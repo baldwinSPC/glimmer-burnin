@@ -1,0 +1,68 @@
+# A pair-scope network acceptance profile: prove the RDMA interconnect between
+# two Sparks before trusting the cluster for multi-node training.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: ib-write-bw
+spec:
+  kind: ib-write-bw
+  scope: Pair
+  durationSeconds: 60
+  thresholds:
+    - metric: bandwidthGbps
+      comparison: GreaterThanOrEqual
+      value: "180" # ~90% of 200GbE line rate
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: nccl-allreduce-pair
+spec:
+  kind: nccl
+  scope: Pair
+  durationSeconds: 120
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+      rdma/rdma_shared_device_a: "1"
+  thresholds:
+    - metric: busBandwidthGBs
+      comparison: GreaterThanOrEqual
+      value: "20" # CX-7 200G RoCE expectation
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: pair-network-acceptance
+spec:
+  failFast: false
+  tests:
+    - testRef: ib-write-bw
+    - testRef: nccl-allreduce-pair
+  sinks:
+    - glimmer-cloud
+---
+# Export verdicts back to Glimmer with no code dependency — a plain webhook POST.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInSink
+metadata:
+  name: glimmer-cloud
+spec:
+  type: Webhook
+  webhook:
+    url: https://glimmercloud.ai/api/v1/burnin/results
+    tokenSecretRef:
+      name: glimmer-burnin-token
+      key: token
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: sparks-pair-check
+spec:
+  profileRef: pair-network-acceptance
+  ttlSecondsAfterFinished: 3600
+  target:
+    nodeNames:
+      - spark-043a
+      - spark-85a9

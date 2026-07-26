@@ -1,0 +1,5 @@
+bin/
+manager
+*.test
+cover.out
+.DS_Store

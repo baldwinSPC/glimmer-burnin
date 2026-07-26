@@ -1,0 +1,73 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: burnin-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - burnin.glimmer.ai
+  resources:
+  - burninprofiles
+  - burninsinks
+  - burnintests
+  - nodefingerprints
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - burnin.glimmer.ai
+  resources:
+  - burninruns
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - burnin.glimmer.ai
+  resources:
+  - burninruns/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - burnin.glimmer.ai
+  resources:
+  - burninruns/status
+  - nodefingerprints/status
+  verbs:
+  - get
+  - patch
+  - update
