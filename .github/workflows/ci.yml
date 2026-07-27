@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-test:
@@ -64,3 +65,23 @@ jobs:
           platforms: linux/arm64,linux/amd64
           push: false
           tags: ghcr.io/baldwinspc/glimmer-burnin:ci
+
+  # The compute-smoke runner compiles CUTLASS for sm_121a, which only makes sense
+  # for linux/arm64 (GB10). On an amd64 runner that means QEMU emulation, and a
+  # CUTLASS template build under emulation is slow (minutes, not seconds) — so this
+  # is opt-in rather than part of every PR. Build-only: publishing is a deliberate,
+  # separately-approved step.
+  runner-compute-smoke:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build compute-smoke runner (linux/arm64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: runners/compute-smoke
+          platforms: linux/arm64
+          push: false
+          tags: ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:ci

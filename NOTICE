@@ -16,6 +16,19 @@ permissive license (Apache-2.0 / BSD / MIT), notably:
   - sigs.k8s.io/controller-tools          Apache-2.0
   - k8s.io/{api,apimachinery,client-go}   Apache-2.0
   - github.com/onsi/ginkgo, gomega        MIT
+  - github.com/NVIDIA/cutlass             BSD-3-Clause  (runners/compute-smoke)
+
+The compute-smoke runner (runners/compute-smoke) links NVIDIA CUTLASS, a
+header-only BSD-3-Clause template library. It is compiled into the runner binary;
+no CUTLASS source is redistributed by this project. The CUTLASS subdirectory
+python/CuTeDSL is covered by the NVIDIA EULA rather than BSD-3-Clause and is NOT
+used here.
+
+Runner images are built multi-stage so the NVIDIA CUDA toolchain is used at build
+time only. Published runner images contain this project's Apache-2.0 binaries on a
+distroless base and no NVIDIA-licensed redistributable libraries; the driver
+library (libcuda.so.1) is injected at runtime from the host by the NVIDIA
+Container Toolkit.
 
 No component of this project is licensed under a copyleft license (GPL/AGPL/
 LGPL/SSPL/MPL). The operator is standalone and does not import the Glimmer
