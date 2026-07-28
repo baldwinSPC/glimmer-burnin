@@ -49,6 +49,10 @@ kubectl get burninruns -w
 Early scaffold: CRDs + manager + reconcile loop + RBAC are in place. Per-kind runner
 scheduling and result parsing land in follow-up PRs.
 
+First runner image: [`runners/compute-smoke`](./runners/compute-smoke) — NVFP4
+block-scaled GEMM for NVIDIA Blackwell SM120/SM121 (GB10 / DGX Spark), verified on
+real hardware.
+
 ## License
 
 [Apache-2.0](./LICENSE). See [NOTICE](./NOTICE). Contributions: [CONTRIBUTING.md](./CONTRIBUTING.md).
