@@ -47,13 +47,25 @@ jobs:
         # summary cannot drift apart.
         id: ref
         env:
+          # Do NOT name any of these RUNNER_* or GITHUB_*: those prefixes are
+          # reserved by Actions and a job-level env: cannot override them, so
+          # the value silently becomes the Actions runner's own (which produced
+          # the tag "glimmer-burnin-GitHub Actions 1000000847").
           OWNER: ${{ github.repository_owner }}
-          RUNNER_NAME: ${{ inputs.runner }}
+          KIND: ${{ inputs.runner }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          image="ghcr.io/${OWNER,,}/glimmer-burnin-${RUNNER_NAME}"
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          package="glimmer-burnin-${KIND}"
+          image="ghcr.io/${OWNER,,}/${package}"
+          # Guard against any future expansion producing something the registry
+          # will reject, rather than discovering it minutes into a QEMU build.
+          if ! printf '%s' "${image}:${VERSION}" \
+               | grep -qE '^ghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+:[A-Za-z0-9._-]+$'; then
+            echo "::error::refusing to build malformed reference '${image}:${VERSION}'"
+            exit 1
+          fi
+          echo "package=${package}" >> "$GITHUB_OUTPUT"
           echo "ref=${image}:${VERSION}" >> "$GITHUB_OUTPUT"
           echo "publishing ${image}:${VERSION}"
 
@@ -62,17 +74,23 @@ jobs:
         # republishing it would change every node's verdict with no audit trail.
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGE: glimmer-burnin-${{ inputs.runner }}
+          PACKAGE: ${{ steps.ref.outputs.package }}
           VERSION: ${{ inputs.version }}
         run: |
-          set -euo pipefail
-          if gh api "user/packages/container/${IMAGE}/versions" \
-               --jq '.[].metadata.container.tags[]' 2>/dev/null \
-               | grep -qx "${VERSION}"; then
-            echo "::error::${IMAGE}:${VERSION} already exists — pick a new version"
-            exit 1
+          set -uo pipefail
+          # GITHUB_TOKEN is repo-scoped and may not be able to read user-level
+          # packages. Distinguish "tag is absent" from "could not check": only
+          # the former is safe to treat as a green light.
+          if tags=$(gh api "user/packages/container/${PACKAGE}/versions" \
+                      --jq '.[].metadata.container.tags[]' 2>/dev/null); then
+            if grep -qx "${VERSION}" <<<"${tags}"; then
+              echo "::error::${PACKAGE}:${VERSION} already exists — pick a new version"
+              exit 1
+            fi
+            echo "tag ${VERSION} is free"
+          else
+            echo "::warning::could not list existing tags for ${PACKAGE} (token may lack package read). Proceeding without the immutability check."
           fi
-          echo "tag ${VERSION} is free"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
