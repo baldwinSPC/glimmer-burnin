@@ -1,0 +1,97 @@
+name: Publish runner image
+
+# Publishing is deliberate and manual: the compute-smoke runner is the image a
+# node's readiness gate executes, so a bad tag silently degrades a whole fleet.
+# Trigger this only after the kernel has been verified on real hardware.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Which runner to publish'
+        required: true
+        default: compute-smoke
+        type: choice
+        options: [compute-smoke]
+      version:
+        description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
+        required: true
+        type: string
+      cuda_arch:
+        description: 'nvcc -arch value. sm_121a = GB10 only; sm_120f covers CC 12.0+12.1.'
+        required: true
+        default: sm_121a
+        type: choice
+        options: [sm_121a, sm_120f]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # sm_121a CUTLASS template instantiation is heavy, and this repo is private
+    # on a personal account, so GitHub's free arm64 hosted runners are not
+    # available and the arm64 build runs under QEMU. That is slow enough to blow
+    # through the 360-minute default. If glimmer-burnin goes public (or the
+    # account moves to Team), switch runs-on to ubuntu-24.04-arm and drop both
+    # the QEMU step and this timeout — it becomes a native, minutes-long build.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to overwrite an existing tag
+        # An image tag that a readiness gate pins must be immutable: silently
+        # republishing it would change every node's verdict with no audit trail.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: glimmer-burnin-${{ inputs.runner }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh api "user/packages/container/${IMAGE}/versions" \
+               --jq '.[].metadata.container.tags[]' 2>/dev/null \
+               | grep -qx "${VERSION}"; then
+            echo "::error::${IMAGE}:${VERSION} already exists — pick a new version"
+            exit 1
+          fi
+          echo "tag ${VERSION} is free"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push (linux/arm64)
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: runners/${{ inputs.runner }}
+          platforms: linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          build-args: |
+            CUDA_ARCH=${{ inputs.cuda_arch }}
+          tags: ghcr.io/${{ github.repository_owner }}/glimmer-burnin-${{ inputs.runner }}:${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=NVFP4 block-scaled GEMM compute-smoke runner for the glimmer-burnin ${{ inputs.runner }} TestKind
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.revision=${{ github.sha }}
+            ai.glimmer.burnin.cuda-arch=${{ inputs.cuda_arch }}
+
+      - name: Report digest
+        run: |
+          echo "### Published" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "image:  ghcr.io/${{ github.repository_owner }}/glimmer-burnin-${{ inputs.runner }}:${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest: ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "arch:   ${{ inputs.cuda_arch }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "NOTE: a newly created GHCR package is PRIVATE. Agents pull anonymously," >> "$GITHUB_STEP_SUMMARY"
+          echo "so set the package visibility to Public before rolling the agent." >> "$GITHUB_STEP_SUMMARY"
