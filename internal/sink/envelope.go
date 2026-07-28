@@ -1,0 +1,84 @@
+package sink
+
+import (
+	"strconv"
+	"time"
+
+	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+)
+
+// EnvelopeFor builds the delivery document for a run.
+//
+// reason and eventKey together identify the delivery, and the eventKey must be
+// derived from what happened rather than from when it happened: the DeliveryID
+// is hashed from it, and a key that moves with the clock would defeat the
+// receiver's ability to dedupe a retry. Use PhaseKey, TestKey, or CheckpointKey
+// rather than composing one by hand.
+func EnvelopeFor(
+	run *burninv1alpha1.BurnInRun,
+	profile string,
+	reason contract.Reason,
+	eventKey string,
+	now time.Time,
+) *contract.Envelope {
+	env := &contract.Envelope{
+		Version:    contract.Version,
+		DeliveryID: contract.NewDeliveryID(string(run.UID), reason, eventKey),
+		Reason:     reason,
+		SentAt:     now.UTC(),
+		Run: contract.RunRef{
+			Namespace: run.Namespace,
+			Name:      run.Name,
+			UID:       string(run.UID),
+			Profile:   profile,
+		},
+		Phase:       string(run.Status.Phase),
+		Fingerprint: run.Status.Fingerprint,
+		Summary: contract.Summary{
+			Passed: run.Status.Passed,
+			Failed: run.Status.Failed,
+		},
+	}
+	for _, r := range run.Status.Results {
+		env.Results = append(env.Results, testResult(r))
+	}
+	return env
+}
+
+func testResult(r burninv1alpha1.TestResult) contract.TestResult {
+	out := contract.TestResult{
+		Name:    r.Name,
+		Kind:    string(r.Kind),
+		Scope:   string(r.Scope),
+		Phase:   string(r.Phase),
+		Nodes:   r.Nodes,
+		Metrics: r.Metrics,
+		Message: r.Message,
+	}
+	if r.StartedAt != nil {
+		t := r.StartedAt.Time.UTC()
+		out.StartedAt = &t
+	}
+	if r.FinishedAt != nil {
+		t := r.FinishedAt.Time.UTC()
+		out.FinishedAt = &t
+	}
+	return out
+}
+
+// PhaseKey identifies a phase-change delivery. A run enters each phase once, so
+// the phase alone is a stable key.
+func PhaseKey(phase burninv1alpha1.RunPhase) string { return string(phase) }
+
+// TestKey identifies a test-completion delivery. Test names are unique within a
+// profile, so the name is stable across retries of the same completion.
+func TestKey(testName string) string { return testName }
+
+// CheckpointKey identifies the nth checkpoint of a run.
+//
+// Checkpoints are numbered rather than timestamped precisely so a retry keeps
+// its identity: a timestamped key would mint a new DeliveryID on every attempt
+// and defeat deduplication, turning a flaky endpoint into a flood of
+// near-identical records.
+func CheckpointKey(sequence int) string { return strconv.Itoa(sequence) }
