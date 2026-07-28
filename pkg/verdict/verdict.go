@@ -1,6 +1,16 @@
 // Package verdict evaluates parsed test metrics against a test's thresholds.
 // It is deliberately pure (no k8s, no I/O) so the pass/fail logic every
 // BurnInRun depends on is unit-testable in isolation.
+//
+// This is public API. It exists outside internal/ so that a burn-in dispatcher
+// which is not this operator — notably a pre-Kubernetes, agent-native path —
+// can reach the same verdict from the same metrics. One brain, two dispatchers:
+// if two callers can disagree about whether a node passed, the contract has
+// already failed. Changing the semantics below changes acceptance for every
+// consumer, so treat them as frozen absent a deliberate, versioned decision.
+//
+// Importing this package does not invert the dependency rule: consumers depend
+// on this project; this project must never import them.
 package verdict
 
 import (
