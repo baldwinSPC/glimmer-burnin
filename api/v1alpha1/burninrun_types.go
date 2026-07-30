@@ -4,16 +4,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// RunPhase is the lifecycle of a BurnInRun.
-// +kubebuilder:validation:Enum=Pending;Running;Passed;Failed;Error;Cancelled
+// RunPhase is the lifecycle of a BurnInRun, and doubles as the phase of an
+// individual TestResult.
+// +kubebuilder:validation:Enum=Pending;Running;Passed;Failed;Error;Skipped;Cancelled
 type RunPhase string
 
 const (
-	RunPending   RunPhase = "Pending"
-	RunRunning   RunPhase = "Running"
-	RunPassed    RunPhase = "Passed"
-	RunFailed    RunPhase = "Failed"
-	RunError     RunPhase = "Error"
+	RunPending RunPhase = "Pending"
+	RunRunning RunPhase = "Running"
+	RunPassed  RunPhase = "Passed"
+	RunFailed  RunPhase = "Failed"
+	// RunError means the machinery malfunctioned (runner crash, unpullable
+	// image): the hardware is unjudged. Distinct from Failed, which is a real
+	// verdict about the hardware.
+	RunError RunPhase = "Error"
+	// RunSkipped (tests only) means the test does not apply to this hardware —
+	// exit code 2 in the runner contract. A node that cannot run a test has
+	// not failed it; collapsing Skip into Fail is the false-negative class
+	// that made healthy Sparks look broken.
+	RunSkipped   RunPhase = "Skipped"
 	RunCancelled RunPhase = "Cancelled"
 )
 

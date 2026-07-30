@@ -1,0 +1,39 @@
+# Single-node acceptance: prove a node's FP4 compute path before trusting it
+# with workloads. This profile is executable by the v1 operator end to end
+# (Node scope); see pair-network-acceptance.yaml for the Pair-scope suite,
+# which v1 records as Error rather than executing.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: fp4-compute-smoke
+spec:
+  kind: compute-smoke
+  scope: Node
+  durationSeconds: 120
+  thresholds:
+    - metric: nonfiniteCount
+      comparison: Equal
+      value: "0"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: node-acceptance
+spec:
+  tests:
+    - testRef: fp4-compute-smoke
+  sinks: []
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: node-acceptance-example
+spec:
+  profileRef: node-acceptance
+  target:
+    nodeNames:
+      - spark-example
+  ttlSecondsAfterFinished: 86400
