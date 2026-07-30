@@ -209,13 +209,16 @@ spec:
                 type: integer
               phase:
                 default: Pending
-                description: RunPhase is the lifecycle of a BurnInRun.
+                description: |-
+                  RunPhase is the lifecycle of a BurnInRun, and doubles as the phase of an
+                  individual TestResult.
                 enum:
                 - Pending
                 - Running
                 - Passed
                 - Failed
                 - Error
+                - Skipped
                 - Cancelled
                 type: string
               results:
@@ -249,13 +252,16 @@ spec:
                         type: string
                       type: array
                     phase:
-                      description: RunPhase is the lifecycle of a BurnInRun.
+                      description: |-
+                        RunPhase is the lifecycle of a BurnInRun, and doubles as the phase of an
+                        individual TestResult.
                       enum:
                       - Pending
                       - Running
                       - Passed
                       - Failed
                       - Error
+                      - Skipped
                       - Cancelled
                       type: string
                     scope:

@@ -34,6 +34,13 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - pods/log
+  - secrets
+  verbs:
+  - get
+- apiGroups:
   - burnin.glimmer.ai
   resources:
   - burninprofiles
@@ -66,6 +73,7 @@ rules:
   - burnin.glimmer.ai
   resources:
   - burninruns/status
+  - burninsinks/status
   - nodefingerprints/status
   verbs:
   - get

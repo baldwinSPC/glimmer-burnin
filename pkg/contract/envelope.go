@@ -66,8 +66,10 @@ type TestResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Summary is the run's tally. Passed+Failed may be less than the profile's test
-// count while a run is still in flight.
+// Summary is the run's tally, in units of per-(test, node) EXECUTIONS — a
+// 2-test profile against 3 nodes finishes with up to 6 in these counters, so
+// consumers must not gate on passed == number-of-tests. Skipped and Errored
+// executions appear in neither counter; Results carries their phases.
 type Summary struct {
 	Passed int32 `json:"passed"`
 	Failed int32 `json:"failed"`
