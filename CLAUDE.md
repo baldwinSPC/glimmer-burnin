@@ -234,6 +234,24 @@ disagree about the same hardware. One brain, two dispatchers.
   together, before either pod exists. Cordoning every target up front took a
   two-node cluster entirely out of scheduling and hollowed out the interlock,
   whose whole premise is that only N nodes are occupied at once.
+- **What the run FOUND is captured once, at start, and never re-derived.**
+  Because a node is cordoned and released per wave, "was this node already
+  cordoned when I got here?" would otherwise be re-asked several times per run
+  and answered from whatever `spec.unschedulable` said at that instant — after
+  the run already had a footprint. Anything the run could not attribute to
+  itself (its own hold seen through an annotation it no longer recognises after
+  a manager restart; an operator cordoning a node the burn-in was already
+  holding, which on an unschedulable node is an invisible no-op) was then
+  recorded as pre-existing and made PERMANENT at teardown: a stranded cordon
+  signed off as intentional. `status.priorUnschedulable` is that record, written
+  before the first cordon and never overwritten, and it — not the node's
+  annotation — decides what the release restores. The node annotation stays as
+  the account a human reads off the node and as the fallback for a run that
+  started under an older operator. The deliberate consequence: a cordon placed
+  on a target after the run started is not adopted and is undone at teardown.
+  That is the right way round, since a cordon undone is visible and one command
+  to redo, and a node the fleet silently loses has nothing left in the cluster
+  that knows it was taken.
 - **Runner pods must tolerate the operator's own cordon.** The run cordons its
   target, which the node controller expresses as
   `node.kubernetes.io/unschedulable:NoSchedule`; a pod that does not tolerate it

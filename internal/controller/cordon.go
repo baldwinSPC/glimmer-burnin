@@ -41,6 +41,74 @@ func cordonOwnerID(run *burninv1alpha1.BurnInRun) string {
 	return run.Namespace + "/" + run.Name + "/" + string(run.UID)
 }
 
+// capturePriorSchedulability records how the run FOUND its targets, before it
+// has touched any of them. It is called once, from markRunning, and its result
+// is written to status.priorUnschedulable and never recomputed.
+//
+// This is the whole fix for the stranded cordon. "Was this node already out of
+// the scheduler?" is a question about the moment the run arrived, and the only
+// place it can be answered correctly is before the run has a footprint of its
+// own. Asked later — on the second wave, or by a manager that has just restarted
+// — the reading includes the run's own cordon, or somebody's cordon placed over
+// the top of it, and there is no way to tell the two apart from the node alone.
+// A run that answers "yes" then honours that answer at teardown and leaves the
+// node unschedulable forever, which is the exact failure the restore-on-terminal
+// finalizer exists to prevent.
+//
+// A node that does not exist yet is simply absent from the map; cordonNode falls
+// back to reading it, which is what the operator did everywhere before.
+func (r *BurnInRunReconciler) capturePriorSchedulability(ctx context.Context, targets []string) map[string]bool {
+	prior := map[string]bool{}
+	for _, name := range targets {
+		var node corev1.Node
+		if err := r.Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
+			continue
+		}
+		prior[name] = node.Spec.Unschedulable
+	}
+	if len(prior) == 0 {
+		return nil
+	}
+	return prior
+}
+
+// priorUnschedulable answers, for one node, what the run must restore it to.
+//
+// The run's own start-time record wins whenever it has one, because it is the
+// only reading taken before the run could contaminate it. `observed` is the
+// node's live spec.unschedulable and is used only when there is no record —
+// a target that did not exist at start, or a run that began under an operator
+// version that did not capture one.
+//
+// The deliberate consequence, stated so it is not mistaken for an oversight: a
+// cordon that appears on a target AFTER the run started is not adopted. If an
+// operator cordons a node the burn-in is already holding, the burn-in still
+// restores the node at the end and the cordon has to be re-applied. That trade
+// is the right way round — a cordon undone is visible and one command to redo,
+// while a node the fleet silently loses has nothing left in the cluster that
+// knows it was taken — and it is also the only self-consistent answer, since a
+// cordon placed on an already-cordoned node is a no-op the operator cannot see.
+func priorUnschedulable(run *burninv1alpha1.BurnInRun, name string, observed bool) bool {
+	if recorded, ok := run.Status.PriorUnschedulable[name]; ok {
+		return recorded
+	}
+	return observed
+}
+
+// restoredUnschedulable is the schedulability a release must put a node back to:
+// the run's start-time record, falling back to the value stamped on the node.
+//
+// The two agree in the ordinary case, since the stamp is written from the record.
+// They disagree exactly where it matters — a node stamped by an operator version
+// that derived prior state per wave, or a stamp edited out of band — and there
+// the run's own record is the one taken before the run had a footprint, so it
+// wins. The node-side stamp stays authoritative when there is no record, because
+// it is the only account a run started under an older operator ever had.
+func restoredUnschedulable(run *burninv1alpha1.BurnInRun, node *corev1.Node) bool {
+	stamped := node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] == burninv1alpha1.PriorUnschedulableTrue
+	return priorUnschedulable(run, node.Name, stamped)
+}
+
 // cordonNode holds ONE node out of the scheduler and records the ownership that
 // makes the release safe.
 //
@@ -112,11 +180,19 @@ func (r *BurnInRunReconciler) cordonNode(ctx context.Context, run *burninv1alpha
 
 	default:
 		// Unowned. Stamp first, cordon second.
+		//
+		// The prior-state value comes from the RUN's start-time record, not from
+		// what the node says right now. A node is cordoned and released once per
+		// wave, so this branch runs repeatedly across a run, and re-deriving the
+		// answer here would let the run's own cordon — or anything laid over it
+		// while the run held the node — be recorded as pre-existing and then made
+		// permanent at teardown. See priorUnschedulable.
 		if node.Annotations == nil {
 			node.Annotations = map[string]string{}
 		}
 		node.Annotations[burninv1alpha1.AnnotationCordonOwner] = owner
-		node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] = strconv.FormatBool(node.Spec.Unschedulable)
+		node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] =
+			strconv.FormatBool(priorUnschedulable(run, name, node.Spec.Unschedulable))
 		if err := r.Update(ctx, &node); err != nil {
 			return false, err
 		}
@@ -199,7 +275,7 @@ func (r *BurnInRunReconciler) releaseNode(ctx context.Context, run *burninv1alph
 	case node.Annotations[burninv1alpha1.AnnotationCordonOwner] != owner:
 		// Not ours (any more). Drop the claim rather than the node's state.
 	default:
-		prior := node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] == burninv1alpha1.PriorUnschedulableTrue
+		prior := restoredUnschedulable(run, &node)
 		node.Spec.Unschedulable = prior
 		delete(node.Annotations, burninv1alpha1.AnnotationCordonOwner)
 		delete(node.Annotations, burninv1alpha1.AnnotationPriorUnschedulable)
@@ -271,7 +347,7 @@ func (r *BurnInRunReconciler) releaseCordons(ctx context.Context, run *burninv1a
 		if node.Annotations[burninv1alpha1.AnnotationCordonOwner] != owner {
 			continue
 		}
-		prior := node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] == burninv1alpha1.PriorUnschedulableTrue
+		prior := restoredUnschedulable(run, node)
 
 		// One update carries both the restored schedulability and the removal
 		// of the stamp. Splitting them would open a window where the node is

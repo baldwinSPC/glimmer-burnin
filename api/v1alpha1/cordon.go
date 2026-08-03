@@ -56,6 +56,16 @@ const (
 	// With this recorded, cleanup restores the prior value — "true" means
 	// leave it cordoned.
 	//
+	// The value is COPIED from the run's own start-time record
+	// (BurnInRunStatus.PriorUnschedulable) and is never derived from the node
+	// at the moment of cordoning. A node is cordoned and released once per
+	// wave, so deriving it here would re-ask "was this already cordoned?" after
+	// the run had a footprint of its own, and any cordon the run could not
+	// attribute to itself would be latched as pre-existing and made permanent
+	// at teardown — a stranded cordon that looks deliberate. The annotation
+	// remains the account a human reads off the node, and the fallback for a
+	// run that started under an operator version with no record of its own.
+	//
 	// Values are the literal strings "true" and "false"; see
 	// PriorUnschedulableTrue and PriorUnschedulableFalse.
 	AnnotationPriorUnschedulable = "burnin.glimmer.ai/prior-unschedulable"

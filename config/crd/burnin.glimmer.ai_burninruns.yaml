@@ -385,6 +385,32 @@ spec:
                 - Skipped
                 - Cancelled
                 type: string
+              priorUnschedulable:
+                additionalProperties:
+                  type: boolean
+                description: |-
+                  PriorUnschedulable is each target node's schedulability AS THE RUN FOUND
+                  IT, keyed by node name, captured once when the run starts and never
+                  recomputed. True means the node was already out of the scheduler before
+                  this run touched it, and must be left that way.
+
+                  It exists because the answer to "was this node already cordoned?" has to
+                  be a property of the RUN, not a reading taken at some arbitrary later
+                  moment. A run cordons and releases a node once per wave, so the same
+                  question used to be re-asked several times per run and answered from
+                  whatever spec.unschedulable happened to say at that instant. Any cordon
+                  the run could not attribute to itself — its own, seen after a manager
+                  restart or an annotation it no longer recognises; a node an operator
+                  cordoned while the burn-in was already holding it — was then recorded as
+                  "pre-existing" and faithfully made PERMANENT on the way out, which is a
+                  stranded cordon with a paper trail saying it was intentional.
+
+                  Captured before the first cordon and never overwritten, so it survives a
+                  restart, is identical on every reconcile, and cannot be contaminated by
+                  the run's own footprint. Nodes absent from the map (a target that did not
+                  exist at start, or a run that began under an older operator) fall back to
+                  reading the node, which is the old behaviour and no worse than it.
+                type: object
               results:
                 items:
                   description: |-
