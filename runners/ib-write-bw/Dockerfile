@@ -48,11 +48,24 @@ ARG RUNTIME_IMAGE=debian:trixie-slim
 FROM ${BUILD_IMAGE} AS perftest-build
 
 ARG PERFTEST_REPO=https://github.com/linux-rdma/perftest.git
-ARG PERFTEST_REF=v4.5-0.20
+# v4.4-0.37 is pinned by TWO independent constraints, and neither is inertia:
+#
+#   1. LICENCE.  From the v4.5 series on, perftest's configure hard-requires
+#      pciutils (libpci, GPL-2.0-or-later) on every non-FreeBSD platform, with no
+#      --without-pciutils.  A GPL library may not ship in an image this project
+#      publishes.  v4.4-0.37 predates that requirement and references libpci
+#      nowhere; assert-no-copyleft.sh below fails the build if a bump changes
+#      that.
+#   2. BUILDABILITY.  The v4.5 series does not compile against stock rdma-core
+#      (50.0 on Ubuntu 24.04, 56.1 on Debian trixie): it needs the AES-XTS
+#      crypto mkey API from mlx5dv that only MLNX_OFED/DOCA ships.
+#
+# Both were verified by building every v4.5 tag on both distributions.
+ARG PERFTEST_REF=v4.4-0.37
 # A tag is not an identity: it can be moved.  A published runner image is what a
 # node's readiness gate executes, so the exact commit is asserted rather than
 # trusted.  Bumping PERFTEST_REF means bumping PERFTEST_SHA with it.
-ARG PERFTEST_SHA=9411e12bad57fb36754e6f77b9ce92a7af1eb22a
+ARG PERFTEST_SHA=5fb4f10a7e7827ed15e53c25810a10be279d6e23
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git \
@@ -80,14 +93,12 @@ RUN set -e; \
     grep -qi "BSD" "${lic}" || grep -qi "OpenIB.org BSD license" "${lic}"; \
     echo "perftest licence file ${lic} offers a BSD option: OK"
 
-# perftest's configure REQUIRES pciutils (libpci, GPL-2.0-or-later) on every
-# non-FreeBSD platform and offers no --without-pciutils.  A GPL library may not
-# ship in this project's images, so the dependency is removed at the source, with
-# every edit asserted.  remove-libpci.sh explains what is removed, why "return
-# true" is the correct answer rather than a convenient one, and what is lost.
-# DO NOT resolve a failure in this step by installing pciutils-dev.
-COPY remove-libpci.sh /remove-libpci.sh
-RUN sh /remove-libpci.sh /src
+# The copyleft guard.  A bump of PERFTEST_REF into the v4.5 series would pull in
+# pciutils (GPL-2.0-or-later) and make this image unpublishable; this fails the
+# build instead.  DO NOT resolve a failure here by installing pciutils-dev — read
+# the script's header first.
+COPY assert-no-copyleft.sh /assert-no-copyleft.sh
+RUN sh /assert-no-copyleft.sh /src
 
 RUN ./autogen.sh \
     && ./configure --prefix=/usr/local \
@@ -115,7 +126,7 @@ RUN mkdir -p /out/licenses \
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS wrapper-build
 ARG TARGETOS
 ARG TARGETARCH
-ARG PERFTEST_REF=v4.5-0.20
+ARG PERFTEST_REF=v4.4-0.37
 
 # CGO_ENABLED=0 leaves a binary that links nothing at all, so "no NVIDIA library,
 # no copyleft library" is a structural property of the wrapper rather than a hope.

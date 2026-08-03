@@ -120,6 +120,15 @@ evidence for.
 
 ### Error (exit 3) — we do not know, and will not guess
 
+- the CUDA driver is not usable from this container at all — no `--gpus`, or a
+  broken container toolkit. The message is
+  `cudaGetDeviceCount: CUDA driver version is insufficient for CUDA runtime
+  version`. This is Error and **not** Skip on purpose, and it is the same
+  behaviour as [`../clockprobe`](../clockprobe): the operator only schedules this
+  pod onto a node that advertises an accelerator, so "the driver is missing" is a
+  fleet-wide misconfiguration. Reporting Skip would let that read as "not
+  applicable" on every node at once, silently. Only `cudaErrorNoDevice` — the
+  driver answering that there is no accelerator — is a Skip.
 - `libnvidia-ml.so.1` is absent while an accelerator IS visible. That is a
   container/driver misconfiguration (`NVIDIA_DRIVER_CAPABILITIES` must include
   `utility`), not a property of the hardware. Skipping here would quietly report
@@ -297,10 +306,12 @@ spec:
       comparison: Equal
       value: "0"
 
-    # The clock floor. 75, NOT 90 — see below.
+    # The clock floor. A BACKSTOP against a wedged part, not a performance
+    # gate — and the number depends on how long the soak runs. 60 is right for
+    # a 30-minute soak on GB10; see below before reusing it.
     - metric: sustainedClockPct
       comparison: GreaterThanOrEqual
-      value: "75"
+      value: "60"
 
     # A soak that exited early has not proven what its duration claims. Set this
     # slightly below spec.durationSeconds.
@@ -318,41 +329,63 @@ spec:
       applicability: RequiredIfMeasurable
 ```
 
-### The clock floor is 75, not 90
+### The clock floor: 60, not 90 — and it depends on how long you soak
 
-The widely cited `sustainedClockPct >= 90` is **wrong for this hardware** and
-would false-fail every healthy node in the fleet.
+Measured on a DGX Spark (GB10, rated boost **3003 MHz** read back from the
+driver, driver 580.82.09) running this exact load, 2026-08-03. Every row is the
+same healthy part:
 
-Measured on a DGX Spark (GB10, rated boost 3003 MHz read back from the driver,
-driver 580.82.09) running this exact load, 2026-08-03:
+| elapsed into the soak | sustained | peak temp | peak power | throttle events |
+|---|---|---|---|---|
+| 25 s | 82.21 % | 72 °C | 89.98 W | 0 |
+| 45 s | 80.50 % | 80 °C | 87.31 W | 0 |
+| 60 s | 78.13 % | 82 °C | 86.17 W | 0 |
+| 120 s | 72.32 % | 82 °C | 86.17 W | 0 |
+| 240 s | 70.66 % | 82 °C | 86.17 W | 0 |
+| **600 s** | **69.90 %** | 83 °C | 86.17 W | **0** |
 
-| run | duration | sustained | min sample | peak temp | throttles |
-|---|---|---|---|---|---|
-| cold start | 25 s | **82.21 %** | 79.85 % | 72 °C | 0 |
-| already warm | 45 s | **80.50 %** | 78.55 % | 80 °C | 0 |
-| steady state | 600 s | **78.94 %** | 76.16 % | 87 °C | 0 |
+The asymptote is not a fuzzy average — it is a **discrete P-state**. The minimum
+sampled clock in every long run is 69.26 % of rated boost, which is 2080 MHz
+exactly, and the 600 s mean of 69.90 % is that state plus the ramp it took to get
+there. A confirmation soak started from an already-hot part reported 69.46 % at
+two minutes and 69.48 % at ten, with `smClockMHz=2087`: the part finds 2080 MHz
+and stays there.
 
-No accelerator sustains its rated boost clock under a dense GEMM — the rated
-figure is a short-burst number. A gate at 90 fires on everything, and a gate that
-fires on everything gets disabled, and then it is not watching when something
-really does wedge.
+Three things fall out of that table, and each one kills a plausible threshold.
 
-Two further cautions about this number:
+**1. `>= 90` fails a healthy part instantly.** Rated boost is a short-burst
+number; nothing sustains it under a dense GEMM. A gate at 90 fires on everything,
+and a gate that fires on everything gets disabled — and then it is not watching
+when something really does wedge.
 
-- **It is load-dependent.** `clockprobe`'s register-resident FMA chain holds
-  ~83.2 % on the same part; this GEMM settles ~4 points lower because it also
-  drives memory. A floor calibrated against one runner does not transfer to the
-  other.
-- **It is duration-dependent.** The three rows above are the same part getting
-  progressively hotter. Calibrate against a soak of the duration you intend to
-  run, not a short one.
+**2. The sustained clock is a function of soak DURATION, not just of the part.**
+A floor calibrated on a 60-second run (78 %) condemns every node in a 30-minute
+run (70 %). This is not drift or noise: it is thermal mass reaching steady state,
+asymptotic, settling near 69.9 % from about the four-minute mark. **Calibrate
+against a soak of the duration you intend to run.** It is also load-dependent —
+[`../clockprobe`](../clockprobe)'s register-resident FMA chain holds ~83 % on the
+same part because it never touches memory — so a floor calibrated against one
+runner does not transfer to the other either.
 
-75 sits ~4 points below the 600 s steady-state figure — enough to absorb a warm
-room and a busy neighbour, and still far above a genuinely wedged part (a
-power-delivery wedge on this platform lands in the 30–50 % range; see
-[`../clockprobe`](../clockprobe)). **Recalibrate per hardware class from your own
-fleet's distribution rather than inheriting this number for a part it was not
-measured on.**
+**3. It happens with ZERO throttle events.** Across the whole 600 s the reason
+mask stayed `0`: no thermal slowdown, no hardware slowdown, not even
+`swPowerCap`. The part is managed down to hold ~83 °C and ~86 W without anything
+being latched for NVML to report.
+
+Point 3 is the one to carry away: **on this hardware `sustainedClockPct` is a
+backstop, not the thermal verdict.** The verdict is `throttleEvents`. The floor
+exists to catch a part wedged far below its class — a power-delivery wedge on
+this platform lands in the 30–50 % range, see [`../clockprobe`](../clockprobe) —
+not to grade performance. 60 splits the gap: ten points below the measured
+69.9 % asymptote, ten points above the wedge ceiling.
+
+This was not theoretical. The default shipped in the first draft of this runner
+was 75, chosen from the 25-second measurement, and the 600-second calibration run
+failed a perfectly healthy Spark with
+`THERMAL_SOAK_FAIL: sustained SM clock 69.9% of rated boost … below the 75.0%
+floor`. **Recalibrate per hardware class and per duration from your own fleet's
+distribution rather than inheriting this number for a part it was not measured
+on.**
 
 ---
 
@@ -361,7 +394,7 @@ measured on.**
 | env | default | meaning |
 |---|---|---|
 | `BURNIN_DURATION_SECONDS` | 900 | total soak wall time; set by the operator from `spec.durationSeconds`. Raised to a 15 s floor, with a `config_warnings` note, because a shorter soak cannot reach a steady thermal or clock state |
-| `THERMAL_SOAK_MIN_CLOCK_PCT` | 75 | sustained-clock floor, as a percentage of the part's own rated boost clock |
+| `THERMAL_SOAK_MIN_CLOCK_PCT` | 60 | sustained-clock floor, as a percentage of the part's own rated boost clock. A wedge backstop, not a performance gate — and duration-dependent; see above |
 | `THERMAL_SOAK_MAX_TEMP_C` | 0 (off) | peak-temperature ceiling. Off by default; only meaningful against a per-class fleet baseline |
 | `BURNIN_SOAK_MATRIX_N` | 8192 | GEMM dimension. Rounded down to a multiple of 64 and shrunk to fit free device memory |
 | `BURNIN_SOAK_SAMPLE_INTERVAL_MS` | 250 | NVML sampling cadence, clamped to [10, 5000] |
@@ -437,12 +470,28 @@ Built and run on a DGX Spark (`spark-85a9`, aarch64, NVIDIA GB10, compute
 capability 12.1, driver 580.82.09, Docker 28.3.3, native arm64 build) on
 2026-08-03, via `docker run --gpus all`:
 
-- 25 s and 600 s soaks: `THERMAL_SOAK_PASS`, exit 0, `throttle_count=0`,
-  `miscompares=0`, `nonfinite_count=0`, `ecc_errors=n/a`
-- the fail path was exercised with a deliberately impossible floor
-  (`THERMAL_SOAK_MIN_CLOCK_PCT=99`) and with
-  `BURNIN_SOAK_INJECT_MISCOMPARES`: `THERMAL_SOAK_FAIL: …`, exit 1, with every
-  metric still on stdout
+**Pass.** A 45 s soak and a 600 s soak both reported `THERMAL_SOAK_PASS`, exit 0.
+The 600 s run: 3984 iterations, `miscompares=0`, `sdc_detections=0`,
+`nonfinite_count=0`, `throttle_count=0`, `throttle_reasons=none`,
+`sustained_clock_pct=69.48`, `smClockMHz=2087`, peak 83 °C, `ecc_errors=n/a`.
+
+**Fail.** Exercised with a deliberately impossible floor
+(`THERMAL_SOAK_MIN_CLOCK_PCT=99`):
+`THERMAL_SOAK_FAIL: sustained SM clock 78.5% of rated boost over the soak, below
+the 99.0% floor (peak 82C)`, exit 1, with every metric still on stdout. The
+miscompare path was proven separately with `BURNIN_SOAK_INJECT_MISCOMPARES` —
+see [`../gpu-burn`](../gpu-burn#verified-on-hardware) for that transcript; it is
+the same shared code.
+
+**Error.** Started without `--gpus`: `THERMAL_SOAK_ERROR: cudaGetDeviceCount:
+CUDA driver version is insufficient for CUDA runtime version`, exit 3, with the
+pre-soak configuration lines already on stdout.
+
+**What could not be exercised on healthy hardware**: a real protective throttle,
+a real miscompare, a real non-finite result, a real ECC event (GB10 has none to
+report), a temperature-ceiling failure, and the MIG skip path. The clock-floor
+and miscompare decision paths were proven by forcing them; the throttle branch
+has never fired on this fleet, because nothing in it has ever throttled.
 
 ---
 

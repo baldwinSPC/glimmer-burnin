@@ -23,6 +23,11 @@ on:
           - host-health
           - memory-bw
           - memory-stress
+          - thermal-soak
+          - gpu-burn
+          - ib-write-bw
+          - nccl
+          - gpudirect-rdma
       version:
         description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
         required: true

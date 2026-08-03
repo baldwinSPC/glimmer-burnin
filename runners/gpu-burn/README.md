@@ -136,10 +136,18 @@ of the burn so far.
 
 **Skip (exit 2)**: no accelerator visible; MIG enabled.
 
-**Error (exit 3)**: NVML absent while an accelerator IS visible (a container
-misconfiguration, not a hardware property); allocation or launch failure; no
-iterations completed; mean GPU utilization below 50 % under load, which makes the
-run unattributable.
+**Error (exit 3)**: the CUDA driver is not usable from this container at all (no
+`--gpus`, or a broken container toolkit — reported as `cudaGetDeviceCount: CUDA
+driver version is insufficient for CUDA runtime version`); NVML absent while an
+accelerator IS visible; allocation or launch failure; no iterations completed;
+mean GPU utilization below 50 % under load, which makes the run unattributable.
+
+The first of those is Error and **not** Skip on purpose, matching
+[`../clockprobe`](../clockprobe): the operator only schedules this pod onto a
+node that advertises an accelerator, so a missing driver is a fleet-wide
+misconfiguration, and reporting Skip would let it read as "not applicable" on
+every node at once. Only `cudaErrorNoDevice` — the driver answering that there is
+no accelerator — is a Skip.
 
 Temperature and clock are **reported but never judged here** — those are
 thermal-soak's verdict, over the identical load. Two kinds, two assertion sets,
@@ -236,7 +244,10 @@ spec:
       applicability: RequiredIfMeasurable
 
     # A burn that exited early did less work than its duration claims. Set both
-    # slightly below what the run should achieve.
+    # slightly below what the run should achieve. Measured on GB10 at N=8192:
+    # ~6.6 iterations/s once the part is at its steady-state clock, so a
+    # 1800 s burn does ~12000 — 1000 is a "did it do any work at all" floor,
+    # not a performance gate.
     - metric: elapsedS
       comparison: GreaterThanOrEqual
       value: "1750"
@@ -246,10 +257,13 @@ spec:
 ```
 
 Do **not** add a `sustainedThroughputTflops` floor without measuring your own
-fleet first: the figure is specific to this kernel, this `N`, and this part.
-Measured on GB10, `N=8192`, it is ~7.7 TFLOPS. It is a real benchmark number
-(unlike compute-smoke's) and is safe to threshold on — but only against a
-distribution you have actually observed.
+fleet first: the figure is specific to this kernel, this `N`, and this part, and
+it moves with the clock. Measured on GB10 at `N=8192`, ~7.7 TFLOPS on a 45 s
+burn and lower once the part settles into its steady-state clock — see
+[`../thermal-soak`](../thermal-soak#the-clock-floor-60-not-90--and-it-depends-on-how-long-you-soak)
+for that curve. It is a real benchmark number (unlike compute-smoke's) and is
+safe to threshold on, but only against a distribution you have actually
+observed, at the duration you actually run.
 
 Leave temperature and clock gates to `thermal-soak`, which runs the identical
 load and owns that verdict. Two tests gating the same measurand from the same
@@ -328,11 +342,32 @@ Built and run on a DGX Spark (`spark-85a9`, aarch64, NVIDIA GB10, compute
 capability 12.1, driver 580.82.09, Docker 28.3.3, native arm64 build) on
 2026-08-03, via `docker run --gpus all`:
 
-- 45 s burn: `GPU_BURN_PASS`, exit 0 — 310 iterations, `errors=0`,
-  `nonfinite_count=0`, `ecc_errors=n/a`, 7.758 TFLOPS sustained, peak 80 °C,
-  peak 87.31 W
-- the fail path was exercised with `BURNIN_SOAK_INJECT_MISCOMPARES`:
-  `GPU_BURN_FAIL: …`, exit 1, with every metric still on stdout
+**Pass.** A 45 s burn: `GPU_BURN_PASS`, exit 0 — 299 iterations, `errors=0`,
+`sdc_detections=0`, `nonfinite_count=0`, `ecc_errors=n/a`, `faults_injected=0`,
+7.472 TFLOPS sustained, peak 82 °C, peak 87.44 W, `throttle_events=0`,
+`throttle_reasons=none`, `ecc_mode=unsupported`.
+
+**The detector was proven, not assumed.** A 30 s burn with
+`BURNIN_SOAK_INJECT_MISCOMPARES=3` found exactly the injected damage and nothing
+else:
+
+```
+faults_injected=3
+first_miscompare_index=0
+iterations=204
+errors=612          # 3 corrupted elements x 204 iterations
+sdc_detections=204  # every iteration saw the same corrupted region
+nonfinite_count=0
+config_warnings=BURNIN_SOAK_INJECT_MISCOMPARES=3 corrupted the reference on purpose; this run is a self-test of the detector and is NOT a verdict about this hardware
+GPU_BURN_FAIL: 612 wrong element(s) across 204 incident(s) in 204 iterations at up to 81C — the part returned a different answer to identical arithmetic
+EXIT=1
+```
+
+**What could not be exercised on healthy hardware**: a *real* miscompare, a real
+non-finite result, and a real ECC event (GB10 has no ECC to report at all). The
+compare path itself is proven by the injection above; the ECC branch that reports
+a number rather than the sentinel has never run on this fleet, because no part in
+it has visible ECC.
 
 ---
 
