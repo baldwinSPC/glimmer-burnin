@@ -297,9 +297,19 @@ disagree about the same hardware. One brain, two dispatchers.
 ### Runner images
 
 - A runner's contract is its **exit code plus `key=value` metrics on stdout**.
-  Exit 0 = pass, 1 = fail, 2 = skip (not applicable to this hardware). The skip
-  path matters: a node that cannot run a test must skip cleanly, not report a
-  failure.
+  Exit 0 = pass, 1 = fail, 2 = skip (not applicable to this hardware), **3 =
+  error** (the runner could not measure; the hardware is unjudged). Anything
+  else is also an error — `pkg/runner.VerdictFor` maps every unrecognised code
+  there — but 3 is the code a runner author writes deliberately.
+  **Exit 1 is the expensive one, and it is the one runners get wrong.** It is a
+  hardware verdict, and the operator never retries a `Fail`, so it permanently
+  indicts a node with the retry budget unspent. It belongs ONLY to something the
+  run actually measured about the part. Everything that stopped the measurement
+  from happening — no device visible, an image with no kernel for this part, a
+  driver or runtime error, a failure to set up the comparison — is exit 3.
+  `compute-smoke` shipped `v0.1.0` reporting all three of those as exit 1; that
+  is the shape of the bug to look for. The skip path matters for the same
+  reason: a node that cannot run a test must skip cleanly, not report a failure.
 - **Environment the operator injects.** `BURNIN_DURATION_SECONDS` and
   `BURNIN_ATTEMPT` at every scope; a **Pair**-scope pod additionally gets:
 

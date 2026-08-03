@@ -17,12 +17,30 @@
 // supply, a degraded cable, or a PD contract that negotiated a lower wattage
 // silently caps the board power budget and the part clocks down and stays down.
 //
-// Nothing else in the suite sees it. compute-smoke passes (the arithmetic is
-// still correct, just slower). thermal-soak passes (a slow part runs cool, so
-// no thermal trip). dcgm-diag passes (nothing is faulty). Every one of those
-// asserts correctness or health; none of them asserts SPEED. A fleet with this
-// fault delivers correct results, slowly, forever, and the loss shows up only
-// in the training-job wall-clock — usually months later.
+// Most of the suite is blind to it. compute-smoke passes (the arithmetic is
+// still correct, just slower). dcgm-diag passes (nothing is faulty). memory-bw
+// passes (the memory path is not what was capped). Every one of those asserts
+// correctness or health; none of them asserts SPEED. A fleet with this fault
+// delivers correct results, slowly, forever, and the loss shows up only in the
+// training-job wall-clock — usually months later.
+//
+// thermal-soak is the EXCEPTION and this runner does not claim otherwise: it
+// applies its own sustained-clock floor (THERMAL_SOAK_MIN_CLOCK_PCT, default 60%
+// of rated boost) and fails below it, and that floor was calibrated against this
+// exact failure mode — a wedge on GB10 lands in the 30-50% range. A wedged part
+// put through a soak should fail the soak.
+//
+// What this probe adds is COST and ATTRIBUTION, not exclusive coverage. It
+// defaults to 60 seconds against the soak's 900, which is the difference between
+// a gate affordable at every enrollment and one run overnight; and the soak's
+// clock floor is explicitly a backstop rather than its verdict, so a wedge
+// surfaces there as "the soak did not pass" while this runner reports it as a
+// wedge — pd_wedge_suspected, throttle_classification, power_limit_ratio_pct —
+// pointing at a cable or a supply.
+//
+// NOT VERIFIED: that thermal-soak fires on a genuinely wedged part is inferred
+// from reading thermal_soak.cu, not observed. No wedged Spark was available to
+// run either test against.
 //
 // HOW IT WORKS
 // ------------

@@ -6,9 +6,6 @@ hold a known, steady, clock-bound load and assert the accelerator actually
 
 ## Why this test exists
 
-Every other test in the suite asserts *correctness* or *health*. This one
-asserts **speed**, and it is the only one that does.
-
 The fault it catches is a GPU pinned in a low P-state that reports perfectly
 healthy utilization. The node looks busy, `nvidia-smi` shows 100% utilization,
 every liveness and readiness check passes, and the part simply runs at a
@@ -17,18 +14,62 @@ Power-Delivery wedge**: an under-spec supply, a degraded cable, or a PD contract
 that negotiated a lower wattage silently caps the board power budget, and the
 part clocks down and stays down.
 
-Nothing else sees it:
+A fleet with this fault delivers correct results, slowly, forever. The loss
+shows up only in training-job wall-clock, usually months later and attributed to
+the model rather than the hardware.
+
+Most of the suite really is blind to it — every one of these asserts correctness
+or health, and none of them asserts speed:
 
 | test | why it passes anyway |
 |------|----------------------|
 | `compute-smoke` | the arithmetic is still exactly right, just slower |
-| `thermal-soak` | a slow part runs cool, so nothing trips |
 | `dcgm-diag` | nothing is faulty; no counter moves |
 | `memory-bw` | the memory path is not what was capped |
+| `host-health` | it counts faults, and a wedge latches none; it reports `powerDrawW` as evidence but reads no clock |
 
-A fleet with this fault delivers correct results, slowly, forever. The loss
-shows up only in training-job wall-clock, usually months later and attributed to
-the model rather than the hardware.
+**`thermal-soak` is the exception, and this runner does not claim otherwise.**
+It applies its own sustained-clock floor — `THERMAL_SOAK_MIN_CLOCK_PCT`, default
+**60 %** of rated boost — and returns `THERMAL_SOAK_FAIL` below it
+([`thermal_soak.cu`](../thermal-soak/thermal_soak.cu)). Its floor was calibrated
+against exactly this failure mode: a PD wedge on GB10 lands in the 30–50 % range,
+which is well under 60. A wedged part put through a soak should fail the soak.
+
+So `clockprobe` earns its place on **cost and attribution**, not on exclusive
+coverage:
+
+- **Cost.** This probe defaults to **60 s** (10 s floor) against `thermal-soak`'s
+  **900 s**, and the sample acceptance profile soaks for 1800 s. That is the
+  difference between a gate you can afford to run on every node at enrollment
+  and on every reboot, and one you run overnight. A wedge that only a 15-minute
+  soak would have caught is a wedge that ships.
+- **Attribution.** `thermal-soak`'s clock floor is explicitly a **backstop**, not
+  its verdict — a soak failure says "this part was slow *or* hot *or* throttling"
+  and hands a human a soak log to disentangle. This runner isolates the clock
+  signal: it holds a clock-bound load with no memory traffic and no thermal
+  agenda, then reports `pdWedgeSuspected`, `throttleClassification`,
+  `powerLimitRatioPct` and `tempAtMinClockC`. A wedge comes back named as a
+  wedge, pointing at a cable or a supply, rather than as a soak that did not
+  pass.
+
+### What is not verified
+
+That `thermal-soak` actually fires on a genuinely wedged part is **inferred from
+reading its source**, not observed. Its floor logic, its default, and its own
+30–50 % estimate of where a wedge lands were all read out of `thermal_soak.cu`;
+no wedged Spark was available to run either test against. Two things follow that
+a reader should not have to guess at:
+
+- The soak's floor is only applied when the clock could be read at all
+  (`m.clockKnown`). A part whose clock NVML will not report is not judged against
+  the floor by that runner.
+- The 30–50 % figure for a wedge is this project's own estimate on GB10, and the
+  60 % floor is calibrated per hardware class **and per soak duration**. On other
+  parts, or at a duration the floor was not calibrated for, the margin between a
+  wedge and a healthy soak is not established.
+
+Confirming both runners against a deliberately under-powered Spark is the
+outstanding piece of work here.
 
 ## Workload
 

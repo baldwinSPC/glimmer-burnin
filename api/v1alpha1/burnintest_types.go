@@ -89,12 +89,21 @@ const (
 	// runs at a fraction of its rated speed. On GB10 this is the USB-C
 	// Power-Delivery failure mode: an under-spec or degraded PD supply, or a
 	// cable negotiating a lower contract, silently caps the power budget and
-	// the part clocks down. Nothing else in the suite sees it — compute-smoke
-	// passes, thermal-soak passes (a slow part runs cool), dcgm-diag passes —
-	// because every one of them asserts correctness or health, and none of
-	// them asserts speed. A fleet with this fault delivers correct results,
-	// slowly, forever, and the loss shows up only in the training-job
-	// wall-clock.
+	// the part clocks down. Most of the suite is blind to it — compute-smoke
+	// passes, dcgm-diag passes, memory-bw passes — because every one of them
+	// asserts correctness or health, and none of them asserts speed. A fleet
+	// with this fault delivers correct results, slowly, forever, and the loss
+	// shows up only in the training-job wall-clock.
+	//
+	// thermal-soak is the exception: it applies a sustained-clock floor of its
+	// own (default 60% of rated boost) and fails below it, and a wedge lands
+	// well under that. So this kind is not the only thing that can catch a
+	// wedge; what it adds is cost and attribution. It is a ~60s enrollment
+	// gate against a soak measured in tens of minutes, and it isolates the
+	// clock signal so a wedge is reported AS a wedge — pdWedgeSuspected,
+	// throttleClassification, powerLimitRatioPct — rather than as a soak that
+	// did not pass. That thermal-soak fires on a genuinely wedged part is
+	// inferred from its source, not yet observed on wedged hardware.
 	//
 	// Two rules follow from the failure mode and belong in the runner, not
 	// here: the probe must warm up before sampling (an unwarmed part is

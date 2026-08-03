@@ -32,8 +32,15 @@ COPY fp4_smoke.cu /src/fp4_smoke.cu
 # survives a toolchain change.  -static-libstdc++/-static-libgcc are host-compiler
 # flags and MUST go through -Xcompiler; passed bare, nvcc fails outright.  Linking
 # them drops the libstdc++/libgcc_s ABI dependency, leaving only glibc.
+#
+# -DBURNIN_CUDA_ARCH bakes the arch string into the binary so it can print
+# built_cuda_arch= and name itself in a wrong-image error.  nvcc gives the runner
+# no other way to report what it was compiled for: __CUDA_ARCH_LIST__ records
+# 1200 for both sm_120a and sm_120f, and only the "f" form also runs on 12.1, so
+# the macro cannot answer "does this image run on the part in front of me?".
 RUN mkdir -p /out && /usr/local/cuda/bin/nvcc \
       -std=c++17 -O3 -arch=${CUDA_ARCH} --expt-relaxed-constexpr \
+      -DBURNIN_CUDA_ARCH="\"${CUDA_ARCH}\"" \
       -cudart static -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc \
       -I /cutlass/include -I /cutlass/tools/util/include \
       -o /out/fp4_smoke /src/fp4_smoke.cu
