@@ -88,6 +88,45 @@ kubectl apply -f config/samples/
 kubectl get burninruns -w
 ```
 
+## Cluster prerequisite for the fabric tests
+
+**Node-scope tests need nothing beyond a working accelerator. The Pair-scope
+fabric tests (`ib-write-bw`, `nccl`, `gpudirect-rdma`) need one node-level
+setting, and without it they fail in a way that does not name its own cause.**
+
+RDMA buffers are pinned memory, and containerd's systemd unit ships
+`LimitMEMLOCK=8388608` — 8 MiB — which every pod inherits. perftest registers
+`message size × queue pairs × 2`, so the ordinary `1 MiB × 4 QPs` lands exactly
+on that ceiling and `ibv_create_cq` returns ENOMEM. What you see is:
+
+```
+Couldn't create CQ / Failed to create CQs / Couldn't create IB resources
+```
+
+and from NCCL, `ibv_reg_mr_iova2 failed with error Cannot allocate memory`.
+Neither mentions a limit. Raise it on every node that will run fabric tests:
+
+```sh
+sudo mkdir -p /etc/systemd/system/containerd.service.d
+printf '[Service]\nLimitMEMLOCK=infinity\n' | sudo tee /etc/systemd/system/containerd.service.d/10-memlock.conf
+sudo systemctl daemon-reload && sudo systemctl restart containerd
+```
+
+Two things not to reach for instead. `securityContext.capabilities.add:
+[IPC_LOCK]` does **not** work for a non-root container: Kubernetes has no
+ambient-capabilities field, so runc clears the permitted set and `CapPrm`
+reads as all zeros. And `docker run --ulimit memlock=-1` masks the problem
+entirely — a runner verified under Docker can still fail as a pod, which is
+exactly how this reached us.
+
+`ib-write-bw` and `gpudirect-rdma` degrade rather than die: they read the limit
+and shrink message size to fit, so a constrained node still measures (99.59
+Gb/s at a forced 8 MiB, against 99.61 unconstrained). `nccl` cannot — it fails
+even an 8-byte all-reduce at 8 MiB — so it reports **Error, not Fail**, because
+the link was never measured. It will not fall back to `NCCL_IB_DISABLE=1`,
+which would silently benchmark TCP sockets and report a plausible number for a
+path nobody was qualifying.
+
 ## Runner contract
 
 A runner is any image that exits **0 = pass, 1 = fail, 2 = skip** (not applicable
