@@ -40,52 +40,53 @@ const (
 // must be reproducible, and a floating tag changes the test under every
 // existing profile with no audit trail.
 //
-// PUBLICATION STATUS — read this before relying on any entry below.
+// PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// Only compute-smoke has actually been built, verified on real hardware, and
-// pushed by the manual publish-runner workflow. Every other entry names the tag
-// its runner WILL be published under and that tag does not exist in the
-// registry yet. Until it is pushed, a test of that kind with no explicit
-// spec.runner.image will pull-fail, and the run records an infrastructure Error
-// for that node after the scheduling grace period — never a hardware verdict.
-// That distinction is what makes listing them tolerable: an unpublished tag
-// costs a run one grace period and reports honestly that nothing was judged.
+// All eleven images are v0.2.0, built natively on arm64 GB10 hardware, pushed
+// to GHCR, and anonymously pullable — verified by fetching a registry token
+// with no credentials and retrieving each manifest.
 //
-// The entry is still not free. A missing entry fails fast and legibly at plan
-// time ("set spec.runner.image"), whereas an unpublished entry fails slowly, per
-// node, and looks like an infrastructure fault rather than a configuration one.
-// Anyone adding a kind here ahead of its publish is trading the fast error for
-// the slow one deliberately.
+// Each was exercised through the operator on a two-node DGX Spark cluster: the
+// Node-scope suite passed 10/10 across both nodes, and the Pair-scope fabric
+// suite passed with ib-write-bw at 99.61 Gb/s, nccl at 12.02 GB/s bus
+// bandwidth, and gpudirect-rdma correctly reporting exit 2 on hardware whose
+// unified memory has no peer-memory provider.
+//
+// ARCHITECTURE: linux/arm64 only. On any other architecture these tags do not
+// resolve and a test of that kind with no explicit spec.runner.image records an
+// infrastructure Error for the node — never a hardware verdict. That is the
+// honest failure, but it is still a failure, so x86 users must set
+// spec.runner.image until multi-arch images ship.
+//
+// A missing entry fails fast and legibly at plan time ("set spec.runner.image");
+// a present-but-unpullable entry fails slowly, per node, and looks like an
+// infrastructure fault rather than a configuration one. That asymmetry is why
+// nothing is listed here before it is actually published.
 //
 // The names follow the publish workflow's own construction —
 // ghcr.io/<owner lowercased>/glimmer-burnin-<kind>:<version> — so an entry here
 // and a workflow_dispatch of publish-runner with the same version agree by
 // construction rather than by anyone remembering to keep them in step.
 var defaultRunnerImages = map[burninv1alpha1.TestKind]string{
-	// compute-smoke's v0.1.0 predates this wave and is the one tag already
-	// public on GHCR, so it stays where it is: tags are immutable and there is
-	// nothing to gain from moving a verified one.
-	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.1.0",
+	// compute-smoke moves off v0.1.0 deliberately. That tag is public and
+	// immutable and stays exactly as it is, but it reports "no usable CUDA
+	// device", a wrong-arch image, and every CUDA runtime error as exit 1 —
+	// a hardware FAILURE verdict against the node. v0.2.0 is the first build
+	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
+	// v0.1.0 keeps the old behaviour, which is why this is a new tag and not
+	// a repushed one.
+	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.2.0",
 
-	// Built natively on arm64 GB10, run on real hardware, and pushed to GHCR.
-	// Every one of these was exercised through the operator on a two-node
-	// Spark cluster: the Node-scope suite passed 10/10 and the Pair-scope
-	// fabric suite passed with ib-write-bw at 99.61 Gb/s and nccl at
-	// 12.02 GB/s, with gpudirect-rdma correctly reporting exit 2.
-	//
-	// These are release-candidate tags. They are real and pullable, but the
-	// packages are still private, so a node without credentials fails the pull
-	// rather than the hardware — recorded as Error, never as a verdict.
-	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.2.0-rc3",
-	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.2.0-rc3",
-	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.2.0-rc3",
-	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.2.0-rc3",
-	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.2.0-rc3",
-	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.2.0-rc3",
-	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.2.0-rc3",
-	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.2.0-rc3",
-	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.2.0-rc3",
-	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.2.0-rc3",
+	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.2.0",
+	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.2.0",
+	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.2.0",
+	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.2.0",
+	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.2.0",
+	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.2.0",
+	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.2.0",
+	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.2.0",
+	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.2.0",
+	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.2.0",
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
