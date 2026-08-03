@@ -262,6 +262,13 @@ func (in *BurnInRunStatus) DeepCopyInto(out *BurnInRunStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.PriorUnschedulable != nil {
+		in, out := &in.PriorUnschedulable, &out.PriorUnschedulable
+		*out = make(map[string]bool, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.SinkStatus != nil {
 		in, out := &in.SinkStatus, &out.SinkStatus
 		*out = make(map[string]string, len(*in))

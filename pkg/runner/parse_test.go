@@ -84,6 +84,11 @@ func TestVerdictFor(t *testing.T) {
 		0: VerdictPass,
 		1: VerdictFail,
 		2: VerdictSkip,
+		// 3 is the code every runner in this repo uses to say "I could not
+		// measure, so this part is unjudged". It is not special-cased here —
+		// it falls through the same default as any other code — but it is
+		// pinned because it is the one a runner author actually writes.
+		3: VerdictError,
 		// Anything else means the runner malfunctioned; the hardware is
 		// unjudged, which is not the same as failed.
 		125: VerdictError,
@@ -94,6 +99,76 @@ func TestVerdictFor(t *testing.T) {
 		if got := VerdictFor(code); got != want {
 			t.Errorf("VerdictFor(%d) = %q, want %q", code, got, want)
 		}
+	}
+}
+
+// TestParse_ComputeSmokeExitContract pins the exit semantics of the oldest and
+// most-trusted runner in the suite.
+//
+// compute-smoke up to and including the published v0.1.0 image reported "no
+// usable CUDA device", "this image has no cubin for this part" and every CUDA
+// runtime error as exit 1 — Fail. That is a permanent hardware verdict against a
+// node whose tensor cores were never exercised, and because a Fail is never
+// retried it was recorded with the run's retry budget entirely unspent. Those
+// paths are exit 3 now; exit 1 is reserved for the three things the runner
+// genuinely measures (NaN/Inf, an all-zero device output, tolerance exceeded).
+//
+// The stdout below is synthetic — it is what the fixed runner is written to
+// print, not a capture from hardware. computeSmokeStdout above is the real
+// capture and is deliberately left alone.
+func TestParse_ComputeSmokeExitContract(t *testing.T) {
+	cases := []struct {
+		name     string
+		stdout   string
+		exitCode int
+		want     Verdict
+	}{{
+		name:     "no GPU visible is Error, not a verdict about the node",
+		stdout:   "built_cuda_arch=sm_121a\nFP4_GEMM_ERROR: no usable CUDA device (cudaGetDevice): CUDA driver version is insufficient\n",
+		exitCode: 3,
+		want:     VerdictError,
+	}, {
+		// The reconciliation case: a CC 12.0 part clears the 12.0/12.1 scope
+		// gate, then finds the sm_121a binary has no cubin for it. That is a
+		// statement about the image that was pinned, never about the silicon.
+		name:     "wrong-arch image is Error, not Fail",
+		stdout:   "built_cuda_arch=sm_121a\ngpu_name=NVIDIA Blackwell\ncompute_cap=12.0\nFP4_GEMM_ERROR: warmup gemm.run failed: no kernel image is available for execution on the device — this image carries no cubin for the part it landed on (built for sm_121a)\n",
+		exitCode: 3,
+		want:     VerdictError,
+	}, {
+		name:     "out-of-scope hardware still Skips",
+		stdout:   "built_cuda_arch=sm_121a\ngpu_name=NVIDIA A100\ncompute_cap=8.0\nFP4_GEMM_SKIP: NVFP4 block-scaled GEMM requires compute capability 12.0/12.1\n",
+		exitCode: 2,
+		want:     VerdictSkip,
+	}, {
+		name:     "a measured numerical mismatch is still Fail",
+		stdout:   "built_cuda_arch=sm_121a\nmax_rel_error=0.446\nnonfinite_count=0\nFP4_GEMM_FAIL: numerical mismatch exceeds tolerance\n",
+		exitCode: 1,
+		want:     VerdictFail,
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Parse("compute-smoke", tc.stdout, tc.exitCode)
+			if got.Verdict != tc.want {
+				t.Errorf("Verdict = %q, want %q", got.Verdict, tc.want)
+			}
+			// Identity is printed before every gate, so even a run that never
+			// launched a kernel records which image met which part. An Error
+			// with no evidence is untriageable.
+			if got.Metrics["builtCudaArch"] != "sm_121a" {
+				t.Errorf("builtCudaArch = %q, want the arch to survive on every path: %v",
+					got.Metrics["builtCudaArch"], got.Metrics)
+			}
+			if len(got.InvalidNames) != 0 {
+				t.Errorf("our own runner emitted names the contract rejects: %v", got.InvalidNames)
+			}
+			// The marker line is not a metric, and it is the most useful thing
+			// a human reads off a non-passing run.
+			if !strings.HasPrefix(got.Message, "FP4_GEMM_") {
+				t.Errorf("Message = %q, want the trailing FP4_GEMM_* marker", got.Message)
+			}
+		})
 	}
 }
 

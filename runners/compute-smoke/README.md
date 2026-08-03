@@ -17,14 +17,79 @@ capability 12.0–12.1) and exercises **NVFP4** block-scaled GEMM.
 |--------|--------|------|
 | Pass | `FP4_GEMM_PASS` | 0 |
 | Fail | `FP4_GEMM_FAIL: <reason>` | 1 |
-| Wrong architecture | `FP4_GEMM_SKIP: <reason>` | 2 |
+| Not applicable | `FP4_GEMM_SKIP: <reason>` | 2 |
+| Unjudged | `FP4_GEMM_ERROR: <reason>` | 3 |
 
 Metrics are emitted as `key=value` lines for threshold evaluation:
-`gpu_name`, `compute_cap`, `m`, `n`, `k`, `max_abs_ref`, `max_abs_error`,
-`max_rel_error`, `nonfinite_count`, `elapsed_ms`, `tflops`.
+`built_cuda_arch`, `gpu_name`, `compute_cap`, `m`, `n`, `k`, `max_abs_ref`,
+`max_abs_error`, `max_rel_error`, `nonfinite_count`, `elapsed_ms`, `tflops`.
 
-`tflops` is a single un-warmed 1024³ launch — it is a liveness signal, **not** a
-benchmark. The problem is far too small to saturate a GB10. Do not threshold on it.
+`built_cuda_arch`, `gpu_name` and `compute_cap` are printed **first**, before
+any gate, so a run that skips or errors still records which image met which
+part. `tflops` is a single un-warmed 1024³ launch — it is a liveness signal,
+**not** a benchmark. The problem is far too small to saturate a GB10. Do not
+threshold on it.
+
+### Fail (exit 1) — the part was measured and it is wrong
+
+Only three things reach exit 1, and all three are properties of the silicon:
+
+- NaN/Inf in the device output (`nonfinite_count > 0`).
+- An all-zero device output.
+- `max_rel_error` above the tolerance.
+
+Exit 1 is the expensive code. A `Fail` is **never retried** by the operator —
+re-running a measurement until it comes out clean would launder a hardware fault
+into an acceptance — so it settles the test and permanently indicts the node.
+Nothing that merely *prevented* a measurement may use it.
+
+### Error (exit 3) — we could not measure, so the part is unjudged
+
+- **No usable CUDA device.** A pod that got no GPU has established nothing about
+  the node's tensor cores.
+- **This image carries no cubin for the part it landed on**
+  (`cudaErrorNoKernelImageForDevice` / `cudaErrorInvalidDeviceFunction`), or the
+  binary was built with no SM120/SM121 block-scaled MMA path at all. Both are
+  statements about the image that was pinned, not about the hardware. The error
+  message names `built_cuda_arch` and the fix.
+- **Any CUDA runtime or driver error**, and any failure to set up the
+  measurement — allocation, `can_implement`, `initialize`, a launch, a
+  synchronise.
+- **The host reference GEMM came out all zeros.** The reference is computed
+  entirely on the host by CUTLASS's host GETT; the device never touches it. A
+  zero there means our own yardstick is degenerate (and `max_rel_error` is
+  `INFINITY` by construction), so the comparison measured nothing.
+
+### The compute-capability gate, and the arch the binary was built for
+
+These are deliberately **two different questions**, and this runner answers them
+separately:
+
+| question | about | outcome |
+|---|---|---|
+| Can this part be asked to do NVFP4 block-scaled GEMM at all? | the hardware | not CC 12.0/12.1 → **Skip** (exit 2) |
+| Does *this image* carry a cubin for it? | the image that was pinned | no → **Error** (exit 3) |
+
+The gate admits the whole `12.0`/`12.1` family, while the default build pins
+`sm_121a` (CC 12.1 only). So a **CC 12.0 part is in scope, passes the gate, and
+then finds no kernel image** — which is why that path is an `Error` and not a
+`Fail`. Before this was fixed it exited 1, recording a hardware verdict against
+a node whose tensor cores were never exercised.
+
+It is `Error` rather than `Skip` on purpose. Narrowing the gate to the built arch
+would report a whole fleet as "not applicable" when the truth is that the
+operator pinned the wrong tag; `Error` is the retryable, hardware-unjudged phase
+and it names the fix. It also cannot be decided at build time: nvcc's
+`__CUDA_ARCH_LIST__` records `1200` for both `sm_120a` and `sm_120f` and only the
+`f` form also covers 12.1, so no compile-time macro can answer whether this
+binary runs on the part in front of it. Where we cannot know, we say so.
+
+Build with `CUDA_ARCH=sm_120f` for one binary covering CC 12.0 + 12.1.
+
+> **Image tags.** The published `v0.1.0` image predates this fix and reports all
+> of the above as exit 1. Published tags are immutable and it is not being
+> changed; the corrected contract ships under a **new tag**. A gate still pinning
+> `v0.1.0` keeps the old, wrong behaviour until it is repinned.
 
 ## What "pass" actually means
 

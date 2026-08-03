@@ -804,11 +804,18 @@ func TestRun_MissingProfileIsTerminalError(t *testing.T) {
 
 // A kind with no default image and no explicit runner cannot be scheduled;
 // asking again cannot fix it, so it must settle as Error, not requeue forever.
+//
+// The example is an UNKNOWN kind on purpose. TestKind is deliberately an open
+// set — the API accepts any string so a site can point a custom runner at the
+// contract — and an unknown kind is the case that can never acquire a default
+// image, so this test cannot rot the way it did once before: it was written
+// against thermal-soak, and quietly stopped testing anything the day
+// thermal-soak's image was published and added to defaultRunnerImages.
 func TestRun_KindWithoutImageIsError(t *testing.T) {
 	soak := &burninv1alpha1.BurnInTest{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "soak"},
 		Spec: burninv1alpha1.BurnInTestSpec{
-			Kind:  burninv1alpha1.KindThermalSoak,
+			Kind:  burninv1alpha1.TestKind("no-such-kind"),
 			Scope: burninv1alpha1.ScopeNode,
 		},
 	}
@@ -2512,6 +2519,213 @@ func TestRun_ManagerRestartLeavesNoStrandedCordons(t *testing.T) {
 		}
 	}
 	h.assertNoStrandedCordons()
+}
+
+// The invariant a fleet is judged on, over the sequence that was actually
+// observed on hardware: a run cordons its targets, the manager is restarted
+// mid-run, the run is deleted, and every node has to come out of it in exactly
+// the schedulability it went in with. Both directions are asserted, because
+// only asserting the first would pass an operator that never uncordons anything
+// and only asserting the second would pass one that uncordons everything.
+//
+// It checks spec.unschedulable and not merely the ownership annotations: when
+// this was seen in the field the annotations HAD been cleared correctly and the
+// node was still cordoned, so an ownership-only assertion is the one assertion
+// guaranteed to miss it.
+func TestRun_ManagerRestartThenDeleteRestoresExactPreRunSchedulability(t *testing.T) {
+	// spark-043a was drained by an administrator before the run existed: no
+	// burn-in annotations, just a node somebody deliberately took out.
+	drained := gb10Node("spark-043a")
+	drained.Spec.Unschedulable = true
+
+	h := newHarness(t,
+		gb10Node("spark-85a9"), drained,
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		withNodeCap(newRun("run1", "acceptance", "spark-85a9", "spark-043a"), 2),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	for _, name := range []string{"spark-85a9", "spark-043a"} {
+		if !h.node(name).Spec.Unschedulable {
+			t.Fatalf("setup: %s was not cordoned", name)
+		}
+	}
+	// The run's record of how it found the fleet is what makes the restore
+	// deterministic, so it has to be on the object and not in the process.
+	if got := h.run("run1").Status.PriorUnschedulable; !got["spark-043a"] || got["spark-85a9"] {
+		t.Fatalf("status.priorUnschedulable = %v, want spark-043a true and spark-85a9 false", got)
+	}
+
+	// A manager restart mid-run: the process keeps nothing, and its record of
+	// which nodes it is holding was not written before it died. The cluster
+	// keeps everything it was told.
+	run := h.run("run1")
+	run.Status.CordonedNodes = nil
+	if err := h.c.Status().Update(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	h.r = h.newReconciler()
+	h.reconcile("run1")
+
+	// The run is deleted rather than finished — the likeliest reaction to a run
+	// behaving badly, and the moment the field failure was noticed.
+	if err := h.c.Delete(context.Background(), h.run("run1")); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcile("run1")
+
+	if h.node("spark-85a9").Spec.Unschedulable {
+		t.Error("spark-85a9 went into the run schedulable and came out cordoned: the fleet has silently lost a node, " +
+			"and nothing left in the cluster knows it was taken")
+	}
+	if !h.node("spark-043a").Spec.Unschedulable {
+		t.Error("spark-043a was drained before the run and was returned to service by the run ending: " +
+			"a node under maintenance is now taking production traffic")
+	}
+	h.assertNoStrandedCordons()
+	var gone burninv1alpha1.BurnInRun
+	if err := h.c.Get(context.Background(), types.NamespacedName{Namespace: "burnin", Name: "run1"}, &gone); err == nil {
+		t.Error("the finalizer was not removed; the run is now undeletable")
+	}
+}
+
+// The mechanism behind the stranded cordon, isolated.
+//
+// A node is cordoned and released once per WAVE, so "was this node already
+// cordoned when I got here?" used to be re-asked several times per run and
+// answered from whatever spec.unschedulable said at that instant. In the gap
+// between two waves — and a manager restart is one long gap — a cordon can be
+// sitting on the target that the run cannot attribute to anybody: its own hold
+// in a form it no longer recognises, or an operator cordoning a node the
+// burn-in was already holding, which on an already-unschedulable node is an
+// invisible no-op. `owner= prior= unschedulable=true` is exactly what the field
+// report showed. Adopting that as the node's pre-run state is what turns the
+// operator's own footprint into a permanent cordon, signed off as intentional.
+//
+// The run's answer must come from what it recorded at START, once.
+func TestRun_RestartNeverAdoptsAnUnattributedCordonAsPreExisting(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-85a9"),
+		smokeTest("fp4"),
+		healthTest("health"),
+		profile("acceptance", nil, false, testRef("fp4"), testRef("health")),
+		newRun("run1", "acceptance", "spark-85a9"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	if !h.node("spark-85a9").Spec.Unschedulable {
+		t.Fatal("setup: the target was not cordoned")
+	}
+
+	// First test done. The node is released between waves, which is the whole
+	// point of cordoning per wave rather than per target list.
+	h.finishPod(h.pods("run1")["spark-85a9"], 0, fp4Stdout, "Completed")
+	h.reconcile("run1")
+	if h.node("spark-85a9").Spec.Unschedulable {
+		t.Fatal("setup: the node was not released between waves")
+	}
+
+	// Mid-run, the target is unschedulable again with nothing naming an owner.
+	node := h.node("spark-85a9")
+	node.Spec.Unschedulable = true
+	if err := h.c.Update(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+	// The manager comes back as a fresh process holding no state at all.
+	h.r = h.newReconciler()
+	h.reconcile("run1")
+
+	if got := h.node("spark-85a9").Annotations[burninv1alpha1.AnnotationPriorUnschedulable]; got != burninv1alpha1.PriorUnschedulableFalse {
+		// Diagnostic: the assertion that matters is the node's actual
+		// schedulability at the end, so let the run finish either way.
+		t.Errorf("prior-unschedulable = %q, want %q — the run adopted a cordon it cannot attribute to anybody "+
+			"as the state it found the node in, and will now leave it that way forever",
+			got, burninv1alpha1.PriorUnschedulableFalse)
+	}
+
+	for i := 0; i < 30; i++ {
+		res := h.reconcile("run1")
+		for _, pod := range h.livePods("run1") {
+			h.finishPod(pod, 0, gb10HostHealthStdout, "Completed")
+		}
+		if !res.Requeue && res.RequeueAfter == 0 {
+			break
+		}
+	}
+
+	if got := h.run("run1").Status.Phase; got != burninv1alpha1.RunPassed {
+		t.Fatalf("phase = %q, want Passed: %+v", got, h.run("run1").Status.Results)
+	}
+	if h.node("spark-85a9").Spec.Unschedulable {
+		t.Error("the node was schedulable when the run started and is cordoned now that it is over — " +
+			"a stranded cordon, with the run's own bookkeeping saying it was meant to be")
+	}
+	h.assertNoStrandedCordons()
+}
+
+// The node-side stamp is an ACCOUNT of what the run recorded, not a second
+// opinion. Where the two disagree — a stamp written by an operator version that
+// derived prior state per wave, or one edited on a live node — the reading taken
+// before the run had a footprint is the one that decides, because it is the only
+// one that cannot contain the run's own cordon.
+func TestRun_PriorStampNeverOutranksTheRunsOwnRecord(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-85a9"),
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-85a9"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	node := h.node("spark-85a9")
+	if !node.Spec.Unschedulable {
+		t.Fatal("setup: the target was not cordoned")
+	}
+	node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] = burninv1alpha1.PriorUnschedulableTrue
+	if err := h.c.Update(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+
+	h.finishPod(h.pods("run1")["spark-85a9"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+
+	if h.node("spark-85a9").Spec.Unschedulable {
+		t.Error("an edited stamp on the node decided the node's fate over the run's own record of finding it schedulable")
+	}
+	h.assertNoStrandedCordons()
+}
+
+// The record is taken before the run has a footprint and is never taken again,
+// so every later pass — and every later manager — reads the same answer.
+func TestRun_PriorSchedulabilityIsCapturedOnceAndSurvivesRestarts(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-85a9"),
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-85a9"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	before := h.run("run1").Status.PriorUnschedulable
+	if len(before) != 1 || before["spark-85a9"] {
+		t.Fatalf("status.priorUnschedulable = %v, want spark-85a9 recorded as schedulable", before)
+	}
+
+	// Reconciling the same state again, and again after a restart, must not
+	// move it: the node is cordoned by now, so a second reading would say the
+	// opposite of the first.
+	h.reconcile("run1")
+	h.r = h.newReconciler()
+	h.reconcile("run1")
+
+	if got := h.run("run1").Status.PriorUnschedulable; got["spark-85a9"] {
+		t.Error("the run re-derived what it found from a node it had already cordoned; " +
+			"its own hold is now recorded as somebody else's")
+	}
 }
 
 // ─── Prometheus exposition ────────────────────────────────────────────────────

@@ -11,12 +11,38 @@
 // against the CUTLASS host block-scaled reference.
 //
 // Build:
-//   nvcc -std=c++17 -O3 -arch=sm_121a \
+//   nvcc -std=c++17 -O3 -arch=sm_121a -DBURNIN_CUDA_ARCH='"sm_121a"' \
 //        -I cutlass/include -I cutlass/tools/util/include \
 //        -o fp4_smoke fp4_smoke.cu
 //
-// Output contract: "FP4_GEMM_PASS" + exit 0 | "FP4_GEMM_FAIL: ..." + exit 1 |
-//                  "FP4_GEMM_SKIP: ..." + exit 2. Metrics are printed as key=value lines.
+// OUTPUT CONTRACT
+//   metrics as key=value lines, then one of
+//     FP4_GEMM_PASS           exit 0   the FP4 units computed, and the answer is right
+//     FP4_GEMM_FAIL:  <why>   exit 1   we MEASURED the part and it is wrong
+//     FP4_GEMM_SKIP:  <why>   exit 2   this hardware is out of scope for the test
+//     FP4_GEMM_ERROR: <why>   exit 3   we could not measure; the part is UNJUDGED
+//
+// Why there are four and not three. Exit 1 is a HARDWARE VERDICT, and the
+// operator never retries one: re-running a measurement until it comes out clean
+// would launder a hardware fault into an acceptance, so a Fail settles the test
+// where it happened. That makes exit 1 the most expensive code in this file to
+// get wrong — it permanently indicts a node. It is therefore reserved for the
+// three things this test actually measures about the silicon: NaN/Inf in the
+// device output, an all-zero device output, and a result outside tolerance.
+//
+// Everything that stopped us from taking that measurement — no CUDA device
+// visible, an image with no cubin for the part it landed on, a CUDA runtime or
+// driver error, a failure to build the reference — is exit 3. Those are real
+// problems, but they are problems with the run, not findings about the node,
+// and Error is the retryable phase (see retryOnErrorLimit). Exit 2 stays what it
+// always was: the part is out of scope, which is neither a fault nor a retry.
+
+#ifndef BURNIN_CUDA_ARCH
+// The Dockerfile passes the real value. The fallback keeps a hand-built binary
+// compiling, and says plainly that it does not know rather than naming an arch
+// it was not built for.
+#define BURNIN_CUDA_ARCH "unknown"
+#endif
 
 #include <cstdio>
 #include <cmath>
@@ -44,10 +70,64 @@ constexpr int kM = 1024, kN = 1024, kK = 1024;
 // fp32 accumulation order. Normalised by max|ref|, anything sane sits well under this.
 constexpr float kTolerance = 0.01f;
 
+constexpr int kExitPass = 0;
+constexpr int kExitFail = 1;
+constexpr int kExitSkip = 2;
+constexpr int kExitError = 3;
+
+// The arch this binary was actually compiled for, so a triager reading a stored
+// result can see the image/part mismatch without having to go and inspect the
+// image that produced it.
+constexpr const char *kBuiltArch = BURNIN_CUDA_ARCH;
+
+// fail() is ONLY for a measured verdict about the silicon. If you are reaching
+// for it because something went wrong, you want errored().
 int fail(const char *why) {
   std::printf("FP4_GEMM_FAIL: %s\n", why);
-  return 1;
+  return kExitFail;
 }
+
+// errored() is every path where the measurement did not happen. The hardware is
+// unjudged, and saying so is the whole point: this run establishes nothing about
+// the node either way.
+int errored(const char *why) {
+  std::printf("FP4_GEMM_ERROR: %s\n", why);
+  return kExitError;
+}
+
+int skipped(const char *why) {
+  std::printf("FP4_GEMM_SKIP: %s\n", why);
+  return kExitSkip;
+}
+
+// A CUDA error is never a hardware verdict here.
+//
+// cudaErrorNoKernelImageForDevice is named explicitly because it is the one an
+// operator can act on, and because it is exactly the case this file used to
+// report as a hardware failure: the compute-capability gate below admits the
+// whole 12.0/12.1 family, while the default build pins a single arch, so an
+// in-scope part can legitimately reach the kernel launch with no cubin to run.
+// That is a statement about which image was pinned, not about the part.
+int cudaErrored(const char *where, cudaError_t err) {
+  char buf[640];
+  if (err == cudaSuccess) {
+    std::snprintf(buf, sizeof(buf), "%s (no CUDA error was latched)", where);
+  } else if (err == cudaErrorNoKernelImageForDevice || err == cudaErrorInvalidDeviceFunction) {
+    std::snprintf(buf, sizeof(buf),
+                  "%s: %s — this image carries no cubin for the part it landed on "
+                  "(built for %s). The hardware is UNJUDGED; pin an image built for this "
+                  "compute capability and re-run",
+                  where, cudaGetErrorString(err), kBuiltArch);
+  } else {
+    std::snprintf(buf, sizeof(buf), "%s: %s", where, cudaGetErrorString(err));
+  }
+  return errored(buf);
+}
+
+// A CUTLASS status failure. Whatever CUTLASS reports, the actionable detail is
+// usually the CUDA error underneath it — a wrong-arch image surfaces here as
+// cudaErrorNoKernelImageForDevice rather than as anything CUTLASS names.
+int cutlassErrored(const char *where) { return cudaErrored(where, cudaGetLastError()); }
 
 } // namespace
 
@@ -142,20 +222,24 @@ int run() {
        SFA.device_data(), layout_SFA, SFB.device_data(), layout_SFB},
       {{1.0f, 0.0f}, nullptr, stride_D, D.device_data(), stride_D}};
 
+  // Everything from here to the reference comparison is SETUP: allocating,
+  // launching, synchronising. None of it measures the part, so none of it may
+  // report a hardware verdict.
   Gemm gemm;
   cutlass::device_memory::allocation<uint8_t> workspace(Gemm::get_workspace_size(args));
-  if (gemm.can_implement(args) != cutlass::Status::kSuccess) return fail("can_implement rejected the problem");
-  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess) return fail("gemm.initialize failed");
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) return cutlassErrored("can_implement rejected the problem");
+  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess) return cutlassErrored("gemm.initialize failed");
 
-  if (gemm.run() != cutlass::Status::kSuccess) return fail("warmup gemm.run failed");
-  if (cudaDeviceSynchronize() != cudaSuccess) return fail(cudaGetErrorString(cudaGetLastError()));
+  if (gemm.run() != cutlass::Status::kSuccess) return cutlassErrored("warmup gemm.run failed");
+  if (cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) return cudaErrored("warmup cudaDeviceSynchronize", e);
 
   cudaEvent_t beg, end;
-  cudaEventCreate(&beg); cudaEventCreate(&end);
+  if (cudaError_t e = cudaEventCreate(&beg); e != cudaSuccess) return cudaErrored("cudaEventCreate", e);
+  if (cudaError_t e = cudaEventCreate(&end); e != cudaSuccess) return cudaErrored("cudaEventCreate", e);
   cudaEventRecord(beg);
-  if (gemm.run() != cutlass::Status::kSuccess) return fail("timed gemm.run failed");
+  if (gemm.run() != cutlass::Status::kSuccess) return cutlassErrored("timed gemm.run failed");
   cudaEventRecord(end);
-  if (cudaEventSynchronize(end) != cudaSuccess) return fail(cudaGetErrorString(cudaGetLastError()));
+  if (cudaError_t e = cudaEventSynchronize(end); e != cudaSuccess) return cudaErrored("cudaEventSynchronize", e);
   float elapsed_ms = 0.f;
   cudaEventElapsedTime(&elapsed_ms, beg, end);
   D.sync_host();
@@ -187,37 +271,85 @@ int run() {
   }
   const double max_rel_error = max_abs_ref > 0.0 ? max_abs_err / max_abs_ref : INFINITY;
 
-  cudaDeviceProp props{}; int dev = 0;
-  cudaGetDevice(&dev); cudaGetDeviceProperties(&props, dev);
-  std::printf("gpu_name=%s\ncompute_cap=%d.%d\nm=%d\nn=%d\nk=%d\n", props.name, props.major, props.minor, kM, kN, kK);
+  // Printed before the decision, so a failing, skipping or erroring run still
+  // leaves its full evidence behind. Identity is already on stdout from main().
+  std::printf("m=%d\nn=%d\nk=%d\n", kM, kN, kK);
   std::printf("max_abs_ref=%g\nmax_abs_error=%g\nmax_rel_error=%g\nnonfinite_count=%lld\nelapsed_ms=%.4f\ntflops=%.2f\n",
               max_abs_ref, max_abs_err, max_rel_error, n_bad,
               elapsed_ms, 2.0 * kM * kN * kK / (elapsed_ms * 1e-3) / 1e12);
 
+  // Correctness first, as in thermal-soak: NaN/Inf in the DEVICE output is a
+  // self-contained measurement of the part that needs no reference at all, so it
+  // is judged before anything that could go wrong with the yardstick.
   if (n_bad != 0) return fail("output contains NaN/Inf");
-  if (max_abs_ref <= 0.0) return fail("reference output is all zeros");
+
+  // An all-zero REFERENCE, by contrast, is not a finding about the GPU. The
+  // reference is computed entirely on the host, from host-generated operands, by
+  // CUTLASS's host GETT — the device never touches it. A zero here means our own
+  // yardstick came out degenerate, which also makes max_rel_error meaningless
+  // (it is INFINITY by construction, so the tolerance check below would fire off
+  // the back of it). Condemning a node because the harness could not build a
+  // reference is precisely the confusion this exit contract exists to prevent,
+  // so it is an Error, and it is checked before the two verdicts that rely on it.
+  if (max_abs_ref <= 0.0)
+    return errored("the host reference GEMM came out all zeros; the comparison has no yardstick "
+                   "and nothing was measured about this part");
+
   if (sum_abs_got <= 0.0) return fail("device output is all zeros");
   if (!(max_rel_error <= kTolerance)) return fail("numerical mismatch exceeds tolerance");
   std::printf("FP4_GEMM_PASS\n");
-  return 0;
+  return kExitPass;
 }
 
 } // namespace
 #endif
 
 int main() {
+  // Emitted first so that every exit below — including the ones that never get
+  // as far as a kernel — leaves the arch this image was built for on the record.
+  std::printf("built_cuda_arch=%s\n", kBuiltArch);
+
   int dev = 0;
   cudaDeviceProp props{};
-  if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&props, dev) != cudaSuccess)
-    return fail("no usable CUDA device");
-  if (!(props.major == 12 && (props.minor == 0 || props.minor == 1))) {
-    std::printf("gpu_name=%s\ncompute_cap=%d.%d\n", props.name, props.major, props.minor);
-    std::printf("FP4_GEMM_SKIP: NVFP4 block-scaled GEMM requires compute capability 12.0/12.1\n");
-    return 2;
-  }
+  // No device is an ERROR, not a failure. A pod that got no GPU (no device
+  // request, a mispresented device plugin, a driver that did not answer) has
+  // told us nothing at all about the node's tensor cores. This used to exit 1,
+  // which recorded a permanent hardware verdict against a node the test never
+  // touched — and, because a Fail is never retried, spent no retry budget
+  // proving it.
+  if (cudaError_t e = cudaGetDevice(&dev); e != cudaSuccess)
+    return cudaErrored("no usable CUDA device (cudaGetDevice)", e);
+  if (cudaError_t e = cudaGetDeviceProperties(&props, dev); e != cudaSuccess)
+    return cudaErrored("no usable CUDA device (cudaGetDeviceProperties)", e);
+  std::printf("gpu_name=%s\ncompute_cap=%d.%d\n", props.name, props.major, props.minor);
+
+  // The SCOPE gate, and it is deliberately the whole SM12x family rather than
+  // the single arch this binary was built for. The two questions are different:
+  // "is NVFP4 block-scaled GEMM a thing this part can be asked to do?" is a
+  // property of the hardware and belongs in Skip, while "does this image happen
+  // to carry a cubin for it?" is a property of the image that was pinned.
+  //
+  // Collapsing them would misreport one of the two. Narrowing this gate to the
+  // built arch would make a wrong-arch image look like out-of-scope hardware,
+  // and a whole fleet would report Skip — reading as "acceptance not applicable"
+  // — when in truth the operator pinned the wrong tag. So an in-scope part with
+  // no cubin runs on and surfaces at the launch as an Error (see cudaErrored),
+  // which is the retryable, hardware-unjudged phase and names the fix.
+  //
+  // Note it cannot be settled statically either: nvcc's __CUDA_ARCH_LIST__
+  // records 1210 for sm_121a and 1200 for both sm_120a and sm_120f, and only
+  // the "f" form also covers 12.1 — so the macro cannot distinguish an image
+  // that runs here from one that does not. Where we cannot know, we say we do
+  // not know.
+  if (!(props.major == 12 && (props.minor == 0 || props.minor == 1)))
+    return skipped("NVFP4 block-scaled GEMM requires compute capability 12.0/12.1");
+
 #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
   return run();
 #else
-  return fail("binary was not compiled with SM120/SM121 block-scaled MMA support (need -arch=sm_120a/sm_121a)");
+  // The part is in scope but this binary has no block-scaled MMA path compiled
+  // in at all — a build-flag mistake in the image, not a fault in the silicon.
+  return errored("this binary was not compiled with SM120/SM121 block-scaled MMA support "
+                 "(need -arch=sm_120a/sm_120f/sm_121a); the part is in scope and UNJUDGED");
 #endif
 }

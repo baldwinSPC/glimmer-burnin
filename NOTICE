@@ -88,9 +88,32 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
       standard library (BSD-3-Clause).
 
-linux-rdma/perftest is dual-licensed GPL/BSD. Nothing in this repository ships it
-today; an ib-write-bw or gpudirect-rdma runner added later must consume it under
-the BSD option.
+linux-rdma/perftest
+  Copyright (c) 2005-2023 Mellanox Technologies Ltd. and contributors.
+  Dual-licensed: GPL-2.0-only OR BSD-2-Clause (the "OpenIB.org BSD license").
+  glimmer-burnin consumes and redistributes perftest under the BSD-2-Clause
+  option ONLY. No part of perftest is taken under the GPL option.
+  Used by: runners/ib-write-bw, runners/gpudirect-rdma.
+  Version: v4.4-0.37 (5fb4f10a7e7827ed15e53c25810a10be279d6e23)
+
+  Pinned deliberately to the v4.4 series. From v4.5 onward perftest's configure
+  hard-requires pciutils (libpci, GPL-2.0-or-later) on every non-FreeBSD
+  platform with no --without-pciutils escape, which would make the resulting
+  image unpublishable under this project's licence policy. Both runners assert
+  at build time that the fetched source still offers the BSD grant, and copy
+  that licence plus an explicit statement of the choice into /licenses.
+
+NVIDIA NCCL
+  Copyright (c) 2015-2024, NVIDIA CORPORATION. All rights reserved.
+  Copyright (c) 2015, Lawrence Berkeley National Laboratory.
+  Licensed under BSD-3-Clause.
+  Built from source and statically linked into runners/nccl's nccl_pair binary.
+  Version: v2.27.7-1 (593de54e52679b51428571c13271e2ea9f91b1b1)
+
+  NCCL is commonly assumed to be an NVIDIA-licensed redistributable of the kind
+  this project may not ship. It is not: it is BSD-3-Clause, the same permissive
+  licence as CUTLASS. The build asserts this by reading LICENSE.txt from the
+  exact commit it fetched.
 
 Runner images are built multi-stage so the NVIDIA CUDA toolchain is used at build
 time only. Published runner images contain this project's Apache-2.0 binaries on a

@@ -219,6 +219,16 @@ func (r *BurnInRunReconciler) markRunning(ctx context.Context, run *burninv1alph
 	// before load lands on them, so that a run's footprint on the fleet tracks
 	// MaxConcurrentNodes instead of the length of its target list. See
 	// cordonNode.
+	//
+	// But how the targets were FOUND is recorded here, and only here, because
+	// this is the last moment at which the answer is uncontaminated: after this
+	// the run starts cordoning, and a reading taken later cannot tell the run's
+	// own hold from a hold that was there first. Written once and never
+	// overwritten, so re-entering this path after a failed status write — or a
+	// manager restart — cannot change what the run believes it must restore.
+	if run.Status.PriorUnschedulable == nil {
+		run.Status.PriorUnschedulable = r.capturePriorSchedulability(ctx, p.Targets)
+	}
 
 	run.Status.Phase = burninv1alpha1.RunRunning
 	started := metav1.NewTime(r.now())

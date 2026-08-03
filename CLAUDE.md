@@ -234,6 +234,24 @@ disagree about the same hardware. One brain, two dispatchers.
   together, before either pod exists. Cordoning every target up front took a
   two-node cluster entirely out of scheduling and hollowed out the interlock,
   whose whole premise is that only N nodes are occupied at once.
+- **What the run FOUND is captured once, at start, and never re-derived.**
+  Because a node is cordoned and released per wave, "was this node already
+  cordoned when I got here?" would otherwise be re-asked several times per run
+  and answered from whatever `spec.unschedulable` said at that instant — after
+  the run already had a footprint. Anything the run could not attribute to
+  itself (its own hold seen through an annotation it no longer recognises after
+  a manager restart; an operator cordoning a node the burn-in was already
+  holding, which on an unschedulable node is an invisible no-op) was then
+  recorded as pre-existing and made PERMANENT at teardown: a stranded cordon
+  signed off as intentional. `status.priorUnschedulable` is that record, written
+  before the first cordon and never overwritten, and it — not the node's
+  annotation — decides what the release restores. The node annotation stays as
+  the account a human reads off the node and as the fallback for a run that
+  started under an older operator. The deliberate consequence: a cordon placed
+  on a target after the run started is not adopted and is undone at teardown.
+  That is the right way round, since a cordon undone is visible and one command
+  to redo, and a node the fleet silently loses has nothing left in the cluster
+  that knows it was taken.
 - **Runner pods must tolerate the operator's own cordon.** The run cordons its
   target, which the node controller expresses as
   `node.kubernetes.io/unschedulable:NoSchedule`; a pod that does not tolerate it
@@ -279,9 +297,19 @@ disagree about the same hardware. One brain, two dispatchers.
 ### Runner images
 
 - A runner's contract is its **exit code plus `key=value` metrics on stdout**.
-  Exit 0 = pass, 1 = fail, 2 = skip (not applicable to this hardware). The skip
-  path matters: a node that cannot run a test must skip cleanly, not report a
-  failure.
+  Exit 0 = pass, 1 = fail, 2 = skip (not applicable to this hardware), **3 =
+  error** (the runner could not measure; the hardware is unjudged). Anything
+  else is also an error — `pkg/runner.VerdictFor` maps every unrecognised code
+  there — but 3 is the code a runner author writes deliberately.
+  **Exit 1 is the expensive one, and it is the one runners get wrong.** It is a
+  hardware verdict, and the operator never retries a `Fail`, so it permanently
+  indicts a node with the retry budget unspent. It belongs ONLY to something the
+  run actually measured about the part. Everything that stopped the measurement
+  from happening — no device visible, an image with no kernel for this part, a
+  driver or runtime error, a failure to set up the comparison — is exit 3.
+  `compute-smoke` shipped `v0.1.0` reporting all three of those as exit 1; that
+  is the shape of the bug to look for. The skip path matters for the same
+  reason: a node that cannot run a test must skip cleanly, not report a failure.
 - **Environment the operator injects.** `BURNIN_DURATION_SECONDS` and
   `BURNIN_ATTEMPT` at every scope; a **Pair**-scope pod additionally gets:
 
