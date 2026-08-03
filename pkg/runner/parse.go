@@ -5,6 +5,24 @@
 // what keeps the vendor seam at the image boundary rather than in the
 // reconciler.
 //
+// # The unmeasurable sentinel
+//
+// One value is reserved: "n/a", case-insensitively. A runner emits
+// "eccErrors=n/a" to DECLARE that it looked and this hardware cannot produce
+// that measurement at all — NVIDIA GB10 exposes no ECC to NVML, so there is no
+// counter to read, and reporting 0 would be a lie about a quantity nobody
+// measured. Such a key lands in Result.Unmeasurable, never in Result.Metrics,
+// so Numeric() still cleanly reports "not a number" for it and no threshold can
+// accidentally compare against it.
+//
+// The declaration is the whole point, and OMISSION IS NOT ONE. A metric that
+// simply never appears fails its threshold closed, exactly as before; only an
+// explicit "n/a" can relax a RequiredIfMeasurable gate (see pkg/verdict and
+// api/v1alpha1.Applicability). A runner that cannot even look — a probe that
+// timed out, a driver that did not answer — must omit the key rather than
+// declare it unmeasurable, because "we could not look" and "there is nothing
+// here to look at" are different claims about the hardware.
+//
 // Like pkg/verdict, this is public and free of Kubernetes types. Glimmer's
 // pre-Kubernetes burn-in path runs the SAME runner images, and if the two
 // dispatchers derived different metrics from identical output they would reach
@@ -52,6 +70,11 @@ func VerdictFor(exitCode int) Verdict {
 	}
 }
 
+// Unmeasurable is the reserved metric VALUE with which a runner declares that
+// this hardware cannot produce a measurement at all. Matched
+// case-insensitively, after trimming.
+const Unmeasurable = "n/a"
+
 // Result is one runner execution, parsed.
 type Result struct {
 	Verdict  Verdict
@@ -59,6 +82,13 @@ type Result struct {
 	// Metrics are keyed by CANONICAL name (see pkg/contract), not by whatever
 	// the runner printed.
 	Metrics map[string]string
+	// Unmeasurable is the set of canonical names the runner explicitly declared
+	// unmeasurable on this hardware (the "n/a" sentinel). It is kept SEPARATE
+	// from Metrics, and the two are disjoint: an unmeasurable name has no
+	// value, so storing one would invent the measurement the sentinel exists to
+	// deny. Only a name in here can relax a RequiredIfMeasurable threshold; a
+	// name in neither map fails closed.
+	Unmeasurable map[string]bool
 	// Message is the last line that was not a key=value pair — usually a
 	// marker or an error string. Kept because a failing runner's most useful
 	// output is rarely a metric.
@@ -69,17 +99,127 @@ type Result struct {
 	InvalidNames []string
 }
 
+// IsUnmeasurable reports whether the runner declared this metric unmeasurable
+// on the hardware it ran against.
+func (r Result) IsUnmeasurable(name string) bool { return r.Unmeasurable[name] }
+
 // aliases maps a runner's own key to the canonical metric name, for the cases
 // generic normalisation cannot reach. Keyed by TestKind.
 //
 // Generic snake_case → lowerCamelCase handles nearly everything
 // ("nonfinite_count" → "nonfiniteCount", "elapsed_ms" → "elapsedMs"). An entry
 // is only needed where the runner's key is not merely a different spelling of
-// the canonical name — "tflops" is a bare unit that names no measurand, so it
-// cannot be derived, only mapped.
+// the canonical name. Three situations need one:
+//
+//  1. The key names no measurand. "tflops" is a bare unit; nothing can be
+//     derived from it, so it can only be mapped.
+//  2. The key's unit differs in CASE from the registered suffix. "gbs" folds to
+//     "Gbs", which is not the registered "GBs", so "h2d_bandwidth_gbs" would
+//     normalise to a name UnitOf() reads as dimensionless — a bandwidth
+//     recorded as a bare number. This is the quiet one, and it is why nearly
+//     every bandwidth runner needs an entry.
+//  3. The tool's own vocabulary differs from ours. gpu_burn's "errors" are
+//     miscompares; stressapptest's "hardware_incidents" are memory errors.
+//
+// Every value here is a name this project mints, so every value must be
+// registered in pkg/contract — enforced by TestAliasTargetsAreRegistered.
+// Within one kind, two keys must never map to the same canonical name: parsing
+// is last-occurrence-wins, so a collision would silently discard one of two
+// real measurements.
 var aliases = map[string]map[string]string{
 	"compute-smoke": {
 		"tflops": "throughputTflops",
+	},
+
+	"gpu-burn": {
+		// gpu_burn calls a mismatched result an "error"; ours is the more
+		// specific word, and keeping it distinct from eccErrors matters — a
+		// miscompare with no ECC event is the silent-corruption case.
+		"errors":     "miscompares",
+		"iterations": "iterationsCompleted",
+		// Sustained across the burn, so NOT throughputTflops: that name is
+		// reserved for the unwarmed single launch and is marked unsafe to
+		// threshold on. Mapping here would make a real benchmark ungateable.
+		"tflops": "sustainedThroughputTflops",
+	},
+
+	"dcgm-diag": {
+		"tests_failed":      "diagTestsFailed",
+		"xid_errors":        "xidEvents",
+		"pcie_replay_count": "pcieReplayErrors",
+		"rows_remapped":     "remappedRows",
+		// DCGM reports correctable (SBE) and uncorrectable (DBE) ECC counts
+		// separately and they mean different things: a handful of SBEs is a
+		// working part, one DBE is a failing one. Neither is "eccErrors", and
+		// aliasing both to it would collide and silently drop one. They are
+		// left to generic normalisation as eccSbeTotal / eccDbeTotal — valid,
+		// unregistered, and honest about being two numbers.
+	},
+
+	"memory-bw": {
+		"h2d_bandwidth_gbs":    "hostToDeviceBandwidthGBs",
+		"d2h_bandwidth_gbs":    "deviceToHostBandwidthGBs",
+		"d2d_bandwidth_gbs":    "deviceToDeviceBandwidthGBs",
+		"memory_bandwidth_gbs": "memoryBandwidthGBs",
+	},
+
+	"host-health": {
+		"nic_link_down":     "nicLinkDownEvents",
+		"pcie_replay_count": "pcieReplayErrors",
+		"xid_count":         "xidEvents",
+		"rows_remapped":     "remappedRows",
+	},
+
+	"thermal-soak": {
+		// The registered temperature and power metrics are already defined as
+		// the peak observed during the test, so the runner's "peak_" keys are
+		// the same measurand under a different spelling.
+		"peak_temp_c":    "gpuTempC",
+		"peak_power_w":   "powerDrawW",
+		"throttle_count": "throttleEvents",
+		// "soak_seconds" would normalise to soakSeconds, whose lowercase "s"
+		// is not the Seconds suffix — a duration stored as dimensionless.
+		"soak_seconds": "elapsedS",
+	},
+
+	"nccl": {
+		// nccl-tests' own column names. Both are GB/s there; the unit is
+		// implicit in the tool's output and explicit in ours.
+		"algbw":       "algBandwidthGBs",
+		"busbw":       "busBandwidthGBs",
+		"wrong_count": "miscompares",
+	},
+
+	"ib-write-bw": {
+		// perftest's BW average / BW peak columns. perftest is dual-licensed
+		// GPL/BSD and is consumed here under the BSD option (see NOTICE).
+		"bw_average": "bandwidthGbps",
+		"bw_peak":    "peakBandwidthGbps",
+	},
+
+	"gpudirect-rdma": {
+		// ib_write_bw --use_cuda: the same link measurand as ib-write-bw, so
+		// the same canonical name. A separate name would imply a separate
+		// quantity and split the fleet's history in two.
+		"bw_average": "bandwidthGbps",
+		"t_avg_usec": "latencyUs",
+	},
+
+	"clockprobe": {
+		// "mhz" folds to "Mhz", which is not the registered "MHz" suffix, so
+		// every clock would otherwise land as a dimensionless number.
+		"sm_clock_mhz":          "smClockMHz",
+		"mem_clock_mhz":         "memClockMHz",
+		"rated_boost_clock_mhz": "ratedBoostClockMHz",
+	},
+
+	"memory-stress": {
+		// stressapptest (Apache-2.0) is the sanctioned memory stressor; the
+		// GPL tools in this space cannot be shipped here.
+		"hardware_incidents":  "memoryErrors",
+		"sdc_count":           "sdcDetections",
+		"read_bandwidth_mbs":  "readBandwidthMBs",
+		"write_bandwidth_mbs": "writeBandwidthMBs",
 	},
 }
 
@@ -91,9 +231,10 @@ var aliases = map[string]map[string]string{
 // mapping, since only the kind's author knows what its keys mean.
 func Parse(kind, stdout string, exitCode int) Result {
 	res := Result{
-		Verdict:  VerdictFor(exitCode),
-		ExitCode: exitCode,
-		Metrics:  map[string]string{},
+		Verdict:      VerdictFor(exitCode),
+		ExitCode:     exitCode,
+		Metrics:      map[string]string{},
+		Unmeasurable: map[string]bool{},
 	}
 	kindAliases := aliases[kind]
 
@@ -122,10 +263,26 @@ func Parse(kind, stdout string, exitCode int) Result {
 			continue
 		}
 		// Last occurrence wins: runners may report progressively, and the final
-		// value is the settled one.
+		// value is the settled one. That applies ACROSS the two maps, which is
+		// what keeps them disjoint — a runner that declares a metric
+		// unmeasurable and later reports a real number has measured it, and the
+		// reverse retracts the number.
+		if isUnmeasurable(value) {
+			res.Unmeasurable[name] = true
+			delete(res.Metrics, name)
+			continue
+		}
+		delete(res.Unmeasurable, name)
 		res.Metrics[name] = value
 	}
 	return res
+}
+
+// isUnmeasurable recognises the reserved value. Only this exact spelling counts:
+// "unknown", "none" or an empty value are ordinary values a runner might mean
+// something else by, and a gate must not relax on a guess.
+func isUnmeasurable(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), Unmeasurable)
 }
 
 // canonicalName maps a runner's key to its canonical form.
@@ -162,7 +319,8 @@ func snakeToLowerCamel(s string) string {
 
 // Numeric reports a metric's value as a float, which is what a threshold is
 // evaluated against. Non-numeric metrics (a GPU's name, say) are legitimate
-// evidence but are not comparable.
+// evidence but are not comparable. A metric declared unmeasurable is not in
+// Metrics at all, so it reports false here rather than a fabricated zero.
 func (r Result) Numeric(name string) (float64, bool) {
 	raw, ok := r.Metrics[name]
 	if !ok {

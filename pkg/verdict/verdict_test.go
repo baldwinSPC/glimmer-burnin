@@ -1,6 +1,7 @@
 package verdict
 
 import (
+	"strings"
 	"testing"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
@@ -8,6 +9,23 @@ import (
 
 func th(metric string, op burninv1alpha1.Comparison, val string) burninv1alpha1.Threshold {
 	return burninv1alpha1.Threshold{Metric: metric, Comparison: op, Value: val}
+}
+
+// ifMeasurable is th() with the only applicability that relaxes anything.
+func ifMeasurable(metric string, op burninv1alpha1.Comparison, val string) burninv1alpha1.Threshold {
+	t := th(metric, op, val)
+	t.Applicability = burninv1alpha1.RequiredIfMeasurable
+	return t
+}
+
+// unmeasured is the runner's explicit declaration, as pkg/runner produces it
+// from an "n/a" value.
+func unmeasured(names ...string) map[string]bool {
+	set := map[string]bool{}
+	for _, n := range names {
+		set[n] = true
+	}
+	return set
 }
 
 func TestEvaluate(t *testing.T) {
@@ -61,13 +79,192 @@ func TestEvaluate(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			pass, msg := Evaluate(c.metrics, c.thresholds)
-			if pass != c.wantPass {
-				t.Fatalf("Evaluate = %v (%q), want %v", pass, msg, c.wantPass)
+			got := Evaluate(c.metrics, nil, c.thresholds)
+			if got.Passed != c.wantPass {
+				t.Fatalf("Evaluate = %v (%q), want %v", got.Passed, got.Message, c.wantPass)
 			}
-			if !pass && msg == "" {
+			if !got.Passed && got.Message == "" {
 				t.Error("a failing verdict must carry an explanatory message")
 			}
+			if len(got.NotEvaluated) != 0 {
+				t.Errorf("nothing was declared unmeasurable, so nothing may go un-evaluated: %+v", got.NotEvaluated)
+			}
 		})
+	}
+}
+
+// ─── The unmeasurable matrix ──────────────────────────────────────────────────
+//
+// Four cases, and the difference between the first two is the whole design: a
+// runner that DID NOT SAY is not a runner that said "cannot".
+
+// Case 1: absent entirely. A runner that forgot to emit, crashed before
+// emitting, or had its key renamed is still a failure — under EVERY
+// applicability. If RequiredIfMeasurable relaxed on absence it would convert
+// every broken probe into an acceptance, which is the exact false negative this
+// project exists to prevent.
+func TestEvaluate_AbsentMetricFailsClosedUnderEveryApplicability(t *testing.T) {
+	for _, th := range []burninv1alpha1.Threshold{
+		th("eccErrors", burninv1alpha1.EQ, "0"),
+		ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
+	} {
+		applicability := string(th.Applicability)
+		if applicability == "" {
+			applicability = "(unset)"
+		}
+		t.Run(applicability, func(t *testing.T) {
+			got := Evaluate(map[string]string{}, unmeasured(), []burninv1alpha1.Threshold{th})
+			if got.Passed {
+				t.Fatal("an absent metric passed; absence is not a declaration of unmeasurability")
+			}
+			if len(got.NotEvaluated) != 0 {
+				t.Errorf("an absent metric was reported as not-evaluated rather than failed: %+v", got.NotEvaluated)
+			}
+			if !strings.Contains(got.Message, "not reported") {
+				t.Errorf("message = %q, want it to say the runner did not report the metric", got.Message)
+			}
+		})
+	}
+}
+
+// Case 2: declared unmeasurable, Required. An unmeasured quantity has not been
+// shown to be within limits, so the default stays fail-closed — this is what
+// keeps an ECC-capable GPU with ECC switched off from sliding through.
+func TestEvaluate_UnmeasurableUnderRequiredFails(t *testing.T) {
+	got := Evaluate(
+		map[string]string{"xidEvents": "0"},
+		unmeasured("eccErrors"),
+		[]burninv1alpha1.Threshold{th("eccErrors", burninv1alpha1.EQ, "0")},
+	)
+	if got.Passed {
+		t.Fatal("a Required threshold on an unmeasurable metric passed")
+	}
+	if !strings.Contains(got.Message, "eccErrors") {
+		t.Errorf("message = %q, want it to name the metric", got.Message)
+	}
+	if !strings.Contains(got.Message, ReasonUnmeasurable) {
+		t.Errorf("message = %q, want it to say the hardware cannot measure it", got.Message)
+	}
+	if len(got.NotEvaluated) != 0 {
+		t.Errorf("a Required gate must be evaluated and failed, not skipped: %+v", got.NotEvaluated)
+	}
+}
+
+// Case 3: declared unmeasurable, RequiredIfMeasurable. The threshold is not
+// applied — and that must NEVER be silent. The node passes, and the outcome
+// carries a reportable record of the gate that did not run.
+func TestEvaluate_UnmeasurableUnderRequiredIfMeasurableIsNotEvaluated(t *testing.T) {
+	got := Evaluate(
+		map[string]string{"xidEvents": "0"},
+		unmeasured("eccErrors", "remappedRows"),
+		[]burninv1alpha1.Threshold{
+			th("xidEvents", burninv1alpha1.EQ, "0"),
+			ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
+			ifMeasurable("remappedRows", burninv1alpha1.EQ, "0"),
+		},
+	)
+	if !got.Passed {
+		t.Fatalf("a healthy GB10 failed acceptance: %q", got.Message)
+	}
+	if len(got.NotEvaluated) != 2 {
+		t.Fatalf("NotEvaluated = %+v, want both un-applied gates reported", got.NotEvaluated)
+	}
+	// Spec order, so a report reads like the profile it came from.
+	if got.NotEvaluated[0].Metric != "eccErrors" || got.NotEvaluated[1].Metric != "remappedRows" {
+		t.Errorf("NotEvaluated = %+v, want eccErrors then remappedRows", got.NotEvaluated)
+	}
+	for _, ne := range got.NotEvaluated {
+		if ne.Reason != ReasonUnmeasurable {
+			t.Errorf("%s: reason = %q, want %q", ne.Metric, ne.Reason, ReasonUnmeasurable)
+		}
+	}
+	msg := got.NotEvaluatedMessage()
+	for _, want := range []string{"not evaluated", "eccErrors", "remappedRows", ReasonUnmeasurable} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("NotEvaluatedMessage = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
+// Case 4: everything else unchanged. RequiredIfMeasurable is not "optional": on
+// hardware that CAN measure, the gate is applied exactly as Required.
+func TestEvaluate_RequiredIfMeasurableStillGatesAMeasuredMetric(t *testing.T) {
+	thresholds := []burninv1alpha1.Threshold{ifMeasurable("eccErrors", burninv1alpha1.EQ, "0")}
+
+	clean := Evaluate(map[string]string{"eccErrors": "0"}, unmeasured(), thresholds)
+	if !clean.Passed || len(clean.NotEvaluated) != 0 {
+		t.Errorf("a clean measured counter must pass and be evaluated: %+v", clean)
+	}
+
+	dirty := Evaluate(map[string]string{"eccErrors": "4"}, unmeasured(), thresholds)
+	if dirty.Passed {
+		t.Fatal("RequiredIfMeasurable let a measured ECC error through; it is not an optional gate")
+	}
+	if !strings.Contains(dirty.Message, "eccErrors") {
+		t.Errorf("message = %q, want it to name the failing threshold", dirty.Message)
+	}
+	if len(dirty.NotEvaluated) != 0 {
+		t.Errorf("a measured metric was reported as not-evaluated: %+v", dirty.NotEvaluated)
+	}
+}
+
+// A value AND a declaration of unmeasurability for the same metric is a
+// self-contradictory runner. pkg/runner cannot produce it, but a hand-built
+// caller can, and ambiguity resolves toward failing.
+func TestEvaluate_ContradictoryRunnerOutputFailsClosed(t *testing.T) {
+	for _, th := range []burninv1alpha1.Threshold{
+		th("eccErrors", burninv1alpha1.EQ, "0"),
+		ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
+	} {
+		got := Evaluate(
+			map[string]string{"eccErrors": "0"},
+			unmeasured("eccErrors"),
+			[]burninv1alpha1.Threshold{th},
+		)
+		if got.Passed {
+			t.Errorf("applicability %q: contradictory output passed", th.Applicability)
+		}
+		if len(got.NotEvaluated) != 0 {
+			t.Errorf("applicability %q: contradiction was reported as not-evaluated: %+v", th.Applicability, got.NotEvaluated)
+		}
+	}
+}
+
+// The enum is validated by the apiserver, but the verdict must not depend on
+// that: a value nobody recognises is Required, never the relaxed one.
+func TestEvaluate_UnknownApplicabilityFailsClosed(t *testing.T) {
+	th := th("eccErrors", burninv1alpha1.EQ, "0")
+	th.Applicability = burninv1alpha1.Applicability("Optional")
+
+	got := Evaluate(map[string]string{}, unmeasured("eccErrors"), []burninv1alpha1.Threshold{th})
+	if got.Passed {
+		t.Fatal("an unrecognised applicability relaxed the gate")
+	}
+}
+
+// A failure stops evaluation, but the gates already found to be un-evaluated are
+// still part of the report: they are evidence about the run either way.
+func TestEvaluate_NotEvaluatedSurvivesALaterFailure(t *testing.T) {
+	got := Evaluate(
+		map[string]string{"xidEvents": "7"},
+		unmeasured("eccErrors"),
+		[]burninv1alpha1.Threshold{
+			ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
+			th("xidEvents", burninv1alpha1.EQ, "0"),
+		},
+	)
+	if got.Passed {
+		t.Fatal("a violated threshold passed")
+	}
+	if len(got.NotEvaluated) != 1 || got.NotEvaluated[0].Metric != "eccErrors" {
+		t.Errorf("NotEvaluated = %+v, want eccErrors kept alongside the failure", got.NotEvaluated)
+	}
+}
+
+func TestOutcome_NotEvaluatedMessageIsEmptyWhenEverythingRan(t *testing.T) {
+	got := Evaluate(map[string]string{"eccErrors": "0"}, nil,
+		[]burninv1alpha1.Threshold{ifMeasurable("eccErrors", burninv1alpha1.EQ, "0")})
+	if msg := got.NotEvaluatedMessage(); msg != "" {
+		t.Errorf("NotEvaluatedMessage = %q, want empty", msg)
 	}
 }

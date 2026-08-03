@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/internal/metrics"
 )
 
 // Build turns a BurnInSink CR into a Deliverer.
@@ -36,10 +37,18 @@ func Build(ctx context.Context, c client.Client, s *burninv1alpha1.BurnInSink, t
 		return &ConfigMap{Client: c, Namespace: s.Namespace, Name: s.Spec.ConfigMap.Name}, nil
 
 	case burninv1alpha1.SinkPrometheus:
-		// Prometheus is a scrape target, not a push destination: there is
-		// nothing to deliver to. It is served by exposing run metrics, which is
-		// a separate mechanism from this package.
-		return nil, Permanent(fmt.Errorf("sink %s/%s: Prometheus sinks are scraped, not delivered to", s.Namespace, s.Name))
+		// Prometheus is a scrape target, not a push destination, so this sink
+		// is a SELECTOR rather than an address: naming it in a profile marks
+		// that profile's runs for exposition on the manager's /metrics
+		// endpoint. "Delivery" reflects the envelope into the in-process
+		// exporter and always succeeds — there is no network, so there is
+		// nothing to retry — and the sink's status records it like any other.
+		//
+		// It carries no config, which is why there is no nil check here to
+		// match the other two branches. Exposition is not durable delivery
+		// (see internal/metrics), so pair a Prometheus sink with a Webhook or
+		// ConfigMap sink rather than using it alone.
+		return metrics.Default.SinkFor(s.Namespace, s.Name), nil
 
 	default:
 		return nil, Permanent(fmt.Errorf("sink %s/%s has unknown type %q", s.Namespace, s.Name, s.Spec.Type))

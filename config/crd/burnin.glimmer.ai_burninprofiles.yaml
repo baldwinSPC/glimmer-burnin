@@ -72,6 +72,25 @@ spec:
                       description: Inline defines the test directly (mutually exclusive
                         with TestRef).
                       properties:
+                        checkpointIntervalSeconds:
+                          description: |-
+                            CheckpointIntervalSeconds is how often a long execution publishes its
+                            metrics so far onto the TestResult. 0 or nil disables checkpointing.
+
+                            A multi-hour thermal soak that is cancelled, evicted, or lost to a node
+                            reboot at minute 200 otherwise reports nothing at all: the runner's
+                            metrics only reach the status when the pod terminates. Checkpointing
+                            keeps the evidence gathered so far, so an interrupted soak still tells
+                            you what the temperatures and clocks were doing.
+
+                            A checkpoint is EVIDENCE, never a verdict. Thresholds are evaluated once,
+                            against the final metrics of a completed execution — a mid-run sample
+                            that dips below a threshold is not a failure, because the run is not
+                            over. Checkpoints overwrite in place rather than accumulating, so a long
+                            soak cannot grow its status object without bound.
+                          format: int32
+                          minimum: 0
+                          type: integer
                         durationSeconds:
                           description: DurationSeconds bounds a single execution (0
                             = the kind's default).
@@ -87,6 +106,29 @@ spec:
                           description: Kind selects built-in runner defaults + result
                             parsing.
                           type: string
+                        repeatCount:
+                          default: 1
+                          description: |-
+                            RepeatCount is how many times this test executes sequentially on each
+                            node. EVERY execution must pass for the test to pass — the repeats are
+                            an AND, not a best-of.
+
+                            This is the intermittent-fault gate. The faults that matter most in
+                            burn-in are the ones that do not reproduce on the first try: a marginal
+                            solder joint, a link that retrains under thermal cycling, a DIMM that
+                            miscompares once an hour. A single clean pass does not distinguish a
+                            good part from a part that fails one run in five, and running the test
+                            N times is what makes that distinction. Repeats are sequential, never
+                            parallel: the point is to cycle the hardware, and two concurrent copies
+                            on one node would contend for the very resource under test.
+
+                            Do not confuse this with RetryOnErrorLimit on the run. A repeat re-runs
+                            a test that already produced a verdict and makes the verdict stricter; a
+                            retry re-runs a test that produced no verdict at all. A repeat can turn
+                            a Passed into a Failed, and must never turn a Failed into a Passed.
+                          format: int32
+                          minimum: 1
+                          type: integer
                         resources:
                           description: Resources requested per test pod (e.g. nvidia.com/gpu,
                             rdma/rdma_shared_device_a).
@@ -284,14 +326,311 @@ spec:
                                 - name
                                 type: object
                               type: array
+                            hostPaths:
+                              description: |-
+                                HostPaths are paths on the NODE made visible inside the runner container.
+
+                                This is the most security-relevant field in this API and it is deliberately
+                                the most explicit one. Every entry hands the runner a piece of the host's
+                                own filesystem; it is not made safe by the pod being short-lived, and a
+                                writable mount of a path that only needed reading is a real escalation.
+                                Nothing is mounted unless it is named here — there is no implicit host
+                                access anywhere in this operator.
+
+                                A burn-in runner legitimately needs it, which is why the field exists
+                                rather than being refused. Hardware acceptance measures the host, and the
+                                two facts below were measured on a real cluster, not inferred:
+
+                                  - RDMA fabric tests are IMPOSSIBLE without it. `privileged: true` plus
+                                    `hostNetwork: true` does NOT give a pod the host's user-verbs device
+                                    nodes: /dev/infiniband inside such a pod holds only rdma_cm and umad*,
+                                    while the host also has uverbs*. uverbs is what ibv_create_cq opens, so
+                                    ib_write_bw dies with "Couldn't create CQ / Failed to create CQs" and
+                                    the nccl runner fails the same way. Mounting the host's
+                                    /dev/infiniband is what makes uverbs* appear in the pod.
+                                  - Xid scanning needs /dev/kmsg, which is not in a container's default
+                                    /dev. Without it host-health reports xid_source=none and OMITS
+                                    xidEvents, so a gate on that metric fails closed and certifies nothing.
+
+                                The shape is deliberately narrow rather than a general
+                                []corev1.Volume + []corev1.VolumeMount. Every mount a burn-in runner has
+                                ever needed is a host device or a host log path, and a curated field states
+                                that intent where a general volume list would bury it: a reviewer can read
+                                what a BurnInTest takes from the node, and from which direction, without
+                                decoding a volume source. It also lets this API refuse what the general
+                                form cannot — Type here admits only the assert-only hostPath types, so a
+                                BurnInTest can never ask the kubelet to CREATE a path on a node.
+                              items:
+                                description: |-
+                                  HostPathMount makes ONE path on the node visible inside the runner container.
+
+                                  It is honoured identically at Node scope and at Pair scope, on BOTH pods of a
+                                  pair: a fabric test that could reach the verbs devices from only one end of
+                                  the link would measure nothing.
+
+                                  See RunnerSpec.HostPaths for what this costs and why a burn-in runner needs
+                                  it anyway. The short version: this is host access, it is granted only where
+                                  named, and it is granted read-only unless the entry says otherwise.
+                                properties:
+                                  mountPath:
+                                    description: |-
+                                      MountPath is where that path appears INSIDE the runner container.
+
+                                      It is required rather than defaulted to Path, because a mount whose two
+                                      ends are written out is a mount a reviewer can check. It is also this
+                                      list's identity: two entries may not share a MountPath.
+                                    minLength: 1
+                                    pattern: ^/
+                                    type: string
+                                  path:
+                                    description: Path is the absolute path ON THE
+                                      HOST, e.g. "/dev/infiniband".
+                                    minLength: 1
+                                    pattern: ^/
+                                    type: string
+                                  readOnly:
+                                    default: true
+                                    description: |-
+                                      ReadOnly mounts the path without write access. It DEFAULTS TO TRUE, which
+                                      is the direction a security-relevant default has to fall: an author who
+                                      needs the runner to write to the host has to say so, and an author who
+                                      forgets gets the harmless mount rather than the dangerous one.
+
+                                      It is a pointer precisely so that "unset" is distinguishable from "false".
+                                      A plain bool would make a Go-constructed object — or one written before
+                                      this field existed — silently take the writable form.
+
+                                      Which way round the real cases fall:
+
+                                        - /dev/kmsg is READ-ONLY. host-health only ever reads the ring buffer,
+                                          and a burn-in runner has no business writing to the kernel log.
+                                        - /dev/infiniband must be WRITABLE (readOnly: false). The user-verbs
+                                          device nodes are opened read-write by ibv_open_device, so a read-only
+                                          mount fails in the same place, and with much the same message, as no
+                                          mount at all.
+                                    type: boolean
+                                  type:
+                                    description: |-
+                                      Type asserts what the path must already BE on the node, and the kubelet
+                                      refuses the pod if it is anything else.
+
+                                      The permitted values are the assert-only ones. corev1's DirectoryOrCreate
+                                      and FileOrCreate are deliberately NOT accepted: a burn-in run touches every
+                                      node in a fleet, and an operator that creates paths on hosts to satisfy its
+                                      own mounts would mutate the fleet it was sent to measure. Leaving Type
+                                      unset keeps Kubernetes' default of no check at all, which also lets the
+                                      container runtime create a missing path — so set it whenever you know what
+                                      the path is.
+
+                                      Setting it converts "the runner saw an empty directory and reported
+                                      nothing" into a pod that refuses to start, which the run records as an
+                                      infrastructure Error. That is the better failure: an Error says the
+                                      hardware was never judged, where an empty mount looks like a measurement.
+                                    enum:
+                                    - Directory
+                                    - File
+                                    - Socket
+                                    - CharDevice
+                                    - BlockDevice
+                                    type: string
+                                required:
+                                - mountPath
+                                - path
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                              - mountPath
+                              x-kubernetes-list-type: map
                             image:
+                              description: |-
+                                Image overrides the built-in image for the test's Kind. Empty means "use
+                                the default for this Kind", and a Kind with no default refuses at plan
+                                time asking for this field rather than pull-failing per node.
+
+                                It is optional because RunnerSpec is no longer only an image override: a
+                                test that needs nothing but a readinessProbe or a hostPath would otherwise
+                                be forced to pin an image it did not want to change, and pinning one to
+                                get a mount is how a fleet ends up on a stale runner tag by accident.
                               type: string
                             privileged:
-                              description: Privileged is sometimes required for RDMA/GPUDirect
-                                paths.
+                              description: |-
+                                Privileged is sometimes required for RDMA/GPUDirect paths.
+
+                                It is NOT sufficient to reach host device nodes — see HostPaths, which is
+                                the field that actually gets them into the container.
                               type: boolean
-                          required:
-                          - image
+                            readinessProbe:
+                              description: |-
+                                ReadinessProbe is what a Pair-scope SERVER runner uses to say it is
+                                actually able to accept a connection.
+
+                                It exists because "the container is running" and "the socket is
+                                listening" are different claims, and the gap between them is exactly
+                                where a fabric test produces its most misleading result: an ib_write_bw
+                                or nccl client that connects a moment too early fails with a connection
+                                error, and a connection error on a fabric test reads as a bad link. The
+                                operator will not start the client pod until the server pod is Ready, so
+                                a server that declares a probe here converts that gate from "the kubelet
+                                started the process" into "the process answered on its port".
+
+                                Without a probe a pod is Ready as soon as its containers start, which is
+                                the weaker guarantee. A server runner whose listener takes any
+                                appreciable time to bind should ship one — a tcpSocket probe on the
+                                runner's own port is usually enough.
+
+                                It is honoured at every scope; it is only load-bearing at Pair.
+                              properties:
+                                exec:
+                                  description: Exec specifies a command to execute
+                                    in the container.
+                                  properties:
+                                    command:
+                                      description: |-
+                                        Command is the command line to execute inside the container, the working directory for the
+                                        command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                                        not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                                        a shell, you need to explicitly call out to that shell.
+                                        Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                  type: object
+                                failureThreshold:
+                                  description: |-
+                                    Minimum consecutive failures for the probe to be considered failed after having succeeded.
+                                    Defaults to 3. Minimum value is 1.
+                                  format: int32
+                                  type: integer
+                                grpc:
+                                  description: GRPC specifies a GRPC HealthCheckRequest.
+                                  properties:
+                                    port:
+                                      description: Port number of the gRPC service.
+                                        Number must be in the range 1 to 65535.
+                                      format: int32
+                                      type: integer
+                                    service:
+                                      default: ""
+                                      description: |-
+                                        Service is the name of the service to place in the gRPC HealthCheckRequest
+                                        (see https://github.com/grpc/grpc/blob/master/doc/health-checking.md).
+
+                                        If this is not specified, the default behavior is defined by gRPC.
+                                      type: string
+                                  required:
+                                  - port
+                                  type: object
+                                httpGet:
+                                  description: HTTPGet specifies an HTTP GET request
+                                    to perform.
+                                  properties:
+                                    host:
+                                      description: |-
+                                        Host name to connect to, defaults to the pod IP. You probably want to set
+                                        "Host" in httpHeaders instead.
+                                      type: string
+                                    httpHeaders:
+                                      description: Custom headers to set in the request.
+                                        HTTP allows repeated headers.
+                                      items:
+                                        description: HTTPHeader describes a custom
+                                          header to be used in HTTP probes
+                                        properties:
+                                          name:
+                                            description: |-
+                                              The header field name.
+                                              This will be canonicalized upon output, so case-variant names will be understood as the same header.
+                                            type: string
+                                          value:
+                                            description: The header field value
+                                            type: string
+                                        required:
+                                        - name
+                                        - value
+                                        type: object
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    path:
+                                      description: Path to access on the HTTP server.
+                                      type: string
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: |-
+                                        Name or number of the port to access on the container.
+                                        Number must be in the range 1 to 65535.
+                                        Name must be an IANA_SVC_NAME.
+                                      x-kubernetes-int-or-string: true
+                                    scheme:
+                                      description: |-
+                                        Scheme to use for connecting to the host.
+                                        Defaults to HTTP.
+                                      type: string
+                                  required:
+                                  - port
+                                  type: object
+                                initialDelaySeconds:
+                                  description: |-
+                                    Number of seconds after the container has started before liveness probes are initiated.
+                                    More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+                                  format: int32
+                                  type: integer
+                                periodSeconds:
+                                  description: |-
+                                    How often (in seconds) to perform the probe.
+                                    Default to 10 seconds. Minimum value is 1.
+                                  format: int32
+                                  type: integer
+                                successThreshold:
+                                  description: |-
+                                    Minimum consecutive successes for the probe to be considered successful after having failed.
+                                    Defaults to 1. Must be 1 for liveness and startup. Minimum value is 1.
+                                  format: int32
+                                  type: integer
+                                tcpSocket:
+                                  description: TCPSocket specifies a connection to
+                                    a TCP port.
+                                  properties:
+                                    host:
+                                      description: 'Optional: Host name to connect
+                                        to, defaults to the pod IP.'
+                                      type: string
+                                    port:
+                                      anyOf:
+                                      - type: integer
+                                      - type: string
+                                      description: |-
+                                        Number or name of the port to access on the container.
+                                        Number must be in the range 1 to 65535.
+                                        Name must be an IANA_SVC_NAME.
+                                      x-kubernetes-int-or-string: true
+                                  required:
+                                  - port
+                                  type: object
+                                terminationGracePeriodSeconds:
+                                  description: |-
+                                    Optional duration in seconds the pod needs to terminate gracefully upon probe failure.
+                                    The grace period is the duration in seconds after the processes running in the pod are sent
+                                    a termination signal and the time when the processes are forcibly halted with a kill signal.
+                                    Set this value longer than the expected cleanup time for your process.
+                                    If this value is nil, the pod's terminationGracePeriodSeconds will be used. Otherwise, this
+                                    value overrides the value provided by the pod spec.
+                                    Value must be non-negative integer. The value zero indicates stop immediately via
+                                    the kill signal (no opportunity to shut down).
+                                    This is a beta field and requires enabling ProbeTerminationGracePeriod feature gate.
+                                    Minimum value is 1. spec.terminationGracePeriodSeconds is used if unset.
+                                  format: int64
+                                  type: integer
+                                timeoutSeconds:
+                                  description: |-
+                                    Number of seconds after which the probe times out.
+                                    Defaults to 1 second. Minimum value is 1.
+                                    More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+                                  format: int32
+                                  type: integer
+                              type: object
                           type: object
                         scope:
                           default: Node
@@ -307,12 +646,50 @@ spec:
                             (e.g. busBandwidthGBs>=20, eccErrors==0, throttleEvents==0). A test with no
                             thresholds passes on a clean (exit 0) run.
                           items:
-                            description: Threshold gates a named metric emitted by
-                              the runner's result parser.
+                            description: |-
+                              Threshold gates a named metric emitted by the runner's result parser.
+
+                              A threshold naming a metric the runner did not emit is a FAILURE, never a
+                              pass: a missing measurement must not silently satisfy acceptance.
+
+                              Choosing the comparison matters as much as choosing the number — see
+                              Comparison. In short: dimensional metrics (a name ending in a unit suffix)
+                              take GreaterThanOrEqual/LessThanOrEqual; dimensionless counters take Equal or
+                              NotEqual, which are exact.
                             properties:
+                              applicability:
+                                default: Required
+                                description: |-
+                                  Applicability decides what happens when the hardware cannot produce this
+                                  metric. Defaults to Required, which is today's fail-closed behaviour.
+                                enum:
+                                - Required
+                                - RequiredIfMeasurable
+                                type: string
                               comparison:
-                                description: Comparison is the operator applied by
-                                  a Threshold.
+                                description: |-
+                                  Comparison is the operator applied by a Threshold. Metric and value are both
+                                  parsed as float64 and compared with NO TOLERANCE — there is no epsilon
+                                  anywhere in this API, and that is what makes each operator right for exactly
+                                  one kind of metric.
+
+                                  GreaterThanOrEqual and LessThanOrEqual are how a MEASUREMENT is gated: a
+                                  floor, a ceiling, or the two together for a band. Anything with a unit —
+                                  bandwidth, temperature, latency, clocks, a percentage — belongs here.
+
+                                  Equal and NotEqual are EXACT, and they exist for DIMENSIONLESS COUNTERS:
+                                  eccErrors Equal 0, throttleEvents Equal 0, miscompares Equal 0. On a counter
+                                  exactness is the whole point, because a tolerance around zero ECC errors is a
+                                  tolerance for ECC errors.
+
+                                  DO NOT use Equal or NotEqual on a continuous measurement.
+                                  `sustainedClockPct Equal 83.22` asks an averaged sample to reproduce a decimal
+                                  string exactly; it will not, so the gate fails on every healthy node forever
+                                  and each failure is reported in the same shape as a hardware verdict. A metric
+                                  whose name ends in a unit suffix (Gbps, GBs, MBs, Us, Ms, S, C, W, Pct, MHz,
+                                  Tflops) is continuous by construction — gate it with GreaterThanOrEqual
+                                  and/or LessThanOrEqual instead. pkg/verdict.ValidateThresholds reports this
+                                  misuse at authoring time, before a run has condemned anything.
                                 enum:
                                 - GreaterThanOrEqual
                                 - LessThanOrEqual
@@ -320,8 +697,23 @@ spec:
                                 - NotEqual
                                 type: string
                               metric:
+                                description: |-
+                                  Metric is the canonical metric name to gate, as the runner's result
+                                  parser emits it — e.g. "busBandwidthGBs", "eccErrors", "latencyUs".
+                                  Names are lowerCamelCase and a dimensional metric ends in a unit suffix;
+                                  a name that breaks that grammar is dropped during parsing, so a threshold
+                                  naming one can never be satisfied.
                                 type: string
                               value:
+                                description: |-
+                                  Value is the number the metric is compared against, parsed as float64.
+                                  It must be finite: "NaN" and "Inf" parse as numbers but express no bound,
+                                  and NaN in particular compares false against everything, which would turn
+                                  NotEqual into a gate that always passes.
+
+                                  Under Equal/NotEqual the comparison is exact, so this should be a whole
+                                  number counted by a counter. Under GreaterThanOrEqual/LessThanOrEqual it
+                                  is a bound and any finite value is meaningful.
                                 type: string
                             required:
                             - comparison

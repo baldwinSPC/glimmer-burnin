@@ -16,13 +16,81 @@ permissive license (Apache-2.0 / BSD / MIT), notably:
   - sigs.k8s.io/controller-tools          Apache-2.0
   - k8s.io/{api,apimachinery,client-go}   Apache-2.0
   - github.com/onsi/ginkgo, gomega        MIT
+  - github.com/robfig/cron/v3             MIT
   - github.com/NVIDIA/cutlass             BSD-3-Clause  (runners/compute-smoke)
+  - github.com/prometheus/client_golang   Apache-2.0
+
+github.com/robfig/cron/v3 v3.0.1 parses BurnInSchedule cron expressions. Its
+LICENSE file is MIT ("Copyright (C) 2012 Rob Figueiredo ... MIT LICENSE"), it is
+not dual-licensed, and it has no dependencies of its own, so it adds nothing
+further to this list.
 
 The compute-smoke runner (runners/compute-smoke) links NVIDIA CUTLASS, a
 header-only BSD-3-Clause template library. It is compiled into the runner binary;
 no CUTLASS source is redistributed by this project. The CUTLASS subdirectory
 python/CuTeDSL is covered by the NVIDIA EULA rather than BSD-3-Clause and is NOT
 used here.
+
+Third-party components built into the other runner images, each verified against
+the project allowlist. Every one is built from source in a build stage; see each
+runner's Dockerfile and README for the per-image assertion that enforces this.
+
+  runners/clockprobe
+    - clockprobe.cu, nvml_dynamic.h   Apache-2.0, this project's own source.
+      NVML is reached by dlopen against the driver's libnvidia-ml.so.1 at
+      runtime; no NVIDIA header (including nvml.h) is vendored or redistributed.
+
+  runners/dcgm-diag
+    - NO DCGM IS SHIPPED IN THIS IMAGE. The image contains only our own
+      Apache-2.0 wrapper on a distroless base; the site supplies DCGM at run
+      time (the wrapper's PATH and LD_LIBRARY_PATH lead to the documented
+      /usr/local/dcgm mount point), which is how DCGM already reaches GPU
+      nodes.
+
+      This entry previously claimed DCGM was "Apache-2.0, built from source"
+      with "its LICENSE travelling in the image". That was wrong on both
+      counts and is corrected here. DCGM's *source* is Apache-2.0, but its
+      *binaries* are not: every DCGM package in NVIDIA's distribution —
+      including datacenter-gpu-manager-4-core, the one built from that
+      Apache-2.0 source — carries the NVIDIA Data Center GPU Manager License
+      in its copyright file. Section 2(c) of that licence forbids
+      distribution, and section 2(e) forbids use that would subject it to a
+      licence requiring free redistribution. Shipping those binaries from an
+      Apache-2.0 repository would breach both the licence and this project's
+      permissive-only policy. The NGC image additionally installs
+      cuda-cudart and cuda-compat, which are NVIDIA-redistributable and
+      barred by the runner-image rule in CLAUDE.md.
+
+      Building DCGM from source was evaluated and rejected as impractical
+      rather than merely inconvenient: upstream's build.sh re-invokes itself
+      inside NVIDIA's own container via intodocker.sh (docker-in-docker) and
+      requires a crosstool-NG toolchain at /opt/cross plus eleven staged
+      dependencies. Even if it built, the resulting binaries would carry the
+      licence above.
+
+  runners/memory-bw
+    - NVIDIA nvbandwidth v0.10.0      Apache-2.0, built from source, binary shipped
+    - p-ranav/argparse                MIT, header-only, compiled into nvbandwidth
+    - JsonCpp                         MIT, vendored in nvbandwidth, compiled in
+
+  runners/memory-stress
+    - stressapptest v1.0.11           Apache-2.0, built from source and shipped
+      with its COPYING and NOTICE at /licenses. The build asserts the COPYING
+      file really is Apache-2.0 rather than trusting a README. stress-ng, fio
+      and memtester are GPL and are for that reason NOT used.
+    - libstdc++ / libgcc              GPL-3.0 WITH GCC-Runtime-Library-Exception,
+      statically linked. The Runtime Library Exception exists precisely to permit
+      this and does not impose GPL terms on the resulting image.
+    - glibc (distroless base)         LGPL-2.1-or-later, dynamically linked and
+      unmodified, which LGPL 2.1 section 6 permits without relicensing.
+
+  runners/host-health
+    - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
+      standard library (BSD-3-Clause).
+
+linux-rdma/perftest is dual-licensed GPL/BSD. Nothing in this repository ships it
+today; an ib-write-bw or gpudirect-rdma runner added later must consume it under
+the BSD option.
 
 Runner images are built multi-stage so the NVIDIA CUDA toolchain is used at build
 time only. Published runner images contain this project's Apache-2.0 binaries on a

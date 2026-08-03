@@ -1,0 +1,93 @@
+# Continuous verification: re-run acceptance on a schedule, forever.
+#
+# Acceptance at install time only proves the hardware was good on the day it
+# arrived. Fans clog, thermal paste degrades, PD supplies and cables age, DIMMs
+# develop faults, links start retraining. The clock-probe failure mode in
+# particular is invisible to every liveness check a cluster already runs — the
+# node keeps reporting healthy and simply produces less work — so nothing but a
+# scheduled re-test will ever find it.
+#
+# This file reuses the tests defined in node-acceptance.yaml; apply that first.
+
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: weekly-reverification
+spec:
+  failFast: false
+  tests:
+    - testRef: host-fault-counters
+    - testRef: sustained-clock
+    - testRef: fp4-compute-smoke
+  sinks:
+    - fleet-dashboards
+    - airgapped-results
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInSchedule
+metadata:
+  name: weekly-spark-reverification
+spec:
+  # Pick a window the fleet can afford to lose these nodes in: every tick
+  # cordons them and drives them to their power and thermal limits for the
+  # duration of the profile.
+  schedule: "0 3 * * 0" # 03:00 every Sunday
+  # Maintenance windows and the facility staff who can respond to a power event
+  # are local. Without this the schedule drifts by an hour twice a year and can
+  # put a full-power sweep outside the window it was agreed for.
+  timeZone: America/Los_Angeles
+  profileRef: weekly-reverification
+  target:
+    # Re-resolved at each tick, so nodes added since this was written are
+    # covered automatically. That is the point of scheduling by selector.
+    nodeSelector:
+      glimmer.ai/accelerator: gb10
+  # Forbid is the default and it is the node-busy guard. Two runs on one node
+  # fight for the accelerators, the memory bandwidth and the fabric each is
+  # trying to measure: both report degraded numbers and a healthy node gets a
+  # failing verdict because it was tested twice at once.
+  concurrencyPolicy: Forbid
+  # A tick older than this is recorded as missed and skipped. Without it, a
+  # controller that was down over a weekend would launch a full-power sweep the
+  # moment it recovers, at whatever hour that turns out to be.
+  startingDeadlineSeconds: 3600
+  # Deliberately asymmetric. The passing runs are the boring ones; the failing
+  # runs are the entire reason the schedule exists, and diagnosing degradation
+  # means comparing a failure against the ones before it.
+  successfulRunsHistoryLimit: 3
+  failedRunsHistoryLimit: 10
+  runTemplate:
+    # A periodic schedule especially wants a deadline: under Forbid, one wedged
+    # run stops the schedule from ever firing again.
+    deadlineSeconds: 7200
+    maxConcurrentNodes: 1
+    # Retries apply to the Error phase ONLY — our machinery malfunctioned and
+    # the hardware was never judged. A Failed test is never re-run.
+    retryOnErrorLimit: 1
+---
+# A Prometheus sink is a SELECTOR, not a destination: naming it marks this
+# profile's runs for exposition on the manager's existing /metrics endpoint.
+# Delivery always succeeds, in-process, with nothing to queue or retry.
+#
+# Exposition is NOT durable delivery. A scrape that does not happen before the
+# operator restarts loses that sample. Pair it with a durable sink — as this
+# profile does — and never gate acceptance on a scrape, which is gating on a
+# cache. The system of record is the BurnInRun object and the envelope
+# delivered to a Webhook or ConfigMap sink.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInSink
+metadata:
+  name: fleet-dashboards
+spec:
+  type: Prometheus
+---
+# The no-egress option: the delivery envelope is written into a ConfigMap in the
+# cluster, for fleets that cannot POST anywhere.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInSink
+metadata:
+  name: airgapped-results
+spec:
+  type: ConfigMap
+  configMap:
+    name: burnin-results

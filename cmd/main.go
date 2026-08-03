@@ -115,6 +115,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.BurnInScheduleReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "BurnInSchedule")
+		os.Exit(1)
+	}
+
+	// NodeFingerprint capture: record what each node is made of, and flag it
+	// when that changes. NodeFingerprint is namespaced and Node is not, so the
+	// namespace has to be supplied; POD_NAMESPACE (downward API) is preferred
+	// and SetupWithManager falls back to the in-cluster service-account file.
+	// It refuses to guess, and a fingerprint written where nobody looks is a
+	// verdict nobody can audit — so an unresolvable namespace is fatal here
+	// rather than silently disabling the capture.
+	if err := (&controller.NodeFingerprintReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("nodefingerprint-controller"),
+		Namespace: os.Getenv("POD_NAMESPACE"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "NodeFingerprint")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)

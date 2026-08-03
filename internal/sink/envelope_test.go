@@ -148,9 +148,9 @@ func TestBuildRejectsMisconfiguredSinks(t *testing.T) {
 				},
 			},
 		},
-		"prometheus is not a push target": {
+		"unknown type": {
 			ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "d"},
-			Spec:       burninv1alpha1.BurnInSinkSpec{Type: burninv1alpha1.SinkPrometheus},
+			Spec:       burninv1alpha1.BurnInSinkSpec{Type: burninv1alpha1.SinkType("Carrier Pigeon")},
 		},
 	}
 	for what, s := range cases {

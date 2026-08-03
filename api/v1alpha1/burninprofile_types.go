@@ -62,10 +62,16 @@ type BurnInProfileList struct {
 
 // TargetSelector picks the node(s) a run targets.
 type TargetSelector struct {
-	// NodeNames explicitly names nodes. For a Pair-scope profile exactly two are
-	// required; the operator pairs them for the point-to-point tests.
+	// NodeNames explicitly names nodes. For a profile containing a Pair-scope
+	// test exactly two are required, and they must be distinct; the operator
+	// pairs them for the point-to-point tests, running the server on the first
+	// and the client on the second. The requirement is ENFORCED at run start —
+	// a Pair test against one node, or three, is a terminal configuration Error
+	// naming the count it got, never a run that quietly measures something
+	// else.
 	NodeNames []string `json:"nodeNames,omitempty"`
 	// NodeSelector selects nodes by label (e.g. glimmer.ai/interconnect=roce-200g).
+	// The same exactly-two rule applies to what it resolves to.
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 	// Tolerations applied to every test pod so it can land on tainted GPU nodes.
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`

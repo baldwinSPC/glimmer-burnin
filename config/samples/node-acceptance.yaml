@@ -1,7 +1,32 @@
-# Single-node acceptance: prove a node's FP4 compute path before trusting it
-# with workloads. This profile is executable by the v1 operator end to end
-# (Node scope); see pair-network-acceptance.yaml for the Pair-scope suite,
-# which v1 records as Error rather than executing.
+# Single-node acceptance. Every test here is Node scope, which is what this
+# operator version executes end to end; see pair-network-acceptance.yaml for the
+# Pair-scope suite, which is recorded as Error rather than executed.
+#
+# ─── RUNNER IMAGES ────────────────────────────────────────────────────────────
+#
+# Only compute-smoke has a published image. The other kinds below have runner
+# source, Dockerfiles and tests in this repo, and internal/controller/pods.go
+# names the tag each WILL be published under, but those tags are not in the
+# registry yet. Applying this file today runs fp4-compute-smoke and reports an
+# infrastructure Error (never a hardware verdict) for the rest, once their pods
+# fail to pull. Set spec.runner.image on a test to point it at your own build.
+#
+# ─── THRESHOLDS FAIL CLOSED ───────────────────────────────────────────────────
+#
+# A threshold naming a metric the runner did not emit is a FAILURE, not a pass.
+# These runners deliberately omit a reading they could not take rather than
+# reporting a confident zero, so a threshold is also an assertion that the
+# measurement was possible at all. Where that is load-bearing it is called out
+# in a comment below.
+#
+# There is exactly one way to relax that, and only the runner can invoke it: a
+# runner that looked at the hardware and found there is nothing to measure emits
+# the reserved value `n/a`, and a threshold marked
+# `applicability: RequiredIfMeasurable` is then reported as NOT EVALUATED
+# instead of failing. Omission is still a failure — a runner that crashed before
+# emitting has not declared anything — so this cannot turn a broken probe into a
+# pass. See the host-fault-counters test at the bottom of this file.
+
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
 metadata:
@@ -18,13 +43,197 @@ spec:
     limits:
       nvidia.com/gpu: "1"
 ---
+# The clock gate. This is the one that catches a part pinned in a low P-state:
+# it reports healthy utilization, passes every other test in this profile, and
+# simply produces a fraction of the work forever. On GB10 it is the USB-C
+# Power-Delivery failure mode.
+#
+# The gate belongs on the PERCENTAGE, not on smClockMHz: the absolute clock is
+# SKU-specific and a fleet-wide threshold on it would have to be retuned for
+# every part number. The runner exits 2 (skip) where it cannot read a rated
+# clock, so a part with no nameplate is unjudged rather than failed.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: sustained-clock
+spec:
+  kind: clockprobe
+  scope: Node
+  durationSeconds: 300
+  thresholds:
+    - metric: sustainedClockPct
+      comparison: GreaterThanOrEqual
+      value: "90"
+    # Transitions into a capped state, not a sample count. An idle GPU is
+    # excluded from this by the runner — unloaded is not throttled.
+    - metric: throttleEvents
+      comparison: Equal
+      value: "0"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: dcgm-diagnostics
+spec:
+  kind: dcgm-diag
+  scope: Node
+  durationSeconds: 600
+  thresholds:
+    - metric: diagTestsFailed
+      comparison: Equal
+      value: "0"
+    - metric: xidEvents
+      comparison: Equal
+      value: "0"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+# Bandwidth and compute fail differently: a part that computes at full rate but
+# reads memory at half rate is usually a link, a seating, or a downgraded
+# PCIe/NVLink negotiation, not a bad die. The numbers below are placeholders —
+# retune them for your part before gating anything on this.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: memory-bandwidth
+spec:
+  kind: memory-bw
+  scope: Node
+  durationSeconds: 180
+  thresholds:
+    - metric: hostToDeviceBandwidthGBs
+      comparison: GreaterThanOrEqual
+      value: "20"
+    - metric: deviceToHostBandwidthGBs
+      comparison: GreaterThanOrEqual
+      value: "20"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+# Host DIMM faults present as accelerator flakiness: a corrupted staging buffer
+# becomes a wrong answer that looks like a bad GPU. Accepting a node means
+# accepting its host memory too.
+#
+# stressapptest (Apache-2.0) is the sanctioned tool. stress-ng, fio and
+# memtester are GPL and cannot ship in an image published by this project.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: host-memory-stress
+spec:
+  kind: memory-stress
+  scope: Node
+  durationSeconds: 900
+  thresholds:
+    - metric: memoryErrors
+      comparison: Equal
+      value: "0"
+    - metric: miscompares
+      comparison: Equal
+      value: "0"
+---
+# Passive: applies no load and measures no throughput, so it is cheap enough to
+# run in every profile. Its value is that these counters move while every
+# performance test still passes — a link retraining or a row being remapped is a
+# part on its way out.
+#
+# NOTE on eccErrors and remappedRows: these two gates are RequiredIfMeasurable,
+# and the distinction is the reason that value exists.
+#
+#   - On a GB10 / DGX Spark there is NO ECC to read. The unified LPDDR5X has
+#     on-die ECC only, so nvidia-smi returns [N/A] for every ECC and row-remap
+#     field on a perfectly healthy part. host-health emits `n/a` for them — it
+#     asked, and the hardware said there is nothing to count — and these gates
+#     are reported as NOT EVALUATED. The node passes, and the report says which
+#     gates did not run and why.
+#
+#   - On an ECC-capable GPU (H100 and friends) nothing is relaxed. Real counters
+#     are reported, so a non-zero count still FAILS, and a GPU whose ECC has
+#     been switched off reports no counter at all, which fails closed exactly as
+#     it did before — turning ECC off is not a way to pass this gate.
+#
+# Change these to `Required` (or drop the applicability field, which defaults to
+# it) for a fleet where every part has real ECC and a missing reading should
+# condemn the node.
+#
+# NOTE on the /dev/kmsg mount: it is what makes the xidEvents gate below mean
+# anything. Xids are read from the kernel ring buffer, which is NOT in a
+# container's default /dev — without the mount the runner reports
+# `xid_source=none` and OMITS xidEvents entirely, so the gate fails closed and
+# the node is condemned for a measurement nobody took. Mounting it is what turns
+# that gate from a guaranteed failure into a real question about the hardware.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: host-fault-counters
+spec:
+  kind: host-health
+  scope: Node
+  durationSeconds: 30
+  hostNetwork: true # NIC link state is read from the host's sysfs
+  runner:
+    # No image: host-health has a default in internal/controller/pods.go and this
+    # test does not want to override it. spec.runner is here only to declare the
+    # host access below — which is exactly the review question this field exists
+    # to make askable, so it is spelled out rather than assumed.
+    #
+    # The mount and the privilege do different jobs and BOTH are needed on a
+    # hardened node: the mount supplies the device node, and privileged supplies
+    # CAP_SYSLOG, without which reading /dev/kmsg is refused wherever
+    # kernel.dmesg_restrict=1 (the default on most distributions).
+    privileged: true
+    hostPaths:
+      # readOnly is left unset and therefore TRUE. This runner only ever reads
+      # the ring buffer; a burn-in runner has no business writing to the kernel
+      # log, and the default falls that way so that nobody has to notice.
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        # Assert what it must already be. The operator will never create a path
+        # on a node to satisfy its own mount, so a node with no /dev/kmsg refuses
+        # the pod and the run records an infrastructure Error — the node is
+        # unjudged, which is honest, rather than silently unmeasured.
+        type: CharDevice
+  thresholds:
+    # Producible only because of the /dev/kmsg mount above. Window-scoped: see
+    # xidPreexisting in the runner README to hold this boot's earlier history
+    # against the node as well.
+    - metric: xidEvents
+      comparison: Equal
+      value: "0"
+    - metric: pcieReplayErrors
+      comparison: Equal
+      value: "0"
+    - metric: eccErrors
+      comparison: Equal
+      value: "0"
+      applicability: RequiredIfMeasurable
+    - metric: remappedRows
+      comparison: Equal
+      value: "0"
+      applicability: RequiredIfMeasurable
+---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInProfile
 metadata:
   name: node-acceptance
 spec:
+  # Every result, even after one failure: a full acceptance sweep is evidence
+  # about a node, and stopping early throws away the rest of it.
+  failFast: false
   tests:
+    # Cheapest first: a node whose fault counters are already moving does not
+    # need to be soaked for fifteen minutes to be suspect.
+    - testRef: host-fault-counters
     - testRef: fp4-compute-smoke
+    - testRef: sustained-clock
+    - testRef: memory-bandwidth
+    - testRef: dcgm-diagnostics
+    - testRef: host-memory-stress
   sinks: []
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
@@ -36,4 +245,8 @@ spec:
   target:
     nodeNames:
       - spark-example
+  # DEFAULT 1, and this is a facility power/cooling interlock rather than a
+  # performance knob. Raising it multiplies real electrical load and real heat
+  # in a real room. Read the field documentation on BurnInRunSpec first.
+  maxConcurrentNodes: 1
   ttlSecondsAfterFinished: 86400

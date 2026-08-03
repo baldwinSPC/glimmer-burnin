@@ -1,5 +1,79 @@
 # A pair-scope network acceptance profile: prove the RDMA interconnect between
 # two Sparks before trusting the cluster for multi-node training.
+#
+# ─── HOW PAIR SCOPE EXECUTES ──────────────────────────────────────────────────
+#
+# The operator runs a SERVER pod on the first target node and a CLIENT pod on
+# the second, each pinned to its node, rendezvous'd through a headless Service.
+# The client is not started until the server pod is Ready. Both containers get
+# BURNIN_ROLE=server|client, BURNIN_PEER_HOST (the peer's DNS name) and
+# BURNIN_PEER_NODE alongside BURNIN_DURATION_SECONDS.
+#
+# The pair produces ONE result naming BOTH nodes. A point-to-point measurement
+# is a property of the link, so a failure here indicts the LINK — cable,
+# transceiver, switch port, NIC, either end — and is deliberately not attributed
+# to one node.
+#
+# Two requirements this sample satisfies explicitly, both refused at run start
+# with an explanation rather than discovered at the deadline:
+#
+#   * exactly two distinct target nodes;
+#   * maxConcurrentNodes >= 2, because a pair holds BOTH of its nodes for the
+#     whole test and therefore costs two slots of the facility interlock. The
+#     default of 1 cannot admit a pair at all.
+#
+# ─── WHAT IS STILL MISSING: THE RUNNER IMAGES ─────────────────────────────────
+#
+# No nccl or ib-write-bw runner ships in this repo yet, so neither kind has a
+# default image and each test below must name spec.runner.image before this
+# profile can run. Applied as-is, the run settles as Error — "no default runner
+# image for kind ... — set spec.runner.image" — which is an infrastructure
+# error, never a hardware verdict. That failure is fast and legible at plan
+# time, which is why no placeholder tag is filled in here: a tag that does not
+# exist would fail slowly, per node, and look like a fabric problem.
+#
+# Each test below therefore carries a spec.runner block with NO image in it: the
+# block is there for the /dev/infiniband mount, and leaving the image unset keeps
+# the fast, legible plan-time refusal exactly as described above rather than
+# swapping it for a tag that does not exist.
+#
+# ─── WHY /dev/infiniband IS MOUNTED, AND THE REAL RLIMIT TRAP ─────────────────
+#
+# The mount makes the RDMA device dependency EXPLICIT rather than relying on
+# `privileged: true` to hand the container the host's whole /dev. It is not
+# what fixed fabric qualification, and an earlier revision of this comment said
+# it was — that was a misdiagnosis, corrected here. Re-measured on these nodes,
+# a privileged pod sees uverbs0-3 with or without the mount; only by-ibdev and
+# by-path differ. Declaring the mount is still worth doing: it documents intent
+# and survives a future tightening of the privileged path.
+#
+# THE ACTUAL BLOCKER WAS `RLIMIT_MEMLOCK`, and it is worth understanding because
+# it will bite any RDMA workload on this cluster, not just burn-in.
+#
+# RDMA buffers are pinned memory. perftest registers size x qps x 2, so
+# `-s 1048576 -q 4` needs exactly 8 MiB. containerd's systemd unit ships
+# LimitMEMLOCK=8388608 (8 MiB), inherited by every pod — so registration lands
+# precisely on the ceiling and ibv_create_cq returns ENOMEM, surfacing as the
+# thoroughly unhelpful "Couldn't create CQ / Failed to create CQs / Couldn't
+# create IB resources". NCCL hits the same wall as "ibv_reg_mr_iova2 failed
+# with error Cannot allocate memory".
+#
+# The bisection that proved it: `-s 1M` alone passes, `-q 4` alone passes, both
+# together fail. Each halves to fit; the product does not.
+#
+# Note `securityContext.capabilities.add: [IPC_LOCK]` does NOT help a non-root
+# container — Kubernetes has no ambient-capabilities field, so runc clears the
+# permitted set and CapPrm/CapEff read as all zeros. CAP_IPC_LOCK *bypasses*
+# RLIMIT_MEMLOCK, which is why the same run passes as uid 0 and fails as uid
+# 65532 at the identical limit. The fixes are therefore: raise the limit on the
+# node (a containerd drop-in with LimitMEMLOCK=infinity), or run the pod as
+# root. The ib-write-bw runner additionally right-sizes itself to whatever
+# limit it observes, so it degrades to a smaller message size instead of dying.
+#
+# When adopting a runner, note that perftest (ib_write_bw) must be invoked with
+# --report_gbits: it reports MB/s by default, and a bytes-vs-bits mixup shifts
+# bandwidthGbps by 8x. See config/samples/node-acceptance.yaml for a profile
+# that runs end to end today.
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
 metadata:
@@ -8,10 +82,39 @@ spec:
   kind: ib-write-bw
   scope: Pair
   durationSeconds: 60
+  runner:
+    # No image on purpose — see the header. This block exists for the mount.
+    #
+    # The mount is applied to BOTH pods of the pair, server and client alike: a
+    # link measured from only one end is not measured.
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        # WRITABLE, and this one has to be said out loud because readOnly
+        # defaults to true. ibv_open_device opens the uverbs nodes read-write,
+        # so a read-only mount fails in the same place as no mount at all.
+        readOnly: false
+        # A node in a fabric-qualification run with no /dev/infiniband has not
+        # loaded its RDMA drivers. That is an infrastructure fault, so refusing
+        # the pod (recorded as Error — unjudged) is the right answer; the
+        # operator will not create the path to paper over it.
+        type: Directory
   thresholds:
+    # MEASURED, not derived from line rate. On 2026-08-02, ib_write_bw between
+    # two GB10 Sparks over RoCE plateaued at 99.63 Gb/s — identical at 4 and 8
+    # queue pairs with 1 MiB messages, so it is a real ceiling and not a
+    # single-QP artifact. The Ethernet link genuinely negotiates 200000 Mb/s;
+    # the limit is the ConnectX-7's host attachment, PCIe Gen5 x4, where
+    # current_link_* == max_link_* (nothing is degraded). Gen5 x4 is ~15.75 GB/s
+    # raw, ~100 Gb/s after overhead. The wire is 200G; the host can only feed
+    # half of it. This is architectural on DGX Spark, not a fault.
+    #
+    # The obvious "~90% of 200GbE line rate" value of 180 is therefore wrong by
+    # ~2x and would fail every healthy Spark pair. 89 is ~90% of the measured
+    # ceiling. Re-measure before reusing this number on any other SKU.
     - metric: bandwidthGbps
       comparison: GreaterThanOrEqual
-      value: "180" # ~90% of 200GbE line rate
+      value: "89"
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
@@ -25,10 +128,32 @@ spec:
     limits:
       nvidia.com/gpu: "1"
       rdma/rdma_shared_device_a: "1"
+  runner:
+    # Same mount, same reason: NCCL's net_ib plugin goes through the verbs
+    # layer, so without uverbs* it fails to create its resources exactly as
+    # ib_write_bw does — and an RDMA plugin that cannot initialise falls back to
+    # TCP, which produces a plausible bandwidth number for a path nobody was
+    # qualifying. An RDMA device request alone does not supply the device nodes.
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        readOnly: false
+        type: Directory
+  # MEASURED between these two Sparks, 2026-08-03. A 2-rank all-reduce sweep
+  # peaked at 12.00 GB/s at 256 MiB (12.00 and 12.01 across two runs); 10.8 is
+  # ~90% of that. Sanity check on the number: 12.00 GB/s is 96 Gb/s, which is
+  # 96% of the 99.61 Gb/s ib_write_bw measures on the same link — a healthy
+  # collective over a saturated fabric, not a suspiciously round figure.
+  #
+  # The previous value here was busBandwidthGBs >= 20, justified as a "CX-7
+  # 200G RoCE expectation". That is arithmetically impossible: 20 GB/s is
+  # 160 Gb/s over a link whose measured ceiling is ~99.6 Gb/s. For a 2-rank
+  # all-reduce busBandwidth == algBandwidth, so ~12.45 GB/s is the hard upper
+  # bound and no healthy Spark pair could ever have passed it.
   thresholds:
     - metric: busBandwidthGBs
       comparison: GreaterThanOrEqual
-      value: "20" # CX-7 200G RoCE expectation
+      value: "10.8"
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInProfile
@@ -62,7 +187,16 @@ metadata:
 spec:
   profileRef: pair-network-acceptance
   ttlSecondsAfterFinished: 3600
+  # A pair is one indivisible unit of load holding BOTH of its nodes, so it
+  # needs two of the interlock's slots and cannot start at the default of 1.
+  # Raising this is a facility decision: two nodes at full load is two nodes'
+  # worth of power and heat. For a fabric test that is a modest ask compared to
+  # gpu-burn, but the number still has to be set deliberately.
+  maxConcurrentNodes: 2
   target:
+    # Exactly two, and distinct. The first is the server (rank 0), the second is
+    # the client — which is the side that measures, and therefore the side whose
+    # metrics decide the verdict.
     nodeNames:
       - spark-043a
       - spark-85a9
