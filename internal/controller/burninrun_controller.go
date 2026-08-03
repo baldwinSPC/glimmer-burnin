@@ -18,30 +18,50 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
-	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+	"github.com/baldwinSPC/glimmer-burnin/internal/metrics"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
 
 // BurnInRunReconciler drives a BurnInRun from Pending to a terminal verdict:
 // resolve the profile ONCE into a pinned plan, capture the target fingerprint,
-// execute each test's pod on each target node, evaluate thresholds against
-// parsed metrics, and export the verdict to the plan's sinks.
+// hold the target nodes out of the scheduler, execute each test's pod on each
+// target node under the run's concurrency interlock, evaluate thresholds
+// against parsed metrics, and export the verdict to the plan's sinks.
 //
 // v1 executes Node-scope tests. Pair/Group tests are recorded as Error rather
 // than silently skipped: a required acceptance test the operator cannot run
 // must never let hardware pass by omission.
+//
+// The reconciler is vendor-neutral by construction. There is no accelerator,
+// no vendor and no product name in any branch here, and there must not be one:
+// whether a test applies to a given part is the RUNNER's answer, delivered as
+// exit code 2, because the runner is the only thing in the system that has
+// actually looked at the hardware. A controller-side "this kind does not apply
+// to that GPU" is a claim made from a label, it goes stale the moment a driver
+// or a firmware revision changes the answer, and it produces a Skipped verdict
+// for hardware nobody tested.
 type BurnInRunReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// PodLogs fetches a completed pod's stdout — the runner's metrics channel.
+	// PodLogs fetches a pod's stdout — the runner's metrics channel. It is
+	// called both when a pod terminates and, for checkpointing, while it is
+	// still running; the parser's last-occurrence-wins rule is what makes a
+	// partial log a valid snapshot rather than a corrupt one.
+	//
 	// controller-runtime's client cannot read subresource logs, so the manager
 	// wires this from a plain clientset; tests stub it.
 	PodLogs func(ctx context.Context, namespace, name string) (string, error)
 
 	// Now is the clock, swappable in tests. Nil means time.Now.
 	Now func() time.Time
+
+	// ForgetMetrics drops a run's exported Prometheus series. Nil uses the
+	// package-level exporter. The series are a view of a live object, so they
+	// are dropped when the object goes away and NOT when it merely finishes —
+	// a finished run's verdict is exactly what a dashboard is there to show.
+	ForgetMetrics func(namespace, name string)
 }
 
 func (r *BurnInRunReconciler) now() time.Time {
@@ -49,6 +69,14 @@ func (r *BurnInRunReconciler) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+func (r *BurnInRunReconciler) forgetMetrics(namespace, name string) {
+	if r.ForgetMetrics != nil {
+		r.ForgetMetrics(namespace, name)
+		return
+	}
+	metrics.Default.Forget(namespace, name)
 }
 
 // resolvedTest is one entry of a profile with its spec materialised.
@@ -90,16 +118,31 @@ const terminalDeliveryRetryInterval = 5 * time.Minute
 // +kubebuilder:rbac:groups=burnin.glimmer.ai,resources=nodefingerprints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// Pair-scope tests rendezvous through a headless Service, which is the only
+// thing that lets the client name the server. See pair.go.
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;delete
+// Nodes are updated, not just read: a run holds its targets out of the
+// scheduler for its duration and restores them afterwards. See cordon.go.
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // Reconcile is the entrypoint: level-based, so every pass re-derives where the
-// run stands from its pinned plan, its status, and its pods.
+// run stands from its pinned plan, its status, its pods and the cluster's
+// nodes. Nothing is remembered in process memory, which is what makes the run
+// survivable across a manager restart at any point in its lifecycle.
 func (r *BurnInRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var run burninv1alpha1.BurnInRun
 	if err := r.Get(ctx, req.NamespacedName, &run); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Deletion outranks every other consideration. The run is going away; the
+	// only thing that still matters is that the nodes it took out of the
+	// scheduler are given back, which is what the finalizer is holding
+	// deletion open for.
+	if !run.DeletionTimestamp.IsZero() {
+		return r.reconcileDeleted(ctx, &run)
 	}
 
 	if isTerminal(run.Status.Phase) {
@@ -147,13 +190,17 @@ func (r *BurnInRunReconciler) start(ctx context.Context, run *burninv1alpha1.Bur
 		return r.finalizeError(ctx, run, profileSinks(profile), resolveErr)
 	}
 
-	p, err := buildPlan(profile, tests, targets)
+	p, err := buildPlan(profile, tests, targets, maxConcurrentNodes(run))
 	if err != nil {
 		return r.finalizeError(ctx, run, profileSinks(profile), err)
 	}
 	if err := pinPlan(run, p); err != nil {
 		return r.finalizeError(ctx, run, p.Sinks, err)
 	}
+	// The finalizer goes on in the SAME write as the plan, which is the last
+	// write before anything can cordon a node. It must never be possible to
+	// hold a node without holding the finalizer that guarantees its release.
+	controllerutil.AddFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
 	if err := r.Update(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -161,6 +208,18 @@ func (r *BurnInRunReconciler) start(ctx context.Context, run *burninv1alpha1.Bur
 }
 
 func (r *BurnInRunReconciler) markRunning(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan) (ctrl.Result, error) {
+	// Recovery path: a crash between pinning the plan and here can land on a
+	// run that never got the finalizer written.
+	if controllerutil.AddFinalizer(run, burninv1alpha1.FinalizerCordonCleanup) {
+		if err := r.Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	// Nothing is cordoned here. Nodes are held one wave at a time, immediately
+	// before load lands on them, so that a run's footprint on the fleet tracks
+	// MaxConcurrentNodes instead of the length of its target list. See
+	// cordonNode.
+
 	run.Status.Phase = burninv1alpha1.RunRunning
 	started := metav1.NewTime(r.now())
 	run.Status.StartedAt = &started
@@ -170,7 +229,7 @@ func (r *BurnInRunReconciler) markRunning(ctx context.Context, run *burninv1alph
 	// Deliver before writing: a crash in between redelivers with the same
 	// derived DeliveryID, which receivers dedupe. The reverse order would
 	// drop the transition entirely.
-	r.deliver(ctx, run, p.Sinks, contract.ReasonPhaseChanged, string(burninv1alpha1.RunRunning))
+	r.deliverPhase(ctx, run, p.Sinks, burninv1alpha1.RunRunning)
 	if err := r.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -256,6 +315,11 @@ func (r *BurnInRunReconciler) resolveTargets(ctx context.Context, sel burninv1al
 // captureFingerprint records what hardware this verdict applies to. v1 reads
 // the salient identity from the Node objects; the richer NodeFingerprint CRD
 // flow can replace this without changing the envelope shape.
+//
+// This is data capture, not dispatch: nothing in this controller branches on
+// what it finds here. The fingerprint travels with the verdict so a consumer
+// can tell which part was judged, and a vendor label appearing in it must never
+// become a reason to run a different test.
 func (r *BurnInRunReconciler) captureFingerprint(ctx context.Context, targets []string) map[string]string {
 	fp := map[string]string{}
 	for _, name := range targets {
@@ -269,7 +333,7 @@ func (r *BurnInRunReconciler) captureFingerprint(ctx context.Context, targets []
 			"os=" + node.Status.NodeInfo.OSImage,
 			"arch=" + node.Status.NodeInfo.Architecture,
 		}
-		// GPU identity labels if present (GFD / glimmer labels).
+		// Accelerator identity labels if present (device-plugin / GFD / glimmer).
 		for _, k := range []string{"nvidia.com/gpu.product", "glimmer.ai/gpu-arch", "glimmer.ai/hw-class"} {
 			if v, ok := node.Labels[k]; ok {
 				parts = append(parts, k+"="+v)
@@ -282,14 +346,101 @@ func (r *BurnInRunReconciler) captureFingerprint(ctx context.Context, targets []
 
 // ─── Step: execute the pinned plan ────────────────────────────────────────────
 
-// step advances a Running run: settle or execute each planned test in order,
-// harvest terminated pods, and finalize when every test has its results.
+// step advances a Running run.
+//
+// The order of the gates is a policy statement. Cancel dominates everything,
+// because a run that could not be stopped would be unstoppable without deleting
+// the object. The whole-run deadline comes next, because a suspended run still
+// burns the wall clock it was budgeted. Suspend comes last, and only stops new
+// work.
 func (r *BurnInRunReconciler) step(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan) (ctrl.Result, error) {
-	for i, t := range p.Tests {
+	if cancelRequested(run) || run.Annotations[cancellingAnnotation] != "" {
+		return r.cancel(ctx, run, p)
+	}
+	if r.deadlineExceeded(run) {
+		return r.expire(ctx, run, p)
+	}
+
+	pass, err := r.execute(ctx, run, p, !suspended(run))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	switch {
+	case pass.running || pass.pending:
+		return r.persistPass(ctx, run, p, pass)
+	case pass.harvested:
+		// A test finished this pass: persist before moving on, so the delivery
+		// and the recorded result stay adjacent in time.
+		if err := r.Status().Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		if pass.checkpointed {
+			r.deliverCheckpoint(ctx, run, p.Sinks, r.checkpointSequence(run, p))
+		}
+		return ctrl.Result{Requeue: true}, nil
+	case suspended(run):
+		// Every planned execution has reported, but the run is suspended and a
+		// suspended run reaches no terminal phase and produces no verdict. It
+		// waits, holding its cordons, because that is what the operator asked
+		// for; the way to actually end a run is spec.cancel, which is one-way
+		// and says so in the phase.
+		return ctrl.Result{RequeueAfter: r.nextWake(run, p)}, nil
+	}
+	return r.finalize(ctx, run, p)
+}
+
+// passResult is what one sweep of the plan achieved.
+type passResult struct {
+	// running means at least one execution has a live pod on a node.
+	running bool
+	// pending means work remains that this pass did not launch — blocked by
+	// the concurrency interlock, by suspension, or by a cancel drain.
+	pending bool
+	// harvested means at least one attempt completed and was recorded.
+	harvested bool
+	// checkpointed means at least one in-flight result had its evidence
+	// refreshed and a Checkpoint envelope is owed.
+	checkpointed bool
+	// dirty means status was mutated and has to be written back. It is tracked
+	// separately from harvested because merely OPENING a result — recording
+	// that an execution has started on a node — is a status change with no
+	// completion attached, and losing it would leave a long soak with no
+	// StartedAt and nothing on a dashboard until the day it finishes.
+	dirty bool
+	// rendezvous means a Pair execution is between its two pods: the server is
+	// up and the client is gated on it becoming Ready. It only affects how soon
+	// the next pass is scheduled — the window is dead time on hardware the run
+	// is already holding, so it is worth a tighter backstop than the general
+	// waiting poll.
+	rendezvous bool
+}
+
+// advanceEffect is the side effect one execution had on the run's status.
+type advanceEffect struct {
+	dirty        bool
+	checkpointed bool
+	rendezvous   bool
+}
+
+// execute sweeps the plan once. launch=false harvests and checkpoints exactly
+// as usual but starts nothing new, which is what both suspension and a graceful
+// cancel need: neither is a reason to throw away an execution already paid for.
+func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, launch bool) (passResult, error) {
+	var out passResult
+
+	busy, err := r.busyNodes(ctx, run)
+	if err != nil {
+		return out, err
+	}
+	capNodes := maxConcurrentNodes(run)
+
+	for i := range p.Tests {
+		t := p.Tests[i]
 		if p.FailFast && hasRequiredFailure(run, p) {
-			// Remaining tests are never scheduled; finalize cleans up any
-			// pods already in flight. Their absence from Results is the
-			// record that they did not run.
+			// Remaining tests are never scheduled; termination cleans up any
+			// pods already in flight. Their absence from Results is the record
+			// that they did not run.
 			break
 		}
 
@@ -298,153 +449,289 @@ func (r *BurnInRunReconciler) step(ctx context.Context, run *burninv1alpha1.Burn
 			continue
 		}
 
-		waiting := false
-		harvested := false
-		for _, node := range p.Targets {
-			if hasResult(run, t.Name, node) {
-				continue
+		var test passResult
+		apply := func(state advanceState, effect advanceEffect) {
+			test.checkpointed = test.checkpointed || effect.checkpointed
+			test.dirty = test.dirty || effect.dirty
+			test.rendezvous = test.rendezvous || effect.rendezvous
+			switch state {
+			case advanceRunning:
+				test.running = true
+			case advancePending:
+				test.pending = true
+			case advanceHarvested:
+				test.harvested = true
 			}
-			outcome, ready, err := r.harvestOrCreate(ctx, run, i, t, node)
+		}
+
+		if t.Spec.Scope == burninv1alpha1.ScopePair {
+			// One execution over two nodes, not two executions. advancePair
+			// owns the whole unit — both pods, the rendezvous Service, the
+			// ready gate and the single combined verdict.
+			state, effect, err := r.advancePair(ctx, run, p, i, t, launch, busy, capNodes)
 			if err != nil {
-				return ctrl.Result{}, err
+				return out, err
 			}
-			if !ready {
-				waiting = true
-				continue
+			apply(state, effect)
+		} else {
+			for _, node := range p.Targets {
+				state, effect, err := r.advance(ctx, run, p, i, t, node, launch, busy, capNodes)
+				if err != nil {
+					return out, err
+				}
+				apply(state, effect)
 			}
-			r.recordResult(ctx, run, p, t, node, outcome)
-			harvested = true
 		}
-		if waiting {
-			// Pod events drive the next reconcile; the poll interval is the
-			// backstop for pods that never emit one. Persist anything
-			// harvested this pass so a restart cannot lose it.
-			if harvested {
-				return ctrl.Result{RequeueAfter: waitingPollInterval}, r.Status().Update(ctx, run)
-			}
-			return ctrl.Result{RequeueAfter: waitingPollInterval}, nil
-		}
-		if harvested {
-			// Test finished this pass: persist before moving on, so the
-			// delivery and the recorded result stay adjacent in time.
-			return ctrl.Result{Requeue: true}, r.Status().Update(ctx, run)
+
+		out.running = out.running || test.running
+		out.pending = out.pending || test.pending
+		out.harvested = out.harvested || test.harvested
+		out.checkpointed = out.checkpointed || test.checkpointed
+		out.dirty = out.dirty || test.dirty
+		out.rendezvous = out.rendezvous || test.rendezvous
+
+		// Tests run in plan order, one at a time: the next test must not start
+		// on a node while this one still owes it a result there. Two tests
+		// overlapping on one node would also break the concurrency interlock's
+		// meaning, since the cap counts nodes, not pods.
+		if test.running || test.pending || test.harvested {
+			break
 		}
 	}
 
-	return r.finalize(ctx, run, p)
+	// Give back everything this run is holding that it is no longer using.
+	// busy is the wave — nodes with a live pod, plus the ones admitted during
+	// this pass — so anything cordoned and not in it is capacity the run is
+	// sitting on for nothing.
+	released, err := r.releaseHeldNodes(ctx, run, busy)
+	if err != nil {
+		return out, err
+	}
+	out.dirty = out.dirty || released
+	return out, nil
 }
 
-// settleWithoutPod records results for tests that must not schedule anything:
-// unsupported scopes, and hardware the test does not apply to.
-func (r *BurnInRunReconciler) settleWithoutPod(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, t plannedTest) bool {
-	if t.Spec.Scope != "" && t.Spec.Scope != burninv1alpha1.ScopeNode {
-		if !hasResult(run, t.Name, "") {
-			r.appendResult(ctx, run, p, burninv1alpha1.TestResult{
-				Name:  t.Name,
-				Kind:  t.Spec.Kind,
-				Scope: t.Spec.Scope,
-				Phase: burninv1alpha1.RunError,
-				Message: fmt.Sprintf("scope %q is not executed by this operator version (v1 runs Node scope) — "+
-					"the test was NOT run; treat this hardware as unjudged for it", t.Spec.Scope),
-			})
+// persistPass writes whatever the pass produced and schedules the next wake-up.
+func (r *BurnInRunReconciler) persistPass(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, pass passResult) (ctrl.Result, error) {
+	if pass.dirty || pass.harvested || pass.checkpointed {
+		if err := r.Status().Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
 		}
-		return true
 	}
-
-	// gpudirect-rdma cannot produce a meaningful verdict on GB10: NVIDIA
-	// states unified memory does not support GPUDirect RDMA at all. Skip is
-	// the honest verdict — the hardware has not failed a test it cannot take.
-	if t.Spec.Kind == burninv1alpha1.KindGPUDirect && allTargetsGB10(run, p.Targets) {
-		if !hasResult(run, t.Name, "") {
-			r.appendResult(ctx, run, p, burninv1alpha1.TestResult{
-				Name:    t.Name,
-				Kind:    t.Spec.Kind,
-				Scope:   t.Spec.Scope,
-				Phase:   burninv1alpha1.RunSkipped,
-				Nodes:   p.Targets,
-				Message: "not applicable — GB10 unified memory does not support GPUDirect RDMA (per NVIDIA); RDMA serves the GPU via host memory",
-			})
-		}
-		return true
+	if pass.checkpointed {
+		// Delivered after the status write, unlike a phase change: a checkpoint
+		// is evidence rather than a transition, so the cheap failure is a
+		// consumer seeing a snapshot the object already holds. The expensive
+		// one would be re-deriving a delivery from status that never landed.
+		r.deliverCheckpoint(ctx, run, p.Sinks, r.checkpointSequence(run, p))
 	}
-	return false
+	wake := r.nextWake(run, p)
+	if pass.rendezvous && wake > pairRendezvousPollInterval {
+		wake = pairRendezvousPollInterval
+	}
+	return ctrl.Result{RequeueAfter: wake}, nil
 }
 
-// allTargetsGB10 reports whether every target's captured fingerprint marks it
-// as sm_121. Unknown fingerprints return false: skipping a test on hardware we
-// cannot identify would be a verdict from ignorance.
-func allTargetsGB10(run *burninv1alpha1.BurnInRun, targets []string) bool {
-	for _, node := range targets {
-		if !strings.Contains(run.Status.Fingerprint[node], "sm_121") {
-			return false
+// nextWake is the backstop poll interval while work is outstanding.
+//
+// Pod events drive the common case; this covers the pod that never emits one,
+// the checkpoint that is due before the next event, and the run deadline that
+// would otherwise be noticed up to a poll interval late.
+func (r *BurnInRunReconciler) nextWake(run *burninv1alpha1.BurnInRun, p *plan) time.Duration {
+	wake := waitingPollInterval
+	if cp := p.checkpointInterval(); cp > 0 && cp < wake {
+		wake = cp
+	}
+	if d := runDeadline(run); d > 0 && run.Status.StartedAt != nil {
+		if remaining := run.Status.StartedAt.Add(d).Sub(r.now()); remaining > 0 && remaining < wake {
+			wake = remaining
 		}
 	}
-	return len(targets) > 0
+	if wake <= 0 {
+		wake = time.Second
+	}
+	return wake
 }
 
-// harvestOrCreate ensures the pod for (test, node) exists, and returns its
-// parsed outcome once it has terminated. ready is false while it runs.
-func (r *BurnInRunReconciler) harvestOrCreate(ctx context.Context, run *burninv1alpha1.BurnInRun, index int, t plannedTest, node string) (runner.Result, bool, error) {
-	name := podName(run, index, node)
+// advanceState is what one (test, node) execution did this pass.
+type advanceState int
+
+const (
+	// advanceDone: the execution has a terminal result and owes nothing.
+	advanceDone advanceState = iota
+	// advanceRunning: a pod exists and has not terminated.
+	advanceRunning
+	// advancePending: work remains but nothing was launched for it.
+	advancePending
+	// advanceHarvested: an attempt completed and was recorded this pass.
+	advanceHarvested
+)
+
+// advance moves one (test, node) execution forward by exactly one step.
+func (r *BurnInRunReconciler) advance(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	p *plan,
+	index int,
+	t plannedTest,
+	node string,
+	launch bool,
+	busy map[string]bool,
+	capNodes int,
+) (advanceState, advanceEffect, error) {
+	var none advanceEffect
+	nodes := []string{node}
+
+	res := resultFor(run, t.Name, node)
+	if res != nil && res.Phase.IsTerminal() {
+		return advanceDone, none, nil
+	}
+
+	attempt, _ := nextAttempt(res)
+	name := podName(run, index, node, attempt)
+
 	var pod corev1.Pod
 	err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: name}, &pod)
 	switch {
 	case apierrors.IsNotFound(err):
-		newPod, buildErr := podForTest(run, index, t.Name, &t.Spec, node, run.Spec.Target)
+		if !launch {
+			return advancePending, none, nil
+		}
+		// The facility interlock. This is the single place a run can add load
+		// to the room, and the cap is enforced here rather than by slicing the
+		// target list up front so that it is honoured across tests, across
+		// repeats, and across a controller restart — the count comes from the
+		// pods that actually exist, not from a wave index nobody persisted.
+		if !busy[node] && len(busy) >= capNodes {
+			return advancePending, none, nil
+		}
+		newPod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, node, run.Spec.Target, nil)
 		if buildErr != nil {
 			// Unbuildable pod (no image for the kind): machinery error, and
 			// asking again cannot fix it.
-			return runner.Result{Verdict: runner.VerdictError, Message: buildErr.Error()}, true, nil
+			r.completeAttempt(ctx, run, p, t, nodes, attempt, "", nil,
+				runner.Result{Verdict: runner.VerdictError, Message: buildErr.Error()})
+			return advanceHarvested, advanceEffect{dirty: true}, nil
+		}
+		// Hold the node BEFORE the pod exists, so nothing else can be scheduled
+		// beside a burn-in that is about to saturate it.
+		cordoned, cordonErr := r.cordonNode(ctx, run, node)
+		if cordonErr != nil {
+			return advancePending, none, cordonErr
 		}
 		if ownErr := controllerutil.SetControllerReference(run, newPod, r.Scheme); ownErr != nil {
-			return runner.Result{}, false, ownErr
+			return advancePending, advanceEffect{dirty: cordoned}, ownErr
 		}
 		if createErr := r.Create(ctx, newPod); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
-			return runner.Result{}, false, createErr
+			return advancePending, advanceEffect{dirty: cordoned}, createErr
 		}
-		return runner.Result{}, false, nil
+		busy[node] = true
+		return advanceRunning, advanceEffect{dirty: cordoned}, nil
 	case err != nil:
-		return runner.Result{}, false, err
+		return advancePending, none, err
 	}
 
-	exitCode, terminated, reason := podOutcome(&pod)
+	if podLive(&pod) {
+		busy[node] = true
+	}
+
+	_, terminated, _ := podOutcome(&pod)
 	if !terminated {
 		// activeDeadlineSeconds only starts once the pod is bound to a node;
 		// an unschedulable pod (typo'd node name, missing toleration) has no
 		// deadline at all and would wedge the run in Running forever.
 		if r.podOverdue(&pod, &t.Spec) {
 			if delErr := r.Delete(ctx, &pod); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return runner.Result{}, false, delErr
+				return advancePending, none, delErr
 			}
-			return runner.Result{
+			r.completeAttempt(ctx, run, p, t, nodes, attempt, pod.Name, &pod, runner.Result{
 				Verdict: runner.VerdictError,
 				Message: fmt.Sprintf("pod never completed within its window (last phase %q) — unschedulable target or stuck image pull; no verdict", pod.Status.Phase),
-			}, true, nil
+			})
+			return advanceHarvested, advanceEffect{dirty: true}, nil
 		}
-		return runner.Result{}, false, nil
+		if !podStarted(&pod) {
+			// Scheduled but not executing. Nothing has been tested yet, so no
+			// result is opened and StartedAt stays unset.
+			return advanceRunning, none, nil
+		}
+		_, opened := r.beginAttempt(run, t, nodes, attempt, &pod)
+		checkpointed := r.checkpoint(ctx, run, t, node, &pod)
+		return advanceRunning, advanceEffect{dirty: opened || checkpointed, checkpointed: checkpointed}, nil
 	}
 
-	stdout, logErr := r.fetchLogs(ctx, &pod)
+	// Terminated. Open the result if we never observed the pod running — the
+	// execution plainly happened and must not be recorded as having no start.
+	r.beginAttempt(run, t, nodes, attempt, &pod)
 
-	res := runner.Parse(string(t.Spec.Kind), stdout, exitCode)
-	if res.Verdict == runner.VerdictError && res.Message == "" {
-		res.Message = fmt.Sprintf("runner terminated abnormally (exit %d, reason %q)", exitCode, reason)
+	parsed, logErr := r.harvestPod(ctx, t, &pod)
+	if logErr != nil && parsed.Verdict == runner.VerdictPass && len(t.Spec.Thresholds) > 0 &&
+		missingThresholdMetric(parsed, t.Spec.Thresholds) {
+		// The exit code says pass but the metrics are gone and thresholds
+		// exist. Fail-closed evaluation would blame the hardware for a log
+		// fetch failure; the honest verdict is Error, machinery's fault.
+		parsed.Verdict = runner.VerdictError
+		parsed.Message = fmt.Sprintf("runner logs unavailable (%v) — thresholds cannot be evaluated; no verdict", logErr)
+	}
+	r.completeAttempt(ctx, run, p, t, nodes, attempt, pod.Name, &pod, parsed)
+	return advanceHarvested, advanceEffect{dirty: true}, nil
+}
+
+// harvestPod turns a terminated pod into a parsed runner result, plus whatever
+// went wrong reading its log.
+//
+// It deliberately stops short of the log-fetch rule ("a pass we cannot verify is
+// an Error, not a Fail"), because that rule is about an EXECUTION and a Pair
+// execution has two pods. Applying it per pod would error a pair whose client
+// reported every number a threshold asks for merely because the server's log
+// was unreadable. The callers apply it once, to the unit.
+func (r *BurnInRunReconciler) harvestPod(ctx context.Context, t plannedTest, pod *corev1.Pod) (runner.Result, error) {
+	exitCode, _, reason := podOutcome(pod)
+	stdout, logErr := r.fetchLogs(ctx, pod)
+	parsed := runner.Parse(string(t.Spec.Kind), stdout, exitCode)
+	if parsed.Verdict == runner.VerdictError && parsed.Message == "" {
+		parsed.Message = fmt.Sprintf("runner terminated abnormally (exit %d, reason %q)", exitCode, reason)
 	}
 	if reason == "DeadlineExceeded" {
 		// The kubelet killed the pod at its deadline. Whatever the container
 		// exited with — including 0 from a SIGTERM-trapping entrypoint — the
 		// test did not run to completion, so there is no verdict.
-		res.Verdict = runner.VerdictError
-		res.Message = "test exceeded its deadline and was killed — no verdict"
+		parsed.Verdict = runner.VerdictError
+		parsed.Message = "test exceeded its deadline and was killed — no verdict"
 	}
-	if logErr != nil && res.Verdict == runner.VerdictPass && len(t.Spec.Thresholds) > 0 {
-		// The exit code says pass but the metrics are gone and thresholds
-		// exist. Fail-closed evaluation would blame the hardware for a log
-		// fetch failure; the honest verdict is Error, machinery's fault.
-		res.Verdict = runner.VerdictError
-		res.Message = fmt.Sprintf("runner logs unavailable (%v) — thresholds cannot be evaluated; no verdict", logErr)
+	return parsed, logErr
+}
+
+// settleWithoutPod records results for tests that must not schedule anything.
+//
+// The list is deliberately short, and it is about what THIS OPERATOR cannot
+// execute — never about what a given piece of hardware supports. "This test
+// does not apply to this part" is the runner's judgement, returned as exit 2,
+// and it is made after looking at the device rather than at a label.
+//
+// Node and Pair execute. Group does not: gang scheduling and rank assignment
+// across N nodes are a real design problem, and until they are solved a Group
+// test must land as Error rather than be quietly dropped — a required
+// acceptance test the operator cannot run must never let hardware pass by
+// omission.
+func (r *BurnInRunReconciler) settleWithoutPod(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, t plannedTest) bool {
+	switch t.Spec.Scope {
+	case "", burninv1alpha1.ScopeNode, burninv1alpha1.ScopePair:
+		return false
 	}
-	return res, true, nil
+	if resultFor(run, t.Name, "") == nil {
+		now := metav1.NewTime(r.now())
+		r.appendSettled(ctx, run, p, burninv1alpha1.TestResult{
+			Name:       t.Name,
+			Kind:       t.Spec.Kind,
+			Scope:      t.Spec.Scope,
+			Phase:      burninv1alpha1.RunError,
+			FinishedAt: &now,
+			Message: fmt.Sprintf("scope %q is not executed by this operator version (it runs Node and Pair scope) — "+
+				"the test was NOT run; treat this hardware as unjudged for it", t.Spec.Scope),
+		})
+	}
+	return true
 }
 
 func (r *BurnInRunReconciler) fetchLogs(ctx context.Context, pod *corev1.Pod) (string, error) {
@@ -475,58 +762,460 @@ func (r *BurnInRunReconciler) podOverdue(pod *corev1.Pod, spec *burninv1alpha1.B
 	return r.now().Sub(pod.CreationTimestamp.Time) > window
 }
 
-// recordResult converts a runner outcome into a TestResult, applies
-// thresholds, and appends it with a TestCompleted delivery.
-func (r *BurnInRunReconciler) recordResult(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, t plannedTest, node string, res runner.Result) {
-	now := metav1.NewTime(r.now())
-	result := burninv1alpha1.TestResult{
-		Name:       t.Name,
-		Kind:       t.Spec.Kind,
-		Scope:      t.Spec.Scope,
-		Nodes:      []string{node},
-		FinishedAt: &now,
-		Metrics:    res.Metrics,
-		Message:    res.Message,
-	}
+// ─── Attempts ─────────────────────────────────────────────────────────────────
 
-	switch res.Verdict {
-	case runner.VerdictPass:
-		// Exit 0 says the runner is content; the thresholds are the profile's
-		// own acceptance bar, evaluated fail-closed.
-		if ok, why := verdict.Evaluate(res.Metrics, t.Spec.Thresholds); ok {
-			result.Phase = burninv1alpha1.RunPassed
-		} else {
-			result.Phase = burninv1alpha1.RunFailed
-			result.Message = why
+// beginAttempt opens the result for (test, node) if it does not exist and
+// records that an execution has started. The second return says whether it
+// changed anything, so the caller knows a status write is owed.
+//
+// It is idempotent, and it is the ONLY place TestResult.StartedAt is set. The
+// distinction it encodes: a pod that exists is scheduling, a pod the kubelet
+// has started is testing. Only the second is time the hardware was occupied,
+// which is why StartedAt is left nil for a pod that never started at all — an
+// unschedulable pod reaped after its grace period has an Error and a
+// FinishedAt, and honestly no start.
+func (r *BurnInRunReconciler) beginAttempt(
+	run *burninv1alpha1.BurnInRun,
+	t plannedTest,
+	nodes []string,
+	attempt int32,
+	pod *corev1.Pod,
+) (*burninv1alpha1.TestResult, bool) {
+	before := len(run.Status.Results)
+	res := ensureResult(run, t, nodes)
+	changed := len(run.Status.Results) != before
+
+	var started *metav1.Time
+	if pod != nil && podStarted(pod) {
+		s := attemptStart(pod, r.now())
+		started = &s
+		if res.StartedAt == nil {
+			res.StartedAt = &s
+			changed = true
 		}
-	case runner.VerdictFail:
-		result.Phase = burninv1alpha1.RunFailed
-	case runner.VerdictSkip:
-		result.Phase = burninv1alpha1.RunSkipped
-	default:
-		result.Phase = burninv1alpha1.RunError
-	}
-	if len(res.InvalidNames) > 0 {
-		result.Message = strings.TrimSpace(result.Message + fmt.Sprintf(
-			" [runner emitted %d metric name(s) the contract rejects: %s]",
-			len(res.InvalidNames), strings.Join(res.InvalidNames, ", ")))
 	}
 
-	r.appendResult(ctx, run, p, result)
+	if n, inProgress := nextAttempt(res); inProgress && n == attempt {
+		a := &res.Attempts[len(res.Attempts)-1]
+		if a.StartedAt == nil && started != nil {
+			a.StartedAt = started
+			changed = true
+		}
+		return res, changed
+	}
+	res.Attempts = append(res.Attempts, burninv1alpha1.TestAttempt{
+		Attempt: attempt,
+		Trigger: triggerFor(res),
+		// The rank-0 / initiating node, which at Node scope is the only one and
+		// at Pair scope is the server. TestResult.Nodes carries the full set.
+		Node:      nodes[0],
+		PodName:   podNameOf(pod),
+		Phase:     burninv1alpha1.RunRunning,
+		StartedAt: started,
+	})
+	return res, true
 }
 
-func (r *BurnInRunReconciler) appendResult(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, result burninv1alpha1.TestResult) {
-	run.Status.Results = append(run.Status.Results, result)
-	recount(run)
-	// One completion per (test, node) execution: the node is part of the
-	// event identity, or a second node's completion would dedupe away against
-	// the first's. Settled results (skips, unsupported scope) are one event
-	// for the whole test.
-	key := result.Name
-	if len(result.Nodes) == 1 {
-		key = result.Name + "/" + result.Nodes[0]
+// completeAttempt records the outcome of one execution and decides what it
+// means for the test as a whole.
+//
+// The two rules that live here are the ones the whole design hangs off:
+//
+//   - REPEATS ARE AN AND. Every execution demanded by RepeatCount must pass.
+//     The first Failed attempt settles the test as Failed and no further pass
+//     can retract it, because the point of a repeat is to catch the fault that
+//     does not reproduce every time.
+//   - A RETRY ONLY EVER FOLLOWS AN ERROR. An Error means the machinery
+//     malfunctioned and the hardware was never judged, so running it again is
+//     the correct response. A Failed attempt is a measurement, and re-running a
+//     measurement until it comes out clean launders a hardware fault into an
+//     acceptance — marginal hardware is precisely the hardware that passes on
+//     the second try.
+//
+// The switch below is exhaustive over the attempt phases and only the Error arm
+// consults the retry budget. That is not an accident of structure; it is the
+// rule, and TestAttempt.Trigger records enough history to audit it after the
+// fact.
+func (r *BurnInRunReconciler) completeAttempt(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	p *plan,
+	t plannedTest,
+	nodes []string,
+	attempt int32,
+	podName string,
+	pod *corev1.Pod,
+	parsed runner.Result,
+) {
+	res, _ := r.beginAttempt(run, t, nodes, attempt, pod)
+	now := metav1.NewTime(r.now())
+	phase, message := attemptOutcome(t, parsed)
+
+	a := &res.Attempts[len(res.Attempts)-1]
+	exit := int32(parsed.ExitCode)
+	a.Phase = phase
+	a.ExitCode = &exit
+	a.FinishedAt = &now
+	a.Metrics = parsed.Metrics
+	a.Message = message
+	if podName != "" {
+		a.PodName = podName
 	}
-	r.deliver(ctx, run, p.Sinks, contract.ReasonTestCompleted, key)
+
+	// The in-progress result carries the latest evidence; on settle it is
+	// overwritten by the metrics of the attempt that decided the verdict.
+	if len(parsed.Metrics) > 0 {
+		res.Metrics = parsed.Metrics
+	}
+
+	settle := func(final burninv1alpha1.RunPhase) {
+		res.Phase = final
+		res.FinishedAt = &now
+		res.Message = message
+		res.Metrics = parsed.Metrics
+		recount(run)
+		// One completion per execution unit: the nodes are part of the event
+		// identity, or a second node's completion would dedupe away against
+		// the first's. A pair is one unit and gets one key naming both ends.
+		r.deliverTestCompleted(ctx, run, p.Sinks, res.Name+"/"+strings.Join(nodes, "+"))
+	}
+
+	switch phase {
+	case burninv1alpha1.RunPassed:
+		res.RepeatsCompleted++
+		if res.RepeatsCompleted >= res.RepeatsRequired {
+			settle(burninv1alpha1.RunPassed)
+			return
+		}
+		// More repeats owed. The test stays open and the next pass starts the
+		// next execution; repeats are sequential because two concurrent copies
+		// on one node would contend for the very resource under test.
+		res.Message = fmt.Sprintf("attempt %d/%d passed", res.RepeatsCompleted, res.RepeatsRequired)
+
+	case burninv1alpha1.RunFailed:
+		settle(burninv1alpha1.RunFailed)
+
+	case burninv1alpha1.RunSkipped:
+		// The test does not apply to this hardware. Repeating it will not make
+		// it start applying, and retrying it will not either.
+		settle(burninv1alpha1.RunSkipped)
+
+	default:
+		if res.ErrorRetries < retryOnErrorLimit(run) {
+			res.ErrorRetries++
+			// An errored attempt measured nothing, so it does not consume a
+			// repeat: RepeatsCompleted is deliberately untouched here.
+			res.Message = fmt.Sprintf("attempt %d errored (%s); retrying", attempt, message)
+			return
+		}
+		settle(burninv1alpha1.RunError)
+	}
+	recount(run)
+}
+
+// attemptOutcome converts one runner execution into a phase.
+//
+// Thresholds are evaluated HERE, once, against a completed execution — never
+// against a checkpoint. A mid-run sample that dips below a bar is not a
+// failure, because the run is not over.
+func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhase, string) {
+	var phase burninv1alpha1.RunPhase
+	message := parsed.Message
+
+	switch parsed.Verdict {
+	case runner.VerdictPass:
+		// Exit 0 says the runner is content; the thresholds are the profile's
+		// own acceptance bar, evaluated fail-closed — a threshold naming a
+		// metric the runner never emitted is a failure, not a pass.
+		out := verdict.Evaluate(parsed.Metrics, parsed.Unmeasurable, t.Spec.Thresholds)
+		if out.Passed {
+			phase = burninv1alpha1.RunPassed
+		} else {
+			phase = burninv1alpha1.RunFailed
+			message = out.Message
+		}
+		// A RequiredIfMeasurable gate the hardware cannot measure was not
+		// applied, and the report has to say so. Appending it to the message
+		// puts it on the TestResult and therefore in the delivered envelope: a
+		// Passed test whose ECC gate never ran must never be indistinguishable
+		// from one whose ECC gate ran and was satisfied.
+		if why := out.NotEvaluatedMessage(); why != "" {
+			message = strings.TrimSpace(message + " [" + why + "]")
+		}
+	case runner.VerdictFail:
+		phase = burninv1alpha1.RunFailed
+	case runner.VerdictSkip:
+		phase = burninv1alpha1.RunSkipped
+	default:
+		phase = burninv1alpha1.RunError
+	}
+
+	if len(parsed.InvalidNames) > 0 {
+		message = strings.TrimSpace(message + fmt.Sprintf(
+			" [runner emitted %d metric name(s) the contract rejects: %s]",
+			len(parsed.InvalidNames), strings.Join(parsed.InvalidNames, ", ")))
+	}
+	return phase, message
+}
+
+// triggerFor says why the next execution of an already-open result is
+// happening. It is derived from the previous attempt's phase rather than
+// tracked separately, so the recorded history cannot disagree with what
+// actually caused the attempt.
+func triggerFor(res *burninv1alpha1.TestResult) burninv1alpha1.AttemptTrigger {
+	if len(res.Attempts) == 0 {
+		return burninv1alpha1.AttemptInitial
+	}
+	if res.Attempts[len(res.Attempts)-1].Phase == burninv1alpha1.RunError {
+		return burninv1alpha1.AttemptErrorRetry
+	}
+	return burninv1alpha1.AttemptRepeat
+}
+
+// nextAttempt is the attempt number the (test, node) execution is currently on,
+// and whether that attempt has already been opened.
+func nextAttempt(res *burninv1alpha1.TestResult) (int32, bool) {
+	if res == nil || len(res.Attempts) == 0 {
+		return 1, false
+	}
+	last := res.Attempts[len(res.Attempts)-1]
+	if !last.Phase.IsTerminal() {
+		return last.Attempt, true
+	}
+	return last.Attempt + 1, false
+}
+
+func podNameOf(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	return pod.Name
+}
+
+// ─── Checkpoints ──────────────────────────────────────────────────────────────
+
+// checkpoint refreshes an in-flight execution's evidence from the runner's
+// stdout so far, and reports whether it wrote anything.
+//
+// A CHECKPOINT IS EVIDENCE, NEVER A VERDICT. It does not look at an exit code,
+// it does not evaluate a threshold, and it cannot move a phase. Its whole job
+// is that a multi-hour soak which is cancelled, evicted or lost to a node
+// reboot at minute 200 still says what the temperatures and clocks were doing,
+// instead of reporting nothing at all because the metrics only reach the status
+// when the pod terminates.
+//
+// It is safe to read a running pod's log precisely because the parser is
+// last-occurrence-wins: a runner reporting progressively emits the same keys
+// repeatedly, so a truncated log is a valid earlier snapshot rather than a
+// corrupt record. The values overwrite in place and never accumulate, so a long
+// soak cannot grow its status object without bound.
+//
+// A log read that fails is not a failure of anything: the next checkpoint, or
+// the terminal harvest, carries the same cumulative state.
+func (r *BurnInRunReconciler) checkpoint(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	t plannedTest,
+	node string,
+	pod *corev1.Pod,
+) bool {
+	interval := checkpointInterval(&t.Spec)
+	if interval <= 0 {
+		return false
+	}
+	res := resultFor(run, t.Name, node)
+	if res == nil || res.Phase.IsTerminal() {
+		return false
+	}
+
+	// Due only once a full interval has passed since the last sample — or,
+	// for the first one, since the execution actually started.
+	since := res.LastCheckpointAt
+	if since == nil {
+		since = res.StartedAt
+	}
+	if since != nil && r.now().Sub(since.Time) < interval {
+		return false
+	}
+
+	stdout, err := r.fetchLogs(ctx, pod)
+	if err != nil {
+		return false
+	}
+	// The exit code is deliberately not consulted: the pod has not exited, and
+	// only the parsed metrics are wanted. Passing 0 here selects no behaviour
+	// — attemptOutcome, which is what turns a verdict into a phase, is not on
+	// this path at all.
+	parsed := runner.Parse(string(t.Spec.Kind), stdout, 0)
+	if len(parsed.Metrics) == 0 {
+		// Nothing to publish yet. Not stamping LastCheckpointAt means the next
+		// pass tries again rather than waiting out another whole interval for
+		// a runner that is simply slow to emit its first line.
+		return false
+	}
+
+	now := metav1.NewTime(r.now())
+	res.Metrics = parsed.Metrics
+	res.LastCheckpointAt = &now
+	if n := len(res.Attempts); n > 0 && !res.Attempts[n-1].Phase.IsTerminal() {
+		res.Attempts[n-1].Metrics = parsed.Metrics
+		res.Attempts[n-1].LastCheckpointAt = &now
+	}
+	return true
+}
+
+// checkpointSequence numbers a run's checkpoints.
+//
+// It is the index of the interval window the checkpoint falls in, counted from
+// the run's start, and it is DERIVED rather than counted so that nothing has to
+// persist a counter. That matters because the sequence feeds the envelope's
+// DeliveryID: a key that moved on every attempt would mint a new identity per
+// retry and defeat the receiver's dedupe, turning a flaky endpoint into a flood
+// of near-identical records.
+func (r *BurnInRunReconciler) checkpointSequence(run *burninv1alpha1.BurnInRun, p *plan) int {
+	interval := p.checkpointInterval()
+	if interval <= 0 || run.Status.StartedAt == nil {
+		return 0
+	}
+	elapsed := r.now().Sub(run.Status.StartedAt.Time)
+	if elapsed <= 0 {
+		return 0
+	}
+	return int(elapsed / interval)
+}
+
+// ─── Suspension, cancellation, deadline ───────────────────────────────────────
+
+// cancel stops the run for good and drives it to Cancelled.
+//
+// Cancelled is terminal and is NOT a verdict. Tests that finished before the
+// cancel keep their real results; tests that had not run are settled as
+// Cancelled rather than Failed, because nobody measured them and a consumer
+// must be able to tell "I stopped this" from "this hardware is bad".
+//
+// The Graceful policy drains: no new executions start, and the ones already in
+// flight are allowed to finish and record. An in-flight burn-in is expensive
+// evidence — a soak four hours in has already cost the fleet those four hours,
+// and discarding it means paying them again. Immediate deletes the pods now,
+// which is what a facility power or cooling event calls for, since there the
+// load itself is the reason for stopping.
+func (r *BurnInRunReconciler) cancel(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan) (ctrl.Result, error) {
+	// Cancellation is one-way. Record that it was observed before doing
+	// anything irreversible, so clearing spec.cancel mid-drain cannot resume a
+	// run that has already begun releasing what it was holding.
+	if run.Annotations[cancellingAnnotation] == "" {
+		reason := run.Spec.CancelReason
+		if reason == "" {
+			reason = "cancelled with no reason given"
+		}
+		if run.Annotations == nil {
+			run.Annotations = map[string]string{}
+		}
+		run.Annotations[cancellingAnnotation] = reason
+		saved := run.Status
+		if err := r.Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		run.Status = saved
+	}
+
+	message := "run cancelled: " + run.Annotations[cancellingAnnotation]
+
+	// Harvest under BOTH policies before doing anything else. An execution
+	// whose pod has already terminated is not "in flight" under any reading of
+	// the word — its exit code and its metrics are sitting there — and throwing
+	// that away because the cancel arrived a moment later would discard evidence
+	// the fleet has already paid for. Immediate is about not waiting; it is not
+	// about refusing to read.
+	pass, err := r.execute(ctx, run, p, false)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if run.Spec.CancelPolicy != burninv1alpha1.CancelImmediate {
+		if pass.running {
+			// Still draining. Persist what was harvested and come back; the
+			// run stays Running until the last in-flight execution reports.
+			return r.persistPass(ctx, run, p, pass)
+		}
+		if pass.harvested || pass.dirty {
+			if err := r.Status().Update(ctx, run); err != nil {
+				return ctrl.Result{}, err
+			}
+			if pass.checkpointed {
+				r.deliverCheckpoint(ctx, run, p.Sinks, r.checkpointSequence(run, p))
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+	}
+
+	r.settleRemaining(run, p, burninv1alpha1.RunCancelled, message)
+	return r.terminate(ctx, run, p.Sinks, burninv1alpha1.RunCancelled)
+}
+
+// deadlineExceeded reports whether the run has outlived spec.deadlineSeconds,
+// measured from status.startedAt across every test, node, repeat and retry.
+func (r *BurnInRunReconciler) deadlineExceeded(run *burninv1alpha1.BurnInRun) bool {
+	d := runDeadline(run)
+	if d <= 0 || run.Status.StartedAt == nil {
+		return false
+	}
+	return r.now().Sub(run.Status.StartedAt.Time) > d
+}
+
+// expire ends a run that ran out of time.
+//
+// The terminal phase is Error, and the two things it is not are the point.
+// It is not Failed, because a run that ran out of time did not judge the
+// hardware it never reached, and reporting that as a hardware verdict condemns
+// parts nobody tested. It is not Cancelled, because nobody asked — Cancelled is
+// reserved for an explicit request, so a consumer can tell an operator's
+// decision from a bound being hit.
+func (r *BurnInRunReconciler) expire(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan) (ctrl.Result, error) {
+	message := fmt.Sprintf("run deadline of %ds expired before this execution completed — the hardware was not judged",
+		*run.Spec.DeadlineSeconds)
+	r.settleRemaining(run, p, burninv1alpha1.RunError, message)
+	return r.terminate(ctx, run, p.Sinks, burninv1alpha1.RunError)
+}
+
+// settleRemaining gives every execution that never reached a verdict an
+// explicit one, so the status says which hardware was left unjudged instead of
+// leaving a reader to infer it from an absence.
+//
+// It never touches a settled result: a deadline or a cancel stops a run, it
+// does not retract evidence already gathered.
+//
+// These results are not delivered individually. They are not completions, and
+// the terminal envelope that follows carries all of them at once.
+func (r *BurnInRunReconciler) settleRemaining(
+	run *burninv1alpha1.BurnInRun,
+	p *plan,
+	phase burninv1alpha1.RunPhase,
+	message string,
+) {
+	now := metav1.NewTime(r.now())
+	for i := range p.Tests {
+		t := p.Tests[i]
+		// An unexecutable scope is settled once for the whole test, with no
+		// node attached; do not then add a per-node result beside it.
+		if existing := resultFor(run, t.Name, ""); existing != nil && len(existing.Nodes) == 0 {
+			continue
+		}
+		for _, nodes := range executionUnits(p, t) {
+			res := ensureResult(run, t, nodes)
+			if res.Phase.IsTerminal() {
+				continue
+			}
+			res.Phase = phase
+			res.FinishedAt = &now
+			res.Message = message
+			if n := len(res.Attempts); n > 0 && !res.Attempts[n-1].Phase.IsTerminal() {
+				res.Attempts[n-1].Phase = phase
+				res.Attempts[n-1].FinishedAt = &now
+				res.Attempts[n-1].Message = message
+			}
+		}
+	}
+	recount(run)
 }
 
 // ─── Finalize and terminal handling ───────────────────────────────────────────
@@ -553,27 +1242,54 @@ func (r *BurnInRunReconciler) finalizeError(ctx context.Context, run *burninv1al
 	log.FromContext(ctx).Error(cause, "run cannot be executed")
 	// Kind is required on every real BurnInTest, so an empty Kind marks this
 	// result as synthetic — a real test named "resolve" cannot shadow it.
+	now := metav1.NewTime(r.now())
 	run.Status.Results = append(run.Status.Results, burninv1alpha1.TestResult{
-		Name:    "resolve",
-		Phase:   burninv1alpha1.RunError,
-		Message: cause.Error(),
+		Name:       "resolve",
+		Phase:      burninv1alpha1.RunError,
+		FinishedAt: &now,
+		Message:    cause.Error(),
 	})
 	return r.terminate(ctx, run, sinks, burninv1alpha1.RunError)
 }
 
-// terminate writes the terminal phase, cleans up leftover pods, and delivers
-// the terminal envelope with its own retry loop.
+// terminate writes the terminal phase, stops the hardware being burned,
+// releases every node the run was holding, and delivers the terminal envelope
+// with its own retry loop.
 func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1.BurnInRun, sinks []string, phase burninv1alpha1.RunPhase) (ctrl.Result, error) {
 	run.Status.Phase = phase
 	finished := metav1.NewTime(r.now())
 	run.Status.FinishedAt = &finished
+
+	// An execution still open at termination judged nothing. Saying so is the
+	// difference between a status that reads as unfinished forever and one
+	// that says which hardware was left unmeasured.
+	for i := range run.Status.Results {
+		res := &run.Status.Results[i]
+		if res.Phase.IsTerminal() {
+			continue
+		}
+		res.Phase = burninv1alpha1.RunError
+		res.FinishedAt = &finished
+		res.Message = "the run reached a terminal phase before this execution completed — no verdict"
+	}
 	recount(run)
 
-	// FailFast (and finalizeError) can leave pods of never-harvested tests
-	// running; a terminal run must not keep burning the hardware.
-	r.deleteUnharvestedPods(ctx, run)
+	// A terminal run must not keep burning the hardware: fail-fast, a
+	// resolution error and an immediate cancel can all leave pods in flight.
+	// Terminated pods are kept until the run's own TTL for post-mortem logs.
+	if err := r.deleteLivePods(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Release before the finalizer comes off, and before anything can return
+	// early: a node held by a run that will never step again is capacity the
+	// fleet silently loses.
+	if _, err := r.releaseCordons(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
 
-	delivered := r.deliver(ctx, run, sinks, contract.ReasonPhaseChanged, string(phase))
+	delivered := r.deliverPhase(ctx, run, sinks, phase)
+
+	metaDirty := controllerutil.RemoveFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
 	if !delivered {
 		// The terminal envelope is the one delivery with no later transition
 		// to carry it; mark it pending so the terminal loop keeps retrying.
@@ -581,17 +1297,17 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 			run.Annotations = map[string]string{}
 		}
 		run.Annotations[pendingDeliveryAnnotation] = string(phase)
-		results := run.Status.Results
+		metaDirty = true
+	}
+	if metaDirty {
+		// Update() refreshes the object from the server, which still holds the
+		// PRE-terminal status — silently reverting everything written above.
+		// Re-apply the whole status after the metadata write.
+		saved := run.Status
 		if err := r.Update(ctx, run); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Update() refreshes the object from the server, which still holds the
-		// PRE-terminal status — silently reverting the phase we are about to
-		// write. Re-apply the terminal fields after the metadata write.
-		run.Status.Phase = phase
-		run.Status.FinishedAt = &finished
-		run.Status.Results = results
-		recount(run)
+		run.Status = saved
 	}
 	if err := r.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err
@@ -602,9 +1318,36 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 	return r.handleTTL(ctx, run)
 }
 
-// reconcileTerminal serves an already-finished run: retry a pending terminal
-// delivery, then let the TTL reap it.
+// reconcileTerminal serves an already-finished run.
+//
+// A terminal phase is FINAL: nothing here writes status.phase, so a cancel
+// request, a spec edit or a late pod event arriving after the verdict cannot
+// change it. What it does do is converge the side effects — release any cordon
+// still held (the recovery path when a manager died between the terminal write
+// and the release), retry a pending terminal delivery, and let the TTL reap it.
 func (r *BurnInRunReconciler) reconcileTerminal(ctx context.Context, run *burninv1alpha1.BurnInRun) (ctrl.Result, error) {
+	// The finalizer is removed in the same write that follows a successful
+	// release, so its absence is proof there is nothing left to give back.
+	// Checking it here keeps a terminal run that is merely waiting out its TTL
+	// from listing every node in the cluster on each poll.
+	if controllerutil.ContainsFinalizer(run, burninv1alpha1.FinalizerCordonCleanup) {
+		released, err := r.releaseCordons(ctx, run)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if released {
+			if err := r.Status().Update(ctx, run); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		controllerutil.RemoveFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
+		saved := run.Status
+		if err := r.Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		run.Status = saved
+	}
+
 	if phase, pending := run.Annotations[pendingDeliveryAnnotation]; pending {
 		p, pinned, err := loadPlan(run)
 		if err != nil || !pinned {
@@ -615,7 +1358,7 @@ func (r *BurnInRunReconciler) reconcileTerminal(ctx context.Context, run *burnin
 			}
 			return r.handleTTL(ctx, run)
 		}
-		if r.deliver(ctx, run, p.Sinks, contract.ReasonPhaseChanged, phase) {
+		if r.deliverPhase(ctx, run, p.Sinks, burninv1alpha1.RunPhase(phase)) {
 			delete(run.Annotations, pendingDeliveryAnnotation)
 			if err := r.Update(ctx, run); err != nil {
 				return ctrl.Result{}, err
@@ -627,24 +1370,72 @@ func (r *BurnInRunReconciler) reconcileTerminal(ctx context.Context, run *burnin
 	return r.handleTTL(ctx, run)
 }
 
-// deleteUnharvestedPods removes the run's pods that never produced a recorded
-// result — the in-flight casualties of FailFast or a resolution error.
-// Harvested pods are kept until the run's own TTL for post-mortem logs.
-func (r *BurnInRunReconciler) deleteUnharvestedPods(ctx context.Context, run *burninv1alpha1.BurnInRun) {
+// reconcileDeleted releases what a deleted run was holding and then lets the
+// deletion proceed.
+//
+// `kubectl delete burninrun` is the most natural reaction to a run behaving
+// badly, and therefore the likeliest moment to strand a node: without the
+// finalizer, deleting the run removes the only object that knows which nodes
+// are being held, and the fleet quietly loses them. Deletion blocks here until
+// the last owned cordon is released.
+func (r *BurnInRunReconciler) reconcileDeleted(ctx context.Context, run *burninv1alpha1.BurnInRun) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(run, burninv1alpha1.FinalizerCordonCleanup) {
+		return ctrl.Result{}, nil
+	}
+	if err := r.deleteLivePods(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	if _, err := r.releaseCordons(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	// The exported series are a view of a live object and must not outlive it.
+	r.forgetMetrics(run.Namespace, run.Name)
+
+	controllerutil.RemoveFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
+	return ctrl.Result{}, client.IgnoreNotFound(r.Update(ctx, run))
+}
+
+// busyNodes is the set of nodes this run currently holds under test load. It is
+// the live input to the MaxConcurrentNodes interlock, counted from the pods
+// that actually exist so that a controller restart cannot lose track of what is
+// already running and fan out on top of it.
+func (r *BurnInRunReconciler) busyNodes(ctx context.Context, run *burninv1alpha1.BurnInRun) (map[string]bool, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(run.Namespace), client.MatchingLabels{labelRun: run.Name}); err != nil {
-		log.FromContext(ctx).Error(err, "could not list run pods for cleanup")
-		return
+		return nil, err
+	}
+	busy := map[string]bool{}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !ownedBy(pod, run) || !podLive(pod) {
+			continue
+		}
+		busy[pod.Labels[labelNode]] = true
+	}
+	return busy, nil
+}
+
+// deleteLivePods removes every pod of this run that has not terminated.
+//
+// Terminated pods are left alone: their logs are the post-mortem, and they are
+// reaped with the run at its TTL. A live pod behind a stopped run is different
+// in kind — it is load on a node the run no longer accounts for, on hardware it
+// may already have handed back to the scheduler.
+func (r *BurnInRunReconciler) deleteLivePods(ctx context.Context, run *burninv1alpha1.BurnInRun) error {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(run.Namespace), client.MatchingLabels{labelRun: run.Name}); err != nil {
+		return err
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if hasResult(run, pod.Labels[labelTest], pod.Labels[labelNode]) {
+		if !ownedBy(pod, run) || !podLive(pod) {
 			continue
 		}
 		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			log.FromContext(ctx).Error(err, "could not delete unharvested pod", "pod", pod.Name)
+			return err
 		}
 	}
+	return nil
 }
 
 // handleTTL garbage-collects a finished run after TTLSecondsAfterFinished.
@@ -658,44 +1449,112 @@ func (r *BurnInRunReconciler) handleTTL(ctx context.Context, run *burninv1alpha1
 	if remaining := expiry.Sub(r.now()); remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
+	// The run is about to stop existing, so its series must stop existing too.
+	r.forgetMetrics(run.Namespace, run.Name)
 	// Owned pods go with the run via ownerRefs.
 	return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, run))
 }
 
 // ─── Result bookkeeping ───────────────────────────────────────────────────────
 
-// hasResult reports whether a result exists for the test; with a non-empty
-// node it must cover that node.
-func hasResult(run *burninv1alpha1.BurnInRun, testName, node string) bool {
-	for _, res := range run.Status.Results {
+// resultFor returns the result for (test, node), or nil.
+//
+// An empty node matches any result with that test name, which is how the
+// node-less results (an unsupported scope, a resolution error) are found.
+func resultFor(run *burninv1alpha1.BurnInRun, testName, node string) *burninv1alpha1.TestResult {
+	for i := range run.Status.Results {
+		res := &run.Status.Results[i]
 		if res.Name != testName {
 			continue
 		}
 		if node == "" {
-			return true
+			return res
 		}
 		for _, n := range res.Nodes {
 			if n == node {
-				return true
+				return res
 			}
 		}
 	}
-	return false
+	return nil
 }
 
-// recount tallies per-(test,node) executions. The envelope documents the same
-// unit, so a 2-test × 3-node run legitimately reports passed=6.
+// executionUnits enumerates the independent executions a test owes.
+//
+// At Node scope that is one per target node. At Pair scope it is exactly ONE
+// unit covering both nodes, because a point-to-point measurement is a property
+// of the link between them and cannot be attributed to either end. Everything
+// that walks a test's work — the pass sweep, the deadline settle, the cancel
+// settle — goes through here so none of them can disagree about how many
+// verdicts a test owes.
+func executionUnits(p *plan, t plannedTest) [][]string {
+	if t.Spec.Scope == burninv1alpha1.ScopePair {
+		return [][]string{append([]string(nil), p.Targets...)}
+	}
+	out := make([][]string, 0, len(p.Targets))
+	for _, node := range p.Targets {
+		out = append(out, []string{node})
+	}
+	return out
+}
+
+// ensureResult returns the open result for one execution unit, creating it if
+// needed. It is looked up by the unit's first node, which is the whole node at
+// Node scope and the server at Pair scope.
+//
+// RepeatsRequired is pinned onto the result at creation from the plan's copy of
+// the spec, so a verdict stays readable — "3 of 3 executions passed" — after
+// the BurnInTest it came from has been edited or deleted.
+func ensureResult(run *burninv1alpha1.BurnInRun, t plannedTest, nodes []string) *burninv1alpha1.TestResult {
+	if res := resultFor(run, t.Name, nodes[0]); res != nil {
+		return res
+	}
+	run.Status.Results = append(run.Status.Results, burninv1alpha1.TestResult{
+		Name:            t.Name,
+		Kind:            t.Spec.Kind,
+		Scope:           t.Spec.Scope,
+		Phase:           burninv1alpha1.RunRunning,
+		Nodes:           append([]string(nil), nodes...),
+		RepeatsRequired: repeatsRequired(&t.Spec),
+	})
+	return &run.Status.Results[len(run.Status.Results)-1]
+}
+
+// appendSettled records a result that is complete the moment it is created and
+// delivers its completion.
+func (r *BurnInRunReconciler) appendSettled(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, result burninv1alpha1.TestResult) {
+	run.Status.Results = append(run.Status.Results, result)
+	recount(run)
+	key := result.Name
+	if len(result.Nodes) > 0 {
+		key = result.Name + "/" + strings.Join(result.Nodes, "+")
+	}
+	r.deliverTestCompleted(ctx, run, p.Sinks, key)
+}
+
+// recount tallies per-(test,node) executions by phase.
+//
+// The four counters are kept apart on purpose. Errored must never be folded
+// into Failed — a summary reading "0 failed" beside eight tests that never ran
+// is a clean sweep of hardware nothing measured — and Skipped must never be
+// either, since a node that cannot take a test has not failed it. Results still
+// in flight count towards nothing.
 func recount(run *burninv1alpha1.BurnInRun) {
-	var passed, failed int32
+	var passed, failed, errored, skipped int32
 	for _, res := range run.Status.Results {
 		switch res.Phase {
 		case burninv1alpha1.RunPassed:
 			passed++
 		case burninv1alpha1.RunFailed:
 			failed++
+		case burninv1alpha1.RunError:
+			errored++
+		case burninv1alpha1.RunSkipped:
+			skipped++
 		}
 	}
 	run.Status.Passed, run.Status.Failed = passed, failed
+	run.Status.Errored, run.Status.Skipped = errored, skipped
 }
 
 func hasRequiredFailure(run *burninv1alpha1.BurnInRun, p *plan) bool {
@@ -727,7 +1586,9 @@ func hasRequiredError(run *burninv1alpha1.BurnInRun, p *plan) bool {
 	return false
 }
 
-// isTerminal reports whether a phase is final.
+// isTerminal reports whether a RUN phase is final. It deliberately omits
+// Skipped, which a run never takes; RunPhase.IsTerminal covers the TestResult
+// case where it does.
 func isTerminal(p burninv1alpha1.RunPhase) bool {
 	switch p {
 	case burninv1alpha1.RunPassed, burninv1alpha1.RunFailed, burninv1alpha1.RunError, burninv1alpha1.RunCancelled:

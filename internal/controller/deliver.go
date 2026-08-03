@@ -22,6 +22,51 @@ const deliveryTimeout = 15 * time.Second
 // mechanism is the reconcile loop itself, not a long in-process backoff chain.
 var deliverRetry = sink.RetryPolicy{MaxAttempts: 2, Base: time.Second, Max: 2 * time.Second}
 
+// deliverPhase announces a run's transition into a phase, including the
+// terminal one. This is the delivery a consumer gates acceptance on.
+func (r *BurnInRunReconciler) deliverPhase(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	sinks []string,
+	phase burninv1alpha1.RunPhase,
+) bool {
+	return r.deliver(ctx, run, sinks, contract.ReasonPhaseChanged, sink.PhaseKey(phase))
+}
+
+// deliverTestCompleted announces one execution reaching a verdict. The key is
+// "<test>/<node>" for a per-node execution and the bare test name for a result
+// that covers no single node, so two nodes finishing the same test cannot
+// dedupe away against each other.
+func (r *BurnInRunReconciler) deliverTestCompleted(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	sinks []string,
+	key string,
+) bool {
+	return r.deliver(ctx, run, sinks, contract.ReasonTestCompleted, sink.TestKey(key))
+}
+
+// deliverCheckpoint sends the cumulative mid-run snapshot.
+//
+// It is the delivery that makes a multi-day soak legible from outside: without
+// it a consumer sees the Running transition and then nothing at all until the
+// verdict, and cannot distinguish a run that is soaking from one that is
+// wedged. The envelope carries every result recorded so far, in-flight ones
+// included, with their latest parsed metrics — evidence, not a verdict, and no
+// threshold has been applied to any of it.
+//
+// Failures are not retried. A checkpoint that does not land is superseded by
+// the next one, since each carries the whole cumulative state; scheduling a
+// retry would only queue a stale snapshot behind a fresher one.
+func (r *BurnInRunReconciler) deliverCheckpoint(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	sinks []string,
+	sequence int,
+) bool {
+	return r.deliver(ctx, run, sinks, contract.ReasonCheckpoint, sink.CheckpointKey(sequence))
+}
+
 // deliver builds the envelope for (reason, eventKey) and sends it to every
 // named sink. It reports whether EVERY sink accepted it. Failures are
 // recorded on the sink's status and logged, never fatal to the run: a broken

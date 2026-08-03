@@ -1,23 +1,38 @@
 name: Publish runner image
 
-# Publishing is deliberate and manual: the compute-smoke runner is the image a
-# node's readiness gate executes, so a bad tag silently degrades a whole fleet.
-# Trigger this only after the kernel has been verified on real hardware.
+# Publishing is deliberate and manual: a runner image is what a node's readiness
+# gate executes, so a bad tag silently degrades a whole fleet. Trigger this only
+# after the runner has been verified on real hardware.
+#
+# The options list must name every directory under runners/ that has a
+# Dockerfile, or that runner cannot be published at all — and a default runner
+# image entry in internal/controller/pods.go pointing at a tag no workflow can
+# produce is an ImagePullBackOff with no way out.
 on:
   workflow_dispatch:
     inputs:
       runner:
-        description: 'Which runner to publish'
+        description: 'Which runner to publish (a directory under runners/)'
         required: true
         default: compute-smoke
         type: choice
-        options: [compute-smoke]
+        options:
+          - compute-smoke
+          - clockprobe
+          - dcgm-diag
+          - host-health
+          - memory-bw
+          - memory-stress
       version:
         description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
         required: true
         type: string
       cuda_arch:
-        description: 'nvcc -arch value. sm_121a = GB10 only; sm_120f covers CC 12.0+12.1.'
+        description: >-
+          CUDA arch for the runners that compile device code (compute-smoke,
+          clockprobe, memory-bw). sm_121a = GB10 only; sm_120f covers CC
+          12.0+12.1. Ignored by the CPU-only runners (host-health,
+          memory-stress) and by dcgm-diag, whose Dockerfiles do not consume it.
         required: true
         default: sm_121a
         type: choice
@@ -115,7 +130,7 @@ jobs:
           tags: ${{ steps.ref.outputs.ref }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=NVFP4 block-scaled GEMM compute-smoke runner for the glimmer-burnin ${{ inputs.runner }} TestKind
+            org.opencontainers.image.description=Runner image for the glimmer-burnin ${{ inputs.runner }} TestKind
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.revision=${{ github.sha }}
             ai.glimmer.burnin.cuda-arch=${{ inputs.cuda_arch }}

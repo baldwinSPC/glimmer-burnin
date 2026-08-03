@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
@@ -170,6 +171,555 @@ func TestParse_CustomKindGetsNoAliasMapping(t *testing.T) {
 	}
 	if got.Metrics["tflops"] != "99" {
 		t.Errorf("custom kind lost its key=value metric: %v", got.Metrics)
+	}
+}
+
+// Per-kind stdout fixtures, in the shape each kind's runner wrapper prints:
+// the underlying tool's own vocabulary, normalised to key=value lines. They
+// exist to pin the mapping from a tool's words to ours, which is the part a
+// refactor can silently get wrong — a dropped alias does not fail to parse, it
+// parses to a name no threshold references, and the test then fails closed on
+// a healthy node.
+func TestParse_PerKindFixtures(t *testing.T) {
+	cases := []struct {
+		kind        string
+		stdout      string
+		exitCode    int
+		wantVerdict Verdict
+		wantMessage string
+		wantMetrics map[string]string
+	}{
+		{
+			kind: "dcgm-diag",
+			stdout: `dcgm_version=3.3.9
+driver_version=580.82.09
+diag_level=3
+tests_run=14
+tests_failed=0
+xid_errors=0
+ecc_sbe_total=0
+ecc_dbe_total=0
+rows_remapped=0
+pcie_replay_count=0
+elapsed_s=412.7
+DCGM_DIAG_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "DCGM_DIAG_PASS",
+			wantMetrics: map[string]string{
+				"dcgmVersion":   "3.3.9",
+				"driverVersion": "580.82.09",
+				"diagLevel":     "3",
+				"testsRun":      "14",
+				// DCGM's "tests_failed" is a subtest count, not a verdict.
+				"diagTestsFailed": "0",
+				"xidEvents":       "0",
+				// Correctable and uncorrectable ECC stay two numbers: a few
+				// SBEs is a working part, one DBE is a failing one.
+				"eccSbeTotal":      "0",
+				"eccDbeTotal":      "0",
+				"remappedRows":     "0",
+				"pcieReplayErrors": "0",
+				"elapsedS":         "412.7",
+			},
+		},
+		{
+			kind: "memory-bw",
+			stdout: `gpu_name=NVIDIA GB10
+transfer_size_bytes=268435456
+h2d_bandwidth_gbs=24.83
+d2h_bandwidth_gbs=26.11
+d2d_bandwidth_gbs=612.40
+memory_bandwidth_gbs=598.72
+elapsed_s=18.4
+MEMORY_BW_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "MEMORY_BW_PASS",
+			wantMetrics: map[string]string{
+				"gpuName":                    "NVIDIA GB10",
+				"transferSizeBytes":          "268435456",
+				"hostToDeviceBandwidthGBs":   "24.83",
+				"deviceToHostBandwidthGBs":   "26.11",
+				"deviceToDeviceBandwidthGBs": "612.40",
+				"memoryBandwidthGBs":         "598.72",
+				"elapsedS":                   "18.4",
+			},
+		},
+		{
+			kind: "host-health",
+			stdout: `node_ready=true
+gpu_count=1
+driver_version=580.82.09
+xid_count=0
+rows_remapped=0
+pcie_replay_count=0
+nic_link_down=0
+ecc_errors=0
+gpu_temp_c=41
+power_draw_w=38.2
+HOST_HEALTH_OK
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "HOST_HEALTH_OK",
+			wantMetrics: map[string]string{
+				"nodeReady":         "true",
+				"gpuCount":          "1",
+				"driverVersion":     "580.82.09",
+				"xidEvents":         "0",
+				"remappedRows":      "0",
+				"pcieReplayErrors":  "0",
+				"nicLinkDownEvents": "0",
+				"eccErrors":         "0",
+				"gpuTempC":          "41",
+				"powerDrawW":        "38.2",
+			},
+		},
+		{
+			// A real failure: the part held its temperature limit by dropping
+			// clocks. Metrics must survive a non-zero exit — the evidence for
+			// a Fail is exactly what an operator needs afterwards.
+			kind: "thermal-soak",
+			stdout: `soak_seconds=3600
+peak_temp_c=91
+peak_power_w=142.5
+throttle_count=3
+sustained_clock_pct=78.4
+iterations_completed=8640
+THERMAL_THROTTLE_DETECTED
+`,
+			exitCode:    1,
+			wantVerdict: VerdictFail,
+			wantMessage: "THERMAL_THROTTLE_DETECTED",
+			wantMetrics: map[string]string{
+				"elapsedS":            "3600",
+				"gpuTempC":            "91",
+				"powerDrawW":          "142.5",
+				"throttleEvents":      "3",
+				"sustainedClockPct":   "78.4",
+				"iterationsCompleted": "8640",
+			},
+		},
+		{
+			kind: "gpu-burn",
+			stdout: `gpu_name=NVIDIA GB10
+iterations=420
+errors=0
+tflops=48.6
+gpu_temp_c=86
+power_draw_w=139.8
+ecc_errors=0
+elapsed_s=900.0
+GPU_BURN_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "GPU_BURN_PASS",
+			wantMetrics: map[string]string{
+				"gpuName":             "NVIDIA GB10",
+				"iterationsCompleted": "420",
+				// gpu_burn's "errors" are wrong answers from hardware that
+				// reported success — not ECC events, which are counted apart.
+				"miscompares": "0",
+				// Sustained across a 15-minute burn, so NOT throughputTflops.
+				"sustainedThroughputTflops": "48.6",
+				"gpuTempC":                  "86",
+				"powerDrawW":                "139.8",
+				"eccErrors":                 "0",
+				"elapsedS":                  "900.0",
+			},
+		},
+		{
+			kind: "nccl",
+			stdout: `ranks=2
+size_bytes=1073741824
+algbw=23.41
+busbw=46.82
+avg_time_us=45872.1
+wrong_count=0
+elapsed_s=62.3
+NCCL_ALLREDUCE_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "NCCL_ALLREDUCE_PASS",
+			wantMetrics: map[string]string{
+				"ranks":           "2",
+				"sizeBytes":       "1073741824",
+				"algBandwidthGBs": "23.41",
+				"busBandwidthGBs": "46.82",
+				// Deliberately NOT latencyUs: a collective's completion time
+				// is not a round trip, and registered names must not be
+				// stretched to cover a different quantity. Well-formed and
+				// unregistered is the honest outcome.
+				"avgTimeUs":   "45872.1",
+				"miscompares": "0",
+				"elapsedS":    "62.3",
+			},
+		},
+		{
+			kind: "ib-write-bw",
+			stdout: `device=mlx5_0
+message_size_bytes=65536
+bw_peak=192.31
+bw_average=186.44
+elapsed_s=9.8
+IB_WRITE_BW_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "IB_WRITE_BW_PASS",
+			wantMetrics: map[string]string{
+				"device":            "mlx5_0",
+				"messageSizeBytes":  "65536",
+				"peakBandwidthGbps": "192.31",
+				"bandwidthGbps":     "186.44",
+				"elapsedS":          "9.8",
+			},
+		},
+		{
+			kind: "gpudirect-rdma",
+			stdout: `gpudirect_supported=true
+device=mlx5_0
+bw_average=178.92
+t_avg_usec=3.71
+elapsed_s=11.2
+GPUDIRECT_RDMA_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "GPUDIRECT_RDMA_PASS",
+			wantMetrics: map[string]string{
+				"gpudirectSupported": "true",
+				"device":             "mlx5_0",
+				// Same link measurand as ib-write-bw, so the same canonical
+				// name: a separate one would split a fleet's history in two.
+				"bandwidthGbps": "178.92",
+				"latencyUs":     "3.71",
+				"elapsedS":      "11.2",
+			},
+		},
+		{
+			kind: "clockprobe",
+			stdout: `gpu_name=NVIDIA GB10
+rated_boost_clock_mhz=1980
+sm_clock_mhz=1837
+mem_clock_mhz=4266
+sustained_clock_pct=92.8
+throttle_events=0
+elapsed_s=30.0
+CLOCKPROBE_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "CLOCKPROBE_PASS",
+			wantMetrics: map[string]string{
+				"gpuName":            "NVIDIA GB10",
+				"ratedBoostClockMHz": "1980",
+				"smClockMHz":         "1837",
+				"memClockMHz":        "4266",
+				"sustainedClockPct":  "92.8",
+				"throttleEvents":     "0",
+				"elapsedS":           "30.0",
+			},
+		},
+		{
+			kind: "memory-stress",
+			stdout: `tool=stressapptest
+duration_requested_s=600
+hardware_incidents=0
+sdc_count=0
+miscompares=0
+read_bandwidth_mbs=18342.6
+write_bandwidth_mbs=17110.2
+elapsed_s=600.4
+STRESSAPPTEST_PASS
+`,
+			exitCode:    0,
+			wantVerdict: VerdictPass,
+			wantMessage: "STRESSAPPTEST_PASS",
+			wantMetrics: map[string]string{
+				"tool":               "stressapptest",
+				"durationRequestedS": "600",
+				"memoryErrors":       "0",
+				"sdcDetections":      "0",
+				"miscompares":        "0",
+				"readBandwidthMBs":   "18342.6",
+				"writeBandwidthMBs":  "17110.2",
+				"elapsedS":           "600.4",
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			got := Parse(c.kind, c.stdout, c.exitCode)
+
+			if got.Verdict != c.wantVerdict {
+				t.Errorf("Verdict = %q, want %q", got.Verdict, c.wantVerdict)
+			}
+			if got.Message != c.wantMessage {
+				t.Errorf("Message = %q, want %q", got.Message, c.wantMessage)
+			}
+			if len(got.InvalidNames) != 0 {
+				t.Errorf("a shipped runner's output produced names the contract rejects: %v", got.InvalidNames)
+			}
+			for name, want := range c.wantMetrics {
+				gotVal, ok := got.Metrics[name]
+				if !ok {
+					t.Errorf("missing canonical metric %q; got %v", name, got.Metrics)
+					continue
+				}
+				if gotVal != want {
+					t.Errorf("metric %q = %q, want %q", name, gotVal, want)
+				}
+			}
+			for name := range got.Metrics {
+				if _, expected := c.wantMetrics[name]; !expected {
+					t.Errorf("unexpected canonical metric %q=%q; every name a runner produces is stored and charted, so none may appear by accident", name, got.Metrics[name])
+				}
+			}
+		})
+	}
+}
+
+// gpudirect-rdma on a part with unified host-device memory has not failed; the
+// test does not apply. Skip must reach the caller as Skip, with the runner's
+// explanation intact — this is the false negative that made healthy hardware
+// look broken.
+func TestParse_GPUDirectSkipIsNotAFailure(t *testing.T) {
+	got := Parse("gpudirect-rdma", `gpudirect_supported=false
+reason=unified host-device memory; the discrete-GPU RDMA path does not apply
+GPUDIRECT_RDMA_SKIP
+`, 2)
+
+	if got.Verdict != VerdictSkip {
+		t.Fatalf("Verdict = %q, want Skip", got.Verdict)
+	}
+	if got.Metrics["gpudirectSupported"] != "false" {
+		t.Errorf("gpudirectSupported = %q, want false", got.Metrics["gpudirectSupported"])
+	}
+	if got.Metrics["reason"] == "" {
+		t.Error("the runner's explanation for skipping was dropped")
+	}
+	if got.Message != "GPUDIRECT_RDMA_SKIP" {
+		t.Errorf("Message = %q, want GPUDIRECT_RDMA_SKIP", got.Message)
+	}
+}
+
+// A runner that malfunctions leaves the hardware unjudged. Whatever it managed
+// to print is still evidence, but the verdict must not read as a failure.
+func TestParse_RunnerMalfunctionIsErrorNotFail(t *testing.T) {
+	got := Parse("dcgm-diag", "dcgm_version=3.3.9\ncould not open /dev/nvidiactl\n", 125)
+	if got.Verdict != VerdictError {
+		t.Errorf("Verdict = %q, want Error; a broken runner is not a broken GPU", got.Verdict)
+	}
+	if got.Metrics["dcgmVersion"] != "3.3.9" {
+		t.Error("evidence printed before the malfunction was discarded")
+	}
+}
+
+// Every value in the alias tables is a name this project mints, so it must be a
+// name pkg/contract knows. An alias to an unregistered name would deliver a
+// metric no threshold, chart or consumer is expecting.
+func TestAliasTargetsAreRegistered(t *testing.T) {
+	for kind, table := range aliases {
+		for rawKey, canonical := range table {
+			if err := contract.ValidateMetricName(canonical); err != nil {
+				t.Errorf("%s: alias %q maps to a name the contract rejects: %v", kind, rawKey, err)
+			}
+			if _, ok := contract.Lookup(canonical); !ok {
+				t.Errorf("%s: alias %q maps to unregistered name %q; register it in pkg/contract or leave the key to generic normalisation", kind, rawKey, canonical)
+			}
+		}
+	}
+}
+
+// Parsing is last-occurrence-wins, so two keys of one kind mapping to the same
+// canonical name would silently discard one of two real measurements.
+func TestAliasTargetsAreUniqueWithinAKind(t *testing.T) {
+	for kind, table := range aliases {
+		seen := map[string]string{}
+		for rawKey, canonical := range table {
+			if prev, dup := seen[canonical]; dup {
+				t.Errorf("%s: %q and %q both map to %q; last-occurrence-wins would drop one", kind, prev, rawKey, canonical)
+			}
+			seen[canonical] = rawKey
+		}
+	}
+}
+
+// An alias that generic normalisation would have produced anyway is dead
+// weight, and dead weight is what stops a reader trusting that the entries
+// which remain are load-bearing.
+func TestAliasEntriesAreNecessary(t *testing.T) {
+	for kind, table := range aliases {
+		for rawKey, canonical := range table {
+			if snakeToLowerCamel(rawKey) == canonical {
+				t.Errorf("%s: alias %q → %q is redundant; generic normalisation already produces it", kind, rawKey, canonical)
+			}
+		}
+	}
+}
+
+// The quiet failure the alias tables exist for. These raw keys carry a unit in
+// the tool's own casing; normalised generically they produce names UnitOf()
+// reads as dimensionless, so a bandwidth or a clock would be stored as a bare
+// number that charts happily and compares against nothing.
+func TestParse_UnitCasingTrapsAreAliased(t *testing.T) {
+	cases := []struct{ kind, rawKey string }{
+		{"memory-bw", "h2d_bandwidth_gbs"},
+		{"memory-bw", "d2h_bandwidth_gbs"},
+		{"memory-bw", "d2d_bandwidth_gbs"},
+		{"memory-bw", "memory_bandwidth_gbs"},
+		{"memory-stress", "read_bandwidth_mbs"},
+		{"memory-stress", "write_bandwidth_mbs"},
+		{"clockprobe", "sm_clock_mhz"},
+		{"clockprobe", "mem_clock_mhz"},
+		{"clockprobe", "rated_boost_clock_mhz"},
+		{"thermal-soak", "soak_seconds"},
+		{"gpudirect-rdma", "t_avg_usec"},
+	}
+	for _, c := range cases {
+		// The premise: generic normalisation really does lose the unit here.
+		// If this ever stops being true the alias may be revisited, but the
+		// test must not quietly pass on a false premise.
+		if u := contract.UnitOf(snakeToLowerCamel(c.rawKey)); u != contract.UnitNone {
+			t.Errorf("%s: %q normalises generically to unit %q; this case no longer demonstrates the trap", c.kind, c.rawKey, u)
+			continue
+		}
+		got := Parse(c.kind, c.rawKey+"=1", 0)
+		for name := range got.Metrics {
+			if contract.UnitOf(name) == contract.UnitNone {
+				t.Errorf("%s: %q parsed to %q, which declares no unit; a dimensional measurement was recorded as a bare number", c.kind, c.rawKey, name)
+			}
+		}
+	}
+}
+
+// Alias tables are per-kind because the same word means different things to
+// different tools. compute-smoke's "tflops" is one unwarmed launch; gpu-burn's
+// is a sustained average. Sharing a canonical name would make one of them
+// wrong, and would hand a liveness signal to a profile author as if it were
+// gateable.
+func TestParse_SameKeyDiffersByKind(t *testing.T) {
+	smoke := Parse("compute-smoke", "tflops=101.99", 0)
+	if smoke.Metrics["throughputTflops"] != "101.99" {
+		t.Errorf("compute-smoke tflops = %v, want throughputTflops=101.99", smoke.Metrics)
+	}
+	if contract.SafeToThresholdOn("throughputTflops") {
+		t.Error("compute-smoke's throughput is a liveness signal and must not be thresholdable")
+	}
+
+	burn := Parse("gpu-burn", "tflops=48.6", 0)
+	if burn.Metrics["sustainedThroughputTflops"] != "48.6" {
+		t.Errorf("gpu-burn tflops = %v, want sustainedThroughputTflops=48.6", burn.Metrics)
+	}
+	if _, collided := burn.Metrics["throughputTflops"]; collided {
+		t.Error("gpu-burn's sustained figure took compute-smoke's name, which would mark a real benchmark unthresholdable")
+	}
+	if !contract.SafeToThresholdOn("sustainedThroughputTflops") {
+		t.Error("gpu-burn's sustained throughput is a benchmark and must stay thresholdable")
+	}
+}
+
+// Every canonical name any shipped kind can produce must survive the contract:
+// a name rejected at delivery time fails after the run is already finished and
+// the hardware is no longer under test.
+func TestParse_AllKindsProduceContractValidNames(t *testing.T) {
+	for kind, table := range aliases {
+		var b strings.Builder
+		for rawKey := range table {
+			b.WriteString(rawKey)
+			b.WriteString("=1\n")
+		}
+		got := Parse(kind, b.String(), 0)
+		if len(got.InvalidNames) != 0 {
+			t.Errorf("%s: alias table produces contract-invalid names: %v", kind, got.InvalidNames)
+		}
+		if len(got.Metrics) != len(table) {
+			t.Errorf("%s: parsed %d metrics from %d alias keys: %v", kind, len(got.Metrics), len(table), got.Metrics)
+		}
+	}
+}
+
+// ─── The unmeasurable sentinel ────────────────────────────────────────────────
+
+// The GB10 case, in one line of stdout: the runner asked, the hardware has no
+// ECC to report, and it says so. The declaration must not become a metric — a
+// stored "n/a" would be a value a threshold could try to compare against, and a
+// stored 0 would be a lie.
+func TestParse_UnmeasurableSentinelIsDeclaredNotMeasured(t *testing.T) {
+	got := Parse("host-health", "xid_count=0\necc_errors=n/a\nrows_remapped=n/a\nHOST_HEALTH_OK\n", 0)
+
+	for _, name := range []string{"eccErrors", "remappedRows"} {
+		if !got.IsUnmeasurable(name) {
+			t.Errorf("%s was not recorded as unmeasurable: %v", name, got.Unmeasurable)
+		}
+		if v, stored := got.Metrics[name]; stored {
+			t.Errorf("%s=%q leaked into Metrics; the sentinel denies a measurement, it is not one", name, v)
+		}
+		if _, ok := got.Numeric(name); ok {
+			t.Errorf("Numeric(%s) invented a number for an unmeasurable metric", name)
+		}
+	}
+	if got.Metrics["xidEvents"] != "0" {
+		t.Errorf("a real measurement alongside the sentinel was lost: %v", got.Metrics)
+	}
+	if len(got.InvalidNames) != 0 {
+		t.Errorf("the sentinel must not affect name validation: %v", got.InvalidNames)
+	}
+	if got.Message != "HOST_HEALTH_OK" {
+		t.Errorf("Message = %q, want HOST_HEALTH_OK", got.Message)
+	}
+}
+
+// Runners are written in whatever language suits the probe, and nvidia-smi
+// itself prints "N/A". The spelling of the sentinel must not decide a verdict.
+func TestParse_UnmeasurableSentinelIsCaseInsensitive(t *testing.T) {
+	for _, spelling := range []string{"n/a", "N/A", "N/a", " n/a "} {
+		got := Parse("host-health", "ecc_errors="+spelling, 0)
+		if !got.IsUnmeasurable("eccErrors") {
+			t.Errorf("%q was not recognised as the sentinel", spelling)
+		}
+	}
+}
+
+// Everything else is an ordinary value. A gate must never relax on a guess at
+// what a runner meant.
+func TestParse_OnlyTheExactSentinelDeclaresUnmeasurable(t *testing.T) {
+	for _, value := range []string{"unknown", "none", "null", "NA", "-", "0"} {
+		got := Parse("host-health", "ecc_errors="+value, 0)
+		if got.IsUnmeasurable("eccErrors") {
+			t.Errorf("%q was treated as a declaration of unmeasurability", value)
+		}
+		if got.Metrics["eccErrors"] != value {
+			t.Errorf("eccErrors = %q, want the value kept as reported", got.Metrics["eccErrors"])
+		}
+	}
+}
+
+// Parsing is last-occurrence-wins, and that has to hold across the two maps or
+// they could both claim the same name: a runner that measures after declaring
+// has measured it, and one that declares after reporting has retracted it.
+func TestParse_UnmeasurableIsLastOccurrenceWins(t *testing.T) {
+	declaredThenMeasured := Parse("host-health", "ecc_errors=n/a\necc_errors=2", 0)
+	if declaredThenMeasured.IsUnmeasurable("eccErrors") {
+		t.Error("a later real reading did not retract the sentinel")
+	}
+	if declaredThenMeasured.Metrics["eccErrors"] != "2" {
+		t.Errorf("eccErrors = %q, want 2", declaredThenMeasured.Metrics["eccErrors"])
+	}
+
+	measuredThenDeclared := Parse("host-health", "ecc_errors=2\necc_errors=n/a", 0)
+	if !measuredThenDeclared.IsUnmeasurable("eccErrors") {
+		t.Error("a later sentinel did not retract the reading")
+	}
+	if _, stored := measuredThenDeclared.Metrics["eccErrors"]; stored {
+		t.Error("the retracted reading was left in Metrics; the two sets must stay disjoint")
 	}
 }
 

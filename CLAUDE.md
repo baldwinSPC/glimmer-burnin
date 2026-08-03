@@ -108,12 +108,30 @@ no-glimmer-import guard, and the CRD drift check.
 
 ```
 api/v1alpha1/        CRD types: BurnInTest, BurnInProfile, BurnInRun,
-                     BurnInSink, NodeFingerprint
-internal/controller/ the BurnInRun reconciler
-internal/verdict/    pure threshold evaluation (no k8s, no I/O)
+                     BurnInSchedule, BurnInSink, NodeFingerprint
+internal/controller/ the reconcilers: BurnInRun (run core, cordon, plan,
+                     pods, Pair rendezvous, delivery), BurnInSchedule,
+                     NodeFingerprint
+internal/sink/       sink delivery engine: webhook, ConfigMap, Prometheus
+                     selection, retry and idempotency
+internal/metrics/    Prometheus exposition of run state, registered on
+                     controller-runtime's registry
 runners/             per-TestKind runner images, one directory each
 config/crd|rbac|samples/   generated manifests and examples
 ```
+
+Public packages — importable by other projects, free of Kubernetes types:
+
+```
+pkg/verdict/         pure threshold evaluation (no k8s, no I/O)
+pkg/runner/          runner exit-code + key=value stdout parsing
+pkg/contract/        versioned delivery envelope + metric-name registry
+```
+
+`pkg/verdict` and `pkg/runner` are public because Glimmer's pre-Kubernetes
+burn-in path runs the same runner images: if the two dispatchers derived
+different metrics or different verdicts from identical runner output, they would
+disagree about the same hardware. One brain, two dispatchers.
 
 ---
 
@@ -123,14 +141,106 @@ config/crd|rbac|samples/   generated manifests and examples
   vendor-specific behaviour belongs in *runner images*, never in controller
   branches. Adding support for a vendor should mean adding a runner, not adding
   an `if nvidia {}`.
-- **Every new `TestKind`** ships with a default runner image, a result parser,
-  and a unit test for that parser.
+- **Every new `TestKind`** ships with a result parser (an alias table entry in
+  `pkg/runner/parse.go` where the runner's keys are not merely a different
+  spelling of the canonical names) and a unit test for that parser. It gets a
+  `defaultRunnerImages` entry in `internal/controller/pods.go` once a runner
+  image exists for it; a kind with no runner source in this repo deliberately
+  has none, so it fails fast at plan time asking for an explicit
+  `spec.runner.image` instead of pull-failing per node.
 - **Verdict logic fails closed.** A threshold naming a metric the runner did not
   emit is a FAILURE, not a pass — a missing measurement must never silently
-  satisfy acceptance. Keep it that way; `internal/verdict` is deliberately pure
-  so this is testable in isolation.
+  satisfy acceptance. Keep it that way; `pkg/verdict` is deliberately pure so
+  this is testable in isolation.
+- **Unmeasurable is a third state, and only a runner may declare it.** Some
+  hardware cannot produce a measurement at all: GB10 exposes no ECC to NVML, so
+  `eccErrors Equal 0` used to fail every healthy node in the fleet. A runner that
+  looked and found nothing to measure emits the reserved value `n/a`
+  (`eccErrors=n/a`), which `pkg/runner` puts in `Result.Unmeasurable`, never in
+  `Metrics`. A threshold with `applicability: RequiredIfMeasurable` is then NOT
+  EVALUATED — reported as such in `TestResult.Message` and the envelope, never
+  as a pass. Three rules make this safe and none of them may be relaxed:
+  ABSENCE IS NOT A DECLARATION (a metric that simply never appears still fails,
+  under every applicability, because a crashed probe must not become an
+  acceptance); `Required` is the default and still fails closed on an
+  unmeasurable metric; and a runner may only declare what it positively
+  established — "we could not look" stays an omission. host-health's ECC path is
+  the worked example: it uses `ecc.mode.current` to tell "this part has no ECC"
+  from "ECC was switched off", and only the first is declarable.
+- **Thresholds compare exactly, and there is no epsilon.** `GreaterThanOrEqual`
+  and `LessThanOrEqual` gate a measurement (both together for a band). `Equal`
+  and `NotEqual` are EXACT and exist for dimensionless counters: `eccErrors
+  Equal 0` means exactly zero, because a tolerance around zero ECC errors is a
+  tolerance for ECC errors. They are the wrong tool for a continuous metric — a
+  name carrying a unit suffix cannot reproduce a decimal string, so
+  `sustainedClockPct Equal 83.22` fails on every healthy node forever and the
+  failure reads as a hardware verdict. Do not "fix" that with an epsilon: it
+  would silently reinterpret every counter gate already written, it would not
+  rescue the continuous case anyway (the tolerance such an author needs is
+  domain knowledge the API can already express as GTE+LTE), and being invisible
+  in the spec it would make a profile's meaning depend on which of the two
+  dispatchers evaluated it. The guidance is made discoverable at AUTHORING time
+  instead: `pkg/verdict.ValidateThresholds` reports exact comparisons on
+  continuous metrics, gates on metrics `pkg/contract` marks `ThresholdUse:
+  Evidence`, and thresholds that can never be evaluated at all. It is advisory
+  and changes nothing about evaluation, which still fails closed — including on
+  a non-finite value, since `NaN` compares false against everything and would
+  otherwise make `NotEqual` a gate that always passes.
+- **Metric names are a contract.** `pkg/contract/metrics.go` holds the registry
+  and the grammar: lowerCamelCase, a dimensional metric ends in a registered
+  unit suffix (`Gbps`, `GBs`, `MBs`, `Us`, `Ms`, `S`, `C`, `W`, `Pct`,
+  `Tflops`), a dimensionless counter does not. A runner's own key is mapped to
+  the canonical name by the alias table in `pkg/runner/parse.go`; parsing is
+  last-occurrence-wins, so two keys must never alias to the same name.
 - **`Error` is not `Fail`.** An infrastructure error (image pull, scheduling)
-  must stay distinguishable from a hardware verdict. Do not collapse them.
+  must stay distinguishable from a hardware verdict. Do not collapse them. The
+  consequence with teeth is the retry rule: `retryOnErrorLimit` re-runs an
+  `Error` and nothing else. A `Fail` — whether from a non-zero exit or from a
+  threshold violation on a clean exit, which reach the decision by different
+  routes — settles the test where it happened, with retry budget left unspent,
+  because re-running a measurement until it comes out clean launders a hardware
+  fault into an acceptance. There is exactly ONE place that decision is made
+  (`completeAttempt`), shared by Node and Pair scope; keep it that way.
+  `TestAttempt.Trigger` records why every attempt happened, so the rule is
+  auditable from a stored result long after the run.
+- **A Pair verdict is about the LINK.** Pair scope runs two pods — a server on
+  the first target, a client on the second, rendezvous'd through a headless
+  Service (`internal/controller/pair.go`) — and produces exactly ONE `TestResult`
+  naming BOTH nodes. Never split it per node: a point-to-point measurement is a
+  property of the link, and attributing it to one endpoint sends an engineer to
+  replace the wrong part. Three rules hold it together and none may be relaxed:
+  the **client is the deciding side** (it is where perftest and nccl-tests
+  report, so its metrics win any key both ends emit, and the pair settles when
+  it terminates rather than waiting for a server that may legitimately linger);
+  verdict precedence is **`Error` > `Fail` > `Skip` > `Pass`**, because a
+  machinery failure on either end means the link was never measured and a
+  client's "connection refused" is then an artifact of its peer, not evidence
+  about the fabric — recording that as `Fail` would permanently indict a link
+  over an unpullable image, and `Fail` is the one phase that is never retried;
+  and a **server that exits 0 before the client ever started is an `Error`**,
+  never a pass, because no traffic crossed the link.
+- **A pair is one unit of load, and it costs two slots.** `maxConcurrentNodes`
+  counts NODES, and a pair holds both of its nodes for the whole test, so it is
+  admitted only when two slots are free — and never at the default cap of 1,
+  which the run refuses at start with that explanation. Admission is checked
+  once, when the unit starts: the client is part of an already-committed unit
+  and is not re-checked, or a lowered cap would strand a running server against
+  a peer that never arrives. `spec.cancel` with `CancelImmediate` is the tool
+  for getting load off the floor now.
+- **Cordoning follows the wave, not the target list.** A node is cordoned
+  immediately before the run puts load on it and released once it is no longer
+  holding any, so a run's footprint on the fleet tracks `maxConcurrentNodes`
+  instead of the size of its target list. Both nodes of a pair are cordoned
+  together, before either pod exists. Cordoning every target up front took a
+  two-node cluster entirely out of scheduling and hollowed out the interlock,
+  whose whole premise is that only N nodes are occupied at once.
+- **Runner pods must tolerate the operator's own cordon.** The run cordons its
+  target, which the node controller expresses as
+  `node.kubernetes.io/unschedulable:NoSchedule`; a pod that does not tolerate it
+  can never be scheduled onto the node the cordon was placed for. `podForTest`
+  adds that toleration unconditionally — it is scoped to that one taint by key
+  and is emphatically not a blanket toleration. Removing it deadlocks every test
+  on every node.
 - Small, focused PRs, with tests. CI must be green.
 
 ### Runner images
@@ -139,6 +249,32 @@ config/crd|rbac|samples/   generated manifests and examples
   Exit 0 = pass, 1 = fail, 2 = skip (not applicable to this hardware). The skip
   path matters: a node that cannot run a test must skip cleanly, not report a
   failure.
+- **Environment the operator injects.** `BURNIN_DURATION_SECONDS` and
+  `BURNIN_ATTEMPT` at every scope; a **Pair**-scope pod additionally gets:
+
+  | Variable | Value |
+  |---|---|
+  | `BURNIN_ROLE` | `server` or `client` |
+  | `BURNIN_PEER_HOST` | the peer's DNS name, `<peer-role>.<service>.<ns>.svc` |
+  | `BURNIN_PEER_NODE` | the peer's node name (for messages, never for addressing) |
+
+  That is the whole rendezvous contract: which end of the link this is, and
+  where the other end answers. A fabric runner image needs nothing else — one
+  image is the server on one node and the client on the other, and it never
+  learns anything about Kubernetes. The peer host is deliberately **not**
+  qualified to `cluster.local`, because a cluster's DNS domain is configurable
+  and hard-coding the default would break the rendezvous as a connection error
+  that looks like a bad link.
+- **A Pair server should declare `spec.runner.readinessProbe`.** The operator
+  will not start the client until the server pod is Ready, but without a probe
+  "Ready" only means the container started — and an `ib_write_bw` or `nccl`
+  client that connects before its server has bound its socket dies with a
+  connection error that reads as a fabric fault. A `tcpSocket` probe on the
+  runner's own port converts the gate into a real statement about a listener.
+- **`n/a` is a reserved metric value** (case-insensitive), and the only way a
+  runner declares a counter unmeasurable on the hardware in front of it. Emit it
+  where you asked and the hardware has nothing to report; omit the key where the
+  probe itself failed. Never emit a `0` you did not measure.
 - Runner images are published **manually** via the `publish-runner` workflow
   (`workflow_dispatch`), never automatically. A runner image is executed by a
   node's readiness gate, so a bad tag degrades a whole fleet at once. Publish

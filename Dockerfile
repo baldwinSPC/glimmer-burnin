@@ -10,6 +10,11 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
+# pkg/ is NOT optional: internal/controller imports pkg/runner and pkg/verdict,
+# and internal/sink imports pkg/contract. Omitting it fails the build with
+# "no matching versions for query latest", because the missing local package
+# looks to the module resolver like an unresolvable remote one.
+COPY pkg/ pkg/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o manager ./cmd

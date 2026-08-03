@@ -1,5 +1,41 @@
 # A pair-scope network acceptance profile: prove the RDMA interconnect between
 # two Sparks before trusting the cluster for multi-node training.
+#
+# ─── HOW PAIR SCOPE EXECUTES ──────────────────────────────────────────────────
+#
+# The operator runs a SERVER pod on the first target node and a CLIENT pod on
+# the second, each pinned to its node, rendezvous'd through a headless Service.
+# The client is not started until the server pod is Ready. Both containers get
+# BURNIN_ROLE=server|client, BURNIN_PEER_HOST (the peer's DNS name) and
+# BURNIN_PEER_NODE alongside BURNIN_DURATION_SECONDS.
+#
+# The pair produces ONE result naming BOTH nodes. A point-to-point measurement
+# is a property of the link, so a failure here indicts the LINK — cable,
+# transceiver, switch port, NIC, either end — and is deliberately not attributed
+# to one node.
+#
+# Two requirements this sample satisfies explicitly, both refused at run start
+# with an explanation rather than discovered at the deadline:
+#
+#   * exactly two distinct target nodes;
+#   * maxConcurrentNodes >= 2, because a pair holds BOTH of its nodes for the
+#     whole test and therefore costs two slots of the facility interlock. The
+#     default of 1 cannot admit a pair at all.
+#
+# ─── WHAT IS STILL MISSING: THE RUNNER IMAGES ─────────────────────────────────
+#
+# No nccl or ib-write-bw runner ships in this repo yet, so neither kind has a
+# default image and each test below must name spec.runner.image before this
+# profile can run. Applied as-is, the run settles as Error — "no default runner
+# image for kind ... — set spec.runner.image" — which is an infrastructure
+# error, never a hardware verdict. That failure is fast and legible at plan
+# time, which is why no placeholder tag is filled in here: a tag that does not
+# exist would fail slowly, per node, and look like a fabric problem.
+#
+# When adopting a runner, note that perftest (ib_write_bw) must be invoked with
+# --report_gbits: it reports MB/s by default, and a bytes-vs-bits mixup shifts
+# bandwidthGbps by 8x. See config/samples/node-acceptance.yaml for a profile
+# that runs end to end today.
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
 metadata:
@@ -9,9 +45,21 @@ spec:
   scope: Pair
   durationSeconds: 60
   thresholds:
+    # MEASURED, not derived from line rate. On 2026-08-02, ib_write_bw between
+    # two GB10 Sparks over RoCE plateaued at 99.63 Gb/s — identical at 4 and 8
+    # queue pairs with 1 MiB messages, so it is a real ceiling and not a
+    # single-QP artifact. The Ethernet link genuinely negotiates 200000 Mb/s;
+    # the limit is the ConnectX-7's host attachment, PCIe Gen5 x4, where
+    # current_link_* == max_link_* (nothing is degraded). Gen5 x4 is ~15.75 GB/s
+    # raw, ~100 Gb/s after overhead. The wire is 200G; the host can only feed
+    # half of it. This is architectural on DGX Spark, not a fault.
+    #
+    # The obvious "~90% of 200GbE line rate" value of 180 is therefore wrong by
+    # ~2x and would fail every healthy Spark pair. 89 is ~90% of the measured
+    # ceiling. Re-measure before reusing this number on any other SKU.
     - metric: bandwidthGbps
       comparison: GreaterThanOrEqual
-      value: "180" # ~90% of 200GbE line rate
+      value: "89"
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
@@ -25,10 +73,18 @@ spec:
     limits:
       nvidia.com/gpu: "1"
       rdma/rdma_shared_device_a: "1"
-  thresholds:
-    - metric: busBandwidthGBs
-      comparison: GreaterThanOrEqual
-      value: "20" # CX-7 200G RoCE expectation
+  # NO THRESHOLD YET — deliberately. The previous value here was
+  # busBandwidthGBs >= 20, justified as a "CX-7 200G RoCE expectation". That is
+  # arithmetically impossible on this fabric: 20 GB/s is 160 Gb/s, and the
+  # measured link ceiling is 99.63 Gb/s (~12.45 GB/s). For a 2-rank all-reduce
+  # busBandwidth == algBandwidth, so the hard upper bound here is ~12.45 GB/s.
+  #
+  # Rather than replace one guessed number with another, this ships
+  # thresholdless: the test still runs and still reports busBandwidthGBs, and a
+  # crashing or non-completing runner still fails on its exit code. Pin a value
+  # only after measuring nccl-tests all_reduce_perf on this pair, the same way
+  # bandwidthGbps above was pinned. Expect roughly 10-11 GB/s.
+  thresholds: []
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInProfile
@@ -62,7 +118,16 @@ metadata:
 spec:
   profileRef: pair-network-acceptance
   ttlSecondsAfterFinished: 3600
+  # A pair is one indivisible unit of load holding BOTH of its nodes, so it
+  # needs two of the interlock's slots and cannot start at the default of 1.
+  # Raising this is a facility decision: two nodes at full load is two nodes'
+  # worth of power and heat. For a fabric test that is a modest ask compared to
+  # gpu-burn, but the number still has to be set deliberately.
+  maxConcurrentNodes: 2
   target:
+    # Exactly two, and distinct. The first is the server (rank 0), the second is
+    # the client — which is the side that measures, and therefore the side whose
+    # metrics decide the verdict.
     nodeNames:
       - spark-043a
       - spark-85a9

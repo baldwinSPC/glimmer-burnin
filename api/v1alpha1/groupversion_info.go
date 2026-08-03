@@ -31,6 +31,7 @@ func init() {
 		&BurnInTest{}, &BurnInTestList{},
 		&BurnInProfile{}, &BurnInProfileList{},
 		&BurnInRun{}, &BurnInRunList{},
+		&BurnInSchedule{}, &BurnInScheduleList{},
 		&NodeFingerprint{}, &NodeFingerprintList{},
 		&BurnInSink{}, &BurnInSinkList{},
 	)
