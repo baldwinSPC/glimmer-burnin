@@ -804,11 +804,18 @@ func TestRun_MissingProfileIsTerminalError(t *testing.T) {
 
 // A kind with no default image and no explicit runner cannot be scheduled;
 // asking again cannot fix it, so it must settle as Error, not requeue forever.
+//
+// The example is an UNKNOWN kind on purpose. TestKind is deliberately an open
+// set — the API accepts any string so a site can point a custom runner at the
+// contract — and an unknown kind is the case that can never acquire a default
+// image, so this test cannot rot the way it did once before: it was written
+// against thermal-soak, and quietly stopped testing anything the day
+// thermal-soak's image was published and added to defaultRunnerImages.
 func TestRun_KindWithoutImageIsError(t *testing.T) {
 	soak := &burninv1alpha1.BurnInTest{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "soak"},
 		Spec: burninv1alpha1.BurnInTestSpec{
-			Kind:  burninv1alpha1.KindThermalSoak,
+			Kind:  burninv1alpha1.TestKind("no-such-kind"),
 			Scope: burninv1alpha1.ScopeNode,
 		},
 	}

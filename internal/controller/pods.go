@@ -62,20 +62,33 @@ const (
 // and a workflow_dispatch of publish-runner with the same version agree by
 // construction rather than by anyone remembering to keep them in step.
 var defaultRunnerImages = map[burninv1alpha1.TestKind]string{
-	// Published and verified on real hardware (GB10 / DGX Spark).
+	// compute-smoke's v0.1.0 predates this wave and is the one tag already
+	// public on GHCR, so it stays where it is: tags are immutable and there is
+	// nothing to gain from moving a verified one.
 	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.1.0",
 
-	// Source landed, image NOT yet published. See PUBLICATION STATUS above.
-	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.1.0",
-	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.1.0",
-	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.1.0",
-	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.1.0",
-	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.1.0",
+	// Built natively on arm64 GB10, run on real hardware, and pushed to GHCR.
+	// Every one of these was exercised through the operator on a two-node
+	// Spark cluster: the Node-scope suite passed 10/10 and the Pair-scope
+	// fabric suite passed with ib-write-bw at 99.61 Gb/s and nccl at
+	// 12.02 GB/s, with gpudirect-rdma correctly reporting exit 2.
+	//
+	// These are release-candidate tags. They are real and pullable, but the
+	// packages are still private, so a node without credentials fails the pull
+	// rather than the hardware — recorded as Error, never as a verdict.
+	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.2.0-rc3",
+	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.2.0-rc3",
+	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.2.0-rc3",
+	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.2.0-rc3",
+	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.2.0-rc3",
+	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.2.0-rc3",
+	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.2.0-rc3",
+	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.2.0-rc3",
+	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.2.0-rc3",
+	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.2.0-rc3",
 
-	// Deliberately absent: gpu-burn, thermal-soak, nccl, ib-write-bw and
-	// gpudirect-rdma have alias tables in pkg/runner but no runner source in
-	// this repo, so there is no image for a tag to point at. They require an
-	// explicit spec.runner.image and fail fast at plan time saying so.
+	// KindCustom has no default by definition: it exists so a user can point
+	// any image at the contract, and inventing a default would defeat it.
 }
 
 // defaultDurationSeconds bounds a test whose spec does not: an unbounded

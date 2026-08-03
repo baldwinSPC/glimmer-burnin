@@ -61,9 +61,24 @@ spec:
   scope: Node
   durationSeconds: 300
   thresholds:
+    # MEASURED on GB10, and the obvious value of 90 is wrong — it would fail
+    # healthy hardware, which is the exact defect class this project keeps
+    # tripping over.
+    #
+    # Sustained clock is both DURATION- and LOAD-dependent. Under a GEMM load a
+    # healthy Spark holds 83.22% of its 3003 MHz rated boost at 25s and decays
+    # to 69.90% by 600s, settling on a discrete P-state. clockprobe's own FMA
+    # chain holds ~83% because it never touches memory, but this test runs for
+    # 300s, so a 90 gate fails a perfectly good node.
+    #
+    # Critically, all of that happens with zero throttle reasons reported, so
+    # throttleEvents below is the real thermal verdict and this gate is a
+    # WEDGE BACKSTOP, not a performance gate. A GB10 pinned by the USB-C
+    # Power-Delivery fault sits near 20% — nowhere near 70 — so a floor set for
+    # the wedge does not need to be tight against normal decay.
     - metric: sustainedClockPct
       comparison: GreaterThanOrEqual
-      value: "90"
+      value: "70"
     # Transitions into a capped state, not a sample count. An idle GPU is
     # excluded from this by the runner — unloaded is not throttled.
     - metric: throttleEvents
