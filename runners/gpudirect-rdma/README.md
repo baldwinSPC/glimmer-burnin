@@ -144,6 +144,15 @@ this runner and `ib-write-bw` can be scheduled without colliding under
 `hostNetwork`. As there, **do not** probe perftest's own port: it listens with a
 backlog of one and would accept the probe as its peer.
 
+## RLIMIT_MEMLOCK
+
+Identical to [`ib-write-bw`](../ib-write-bw/README.md#rlimit_memlock--the-limit-that-decides-whether-this-runs-at-all):
+the runner reads the limit, budgets half of it, and reduces message size before
+queue pairs so it fits — needing nothing from the cluster. The two ends negotiate
+through the control channel and plan for the smaller of the two limits.
+
+On GB10 the applicability gate fires first, so this path is not reached there.
+
 ## Tuning
 
 | Variable | Default | Meaning |

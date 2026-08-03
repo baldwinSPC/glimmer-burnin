@@ -154,7 +154,18 @@ func run() int {
 		logf("found %s", p)
 	}
 
+	soft, raised, mlErr := memlock()
+	if mlErr != nil {
+		return fin(exitError, "%v", mlErr)
+	}
+	if raised {
+		logf("raised the RLIMIT_MEMLOCK soft limit to the hard limit (%s)", humanBytes(soft))
+	}
+	logf("RLIMIT_MEMLOCK = %s; this runner will register at most %s of RDMA buffers",
+		humanBytes(soft), humanBytes(budgetFor(soft)))
+
 	cfg := plan{
+		memlock:      soft,
 		healthPort:   envInt("BURNIN_HEALTH_PORT", defaultHealthPort),
 		perftestPort: envInt("BURNIN_PERFTEST_PORT", defaultPerftestPort),
 		messageBytes: envInt("BURNIN_MESSAGE_BYTES", defaultMessageBytes),
@@ -178,6 +189,8 @@ func run() int {
 }
 
 type plan struct {
+	// memlock bounds how much this runner may register; see memlock.go.
+	memlock      uint64
 	healthPort   int
 	perftestPort int
 	messageBytes int
@@ -215,6 +228,28 @@ func runServer(ports []rdmaPort, cfg plan) int {
 		return fin(exitFail, "%v — the node has RDMA hardware but no usable link", err)
 	}
 	logf("using %s; %s", port, why)
+
+	budget := budgetFor(cfg.memlock)
+	if peer := ch.peerHello.Memlock; peer > 0 && budgetFor(peer) < budget {
+		logf("the %s endpoint reports RLIMIT_MEMLOCK = %s, smaller than this end's %s; planning for the smaller",
+			pairRoleClient, humanBytes(peer), humanBytes(cfg.memlock))
+		budget = budgetFor(peer)
+	}
+	fittedBytes, fittedQPs, notes, ok := fitToMemlock(cfg.messageBytes, cfg.qps, budget)
+	if !ok {
+		reason := fmt.Sprintf("RLIMIT_MEMLOCK is too small to register even a minimal RDMA test "+
+			"(%s available to buffers, %s needed at the %d-byte floor) — %s",
+			humanBytes(budget), humanBytes(pinnedBytes(minMessageBytes, 1)), minMessageBytes,
+			memlockAdvice(cfg.memlock, pinnedBytes(minMessageBytes, 1)))
+		_ = ch.send(message{Kind: kindAbort, Reason: reason})
+		return fin(exitError, "%s", reason)
+	}
+	for _, n := range notes {
+		logf("REDUCED TO FIT RLIMIT_MEMLOCK: %s", n)
+	}
+	cfg.messageBytes, cfg.qps = fittedBytes, fittedQPs
+	logf("plan: %d-byte messages across %d queue pairs = %s registered (budget %s)",
+		cfg.messageBytes, cfg.qps, humanBytes(pinnedBytes(cfg.messageBytes, cfg.qps)), humanBytes(budget))
 
 	for _, ph := range []struct {
 		name string
@@ -313,7 +348,7 @@ func tcpListening(port int) bool {
 // ── client ───────────────────────────────────────────────────────────────────
 
 func runClient(ports []rdmaPort, peerHost string, cfg plan) int {
-	ch, err := dialPeer(peerHost, cfg.healthPort, cfg.peerWait, logf)
+	ch, err := dialPeer(peerHost, cfg.healthPort, message{Memlock: cfg.memlock}, cfg.peerWait, logf)
 	if err != nil {
 		return fin(exitError, "%v — the link was never exercised", err)
 	}
@@ -356,6 +391,11 @@ phases:
 			echo(phaseBandwidth, out)
 			if err != nil && !strings.Contains(out, "BW average[") {
 				_ = ch.send(message{Kind: kindAbort, Reason: err.Error()})
+				if looksLikeMemlockExhaustion(out) {
+					return fin(exitError, "ib_write_bw --use_cuda could not allocate its RDMA resources against %s over %s: %s. %s",
+						dest, port.Device, oneLine(out),
+						memlockAdvice(cfg.memlock, pinnedBytes(c.messageBytes, c.qps)))
+				}
 				return fin(exitError, "ib_write_bw --use_cuda failed against %s over %s: %v (output: %s)",
 					dest, port.Device, err, oneLine(out))
 			}

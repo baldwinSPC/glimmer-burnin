@@ -37,20 +37,38 @@
 # the fast, legible plan-time refusal exactly as described above rather than
 # swapping it for a tag that does not exist.
 #
-# ─── WHY /dev/infiniband IS MOUNTED ───────────────────────────────────────────
+# ─── WHY /dev/infiniband IS MOUNTED, AND THE REAL RLIMIT TRAP ─────────────────
 #
-# `privileged: true` plus `hostNetwork: true` is NOT enough to reach the RDMA
-# devices, which is the single thing that blocked fabric qualification on this
-# fleet. Measured in a privileged hostNetwork pod on these nodes:
+# The mount makes the RDMA device dependency EXPLICIT rather than relying on
+# `privileged: true` to hand the container the host's whole /dev. It is not
+# what fixed fabric qualification, and an earlier revision of this comment said
+# it was — that was a misdiagnosis, corrected here. Re-measured on these nodes,
+# a privileged pod sees uverbs0-3 with or without the mount; only by-ibdev and
+# by-path differ. Declaring the mount is still worth doing: it documents intent
+# and survives a future tightening of the privileged path.
 #
-#   pod:  /dev/infiniband -> rdma_cm umad0 umad1 umad2 umad3
-#   host: /dev/infiniband -> by-ibdev by-path rdma_cm umad0-3 uverbs0-3
+# THE ACTUAL BLOCKER WAS `RLIMIT_MEMLOCK`, and it is worth understanding because
+# it will bite any RDMA workload on this cluster, not just burn-in.
 #
-# The uverbs* user-verbs nodes are the missing ones, and uverbs is what
-# ibv_create_cq opens — so without the mount ib_write_bw dies with "Couldn't
-# create CQ / Failed to create CQs / Couldn't create IB resources" and the nccl
-# runner fails in the same place. Mounting the host's /dev/infiniband makes
-# uverbs0-3 appear in the pod; that was verified directly, not inferred.
+# RDMA buffers are pinned memory. perftest registers size x qps x 2, so
+# `-s 1048576 -q 4` needs exactly 8 MiB. containerd's systemd unit ships
+# LimitMEMLOCK=8388608 (8 MiB), inherited by every pod — so registration lands
+# precisely on the ceiling and ibv_create_cq returns ENOMEM, surfacing as the
+# thoroughly unhelpful "Couldn't create CQ / Failed to create CQs / Couldn't
+# create IB resources". NCCL hits the same wall as "ibv_reg_mr_iova2 failed
+# with error Cannot allocate memory".
+#
+# The bisection that proved it: `-s 1M` alone passes, `-q 4` alone passes, both
+# together fail. Each halves to fit; the product does not.
+#
+# Note `securityContext.capabilities.add: [IPC_LOCK]` does NOT help a non-root
+# container — Kubernetes has no ambient-capabilities field, so runc clears the
+# permitted set and CapPrm/CapEff read as all zeros. CAP_IPC_LOCK *bypasses*
+# RLIMIT_MEMLOCK, which is why the same run passes as uid 0 and fails as uid
+# 65532 at the identical limit. The fixes are therefore: raise the limit on the
+# node (a containerd drop-in with LimitMEMLOCK=infinity), or run the pod as
+# root. The ib-write-bw runner additionally right-sizes itself to whatever
+# limit it observes, so it degrades to a smaller message size instead of dying.
 #
 # When adopting a runner, note that perftest (ib_write_bw) must be invoked with
 # --report_gbits: it reports MB/s by default, and a bytes-vs-bits mixup shifts

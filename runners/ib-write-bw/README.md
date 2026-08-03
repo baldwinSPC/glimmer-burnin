@@ -151,6 +151,68 @@ would be accepted as the peer, fed nothing, and break the test it was meant to
 guard. Probe connections that reach the control port are read with a short
 deadline and dropped, which is why the client identifies itself with a hello.
 
+## RLIMIT_MEMLOCK — the limit that decides whether this runs at all
+
+Every RDMA buffer is **pinned** memory, capped by `RLIMIT_MEMLOCK`. Exceed it and
+`ibv_create_cq` fails with `ENOMEM`, which perftest reports as:
+
+```
+Couldn't create CQ
+Failed to create CQs
+ Couldn't create IB resources
+```
+
+That message names neither the limit nor the remedy and reads exactly like a
+broken HCA.
+
+**This runner needs nothing from the cluster: it sizes itself to fit.** It reads
+the limit, budgets half of it (the data buffers are not the only pinned pages),
+and reduces the plan if needed — surrendering **message size before queue
+pairs**, because that order is measured, not preferred:
+
+| change | cost |
+|---|---|
+| 4 queue pairs → 1 | 99.6 → 97.5 Gb/s |
+| 1 MiB → 64 KiB at 4 QPs | 99.61 → 99.40 Gb/s |
+
+Queue pairs are what saturate the link; message size mostly buys headroom above
+saturation. **Verified in a pod at the 8 MiB container default:**
+
+```
+RLIMIT_MEMLOCK = 8.0 MiB; this runner will register at most 4.0 MiB of RDMA buffers
+REDUCED TO FIT RLIMIT_MEMLOCK: message size 1048576 -> 524288 bytes
+plan: 524288-byte messages across 4 queue pairs = 4.0 MiB registered (budget 4.0 MiB)
+IB_WRITE_BW_PASS: measured 99.59 Gb/s ... with 4 QPs at 524288-byte messages
+```
+
+99.59 vs 99.61 Gb/s unconstrained — the gate at 89 is unaffected. Both ends
+negotiate: the client reports its limit in the hello and the **server plans for
+the smaller of the two**, because the two pods can be given different limits and
+a plan that fits only the side that chose it fails on the other.
+
+If the plan cannot be fitted even at the floor, the runner reports an **Error**
+naming `RLIMIT_MEMLOCK` rather than measuring something meaningless — a 4 KiB
+single-QP "bandwidth" says nothing about a link but would fail a correctly-set
+threshold as if the hardware were at fault.
+
+### Why the limit differs between your laptop and the cluster
+
+The host allows ~15 GB; a containerd-started pod inherits containerd's own
+`LimitMEMLOCK`, which is **8 MiB** by systemd default. The same binary with the
+same arguments therefore gets 8 MiB in a pod and 15 GB on the node.
+
+**`docker run --ulimit memlock=-1` hides this completely.** That flag is what
+every NVIDIA container guide tells you to pass, and it is what this runner was
+first verified with — which is precisely why the failure only appeared once it
+ran as a pod. Verify fabric runners **as pods**.
+
+Note also that neither `privileged: true` nor
+`securityContext.capabilities.add: [IPC_LOCK]` raises the limit for a
+**non-root** container: Kubernetes has no ambient-capabilities field, so the
+capability sets are empty even when privileged (`CapEff: 0000000000000000`), and
+the process cannot raise its own hard limit. Sizing the work to fit is the only
+portable answer, which is what this runner does.
+
 ## Pod requirements
 
 ```yaml

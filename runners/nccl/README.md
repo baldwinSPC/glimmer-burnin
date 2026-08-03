@@ -187,6 +187,69 @@ the *same* link is `roceP2p1s0f1` at one end and `roceP2p1s0f0` at the other —
 each side computes its own device. See
 [`../ib-write-bw/README.md`](../ib-write-bw/README.md#how-the-two-ends-find-each-other).
 
+## RLIMIT_MEMLOCK — this runner needs the cluster's help, and says so
+
+NCCL's IB/RoCE transport registers **pinned** memory, capped by
+`RLIMIT_MEMLOCK`. A containerd-started pod inherits containerd's own
+`LimitMEMLOCK`, **8 MiB** by systemd default, and NCCL cannot work within it:
+
+```
+NCCL WARN Call to ibv_reg_mr_iova2 failed with error Cannot allocate memory
+```
+
+**Unlike [`ib-write-bw`](../ib-write-bw), this runner cannot size itself to
+fit.** That runner owns every byte it registers, so it shrinks its plan and still
+measures the link. NCCL does not expose the same lever — **measured**, at 8 MiB
+*all* of these still fail in `ibv_reg_mr_iova2`:
+
+| setting | result |
+|---|---|
+| default | FAIL |
+| `NCCL_BUFFSIZE` = 2 MiB / 1 MiB / 512 KiB | FAIL |
+| `NCCL_BUFFSIZE` + `NCCL_MAX_NCHANNELS=2` | FAIL |
+| an **8-byte** all-reduce, `NCCL_BUFFSIZE=256 KiB` | FAIL |
+
+An eight-byte collective failing rules out the user buffers and the channel
+buffers alike: what does not fit is NCCL's own internal registration. The only
+alternative to refusing would be `NCCL_IB_DISABLE=1` — a silent fallback to a TCP
+socket transport, which is the exact failure this test exists to catch, so it
+must never be how this test passes.
+
+So the runner **checks the limit up front** (before the rendezvous, so it does
+not hold its peer's node hostage) and exits 3 with both remedies. **Error, not
+Fail**: the link was never measured, so there is no hardware verdict, and Error
+is the retryable phase — right for an environment somebody is about to fix.
+
+### The two remedies, and the trap between them
+
+What actually matters is **`CAP_IPC_LOCK`, which bypasses `RLIMIT_MEMLOCK`
+entirely** — the identical NCCL run passes as uid 0 and fails as uid 65532 at the
+very same 8 MiB limit. Measured on this cluster:
+
+1. **Raise the container runtime's limit.** For containerd under systemd:
+   ```
+   # /etc/systemd/system/containerd.service.d/10-memlock.conf
+   [Service]
+   LimitMEMLOCK=infinity
+   ```
+   then `systemctl daemon-reload && systemctl restart containerd`. This is what
+   every RDMA/NCCL guide means by `--ulimit memlock=-1`. **This is what the
+   reference cluster now does.**
+2. **Run as uid 0 in a privileged pod**, so `CAP_IPC_LOCK` applies.
+
+**The trap:** `securityContext.capabilities.add: [IPC_LOCK]` does **not** work
+for a non-root container — Kubernetes has no ambient-capabilities field, so runc
+clears the permitted set when it drops to the UID. Verified: `CapPrm` and
+`CapEff` are both `0000000000000000` in a privileged pod running as 65532, with
+and without `IPC_LOCK` added.
+
+The required floor is **64 MiB**, and it is a *conservative* floor rather than a
+measured minimum — the 8 MiB default is measured to fail, but NCCL's true
+requirement could not be measured, because the only ways to give a container more
+(CAP_IPC_LOCK, or raising the runtime limit) remove the ceiling rather than
+raising it to a number. The Error always reports the **observed** limit and both
+remedies, so it stays actionable regardless.
+
 ## Pod requirements
 
 ```yaml

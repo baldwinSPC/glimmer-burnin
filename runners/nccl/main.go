@@ -139,6 +139,21 @@ func run() int {
 		return fin(exitSkip, "this node has %d accelerators, but intra-node (Node scope) collectives are not "+
 			"implemented by this runner yet — it is a Pair-scope fabric test. Run at scope: Pair", gpus)
 	}
+	// THE MEMLOCK GATE, checked before the rendezvous on purpose: a node that
+	// cannot register NCCL's buffers must not hold its peer's node hostage while
+	// it waits for a handshake it will fail immediately afterwards.
+	soft, raised, mlErr := memlock()
+	if mlErr != nil {
+		return fin(exitError, "%v", mlErr)
+	}
+	if raised {
+		logf("raised the RLIMIT_MEMLOCK soft limit to the hard limit (%s)", humanLimit(soft))
+	}
+	logf("RLIMIT_MEMLOCK = %s (this runner needs at least %s)", humanLimit(soft), humanLimit(requiredMemlockBytes))
+	if !memlockSufficient(soft) {
+		return fin(exitError, "%s", memlockAdvice(soft))
+	}
+
 	if role != pairRoleServer && role != pairRoleClient {
 		return fin(exitError, "BURNIN_ROLE=%q is neither %q nor %q", role, pairRoleServer, pairRoleClient)
 	}
@@ -147,6 +162,7 @@ func run() int {
 	}
 
 	cfg := plan{
+		memlock:       soft,
 		healthPort:    envInt("BURNIN_HEALTH_PORT", defaultHealthPort),
 		bootstrapPort: envInt("BURNIN_BOOTSTRAP_PORT", defaultBootstrapPort),
 		warmup:        envInt("BURNIN_NCCL_WARMUP_ITERS", defaultWarmupIters),
@@ -177,6 +193,8 @@ func run() int {
 }
 
 type plan struct {
+	// memlock is this process's RLIMIT_MEMLOCK soft limit; see memlock.go.
+	memlock       uint64
 	healthPort    int
 	bootstrapPort int
 	warmup        int
@@ -213,6 +231,12 @@ func runServer(ports []rdmaPort, cfg plan) int {
 
 	peerIP := ch.peerIP()
 	logf("%s endpoint connected from %s", pairRoleClient, peerIP)
+
+	if peer := ch.peerHello.Memlock; peer > 0 && !memlockSufficient(peer) {
+		reason := fmt.Sprintf("the %s endpoint reports %s", pairRoleClient, memlockAdvice(peer))
+		_ = ch.send(message{Kind: kindAbort, Reason: reason})
+		return fin(exitError, "%s", reason)
+	}
 
 	env := ncclEnv(ports, peerIP)
 	args := harnessArgs(0, "", cfg)
@@ -264,7 +288,7 @@ func runServer(ports []rdmaPort, cfg plan) int {
 // ── client (rank 1) ──────────────────────────────────────────────────────────
 
 func runClient(ports []rdmaPort, peerHost string, cfg plan) int {
-	ch, err := dialPeer(peerHost, cfg.healthPort, cfg.peerWait, logf)
+	ch, err := dialPeer(peerHost, cfg.healthPort, message{Memlock: cfg.memlock}, cfg.peerWait, logf)
 	if err != nil {
 		return fin(exitError, "%v — the collective was never run", err)
 	}
@@ -293,6 +317,10 @@ func runClient(ports []rdmaPort, peerHost string, cfg plan) int {
 	echo(out)
 	if runErr != nil && !strings.Contains(out, "RESULT ") {
 		_ = ch.send(message{Kind: kindAbort, Reason: runErr.Error()})
+		if looksLikeMemlockExhaustion(out) {
+			return fin(exitError, "the rank-1 harness could not register its NCCL transport buffers against %s. %s",
+				peerIP, memlockAdvice(cfg.memlock))
+		}
 		return fin(exitError, "the rank-1 harness failed against %s: %v", peerIP, runErr)
 	}
 	s, err := parseSweep(out)

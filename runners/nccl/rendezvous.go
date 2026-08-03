@@ -31,7 +31,7 @@ import (
 //     address from the accepted connection itself (conn.RemoteAddr).
 //
 //  2. AGREEMENT ON PARAMETERS. perftest requires the two ends to be started with
-//     matching message size, queue-pair count and mode; mismatch it and the run
+//     matching parameters; mismatch them and the run
 //     dies with "Failed to complete run_iter_bw function successfully", which
 //     reads exactly like a broken fabric. Sending the parameters over this
 //     channel makes a mismatch impossible rather than merely unlikely.
@@ -64,6 +64,12 @@ type message struct {
 	Seconds int    `json:"seconds,omitempty"`
 	Iters   int    `json:"iters,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+	// Memlock is the sender's RLIMIT_MEMLOCK soft limit in bytes. The client
+	// reports it in its hello so the SERVER can size a plan that fits BOTH ends:
+	// the two pods can be given different limits, and a plan that fits only the
+	// side that chose it fails on the other with an error that names neither the
+	// limit nor the peer.
+	Memlock uint64 `json:"memlock,omitempty"`
 }
 
 const (
@@ -84,6 +90,9 @@ const phaseCollective = "collective"
 type channel struct {
 	conn net.Conn
 	r    *bufio.Reader
+	// peerHello is the client's opening message, kept because it carries the
+	// peer's memlock budget and the server must plan against it.
+	peerHello message
 }
 
 func newChannel(c net.Conn) *channel { return &channel{conn: c, r: bufio.NewReader(c)} }
@@ -165,6 +174,7 @@ func acceptPeer(ln net.Listener, within time.Duration, log func(string, ...any))
 			}
 			continue
 		}
+		ch.peerHello = m
 		if m.Version != protocolVersion {
 			_ = ch.send(message{Kind: kindAbort, Reason: fmt.Sprintf(
 				"control protocol version %d, peer speaks %d", protocolVersion, m.Version)})
@@ -182,7 +192,7 @@ func acceptPeer(ln net.Listener, within time.Duration, log func(string, ...any))
 // endpoint controller and can lag the pod by a moment, and a client that
 // resolved once and gave up would report a fabric fault about a name that was
 // simply not published yet.
-func dialPeer(host string, port int, within time.Duration, log func(string, ...any)) (*channel, error) {
+func dialPeer(host string, port int, hello message, within time.Duration, log func(string, ...any)) (*channel, error) {
 	deadline := time.Now().Add(within)
 	addr := net.JoinHostPort(host, fmt.Sprint(port))
 	var lastErr error
@@ -190,7 +200,8 @@ func dialPeer(host string, port int, within time.Duration, log func(string, ...a
 		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		if err == nil {
 			ch := newChannel(conn)
-			if err := ch.send(message{Kind: kindHello}); err == nil {
+			hello.Kind = kindHello
+			if err := ch.send(hello); err == nil {
 				return ch, nil
 			}
 			lastErr = err
