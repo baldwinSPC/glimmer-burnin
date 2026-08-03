@@ -159,13 +159,36 @@ spec:
   runner:
     readinessProbe:
       tcpSocket: { port: 18510 }
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        readOnly: false      # ibv_open_device opens the verbs nodes read-write
+        type: Directory
 ```
 
-The pod needs access to `/dev/infiniband` and an unlimited `memlock`. On this
-project's reference nodes `/dev/infiniband/uverbs*` is mode `0666`, so the
-container runs as **non-root** (uid 65532) with no added capability — RDMA verbs
-need neither `CAP_SYS_ADMIN` nor privileged mode, and a privileged fabric pod on
-every node in a fleet is a far larger grant than this test needs.
+**The `/dev/infiniband` mount is mandatory, and `privileged` is not a substitute
+for it.** Measured on this project's reference nodes, inside a pod that had both
+`privileged: true` and `hostNetwork: true`:
+
+```
+pod:  /dev/infiniband -> rdma_cm umad0 umad1 umad2 umad3
+host: /dev/infiniband -> by-ibdev by-path rdma_cm umad0-3 uverbs0-3
+```
+
+Every `uverbs*` node — the user-verbs devices `ibv_create_cq` opens — was
+missing. Without them this runner dies at `Couldn't create CQ / Failed to create
+CQs / Couldn't create IB resources`, which reads like a broken link and is
+nothing of the kind. Adding the `hostPaths` entry above makes `uverbs0-3` appear
+in the pod; that was verified directly. The mount is applied to **both** pods of
+the pair, which is what it has to be: a link measured from one end is not
+measured.
+
+The pod also needs an unlimited `memlock`. On this project's reference nodes
+`/dev/infiniband/uverbs*` is mode `0666`, so the container runs as **non-root**
+(uid 65532) with no added capability — RDMA verbs need neither `CAP_SYS_ADMIN`
+nor privileged mode, and a privileged fabric pod on every node in a fleet is a
+far larger grant than this test needs. Mounting one device directory is the
+smaller grant, and it is the one that actually works.
 
 `hostNetwork` is required rather than merely convenient: without it the pod's
 address is a CNI overlay address, the route to the peer does not land on an RDMA

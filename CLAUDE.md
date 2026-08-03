@@ -241,6 +241,39 @@ disagree about the same hardware. One brain, two dispatchers.
   adds that toleration unconditionally — it is scoped to that one taint by key
   and is emphatically not a blanket toleration. Removing it deadlocks every test
   on every node.
+- **Host access is named, narrow, and never implicit.** `spec.runner.hostPaths`
+  is the ONLY way a runner pod reaches the node's filesystem: a test that
+  declares nothing gets a pod with no volumes at all, and there is no default
+  `/dev`, no convenience `/sys`, nothing. The shape is deliberately a curated
+  `HostPathMount{path, mountPath, readOnly, type}` rather than
+  `[]corev1.Volume` + `[]corev1.VolumeMount`, because every mount a burn-in
+  runner has ever needed is a host device or a host log path, and the curated
+  form states that intent where a general volume list would bury it. It also
+  refuses what the general form cannot: `type` admits only the assert-only
+  hostPath kinds, so a BurnInTest can never ask the kubelet to CREATE a path —
+  an operator sent to measure a fleet must not mutate it. Widen to the general
+  form only for a case the narrow one genuinely cannot express, and say which.
+  Four rules hold it up: `readOnly` **defaults to true** and is a pointer so
+  that "unset" is distinguishable from "false" (a privilege grant's default has
+  to fall towards the harmless form, including for objects the apiserver never
+  defaulted); the mounts are built in `podForTest`, which is the one place a
+  runner pod is constructed, so Node scope and BOTH pods of a Pair get identical
+  host access by construction — a link measured from one end is not measured;
+  the mount spec rides in the **pinned plan** like the rest of the test spec, so
+  editing a BurnInTest mid-run cannot widen what an in-flight attempt takes off
+  the host; and `privileged: true` is NOT a substitute — measured on this
+  project's own nodes, a privileged `hostNetwork` pod was missing every
+  `/dev/infiniband/uverbs*` device the host had, which is exactly what
+  `ibv_create_cq` opens.
+- **A runner without its mount degrades honestly; keep it that way.** The two
+  cases that motivated `hostPaths` are the worked examples. Without
+  `/dev/infiniband` the fabric runners fail loudly at `Couldn't create CQ`
+  rather than reporting a number, and without `/dev/kmsg` host-health reports
+  `xid_source=none` and OMITS `xidEvents` rather than printing a zero it never
+  measured — so a gate on it fails the node instead of certifying it. A runner
+  must never paper over a missing mount with a fabricated measurement; a node
+  condemned for a reading nobody took is recoverable, and a fleet certified
+  clean by a fabricated zero is not.
 - Small, focused PRs, with tests. CI must be green.
 
 ### Runner images

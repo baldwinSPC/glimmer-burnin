@@ -160,6 +160,13 @@ spec:
 # Change these to `Required` (or drop the applicability field, which defaults to
 # it) for a fleet where every part has real ECC and a missing reading should
 # condemn the node.
+#
+# NOTE on the /dev/kmsg mount: it is what makes the xidEvents gate below mean
+# anything. Xids are read from the kernel ring buffer, which is NOT in a
+# container's default /dev — without the mount the runner reports
+# `xid_source=none` and OMITS xidEvents entirely, so the gate fails closed and
+# the node is condemned for a measurement nobody took. Mounting it is what turns
+# that gate from a guaranteed failure into a real question about the hardware.
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
 metadata:
@@ -169,7 +176,32 @@ spec:
   scope: Node
   durationSeconds: 30
   hostNetwork: true # NIC link state is read from the host's sysfs
+  runner:
+    # No image: host-health has a default in internal/controller/pods.go and this
+    # test does not want to override it. spec.runner is here only to declare the
+    # host access below — which is exactly the review question this field exists
+    # to make askable, so it is spelled out rather than assumed.
+    #
+    # The mount and the privilege do different jobs and BOTH are needed on a
+    # hardened node: the mount supplies the device node, and privileged supplies
+    # CAP_SYSLOG, without which reading /dev/kmsg is refused wherever
+    # kernel.dmesg_restrict=1 (the default on most distributions).
+    privileged: true
+    hostPaths:
+      # readOnly is left unset and therefore TRUE. This runner only ever reads
+      # the ring buffer; a burn-in runner has no business writing to the kernel
+      # log, and the default falls that way so that nobody has to notice.
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        # Assert what it must already be. The operator will never create a path
+        # on a node to satisfy its own mount, so a node with no /dev/kmsg refuses
+        # the pod and the run records an infrastructure Error — the node is
+        # unjudged, which is honest, rather than silently unmeasured.
+        type: CharDevice
   thresholds:
+    # Producible only because of the /dev/kmsg mount above. Window-scoped: see
+    # xidPreexisting in the runner README to hold this boot's earlier history
+    # against the node as well.
     - metric: xidEvents
       comparison: Equal
       value: "0"

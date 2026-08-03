@@ -32,6 +32,26 @@
 # time, which is why no placeholder tag is filled in here: a tag that does not
 # exist would fail slowly, per node, and look like a fabric problem.
 #
+# Each test below therefore carries a spec.runner block with NO image in it: the
+# block is there for the /dev/infiniband mount, and leaving the image unset keeps
+# the fast, legible plan-time refusal exactly as described above rather than
+# swapping it for a tag that does not exist.
+#
+# ─── WHY /dev/infiniband IS MOUNTED ───────────────────────────────────────────
+#
+# `privileged: true` plus `hostNetwork: true` is NOT enough to reach the RDMA
+# devices, which is the single thing that blocked fabric qualification on this
+# fleet. Measured in a privileged hostNetwork pod on these nodes:
+#
+#   pod:  /dev/infiniband -> rdma_cm umad0 umad1 umad2 umad3
+#   host: /dev/infiniband -> by-ibdev by-path rdma_cm umad0-3 uverbs0-3
+#
+# The uverbs* user-verbs nodes are the missing ones, and uverbs is what
+# ibv_create_cq opens — so without the mount ib_write_bw dies with "Couldn't
+# create CQ / Failed to create CQs / Couldn't create IB resources" and the nccl
+# runner fails in the same place. Mounting the host's /dev/infiniband makes
+# uverbs0-3 appear in the pod; that was verified directly, not inferred.
+#
 # When adopting a runner, note that perftest (ib_write_bw) must be invoked with
 # --report_gbits: it reports MB/s by default, and a bytes-vs-bits mixup shifts
 # bandwidthGbps by 8x. See config/samples/node-acceptance.yaml for a profile
@@ -44,6 +64,23 @@ spec:
   kind: ib-write-bw
   scope: Pair
   durationSeconds: 60
+  runner:
+    # No image on purpose — see the header. This block exists for the mount.
+    #
+    # The mount is applied to BOTH pods of the pair, server and client alike: a
+    # link measured from only one end is not measured.
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        # WRITABLE, and this one has to be said out loud because readOnly
+        # defaults to true. ibv_open_device opens the uverbs nodes read-write,
+        # so a read-only mount fails in the same place as no mount at all.
+        readOnly: false
+        # A node in a fabric-qualification run with no /dev/infiniband has not
+        # loaded its RDMA drivers. That is an infrastructure fault, so refusing
+        # the pod (recorded as Error — unjudged) is the right answer; the
+        # operator will not create the path to paper over it.
+        type: Directory
   thresholds:
     # MEASURED, not derived from line rate. On 2026-08-02, ib_write_bw between
     # two GB10 Sparks over RoCE plateaued at 99.63 Gb/s — identical at 4 and 8
@@ -73,6 +110,17 @@ spec:
     limits:
       nvidia.com/gpu: "1"
       rdma/rdma_shared_device_a: "1"
+  runner:
+    # Same mount, same reason: NCCL's net_ib plugin goes through the verbs
+    # layer, so without uverbs* it fails to create its resources exactly as
+    # ib_write_bw does — and an RDMA plugin that cannot initialise falls back to
+    # TCP, which produces a plausible bandwidth number for a path nobody was
+    # qualifying. An RDMA device request alone does not supply the device nodes.
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        readOnly: false
+        type: Directory
   # MEASURED between these two Sparks, 2026-08-03. A 2-rank all-reduce sweep
   # peaked at 12.00 GB/s at 256 MiB (12.00 and 12.01 across two runs); 10.8 is
   # ~90% of that. Sanity check on the number: 12.00 GB/s is 96 Gb/s, which is

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -214,6 +215,80 @@ func runnerTolerations(fromTarget []corev1.Toleration) []corev1.Toleration {
 	})
 }
 
+// hostPathVolumes turns a runner's declared host mounts into the pod-level
+// volumes and the container-level mounts that go with them.
+//
+// It returns nil, nil when nothing is declared, and that is load-bearing: a test
+// that asks for no host access must produce a pod with NO volumes at all. There
+// is no implicit mount anywhere in this operator — not a default /dev, not a
+// convenience /sys — because a host mount nobody wrote down is a host mount
+// nobody reviewed.
+//
+// Both slices are built in declaration order so a pod's shape is a function of
+// the pinned spec alone, which is what lets a controller restart rebuild the same
+// pod rather than decide the existing one is wrong.
+func hostPathVolumes(mounts []burninv1alpha1.HostPathMount) ([]corev1.Volume, []corev1.VolumeMount) {
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
+	for i, m := range mounts {
+		name := hostPathVolumeName(i, m.MountPath)
+		volumes = append(volumes, corev1.Volume{
+			Name: name,
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: m.Path, Type: m.Type},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      name,
+			MountPath: m.MountPath,
+			ReadOnly:  hostPathReadOnly(m),
+		})
+	}
+	return volumes, volumeMounts
+}
+
+// hostPathReadOnly re-applies the CRD's `readOnly` default of true.
+//
+// The reconciler must not assume apiserver defaulting has happened — an object
+// built directly in a test, or one written before the field existed, still has to
+// be executed under the policy the field documentation promises. For this field
+// in particular a nil that fell through as "false" would hand out write access to
+// a host path because nobody mentioned it, which is exactly backwards for a
+// privilege grant.
+func hostPathReadOnly(m burninv1alpha1.HostPathMount) bool {
+	return m.ReadOnly == nil || *m.ReadOnly
+}
+
+// hostPathVolumeName derives a pod volume name from a mount's position and its
+// mount path.
+//
+// The index alone would be enough for uniqueness — MountPath is the list's map
+// key, so the API already rejects duplicates — but a name like "host-0-dev-kmsg"
+// tells whoever is reading `kubectl describe pod` on a node that is refusing to
+// start what the pod was actually asking the kubelet for. The index stays in
+// front so that two paths which sanitise to the same label still get distinct
+// names.
+//
+// The result is a DNS-1123 label: lowercase alphanumerics and dashes, no leading
+// or trailing dash, at most 63 characters.
+func hostPathVolumeName(index int, mountPath string) string {
+	sanitized := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return '-'
+		}
+	}, mountPath)
+	name := fmt.Sprintf("host-%d-%s", index, sanitized)
+	if len(name) > 63 {
+		name = name[:63]
+	}
+	return strings.Trim(name, "-")
+}
+
 // runnerImage resolves the container image for a test.
 func runnerImage(spec *burninv1alpha1.BurnInTestSpec) (string, error) {
 	if spec.Runner != nil && spec.Runner.Image != "" {
@@ -283,6 +358,7 @@ func podForTest(
 		)
 	}
 
+	var volumes []corev1.Volume
 	if spec.Runner != nil {
 		container.Command = spec.Runner.Command
 		container.Args = spec.Runner.Args
@@ -295,6 +371,16 @@ func podForTest(
 			t := true
 			container.SecurityContext = &corev1.SecurityContext{Privileged: &t}
 		}
+		// Host mounts. This runs for EVERY scope and, at Pair scope, for both
+		// roles: podForTest is the one place a runner pod is built, so the server
+		// and the client of a pair get identical host access by construction
+		// rather than by two code paths agreeing. A fabric test that reached the
+		// verbs devices from only one end would measure nothing.
+		//
+		// spec is the PINNED plan's copy of the test spec, so what a running test
+		// mounts is fixed at run start: editing the BurnInTest mid-run cannot
+		// change which host paths an in-flight attempt is handed.
+		volumes, container.VolumeMounts = hostPathVolumes(spec.Runner.HostPaths)
 	}
 
 	labels := map[string]string{
@@ -328,6 +414,9 @@ func podForTest(
 			HostNetwork:           spec.HostNetwork,
 			ActiveDeadlineSeconds: &deadline,
 			Containers:            []corev1.Container{container},
+			// Nil unless the test declared host mounts, so a test that asked for
+			// no host access gets a pod with no volumes whatsoever.
+			Volumes: volumes,
 		},
 	}
 

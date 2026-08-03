@@ -326,11 +326,138 @@ spec:
                                 - name
                                 type: object
                               type: array
+                            hostPaths:
+                              description: |-
+                                HostPaths are paths on the NODE made visible inside the runner container.
+
+                                This is the most security-relevant field in this API and it is deliberately
+                                the most explicit one. Every entry hands the runner a piece of the host's
+                                own filesystem; it is not made safe by the pod being short-lived, and a
+                                writable mount of a path that only needed reading is a real escalation.
+                                Nothing is mounted unless it is named here — there is no implicit host
+                                access anywhere in this operator.
+
+                                A burn-in runner legitimately needs it, which is why the field exists
+                                rather than being refused. Hardware acceptance measures the host, and the
+                                two facts below were measured on a real cluster, not inferred:
+
+                                  - RDMA fabric tests are IMPOSSIBLE without it. `privileged: true` plus
+                                    `hostNetwork: true` does NOT give a pod the host's user-verbs device
+                                    nodes: /dev/infiniband inside such a pod holds only rdma_cm and umad*,
+                                    while the host also has uverbs*. uverbs is what ibv_create_cq opens, so
+                                    ib_write_bw dies with "Couldn't create CQ / Failed to create CQs" and
+                                    the nccl runner fails the same way. Mounting the host's
+                                    /dev/infiniband is what makes uverbs* appear in the pod.
+                                  - Xid scanning needs /dev/kmsg, which is not in a container's default
+                                    /dev. Without it host-health reports xid_source=none and OMITS
+                                    xidEvents, so a gate on that metric fails closed and certifies nothing.
+
+                                The shape is deliberately narrow rather than a general
+                                []corev1.Volume + []corev1.VolumeMount. Every mount a burn-in runner has
+                                ever needed is a host device or a host log path, and a curated field states
+                                that intent where a general volume list would bury it: a reviewer can read
+                                what a BurnInTest takes from the node, and from which direction, without
+                                decoding a volume source. It also lets this API refuse what the general
+                                form cannot — Type here admits only the assert-only hostPath types, so a
+                                BurnInTest can never ask the kubelet to CREATE a path on a node.
+                              items:
+                                description: |-
+                                  HostPathMount makes ONE path on the node visible inside the runner container.
+
+                                  It is honoured identically at Node scope and at Pair scope, on BOTH pods of a
+                                  pair: a fabric test that could reach the verbs devices from only one end of
+                                  the link would measure nothing.
+
+                                  See RunnerSpec.HostPaths for what this costs and why a burn-in runner needs
+                                  it anyway. The short version: this is host access, it is granted only where
+                                  named, and it is granted read-only unless the entry says otherwise.
+                                properties:
+                                  mountPath:
+                                    description: |-
+                                      MountPath is where that path appears INSIDE the runner container.
+
+                                      It is required rather than defaulted to Path, because a mount whose two
+                                      ends are written out is a mount a reviewer can check. It is also this
+                                      list's identity: two entries may not share a MountPath.
+                                    minLength: 1
+                                    pattern: ^/
+                                    type: string
+                                  path:
+                                    description: Path is the absolute path ON THE
+                                      HOST, e.g. "/dev/infiniband".
+                                    minLength: 1
+                                    pattern: ^/
+                                    type: string
+                                  readOnly:
+                                    default: true
+                                    description: |-
+                                      ReadOnly mounts the path without write access. It DEFAULTS TO TRUE, which
+                                      is the direction a security-relevant default has to fall: an author who
+                                      needs the runner to write to the host has to say so, and an author who
+                                      forgets gets the harmless mount rather than the dangerous one.
+
+                                      It is a pointer precisely so that "unset" is distinguishable from "false".
+                                      A plain bool would make a Go-constructed object — or one written before
+                                      this field existed — silently take the writable form.
+
+                                      Which way round the real cases fall:
+
+                                        - /dev/kmsg is READ-ONLY. host-health only ever reads the ring buffer,
+                                          and a burn-in runner has no business writing to the kernel log.
+                                        - /dev/infiniband must be WRITABLE (readOnly: false). The user-verbs
+                                          device nodes are opened read-write by ibv_open_device, so a read-only
+                                          mount fails in the same place, and with much the same message, as no
+                                          mount at all.
+                                    type: boolean
+                                  type:
+                                    description: |-
+                                      Type asserts what the path must already BE on the node, and the kubelet
+                                      refuses the pod if it is anything else.
+
+                                      The permitted values are the assert-only ones. corev1's DirectoryOrCreate
+                                      and FileOrCreate are deliberately NOT accepted: a burn-in run touches every
+                                      node in a fleet, and an operator that creates paths on hosts to satisfy its
+                                      own mounts would mutate the fleet it was sent to measure. Leaving Type
+                                      unset keeps Kubernetes' default of no check at all, which also lets the
+                                      container runtime create a missing path — so set it whenever you know what
+                                      the path is.
+
+                                      Setting it converts "the runner saw an empty directory and reported
+                                      nothing" into a pod that refuses to start, which the run records as an
+                                      infrastructure Error. That is the better failure: an Error says the
+                                      hardware was never judged, where an empty mount looks like a measurement.
+                                    enum:
+                                    - Directory
+                                    - File
+                                    - Socket
+                                    - CharDevice
+                                    - BlockDevice
+                                    type: string
+                                required:
+                                - mountPath
+                                - path
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                              - mountPath
+                              x-kubernetes-list-type: map
                             image:
+                              description: |-
+                                Image overrides the built-in image for the test's Kind. Empty means "use
+                                the default for this Kind", and a Kind with no default refuses at plan
+                                time asking for this field rather than pull-failing per node.
+
+                                It is optional because RunnerSpec is no longer only an image override: a
+                                test that needs nothing but a readinessProbe or a hostPath would otherwise
+                                be forced to pin an image it did not want to change, and pinning one to
+                                get a mount is how a fleet ends up on a stale runner tag by accident.
                               type: string
                             privileged:
-                              description: Privileged is sometimes required for RDMA/GPUDirect
-                                paths.
+                              description: |-
+                                Privileged is sometimes required for RDMA/GPUDirect paths.
+
+                                It is NOT sufficient to reach host device nodes — see HostPaths, which is
+                                the field that actually gets them into the container.
                               type: boolean
                             readinessProbe:
                               description: |-
@@ -504,8 +631,6 @@ spec:
                                   format: int32
                                   type: integer
                               type: object
-                          required:
-                          - image
                           type: object
                         scope:
                           default: Node

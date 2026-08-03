@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
@@ -89,6 +90,9 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 		if err := validatePairTopology(t, targets, nodeCap); err != nil {
 			return nil, err
 		}
+		if err := validateHostPaths(t); err != nil {
+			return nil, err
+		}
 		p.Tests = append(p.Tests, plannedTest{Name: t.name, Required: t.required, Spec: t.spec})
 	}
 	return p, nil
@@ -124,6 +128,44 @@ func validatePairTopology(t resolvedTest, targets []string, nodeCap int) error {
 				"set spec.maxConcurrentNodes to at least 2, having checked that two nodes at full load is within the "+
 				"room's power and cooling headroom",
 			t.name, nodeCap, nodeCap)
+	}
+	return nil
+}
+
+// validateHostPaths refuses a host mount that would produce a pod the apiserver
+// rejects.
+//
+// The CRD already enforces most of this — MountPath is the list's map key, and
+// both paths carry an absolute-path pattern — so on a real cluster this is a
+// backstop. It matters anyway because the failure it prevents has no other exit:
+// an invalid pod spec is rejected on Create, the reconcile returns an error, and
+// the run retries the same rejection forever while holding a cordon. Refusing at
+// START instead turns that into one legible sentence at run start, which is the
+// same trade validatePairTopology makes.
+func validateHostPaths(t resolvedTest) error {
+	if t.spec.Runner == nil {
+		return nil
+	}
+	byMountPath := map[string]bool{}
+	for _, m := range t.spec.Runner.HostPaths {
+		switch {
+		case m.Path == "" || m.MountPath == "":
+			return fmt.Errorf(
+				"test %q declares a host mount with an empty path (host %q -> container %q) — "+
+					"both ends of a host mount have to be written down before this operator will grant it",
+				t.name, m.Path, m.MountPath)
+		case !strings.HasPrefix(m.Path, "/") || !strings.HasPrefix(m.MountPath, "/"):
+			return fmt.Errorf(
+				"test %q declares a host mount with a relative path (host %q -> container %q) — "+
+					"both must be absolute; a relative host path names nothing in particular on a node",
+				t.name, m.Path, m.MountPath)
+		case byMountPath[m.MountPath]:
+			return fmt.Errorf(
+				"test %q declares two host mounts at container path %q — a duplicate mount point is an invalid "+
+					"pod spec, so every attempt would be refused by the apiserver while the run held the node",
+				t.name, m.MountPath)
+		}
+		byMountPath[m.MountPath] = true
 	}
 	return nil
 }

@@ -198,10 +198,23 @@ spec:
   runner:
     readinessProbe:
       tcpSocket: { port: 18530 }
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        readOnly: false
+        type: Directory
 ```
 
-Also needs `/dev/infiniband` and an unlimited `memlock`. Runs **non-root** (uid
-65532). The control/readiness port is **18530** and rank 0's NCCL bootstrap
+**The `/dev/infiniband` mount is mandatory.** `privileged: true` plus
+`hostNetwork: true` does *not* supply the `uverbs*` user-verbs nodes — measured,
+see [`../ib-write-bw/README.md`](../ib-write-bw/README.md#pod-requirements) — and
+neither does an `rdma/…` resource request. Without them NCCL's `net_ib` plugin
+fails to create its resources exactly as `ib_write_bw` does, and the failure
+mode here is the worse one: a plugin that cannot initialise falls back to TCP and
+still reports a bus bandwidth, so the run yields a plausible number for a
+transport nobody was qualifying. The mount is applied to both ranks of the pair.
+
+Also needs an unlimited `memlock`. Runs **non-root** (uid 65532). The control/readiness port is **18530** and rank 0's NCCL bootstrap
 handle is published on **18535**; both differ from the other two fabric runners'
 ports so they do not collide under `hostNetwork`.
 

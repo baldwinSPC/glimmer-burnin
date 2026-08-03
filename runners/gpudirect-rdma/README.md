@@ -114,7 +114,8 @@ pair reports one result naming both nodes, and neither node is blamed.
 ## Pod requirements
 
 Everything [`ib-write-bw`](../ib-write-bw/README.md#pod-requirements) needs —
-`hostNetwork`, `/dev/infiniband`, unlimited `memlock`, non-root — **plus** a GPU:
+`hostNetwork`, the `/dev/infiniband` mount, unlimited `memlock`, non-root —
+**plus** a GPU:
 
 ```yaml
 spec:
@@ -125,7 +126,18 @@ spec:
   runner:
     readinessProbe:
       tcpSocket: { port: 18520 }
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        readOnly: false
+        type: Directory
 ```
+
+The `hostPaths` entry is not optional and `privileged` will not stand in for it:
+a privileged `hostNetwork` pod on these nodes was measured to be missing every
+`uverbs*` device, which is what `ibv_create_cq` opens. See
+[`../ib-write-bw/README.md`](../ib-write-bw/README.md#pod-requirements) for the
+observed pod-versus-host listing.
 
 The control/readiness port defaults to **18520** (perftest uses 18525/18526), so
 this runner and `ib-write-bw` can be scheduled without colliding under

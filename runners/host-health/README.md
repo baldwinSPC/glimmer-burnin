@@ -162,8 +162,13 @@ spec:
   hostNetwork: true
   runner:
     image: ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.1.0
-    # Required ONLY for the /dev/kmsg Xid scan; see "What the pod needs".
+    # Both of these are for the /dev/kmsg Xid scan and nothing else; see
+    # "What the pod needs". Drop them and xidEvents is omitted, not zeroed.
     privileged: true
+    hostPaths:
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        type: CharDevice # readOnly defaults to true
   thresholds:
     - { metric: xidEvents,         comparison: Equal, value: "0" }
     # RequiredIfMeasurable: passes on a GB10, which has no ECC for NVML to read
@@ -199,7 +204,7 @@ Xid or ECC error provoked by that load is still in the log.
 | PCIe AER | nothing — `/sys` is already mounted read-only in any container | `aer_status=absent` |
 | NIC link state | `hostNetwork: true` | `nic_status=absent`, `nicLinkDownEvents` omitted |
 | NVML | NVIDIA Container Toolkit; the image requests `NVIDIA_DRIVER_CAPABILITIES=utility` | `nvml_status=absent`, all NVML counters omitted |
-| Xid scan | a readable `/dev/kmsg` — see below | `xid_source=none`, `xidEvents` omitted |
+| Xid scan | a readable `/dev/kmsg`, mounted with `spec.runner.hostPaths` — see below | `xid_source=none`, `xidEvents` omitted (never a false zero) |
 
 **The Xid scan is the awkward one.** `/dev/kmsg` is not in a container's default
 `/dev`, and reading it needs `CAP_SYSLOG` (or root) on any host with
@@ -207,21 +212,49 @@ Xid or ECC error provoked by that load is still in the log.
 runs as `USER 65532:65532` — least privilege by default, and it degrades cleanly
 rather than demanding root of every node.
 
-To actually get the scan today:
+**Mount it.** `spec.runner.hostPaths` is the supported way, and it is what
+`config/samples/node-acceptance.yaml` does:
 
-- `spec.runner.privileged: true` gives the container the host's `/dev`, including
-  `/dev/kmsg`. On a host with `kernel.dmesg_restrict=0` and a world-readable
-  `/dev/kmsg` that is sufficient even as uid 65532; otherwise the container must
-  also run as root, which the current reconciler cannot express (it sets
-  `privileged` but no `runAsUser`, and the image's `USER` wins).
-- Alternatively, mount a text kernel log and point the runner at it with
-  `BURNIN_KERN_LOG_PATHS` — but the reconciler does not build volumes for test
-  pods yet either.
+```yaml
+  runner:
+    # The mount supplies the device node; privileged supplies CAP_SYSLOG, which
+    # reading /dev/kmsg needs wherever kernel.dmesg_restrict=1 — the default on
+    # most distributions. On a host with dmesg_restrict=0 and a world-readable
+    # /dev/kmsg the mount alone is enough, even as uid 65532.
+    privileged: true
+    hostPaths:
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        # readOnly defaults to true, which is right here: this runner only ever
+        # reads the ring buffer.
+        type: CharDevice
+```
 
-Until one of those exists, expect `xid_source=none` on a hardened node, and
-remember that this is the safe failure: the metric is omitted, so a profile that
-thresholds `xidEvents` fails the node rather than passing it on a zero nobody
-measured.
+Do not rely on `privileged: true` alone to supply the device node. It is
+documented as giving the container the host's `/dev`, but that was measured to be
+unreliable on this project's own nodes — a privileged pod on these hosts is
+missing device nodes the host has (see the `uverbs*` case in
+[`../ib-write-bw/README.md`](../ib-write-bw/README.md#pod-requirements)). Name
+the path and the kubelet mounts the path.
+
+A text kernel log works too: mount it with `hostPaths` and point the runner at it
+with `BURNIN_KERN_LOG_PATHS` — and on a hardened node that is the more robust
+route, because it needs no capability at all.
+
+One residual gap, unchanged by this field: if a node needs the reader to be
+**root** rather than merely to hold `CAP_SYSLOG`, the reconciler still cannot
+express it. It sets `privileged` but no `runAsUser`, and the image's
+`USER 65532:65532` wins. Expect `xid_source=none` there, and reach for the text
+kernel log instead.
+
+**Without the mount the runner degrades honestly, and that is the whole point.**
+It reports `xid_source=none` and **omits** `xidEvents` rather than printing a
+`0` it never measured. `pkg/verdict` fails a threshold whose metric is missing,
+so a profile that gates `xidEvents Equal 0` on an unmounted node **fails the
+node** — it does not pass it. The cost of forgetting the mount is a node
+condemned for a measurement nobody took; the cost of the alternative would be a
+fleet certified clean by a fabricated zero, and only one of those two is
+recoverable.
 
 ## Duration
 

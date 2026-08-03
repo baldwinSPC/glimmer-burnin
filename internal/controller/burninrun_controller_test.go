@@ -3485,3 +3485,294 @@ func TestRun_ReleasesANodeAsSoonAsItsWorkIsDone(t *testing.T) {
 	h.reconcileUntilSettled("run1")
 	h.assertNoStrandedCordons()
 }
+
+// ─── Host mounts ──────────────────────────────────────────────────────────────
+//
+// Measured on a live two-node GB10 cluster: `privileged: true` plus
+// `hostNetwork: true` does NOT put the host's RDMA device nodes in the pod. A
+// privileged hostNetwork pod saw only `rdma_cm umad0..3` under /dev/infiniband
+// while the host also had `uverbs0..3`, and uverbs is what ibv_create_cq opens —
+// so ib_write_bw died with "Couldn't create CQ" and nccl failed the same way.
+// The same gap kept host-health from reading /dev/kmsg, which made it report
+// xid_source=none and omit xidEvents, so any gate on that metric failed closed
+// and certified nothing.
+//
+// RunnerSpec.HostPaths is the fix, and these are its load-bearing properties:
+// the mount reaches the pod, it reaches BOTH ends of a pair, read-only means
+// read-only, the spec is pinned so a mid-run edit cannot change it, and asking
+// for nothing grants nothing.
+
+// hostMount is one declared host mount, written the way a profile author writes
+// the common case: two paths, and no opinion about read-only.
+func hostMount(path, mountPath string) burninv1alpha1.HostPathMount {
+	return burninv1alpha1.HostPathMount{Path: path, MountPath: mountPath}
+}
+
+// withHostPaths declares host mounts on a test, creating the runner block if the
+// fixture has none — which is what an author does to a test whose image they are
+// not overriding.
+func withHostPaths(bt *burninv1alpha1.BurnInTest, mounts ...burninv1alpha1.HostPathMount) *burninv1alpha1.BurnInTest {
+	if bt.Spec.Runner == nil {
+		bt.Spec.Runner = &burninv1alpha1.RunnerSpec{}
+	}
+	bt.Spec.Runner.HostPaths = mounts
+	return bt
+}
+
+// mountOf resolves one container mount path to the volumeMount that provides it
+// AND the pod volume that volumeMount names.
+//
+// Both halves are asserted together on purpose: a volumeMount pointing at a
+// volume that does not exist is an invalid pod, and a volume nothing mounts
+// grants the runner nothing at all. Either half alone would let a broken pod
+// pass this test.
+func mountOf(t *testing.T, pod *corev1.Pod, mountPath string) (corev1.VolumeMount, corev1.Volume) {
+	t.Helper()
+	var vm corev1.VolumeMount
+	found := false
+	for _, m := range pod.Spec.Containers[0].VolumeMounts {
+		if m.MountPath == mountPath {
+			vm, found = m, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pod %s has no mount at %q — the runner cannot see the host path: %+v",
+			pod.Name, mountPath, pod.Spec.Containers[0].VolumeMounts)
+	}
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == vm.Name {
+			return vm, v
+		}
+	}
+	t.Fatalf("pod %s mounts volume %q at %q but declares no such volume: %+v",
+		pod.Name, vm.Name, mountPath, pod.Spec.Volumes)
+	return vm, corev1.Volume{}
+}
+
+// A declared host path reaches the runner container as a hostPath volume, with
+// the host path, the mount point and the asserted type all intact.
+func TestRun_HostPathsReachTheRunnerPod(t *testing.T) {
+	charDev := corev1.HostPathCharDev
+	bt := withHostPaths(healthTest("host-health"), burninv1alpha1.HostPathMount{
+		Path: "/dev/kmsg", MountPath: "/dev/kmsg", Type: &charDev,
+	})
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("host-health")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	pod := h.pods("run1")["spark-a"]
+	if pod == nil {
+		t.Fatal("no pod was created")
+	}
+	vm, vol := mountOf(t, pod, "/dev/kmsg")
+	if vol.HostPath == nil {
+		t.Fatalf("volume %q is not a hostPath volume: %+v", vol.Name, vol.VolumeSource)
+	}
+	if vol.HostPath.Path != "/dev/kmsg" {
+		t.Errorf("host path = %q, want /dev/kmsg — the pod is reading the wrong thing off the node", vol.HostPath.Path)
+	}
+	if vol.HostPath.Type == nil || *vol.HostPath.Type != corev1.HostPathCharDev {
+		t.Errorf("hostPath type = %v, want CharDevice — without the assertion the runtime may create the path on the host", vol.HostPath.Type)
+	}
+	if vm.Name != vol.Name {
+		t.Errorf("mount names volume %q, pod declares %q", vm.Name, vol.Name)
+	}
+}
+
+// A pair is one measurement across two pods, so both ends need the devices. A
+// mount that reached only the server would leave the client — the side that
+// actually measures — without the verbs nodes, which is the exact failure this
+// field was added for.
+func TestPair_HostPathsReachBothEndsOfTheLink(t *testing.T) {
+	dir := corev1.HostPathDirectory
+	writable := false
+	bt := pairTest("ib")
+	bt.Spec.Runner.HostPaths = []burninv1alpha1.HostPathMount{{
+		Path: "/dev/infiniband", MountPath: "/dev/infiniband", ReadOnly: &writable, Type: &dir,
+	}}
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		bt,
+		profile("fabric", nil, false, testRef("ib")),
+		pairRun("run1", "fabric", "spark-a", "spark-b"),
+	)
+	server, client := runPairToStart(h)
+
+	for _, pod := range []*corev1.Pod{server, client} {
+		role := pod.Labels[labelPairRole]
+		vm, vol := mountOf(t, pod, "/dev/infiniband")
+		if vol.HostPath == nil || vol.HostPath.Path != "/dev/infiniband" {
+			t.Errorf("%s end: hostPath = %+v, want /dev/infiniband — this end cannot open uverbs and the link is not measured",
+				role, vol.VolumeSource)
+		}
+		if vm.ReadOnly {
+			t.Errorf("%s end: /dev/infiniband mounted read-only — ibv_open_device opens the verbs nodes read-write, so this fails in the same place as no mount at all",
+				role)
+		}
+	}
+}
+
+// readOnly defaults to TRUE, and a Go-built object must get that default too:
+// the reconciler cannot assume apiserver defaulting has happened, and a nil that
+// fell through as "false" would hand out write access to a host path because
+// nobody mentioned it.
+func TestRun_HostPathReadOnlyDefaultsToTrueAndFalseIsHonoured(t *testing.T) {
+	writable := false
+	readOnly := true
+	bt := withHostPaths(healthTest("host-health"),
+		hostMount("/dev/kmsg", "/dev/kmsg"), // unset: must come out read-only
+		burninv1alpha1.HostPathMount{Path: "/dev/infiniband", MountPath: "/dev/infiniband", ReadOnly: &writable},
+		burninv1alpha1.HostPathMount{Path: "/var/log", MountPath: "/host/var/log", ReadOnly: &readOnly},
+	)
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("host-health")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	pod := h.pods("run1")["spark-a"]
+	for _, tc := range []struct {
+		mountPath string
+		want      bool
+		why       string
+	}{
+		{"/dev/kmsg", true, "readOnly was left unset, and the default for a host mount has to fall towards the harmless form"},
+		{"/dev/infiniband", false, "readOnly: false was declared explicitly because the verbs nodes are opened read-write"},
+		{"/host/var/log", true, "readOnly: true was declared explicitly"},
+	} {
+		vm, _ := mountOf(t, pod, tc.mountPath)
+		if vm.ReadOnly != tc.want {
+			t.Errorf("%s: readOnly = %v, want %v — %s", tc.mountPath, vm.ReadOnly, tc.want, tc.why)
+		}
+	}
+}
+
+// The mount spec is part of the pinned plan, so a mid-run edit cannot change
+// what a running test takes off the host.
+//
+// This is the same hermeticity the rest of the spec has, and it matters more
+// here than anywhere else: without it, editing a BurnInTest while a run is in
+// flight would silently widen the host access of the very next attempt — the
+// escalation would arrive with no new object, no new run, and no audit trail.
+func TestRun_HostPathsArePinnedAgainstAMidRunEdit(t *testing.T) {
+	bt := withHostPaths(healthTest("host-health"), hostMount("/dev/kmsg", "/dev/kmsg"))
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("host-health")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1") // pins the plan; no pod yet
+
+	// Sabotage: widen the mount to the whole host filesystem, writable.
+	var live burninv1alpha1.BurnInTest
+	if err := h.c.Get(context.Background(), types.NamespacedName{Namespace: "burnin", Name: "host-health"}, &live); err != nil {
+		t.Fatal(err)
+	}
+	writable := false
+	live.Spec.Runner.HostPaths = []burninv1alpha1.HostPathMount{
+		{Path: "/", MountPath: "/host", ReadOnly: &writable},
+	}
+	if err := h.c.Update(context.Background(), &live); err != nil {
+		t.Fatal(err)
+	}
+
+	h.reconcile("run1") // creates the pod, from the PINNED spec
+
+	pod := h.pods("run1")["spark-a"]
+	if pod == nil {
+		t.Fatal("no pod was created")
+	}
+	if len(pod.Spec.Volumes) != 1 {
+		t.Fatalf("pod has %d volumes, want the 1 that was pinned at start: %+v", len(pod.Spec.Volumes), pod.Spec.Volumes)
+	}
+	if _, vol := mountOf(t, pod, "/dev/kmsg"); vol.HostPath.Path != "/dev/kmsg" {
+		t.Errorf("host path = %q, want the pinned /dev/kmsg", vol.HostPath.Path)
+	}
+	for _, m := range pod.Spec.Containers[0].VolumeMounts {
+		if m.MountPath == "/host" {
+			t.Fatal("the mid-run edit reached a running test: the pod mounts the host root, which nobody authorised for this run")
+		}
+	}
+}
+
+// A test that declares no host access gets a pod with NO volumes. There is no
+// implicit /dev, no convenience /sys, nothing: a host mount nobody wrote down is
+// a host mount nobody reviewed, and this is the assertion that keeps it that way
+// as pod construction grows.
+func TestRun_NoHostPathsDeclaredGrantsNoHostAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		test *burninv1alpha1.BurnInTest
+	}{
+		{"no runner block at all", smokeTest("fp4")},
+		{"a runner block that declares no host paths", func() *burninv1alpha1.BurnInTest {
+			bt := smokeTest("fp4")
+			bt.Spec.Runner = &burninv1alpha1.RunnerSpec{Privileged: true}
+			return bt
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t,
+				gb10Node("spark-a"),
+				tc.test,
+				profile("acceptance", nil, false, testRef("fp4")),
+				newRun("run1", "acceptance", "spark-a"),
+			)
+			h.reconcile("run1")
+			h.reconcile("run1")
+
+			pod := h.pods("run1")["spark-a"]
+			if pod == nil {
+				t.Fatal("no pod was created")
+			}
+			if len(pod.Spec.Volumes) != 0 {
+				t.Errorf("pod has %d volumes without asking for any: %+v", len(pod.Spec.Volumes), pod.Spec.Volumes)
+			}
+			if len(pod.Spec.Containers[0].VolumeMounts) != 0 {
+				t.Errorf("pod has %d volume mounts without asking for any: %+v",
+					len(pod.Spec.Containers[0].VolumeMounts), pod.Spec.Containers[0].VolumeMounts)
+			}
+		})
+	}
+}
+
+// Two mounts at one container path is an invalid pod spec, which the apiserver
+// refuses on every Create — so the run would retry the same rejection forever
+// while holding a cordon. It is refused at START instead, with the offending
+// path named.
+func TestRun_DuplicateHostMountPathIsRefusedAtStart(t *testing.T) {
+	bt := withHostPaths(healthTest("host-health"),
+		hostMount("/dev/kmsg", "/host/log"),
+		hostMount("/var/log/kern.log", "/host/log"),
+	)
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("host-health")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error", run.Status.Phase)
+	}
+	msg := run.Status.Results[0].Message
+	if !strings.Contains(msg, "/host/log") {
+		t.Errorf("message = %q, want it to name the duplicated mount point", msg)
+	}
+	if len(h.allPods("run1")) != 0 {
+		t.Error("a pod was created for a test whose mounts cannot be admitted")
+	}
+	h.assertNoStrandedCordons()
+}
