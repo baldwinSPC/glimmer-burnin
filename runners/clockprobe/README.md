@@ -277,11 +277,68 @@ author whose threshold was calibrated against `gpu-burn` would silently condemn
 every node this runner touched, and a fleet's stored history would interleave
 two different quantities under one series.
 
-So the name is `sustainedFmaThroughputTflops`: unregistered, which the registry
-explicitly permits ("the registry exists to stop the names we DO own from
-drifting apart, not to forbid new measurements"), still thresholdable, and
-honestly distinguishable. Registering it — with a description saying what load
-produced it — is a reasonable follow-up.
+So the name is `sustainedFmaThroughputTflops`, now registered in `pkg/contract`
+with a description that says which load produced it — thresholdable, and
+honestly distinguishable from the GEMM figure.
+
+### Which of these can decide acceptance
+
+Every canonical name above is registered in
+[`pkg/contract/metrics.go`](../../pkg/contract/metrics.go), and each one states
+whether a profile may gate a fleet on it. The short version:
+
+| may gate on it (`Acceptance`) | why |
+|---|---|
+| `sustainedClockPct`, `minSmClockPct` | the mean and the worst single sample; the mean is the verdict, the minimum catches a dropout the mean hides |
+| `smClockMHz`, `memClockMHz` | absolute clocks; SKU-specific, so a fleet-wide gate belongs on the percentage |
+| `sustainedFmaThroughputTflops`, `throughputConsistencyPct` | the clock-bound throughput and the collapse detector |
+| `gpuTempC`, `meanTempUnderLoadC`, `powerDrawW`, `meanPowerW` | peak and mean of the two things a wedge moves |
+| `enforcedPowerLimitW`, `powerLimitRatioPct` | the PD contract, absolute and SKU-portable |
+| `throttleEvents`, `throttledSamples` | transitions into a capped state, and how long it lasted |
+
+Everything else is `Evidence` — recorded, delivered and chartable, but refused
+by `pkg/verdict.ValidateThresholds` as a basis for acceptance. Three groups:
+
+- **Denominators and nameplate constants** — `ratedBoostClockMHz`,
+  `defaultPowerLimitW`, `peakFmaThroughputTflops`, `maxSmClockPct`. Each is
+  published so the ratio computed from it can be audited; gating on one gates on
+  the SKU, or on the single best sample, rather than on the part's health.
+- **Configuration echoed back** — `durationRequestedS`, `warmupS`,
+  `sampleWindowS`, `clockFloorPct`, `thermalClockFloorPct`,
+  `thermalTempThresholdC`, `clockFloorAppliedPct`, `loadThreads`,
+  `loadItersPerLaunch`, `loadLaunches`, `samplesTaken`. Inputs and probe
+  bookkeeping; a threshold on one asserts something about this runner's
+  configuration, not about the accelerator.
+- **Labels, which are the load-bearing ones** — `pdWedgeSuspected`,
+  `throttleClassification`, `clockFloorBasis`, `throttleReasons`,
+  `nvmlUnsupported`, `configWarnings`, `gpuName`, `computeCap`, `pciBusId`,
+  `driverVersion`, `migMode`. **Their values are not numbers.** A threshold is
+  compared as a float64, so a gate on one of these fails closed on *every* node
+  forever and the failure reads as a hardware verdict on healthy hardware — and
+  before they were registered, nothing caught it: the names are valid, they
+  carry no unit suffix, and an unregistered name is assumed thresholdable
+  because the registry is deliberately an open world. Registering them is what
+  makes the linter refuse the gate.
+
+  `pdWedgeSuspected` and `throttleClassification` are the two most exposed,
+  because they are what this runner presents as its wedge verdict and so the two
+  a profile author reaches for first. **They do not need a gate.** The runner
+  already fails the node itself (exit 1) with the classification in the message;
+  these metrics exist to send an engineer to a cable rather than to a die.
+
+The nine per-reason counters (`gpu_idle_samples` and friends) are deliberately
+**not** registered. They are the mask's decomposition — the vendor's own enum,
+scaled by the sample interval so they do not compare across profiles, and
+already summarised for acceptance by `throttledSamples` and `throttleEvents`.
+They carry none of the label metrics' danger, because they are ordinary
+integers: a gate on one evaluates and means what it says.
+
+They are not invisible, though. `clockprobe` is a kind whose runner this project
+ships, so `verdict.ValidateThresholdsForKind` reports a gate on an unregistered
+one and tells the author to register it — which is exactly the right moment to
+ask, since writing a threshold is what promotes a name from incidental evidence
+to something a fleet is accepted on. The finding is advisory and does not block
+a run.
 
 ### A note for anyone adding a metric here
 
@@ -293,6 +350,12 @@ unit — a clock recorded as a bare number that charts happily and compares
 against nothing. That is why `min_sm_clock_pct` / `max_sm_clock_pct` are
 percentages here rather than the MHz they were measured in. Add the alias first,
 or use a unit whose lowercase spelling survives the fold.
+
+And if the new metric's value is a **label** rather than a number — a state, a
+name, a version, a comma-separated list — register it in `pkg/contract` with
+`ThresholdUse: Evidence` in the same change. An unregistered label-valued metric
+is assumed thresholdable, and the gate someone writes against it will fail every
+node in their fleet and look like bad silicon.
 
 ## Configuration
 

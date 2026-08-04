@@ -43,6 +43,28 @@ import (
 // (throughputTflops) and a figure sustained across a multi-minute burn
 // (sustainedThroughputTflops) are separate metrics even though both are TFLOPS.
 // Collapsing them would make one of them thresholdable by accident.
+//
+// # Why a metric with no number in it is registered at all
+//
+// Some of what a runner reports is a LABEL, not a measurement: a GPU's name, a
+// driver version, clockprobe's "pdWedgeSuspected=true|false|unknown". Those
+// names obey the grammar, carry no unit suffix, and are perfectly legitimate
+// evidence — but a threshold is evaluated by parsing the value as a float64, so
+// a gate on one of them fails closed on EVERY node, forever, and the failure
+// reads as a hardware verdict on healthy hardware.
+//
+// Left unregistered, nothing catches that: the grammar passes, UnitOf answers
+// UnitNone (which is the legitimate dimensionless-counter case), and
+// SafeToThresholdOn answers true because the registry is an open world. So a
+// label-valued metric this project OWNS is registered with ThresholdUse
+// Evidence precisely so SafeToThresholdOn answers false and an authoring-time
+// linter refuses the gate while its author is still there to fix it. Its
+// Description is the text the linter reports, so it names the values the metric
+// actually takes and says what to gate on instead.
+//
+// This is a registration rule for FIRST-PARTY runners only. A third-party
+// runner's label-valued metric stays outside the registry and stays permitted,
+// which is the open-world rule doing its job.
 
 // Unit is a physical unit a metric can be expressed in.
 type Unit string
@@ -214,6 +236,21 @@ var registry = map[string]Metric{
 		Description:  "wall-clock seconds the test body ran, excluding image pull and container start; a soak that exits early has not proven what its duration claims",
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"durationRequestedS": {
+		Name: "durationRequestedS", Unit: UnitSeconds,
+		Description:  "the duration the runner was ASKED for (BURNIN_DURATION_SECONDS), echoed back before any clamping; it is an input read back, not a measurement, and elapsedS is the one that says what actually happened",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"warmupS": {
+		Name: "warmupS", Unit: UnitSeconds,
+		Description:  "seconds of load applied before sampling began, so an unwarmed part's legitimately idle clocks are not sampled; a probe's own schedule, not a property of the part",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"sampleWindowS": {
+		Name: "sampleWindowS", Unit: UnitSeconds,
+		Description:  "seconds of the run during which measurements were taken (elapsedS minus warmupS); it bounds how much evidence the other metrics rest on rather than saying anything about the hardware",
+		ThresholdUse: ThresholdUseEvidence,
+	},
 
 	// --- Thermal, power and clocks -----------------------------------------
 	"gpuTempC": {
@@ -221,9 +258,44 @@ var registry = map[string]Metric{
 		Description:  "peak GPU temperature observed during the test",
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"meanTempUnderLoadC": {
+		Name: "meanTempUnderLoadC", Unit: UnitCelsius,
+		Description:  "GPU temperature averaged across the load window; distinct from gpuTempC, which is the peak — a part that runs hot throughout and one that spikes once are different findings and must not share a name",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"tempAtMinClockC": {
+		Name: "tempAtMinClockC", Unit: UnitCelsius,
+		Description:  "the temperature recorded at the sample where the SM clock was lowest; it exists to attribute a clock shortfall to heat or to a power-delivery wedge, and its value depends on which single sample happened to be the minimum — so it explains a verdict rather than deciding one",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"thermalTempThresholdC": {
+		Name: "thermalTempThresholdC", Unit: UnitCelsius,
+		Description:  "the temperature at or above which the runner will attribute a clock shortfall to heat; a configured input echoed back so a verdict can be audited against the threshold that produced it, not a reading",
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"powerDrawW": {
 		Name: "powerDrawW", Unit: UnitWatts,
 		Description:  "peak board power draw observed during the test",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"meanPowerW": {
+		Name: "meanPowerW", Unit: UnitWatts,
+		Description:  "board power averaged across the load window; the floor form is the useful gate, because a part that draws far LESS than its budget under full load is the power-delivery wedge signature rather than a well-behaved one",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"enforcedPowerLimitW": {
+		Name: "enforcedPowerLimitW", Unit: UnitWatts,
+		Description:  "the power limit the driver is currently enforcing on the board — on GB10 this is the negotiated USB-C Power-Delivery contract made visible, and a degraded supply or cable shows up here well below the board's default; absolute and therefore SKU-specific, so a fleet-wide gate belongs on powerLimitRatioPct",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"defaultPowerLimitW": {
+		Name: "defaultPowerLimitW", Unit: UnitWatts,
+		Description:  "the board's nameplate default power limit, read back from the driver so powerLimitRatioPct can be audited against its denominator; a nameplate constant identifies the SKU rather than its health, so gating on it fails a heterogeneous fleet for no hardware reason",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"powerLimitRatioPct": {
+		Name: "powerLimitRatioPct", Unit: UnitPercent,
+		Description:  "enforcedPowerLimitW as a percentage of defaultPowerLimitW: the SKU-portable form of 'is this board allowed its full power budget?', and well under 100 is the power-delivery wedge. NOTE it is omitted entirely on a part whose driver does not expose both limits (GB10 reports power.limit as [N/A], which the runner records in nvmlUnsupported), and an omitted metric fails its threshold closed — so a gate on this must be scoped to parts known to answer",
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"sustainedClockPct": {
@@ -246,6 +318,41 @@ var registry = map[string]Metric{
 		Description:  "the part's nameplate boost clock, read back from the driver so sustainedClockPct can be audited against its denominator; a nameplate constant identifies the SKU rather than its health, so gating on it fails a heterogeneous fleet for no hardware reason",
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	"minSmClockPct": {
+		Name: "minSmClockPct", Unit: UnitPercent,
+		Description:  "the LOWEST single SM-clock sample of the load window, as a percentage of rated boost; a floor on it asserts the part never dropped out, which sustainedClockPct's average can hide. It is a single sample, so it moves on one transient dip — calibrate it against measured fleet behaviour rather than against a spec sheet",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"maxSmClockPct": {
+		Name: "maxSmClockPct", Unit: UnitPercent,
+		Description:  "the HIGHEST single SM-clock sample of the load window, as a percentage of rated boost, recorded so the spread around sustainedClockPct is visible; it is not an acceptance figure, because a wedged part that boosts for one sample and collapses satisfies a floor on it while failing the sustained behaviour this measurement exists to judge",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"clockFloorPct": {
+		Name: "clockFloorPct", Unit: UnitPercent,
+		Description:  "the sustained-clock floor the runner was configured with, echoed back so a verdict can be read against the bar it was judged by; a configured input, not a measurement",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"thermalClockFloorPct": {
+		Name: "thermalClockFloorPct", Unit: UnitPercent,
+		Description:  "the more lenient sustained-clock floor the runner applies when a shortfall is positively attributed to heat, echoed back as configured; a configured input, not a measurement",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"clockFloorAppliedPct": {
+		Name: "clockFloorAppliedPct", Unit: UnitPercent,
+		Description:  "which of the two configured floors this run actually judged against (see clockFloorBasis); it records the runner's own decision so a pass or fail can be reproduced, and gating on it would gate on the runner's configuration rather than on the part",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"gpuUtilizationPct": {
+		Name: "gpuUtilizationPct", Unit: UnitPercent,
+		Description:  "device utilization averaged over the load window. It is the headline SYMPTOM of a clock wedge — it reads perfectly healthy while the clock does not — so it is published beside the clock to make that fault legible, not to be gated on: the runner already refuses to judge a run whose utilization shows the load never landed, and a threshold here would turn that same measurement artifact into a hardware verdict",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"memUtilizationPct": {
+		Name: "memUtilizationPct", Unit: UnitPercent,
+		Description:  "device memory-controller utilization averaged over the load window; for a deliberately register-resident load it is expected to be near zero, so its value describes the probe's own load shape rather than the part",
+		ThresholdUse: ThresholdUseEvidence,
+	},
 
 	// --- Compute throughput -------------------------------------------------
 	"throughputTflops": {
@@ -256,6 +363,21 @@ var registry = map[string]Metric{
 	"sustainedThroughputTflops": {
 		Name: "sustainedThroughputTflops", Unit: UnitTeraflops,
 		Description:  "throughput averaged across a sustained burn, after the part has reached its steady thermal and clock state; unlike throughputTflops this is a benchmark figure and may be thresholded",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"sustainedFmaThroughputTflops": {
+		Name: "sustainedFmaThroughputTflops", Unit: UnitTeraflops,
+		Description:  "throughput of a register-resident FP32 FMA chain sustained across the load window — no memory traffic, so it moves in lockstep with the achieved clock and is an independent cross-check on it. It is DELIBERATELY not sustainedThroughputTflops: that name belongs to a dense GEMM burn, the two differ by a large factor on the same healthy part, and sharing a name would silently condemn every node a gate calibrated on the other one touched",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"peakFmaThroughputTflops": {
+		Name: "peakFmaThroughputTflops", Unit: UnitTeraflops,
+		Description:  "the best single measurement window of the same FMA load, published so throughputConsistencyPct can be audited against its denominator; as the best window rather than the sustained one it is the figure a collapsing part still satisfies, which is why the consistency ratio and not this is the gate",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"throughputConsistencyPct": {
+		Name: "throughputConsistencyPct", Unit: UnitPercent,
+		Description:  "sustainedFmaThroughputTflops as a percentage of peakFmaThroughputTflops: a part that starts fast and collapses mid-window scores low here even when its mean clock still clears every floor, which is the case an average is blind to",
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
@@ -312,6 +434,48 @@ var registry = map[string]Metric{
 		Description:  "count of clock-throttle events observed during the test",
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"throttledSamples": {
+		Name: "throttledSamples", Unit: UnitNone,
+		Description:  "count of individual samples in which the driver reported a CAPPING throttle reason; throttleEvents counts transitions into that state, so a part throttled once for the whole window scores 1 event and many samples, and the pair separates a brief excursion from a permanent cap",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"throttleReasonsMask": {
+		Name: "throttleReasonsMask", Unit: UnitNone,
+		Description:  "the union of the driver's raw throttle-reason bits over the run, kept so a stored result can be re-classified later against a vendor's own bit definitions. It is not a quantity: it is a bitfield in decimal, arithmetic on it is meaningless, and it includes the idle bit — which is not a throttle at all — so `throttleReasonsMask Equal 0` fails any part that was briefly idle mid-window. Gate on throttledSamples instead",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// DELIBERATELY NOT REGISTERED: the per-reason sample counters that accompany
+	// the two above — gpuIdleSamples, swPowerCapSamples, hwSlowdownSamples,
+	// hwThermalSlowdownSamples and the rest, one per bit of throttleReasonsMask.
+	//
+	// They are the mask's decomposition, published so a stored result can be
+	// re-read without decoding a bitfield, and they are diagnostic in the
+	// strictest sense: their meaning is the vendor's own enum rather than ours,
+	// their magnitude scales with the configured sample interval so they are not
+	// comparable across profiles, and everything an acceptance decision needs
+	// from them is already in throttledSamples and throttleEvents. Registering a
+	// name commits this project to it and to its unit permanently, and these are
+	// the ones most likely to change shape when a second vendor's runner reports
+	// a different set of reasons.
+	//
+	// Leaving them out is safe in the way the label metrics below are NOT,
+	// because they are ordinary integers: a threshold on one evaluates and means
+	// what it says, and is simply narrower than the aggregate. There is no
+	// fails-closed trap here.
+	//
+	// It is not free, though, and the cost is deliberate.
+	// verdict.ValidateThresholdsForKind reports an unregistered metric on a
+	// kind whose runner this project ships, so an author who does gate on one is
+	// told to register it. That is the right moment to ask: writing a threshold
+	// is what promotes a name from incidental evidence to acceptance-deciding,
+	// and registration is owed at that point rather than in advance of any
+	// consumer. Until then these stay out, and the advice stays advice — it does
+	// not block a run.
+	"unsupportedReads": {
+		Name: "unsupportedReads", Unit: UnitNone,
+		Description:  "count of driver properties the runner asked for and was refused (the names are in nvmlUnsupported). It records how complete the probe's view was, and a non-zero count is NORMAL on a part that genuinely does not expose everything — GB10 refuses the power-limit reads — so gating on it condemns healthy hardware for its driver's silence, which is the same mistake as gating ECC counters on a part with no ECC",
+		ThresholdUse: ThresholdUseEvidence,
+	},
 
 	// --- Test-execution counters --------------------------------------------
 	"diagTestsFailed": {
@@ -323,6 +487,102 @@ var registry = map[string]Metric{
 		Name: "iterationsCompleted", Unit: UnitNone,
 		Description:  "count of stress iterations the runner completed; a soak that completes far fewer than expected did less work than its duration suggests",
 		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"samplesTaken": {
+		Name: "samplesTaken", Unit: UnitNone,
+		Description:  "count of measurement samples the probe collected during its window; it bounds how much evidence the derived statistics rest on, and its magnitude is set by the configured sample interval rather than by the part",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"loadLaunches": {
+		Name: "loadLaunches", Unit: UnitNone,
+		Description:  "count of load-kernel launches issued during the measured window; the runner sizes each launch to a fixed wall time on the part in front of it, so this lands near the same figure on a healthy and a wedged part alike and says nothing about either — elapsedS is the metric that says the window ran",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"loadThreads": {
+		Name: "loadThreads", Unit: UnitNone,
+		Description:  "total CUDA threads the load was launched with, derived from the part's SM count; it records how the probe sized itself to the device, which makes a throughput figure reproducible and is not a property of the device's health",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"loadItersPerLaunch": {
+		Name: "loadItersPerLaunch", Unit: UnitNone,
+		Description:  "inner-loop iterations per load-kernel launch, chosen by calibrating against the live part so each launch takes a fixed wall time; it is an artefact of that calibration — a slower part gets a smaller number by design — so it explains the load rather than judging the part",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+
+	// --- Identity, configuration and classification LABELS -------------------
+	//
+	// Every metric below is registered because its value is NOT A NUMBER, and a
+	// threshold is evaluated by parsing the value as a float64. Unregistered,
+	// each of these would sail through an authoring-time lint — valid grammar,
+	// no unit suffix, open-world SafeToThresholdOn — and then fail closed on
+	// every node in the fleet forever, reading as a hardware verdict on healthy
+	// hardware. Registering them as Evidence is what makes the linter refuse the
+	// gate instead. See the "Why a metric with no number in it is registered at
+	// all" note above.
+	//
+	// The runner's own exit code is what decides a node on these findings: a
+	// wedge is a clockprobe exit 1 with the classification in the message. A
+	// profile does not need — and cannot have — a threshold to reach the same
+	// verdict.
+	"gpuName": {
+		Name: "gpuName", Unit: UnitNone,
+		Description:  "the accelerator's product name as the driver reports it (\"NVIDIA GB10\"). A label, not a measurement: no comparison against it is arithmetic, and identity is a fleet-inventory question rather than an acceptance one — target a heterogeneous fleet with node selectors, not with a threshold",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"computeCap": {
+		Name: "computeCap", Unit: UnitNone,
+		Description:  "the CUDA compute capability the device reports, as major.minor (\"12.1\"). It is a VERSION, not a quantity, and the resemblance is the trap: compared as a decimal, 12.1 and 12.10 are the same value and any ordering that looks right does so by coincidence of notation. A runner that cares about capability decides it in the runner, where the two components are compared separately",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"pciBusId": {
+		Name: "pciBusId", Unit: UnitNone,
+		Description:  "the device's PCI bus address, recorded so a verdict can be tied to a physical slot when a node holds several parts; an address, with no ordering a threshold could use",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"driverVersion": {
+		Name: "driverVersion", Unit: UnitNone,
+		Description:  "the NVIDIA driver version string (\"580.82.09\"). A three-component version does not parse as a float at all, so a gate on it fails closed on every node; driver-version policy belongs in a fleet's node labels and admission rules, not in a hardware acceptance verdict",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"builtCudaArch": {
+		Name: "builtCudaArch", Unit: UnitNone,
+		Description:  "the nvcc arch target this runner IMAGE was compiled for (\"sm_121a\"), printed by the runner so a stored result names the image that produced it. A property of the image that was pinned rather than of the part it landed on, and the runner already reports a mismatch itself as an Error naming the fix",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"migMode": {
+		Name: "migMode", Unit: UnitNone,
+		Description:  "whether MIG partitioning is enabled on the device (\"enabled\"/\"disabled\"). A configuration state expressed as a word; a runner whose measurement is unattributable under MIG skips (exit 2) on its own, which is the reported form of that finding",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"nvmlUnsupported": {
+		Name: "nvmlUnsupported", Unit: UnitNone,
+		Description:  "comma-separated names of the driver properties the runner asked for and was refused, recorded rather than substituted so an unsupported read can never be mistaken for a measured value. A list; unsupportedReads is its count, and neither is safe to gate on (see that entry)",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"configWarnings": {
+		Name: "configWarnings", Unit: UnitNone,
+		Description:  "semicolon-separated notes about configuration the runner adjusted or could not honour, so a result carries the reason it did not run exactly as asked. Free-form prose, and a gate on it can only fail",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"throttleReasons": {
+		Name: "throttleReasons", Unit: UnitNone,
+		Description:  "comma-separated names of the throttle reasons the driver latched during the run (\"none\" when it latched nothing) — the human-readable form of throttleReasonsMask. A list of labels; gate on throttledSamples for \"was it throttled at all\"",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"throttleClassification": {
+		Name: "throttleClassification", Unit: UnitNone,
+		Description:  "why the runner believes the clock fell short: one of none|thermal|powerCap|applicationClocks|unknown. This is an ATTRIBUTION, and a label — it exists to send an engineer to a cable or to a cooling path rather than to a die, and the runner has already failed the node itself when it is anything but none. Gate the clock (sustainedClockPct) and read this to find out why",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"pdWedgeSuspected": {
+		Name: "pdWedgeSuspected", Unit: UnitNone,
+		Description:  "whether the run matched the power-delivery wedge signature — slow, cool, and not thermally throttled: one of true|false|unknown. Deliberately TRI-STATE and therefore a label, not a boolean: without a temperature a wedge cannot be told from a thermal throttle, and \"we could not tell\" must not collapse into \"false\" and read as an all-clear. The runner fails the node on this itself; a threshold cannot express the three states and fails closed on all of them",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"clockFloorBasis": {
+		Name: "clockFloorBasis", Unit: UnitNone,
+		Description:  "which floor the run was judged against, general|thermal, naming the reason clockFloorAppliedPct is what it is; a label recording the runner's own decision",
+		ThresholdUse: ThresholdUseEvidence,
 	},
 }
 

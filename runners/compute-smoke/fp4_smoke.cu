@@ -162,7 +162,32 @@ int cutlassErrored(const char *where) { return cudaErrored(where, cudaGetLastErr
 
 } // namespace
 
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
+// Whether this build has a block-scaled MMA path at all. Decided ONCE, because
+// the answer is needed in two places — the kernel definition below and the
+// dispatch at the end of main() — and two #if conditions that must agree
+// eventually stop agreeing.
+//
+// BURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA forces the fallback, and exists for
+// COMPILE COVERAGE ONLY: the #else branch had never been compiled by any build
+// (issue #9), so a syntax or logic error in it would have surfaced for the first
+// time on a CUTLASS or CUDA downgrade — which is to say, on a fleet.
+//
+// It is needed because the arch flag cannot reach that branch. Measured against
+// CUTLASS v4.6.1 with CUDA 13.0.1: BOTH CUTLASS_ARCH_MMA_SM120_SUPPORTED and
+// CUTLASS_ARCH_MMA_SM121_SUPPORTED are defined even for `-arch=sm_80`, so
+// building for a pre-Blackwell arch still takes the #if side. Only an older
+// CUTLASS leaves them undefined, and cloning a second, deliberately stale
+// upstream into every build to compile eight lines is a worse trade than this
+// switch. The Dockerfile compiles both sides on every image build.
+#if defined(BURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA)
+#define BURNIN_FP4_HAVE_BLOCK_SCALED_MMA 0
+#elif defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
+#define BURNIN_FP4_HAVE_BLOCK_SCALED_MMA 1
+#else
+#define BURNIN_FP4_HAVE_BLOCK_SCALED_MMA 0
+#endif
+
+#if BURNIN_FP4_HAVE_BLOCK_SCALED_MMA
 
 using namespace cute;
 
@@ -352,37 +377,60 @@ int main() {
     return cudaErrored("no usable CUDA device (cudaGetDevice)", e);
   if (cudaError_t e = cudaGetDeviceProperties(&props, dev); e != cudaSuccess)
     return cudaErrored("no usable CUDA device (cudaGetDeviceProperties)", e);
+
+#if defined(BURNIN_FP4_FORCE_CC_MAJOR) && defined(BURNIN_FP4_FORCE_CC_MINOR)
+  // TEST-ONLY, and never present in a published image.
+  //
+  // The Skip path below can only be taken by a part that is not compute
+  // capability 12.0/12.1, and no such accelerator is available to this project
+  // (issue #9). Exit 2 is the contract's load-bearing distinction — a node that
+  // cannot run a test has NOT failed it — so leaving it never once executed on
+  // real silicon was the gap this exists to close: defining these two macros
+  // builds the SAME source, with the SAME toolchain, and runs it on a REAL GPU
+  // while telling it the part reports a capability it does not have.
+  //
+  // Three things keep it from ever becoming a way to fabricate a Skip in a
+  // fleet. It is compile-time, so no environment variable or argument can reach
+  // it; no Dockerfile in this repository defines it, which runners/pins_test.go
+  // asserts; and a build that does define it says so on stdout, in a key=value
+  // line that lands in the stored result and the delivered envelope, so any
+  // verdict such a binary produced is self-identifying forever.
+  props.major = BURNIN_FP4_FORCE_CC_MAJOR;
+  props.minor = BURNIN_FP4_FORCE_CC_MINOR;
+  std::printf("forced_compute_cap=%d.%d\n", props.major, props.minor);
+#endif
+
   gDeviceMajor = props.major;
   gDeviceMinor = props.minor;
   std::printf("gpu_name=%s\ncompute_cap=%d.%d\n", props.name, props.major, props.minor);
 
-  // The SCOPE gate, and it is deliberately the whole SM12x family rather than
-  // the single arch this binary was built for. The two questions are different:
-  // "is NVFP4 block-scaled GEMM a thing this part can be asked to do?" is a
-  // property of the hardware and belongs in Skip, while "does this image happen
-  // to carry a cubin for it?" is a property of the image that was pinned.
+  // The SCOPE gate — "is NVFP4 block-scaled GEMM a thing this part can be asked
+  // to do at all?", which is a property of the hardware and is answered with a
+  // Skip. It is deliberately the whole SM12x family rather than the single arch
+  // this binary was built for; the reasoning, and the second question it must
+  // not be collapsed with, are in arch_match.h.
   //
-  // Collapsing them would misreport one of the two. Narrowing this gate to the
-  // built arch would make a wrong-arch image look like out-of-scope hardware,
-  // and a whole fleet would report Skip — reading as "acceptance not applicable"
-  // — when in truth the operator pinned the wrong tag. So an in-scope part with
-  // no cubin passes THIS gate and is stopped by the image gate below as an
-  // Error, which is the retryable, hardware-unjudged phase and names the fix.
-  //
-  // Note the image question cannot be settled by a preprocessor macro: nvcc's
-  // __CUDA_ARCH_LIST__ records 1210 for sm_121a and 1200 for both sm_120a and
-  // sm_120f, and only the "f" form also covers 12.1 — so the macro cannot
-  // distinguish an image that runs here from one that does not. That is why the
-  // gate below compares the BURNIN_CUDA_ARCH string, which does carry the
-  // distinction, against the capability the device reported. Where even that
-  // cannot answer, it says so and runs on rather than guessing.
-  if (!(props.major == 12 && (props.minor == 0 || props.minor == 1)))
-    return skipped("NVFP4 block-scaled GEMM requires compute capability 12.0/12.1");
+  // The decision and its wording live there so a plain C++ test can drive them
+  // to every capability without a GPU. That matters here more than anywhere
+  // else in this file: this is the only Skip the runner has, and the hardware
+  // that would take it does not exist in this fleet.
+  if (burnin::scopeOf(props.major, props.minor) == burnin::Scope::OutOfScope) {
+    char buf[512];
+    burnin::describeOutOfScope(buf, sizeof(buf), props.major, props.minor);
+    return skipped(buf);
+  }
 
   // The IMAGE gate, and the second of the two questions above: the part is in
   // scope, so does this image actually carry code for it? Answered here, from
   // the arch baked in at build time and the capability the device just
   // reported, rather than left to whatever the runtime latches at the launch.
+  //
+  // It cannot be settled by a preprocessor macro either: nvcc's
+  // __CUDA_ARCH_LIST__ records 1210 for sm_121a and 1200 for both sm_120a and
+  // sm_120f, and only the "f" form also covers 12.1 — so the macro cannot
+  // distinguish an image that runs here from one that does not. That is why this
+  // compares the BURNIN_CUDA_ARCH string, which does carry the distinction,
+  // against the capability the device reported.
   //
   // It has to be answered here because the launch does not answer it reliably.
   // The loader refuses an sm_121a cubin on a CC 12.0 part, and that direction
@@ -415,12 +463,14 @@ int main() {
     return errored(buf);
   }
 
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
+#if BURNIN_FP4_HAVE_BLOCK_SCALED_MMA
   return run();
 #else
   // The part is in scope but this binary has no block-scaled MMA path compiled
-  // in at all — a build-flag mistake in the image, not a fault in the silicon.
+  // in at all — a build-flag or toolchain mistake in the image, not a fault in
+  // the silicon, so it is UNJUDGED and never a hardware verdict.
   return errored("this binary was not compiled with SM120/SM121 block-scaled MMA support "
-                 "(need -arch=sm_120a/sm_120f/sm_121a); the part is in scope and UNJUDGED");
+                 "(need CUTLASS >= v4.5.0 and -arch=sm_120a/sm_120f/sm_121a); the part is in "
+                 "scope and UNJUDGED");
 #endif
 }

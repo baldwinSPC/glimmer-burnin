@@ -27,6 +27,17 @@
 # emitting has not declared anything — so this cannot turn a broken probe into a
 # pass. See the host-fault-counters test at the bottom of this file.
 
+# compute-smoke is a BURST, and there is deliberately no durationSeconds here.
+#
+# It runs one block-scaled NVFP4 GEMM and checks it against a host reference, in
+# milliseconds. What it proves is that the real FP4 tensor-core instruction path
+# executed on this part and got the right answer — a correctness statement, which
+# holding the same GEMM in a loop for two minutes would not strengthen.
+#
+# This file used to ask for `durationSeconds: 120` and silently get milliseconds,
+# which made the sample fiction (issue #25). The duration-bearing kinds are the
+# ones below: thermal-soak and gpu-burn hold a load for their whole budget, and
+# clockprobe holds one specifically to judge sustained clocks. One kind, one job.
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
 metadata:
@@ -34,7 +45,6 @@ metadata:
 spec:
   kind: compute-smoke
   scope: Node
-  durationSeconds: 120
   thresholds:
     - metric: nonfiniteCount
       comparison: Equal

@@ -30,6 +30,15 @@ part. `tflops` is a single un-warmed 1024³ launch — it is a liveness signal,
 **not** a benchmark. The problem is far too small to saturate a GB10. Do not
 threshold on it.
 
+Those four are not merely inadvisable to gate on, they are registered as
+`Evidence` in [`pkg/contract`](../../pkg/contract/metrics.go) so that
+`pkg/verdict.ValidateThresholds` refuses the gate at authoring time. For the
+three identity metrics the reason is blunter than "the number is noisy": their
+values are **labels**, a threshold is compared as a `float64`, and a gate on one
+fails closed on every node forever while reading as a hardware verdict.
+`compute_cap` is the sly one — `12.1` parses, so the gate silently compares a
+`major.minor` version as a decimal.
+
 ### Fail (exit 1) — the part was measured and it is wrong
 
 Only three things reach exit 1, and all three are properties of the silicon:
@@ -82,6 +91,89 @@ It is `Error` rather than `Skip` on purpose. Narrowing the scope gate to the
 built arch would report a whole fleet as "not applicable" when the truth is that
 the operator pinned the wrong tag; `Error` is the retryable, hardware-unjudged
 phase and it names the fix.
+
+Both decisions live in [`arch_match.h`](arch_match.h) — host-only and free of
+CUDA — as `scopeOf()` and `archMatch()`, so a plain C++ program can drive them
+to every compute capability with no GPU in the room. See
+[how the Skip path is exercised](#how-the-skip-path-is-exercised) for why that
+matters more here than anywhere else in this runner.
+
+#### How the Skip path is exercised
+
+Exit 2 is the contract's load-bearing distinction — *a node that cannot run a
+test has not failed it* — and until 2026-08-03 it had **never executed**
+(issue #9). It fires only on a part that is not CC 12.0/12.1, this project has
+no such accelerator, and the route everyone expected is gone: `dcgm-diag` was
+supposed to be the first real-silicon exerciser on the theory that DCGM does not
+support GB10, and DCGM works on GB10.
+
+It is now covered three ways, in ascending order of how much they prove:
+
+1. **`scopeOf()` is unit-tested exhaustively** in
+   [`arch_match_test.cc`](arch_match_test.cc) — H100, L40S, A100, T4, V100,
+   B200, a hypothetical CC 12.2, and an unread capability — under `make test`,
+   with no Docker, no CUDA and no GPU.
+2. **The sentinel is asserted end to end in Go** from captured output, in
+   `pkg/runner`'s parser tests and through the reconciler in
+   `internal/controller` — the latter with `nonfiniteCount Equal 0` attached, so
+   it also proves a skipped run's missing metric does not fail closed into a
+   hardware verdict.
+3. **The real binary took the path on the real GB10.** A compile-time capability
+   injection (`BURNIN_FP4_FORCE_CC_MAJOR` / `_MINOR`, see `fp4_smoke.cu`) builds
+   the same source with the same toolchain and tells it the device reports a
+   capability it does not have:
+
+   ```console
+   $ docker build --target build -t cs-build .
+   $ docker run --rm --gpus all cs-build bash -c '
+       nvcc -std=c++17 -O3 -arch=sm_121a --expt-relaxed-constexpr \
+         -DBURNIN_CUDA_ARCH=\"sm_121a\" \
+         -DBURNIN_FP4_FORCE_CC_MAJOR=9 -DBURNIN_FP4_FORCE_CC_MINOR=0 \
+         -cudart static -I /cutlass/include -I /cutlass/tools/util/include \
+         -o /tmp/skip /src/fp4_smoke.cu && /tmp/skip; echo EXIT=$?'
+   built_cuda_arch=sm_121a
+   forced_compute_cap=9.0
+   gpu_name=NVIDIA GB10
+   compute_cap=9.0
+   FP4_GEMM_SKIP: NVFP4 block-scaled GEMM requires compute capability 12.0/12.1, and this part reports 9.0 — the test does not apply to this hardware and the part is NOT failed; run a kind whose runner covers this architecture
+   EXIT=2
+   ```
+
+   The switches are compile-time so no environment variable can reach them, no
+   Dockerfile in the repository may define them (`runners/pins_test.go` fails the
+   build if one does), and a binary built with them prints
+   `forced_compute_cap=` — a `key=value` line, so it lands in the stored result
+   and the delivered envelope and keeps such a verdict self-identifying forever.
+
+#### The `#else` guard is compiled on every image build
+
+`fp4_smoke.cu` wraps its kernel in a block-scaled-MMA availability check whose
+`#else` reports the part unjudged. That branch had never been compiled by any
+build, so a syntax or logic error in it would have surfaced for the first time
+on a CUTLASS or CUDA downgrade — which is to say, on a fleet.
+
+**The arch flag cannot reach it.** Measured against CUTLASS v4.6.1 with CUDA
+13.0.1: both `CUTLASS_ARCH_MMA_SM120_SUPPORTED` and `..._SM121_SUPPORTED` are
+defined *even for `-arch=sm_80`*, so building for a pre-Blackwell arch still
+takes the `#if` side. Only a pre-v4.5.0 CUTLASS leaves them undefined, and
+cloning a second, deliberately stale upstream into every build to compile eight
+lines is the worse trade.
+
+So the Dockerfile compiles **both** sides on every build, forcing the fallback
+with `BURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA` and everything else identical to
+the release compile. The compile artefact is asserted, then deleted, and never
+enters the final image. The second half of that guard is the one with teeth: the
+**shipped** binary must *not* contain the `#else` message, which is the proof
+the real kernel is in there. Without it, a CUTLASS bump that stopped defining
+those macros would publish an immutable tag reporting every node in a fleet as
+`Error`.
+
+Verified on the GB10 that the branch not only compiles but runs:
+
+```console
+FP4_GEMM_ERROR: this binary was not compiled with SM120/SM121 block-scaled MMA support (need CUTLASS >= v4.5.0 and -arch=sm_120a/sm_120f/sm_121a); the part is in scope and UNJUDGED
+EXIT=3
+```
 
 ### The image gate, and why it runs before the launch
 
@@ -145,6 +237,46 @@ returns exit 1 — and `runners/cxxtests_test.go` compiles and runs it under
 > of the above as exit 1. Published tags are immutable and it is not being
 > changed; the corrected contract ships under a **new tag**. A gate still pinning
 > `v0.1.0` keeps the old, wrong behaviour until it is repinned.
+
+## This runner is a BURST, and it ignores `BURNIN_DURATION_SECONDS`
+
+One warm-up GEMM, one timed GEMM, done — in **milliseconds**, whatever duration
+the operator injects. Every other runner in this repository reads
+`BURNIN_DURATION_SECONDS`; this one does not, and
+[`TestKind.BurstOnly()`](../../api/v1alpha1/burnintest_types.go) says so out
+loud.
+
+That was true silently for a long time while `config/samples/node-acceptance.yaml`
+asked the kind for `durationSeconds: 120` and got milliseconds — so the shipped
+"node acceptance" burned nothing in and nothing anywhere said so (issue #25).
+
+The fix was to **stop pretending**, not to add a loop:
+
+- What this runner proves is that the real block-scaled MMA instruction path
+  executed on this part and produced the right answer. That is a *correctness*
+  statement, and running the same GEMM for two minutes does not make it a
+  stronger one.
+- It would make it a **worse soak** than the kinds that exist to be soaks.
+  `thermal-soak` and `gpu-burn` both run on the shared duration-honouring load
+  wrapper (`soak_core.cuh`), and `clockprobe` holds a load specifically to judge
+  sustained clocks. Converging this runner onto that wrapper would duplicate all
+  three and leave the fleet with no cheap correctness gate at all.
+- One kind, one job. A profile that wants both puts a burst and a soak in it,
+  which is what `node-acceptance.yaml` does.
+
+`durationSeconds` is not *meaningless* on this kind: the reconciler still derives
+the pod's deadline from it, so an image that hangs before reaching its kernel is
+still killed. What it does not do is decide how long the test runs. A profile
+author who meant "burn this node in for two minutes" wants a soak kind.
+
+Two guards keep the three statements — behaviour, kind doc, sample — from
+drifting apart again, and they run in `make test`:
+
+- `runners/pins_test.go` fails if this runner's source ever *does* read
+  `BURNIN_DURATION_SECONDS` while the kind still claims to be burst-only (and,
+  in the other direction, if any non-burst runner stops reading it).
+- `api/v1alpha1/samples_test.go` fails if any shipped sample sets
+  `durationSeconds` on a burst-only kind.
 
 ## What "pass" actually means
 

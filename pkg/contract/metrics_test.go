@@ -126,14 +126,35 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"ioLatencyUs":                {UnitMicroseconds, ThresholdUseAcceptance},
 		"latencyUs":                  {UnitMicroseconds, ThresholdUseAcceptance},
 		"elapsedS":                   {UnitSeconds, ThresholdUseAcceptance},
+		"durationRequestedS":         {UnitSeconds, ThresholdUseEvidence},
+		"warmupS":                    {UnitSeconds, ThresholdUseEvidence},
+		"sampleWindowS":              {UnitSeconds, ThresholdUseEvidence},
 		"sustainedClockPct":          {UnitPercent, ThresholdUseAcceptance},
+		"minSmClockPct":              {UnitPercent, ThresholdUseAcceptance},
+		"maxSmClockPct":              {UnitPercent, ThresholdUseEvidence},
+		"clockFloorPct":              {UnitPercent, ThresholdUseEvidence},
+		"thermalClockFloorPct":       {UnitPercent, ThresholdUseEvidence},
+		"clockFloorAppliedPct":       {UnitPercent, ThresholdUseEvidence},
+		"gpuUtilizationPct":          {UnitPercent, ThresholdUseEvidence},
+		"memUtilizationPct":          {UnitPercent, ThresholdUseEvidence},
+		"powerLimitRatioPct":         {UnitPercent, ThresholdUseAcceptance},
+		"throughputConsistencyPct":   {UnitPercent, ThresholdUseAcceptance},
 		"smClockMHz":                 {UnitMegahertz, ThresholdUseAcceptance},
 		"memClockMHz":                {UnitMegahertz, ThresholdUseAcceptance},
 		"ratedBoostClockMHz":         {UnitMegahertz, ThresholdUseEvidence},
 		"gpuTempC":                   {UnitCelsius, ThresholdUseAcceptance},
+		"meanTempUnderLoadC":         {UnitCelsius, ThresholdUseAcceptance},
+		"tempAtMinClockC":            {UnitCelsius, ThresholdUseEvidence},
+		"thermalTempThresholdC":      {UnitCelsius, ThresholdUseEvidence},
 		"powerDrawW":                 {UnitWatts, ThresholdUseAcceptance},
+		"meanPowerW":                 {UnitWatts, ThresholdUseAcceptance},
+		"enforcedPowerLimitW":        {UnitWatts, ThresholdUseAcceptance},
+		"defaultPowerLimitW":         {UnitWatts, ThresholdUseEvidence},
 		"throughputTflops":           {UnitTeraflops, ThresholdUseEvidence},
 		"sustainedThroughputTflops":  {UnitTeraflops, ThresholdUseAcceptance},
+
+		"sustainedFmaThroughputTflops": {UnitTeraflops, ThresholdUseAcceptance},
+		"peakFmaThroughputTflops":      {UnitTeraflops, ThresholdUseEvidence},
 
 		// Dimensionless counters.
 		"miscompares":         {UnitNone, ThresholdUseAcceptance},
@@ -146,8 +167,34 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"pcieReplayErrors":    {UnitNone, ThresholdUseAcceptance},
 		"nicLinkDownEvents":   {UnitNone, ThresholdUseAcceptance},
 		"throttleEvents":      {UnitNone, ThresholdUseAcceptance},
+		"throttledSamples":    {UnitNone, ThresholdUseAcceptance},
+		"throttleReasonsMask": {UnitNone, ThresholdUseEvidence},
+		"unsupportedReads":    {UnitNone, ThresholdUseEvidence},
 		"diagTestsFailed":     {UnitNone, ThresholdUseAcceptance},
 		"iterationsCompleted": {UnitNone, ThresholdUseAcceptance},
+		"samplesTaken":        {UnitNone, ThresholdUseEvidence},
+		"loadLaunches":        {UnitNone, ThresholdUseEvidence},
+		"loadThreads":         {UnitNone, ThresholdUseEvidence},
+		"loadItersPerLaunch":  {UnitNone, ThresholdUseEvidence},
+
+		// Label-valued. Every one of these MUST be Evidence: their values are
+		// not numbers, so a threshold on one fails closed on every node forever
+		// and reads as a hardware verdict. Evidence is what makes an
+		// authoring-time linter refuse the gate. Flipping any of them to
+		// Acceptance would re-open exactly that hole, which is why they are
+		// asserted here by name rather than left to review.
+		"gpuName":                {UnitNone, ThresholdUseEvidence},
+		"computeCap":             {UnitNone, ThresholdUseEvidence},
+		"pciBusId":               {UnitNone, ThresholdUseEvidence},
+		"driverVersion":          {UnitNone, ThresholdUseEvidence},
+		"builtCudaArch":          {UnitNone, ThresholdUseEvidence},
+		"migMode":                {UnitNone, ThresholdUseEvidence},
+		"nvmlUnsupported":        {UnitNone, ThresholdUseEvidence},
+		"configWarnings":         {UnitNone, ThresholdUseEvidence},
+		"throttleReasons":        {UnitNone, ThresholdUseEvidence},
+		"throttleClassification": {UnitNone, ThresholdUseEvidence},
+		"pdWedgeSuspected":       {UnitNone, ThresholdUseEvidence},
+		"clockFloorBasis":        {UnitNone, ThresholdUseEvidence},
 	}
 
 	for name, w := range want {

@@ -1,4 +1,6 @@
-// arch_match_test.cc — tests for the image/part mismatch classification in arch_match.h.
+// arch_match_test.cc — tests for the two pre-launch decisions in arch_match.h:
+// whether the PART is in scope at all (Skip), and whether this IMAGE carries a
+// cubin for it (Error).
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright the Glimmer authors.
@@ -7,11 +9,12 @@
 //
 //   c++ -std=c++17 -Wall -Wextra -o /tmp/arch_match_test arch_match_test.cc && /tmp/arch_match_test
 //
-// archmatch_test.go does exactly that, so this runs under `make test` and in CI
-// with no Docker, no CUDA toolchain and no GPU. That is the whole reason the
-// logic lives in a CUDA-free header: the decision this file checks is the one
-// an operator's error message depends on, and it was previously reachable only
-// by putting a deliberately mis-built image on real hardware.
+// runners/cxxtests_test.go does exactly that, so this runs under `make test` and
+// in CI with no Docker, no CUDA toolchain and no GPU. That is the whole reason
+// the logic lives in a CUDA-free header: both decisions were previously
+// reachable only by putting the right silicon, or a deliberately mis-built
+// image, in front of the runner — and for the Skip, the right silicon is
+// hardware this project does not have at all (issue #9).
 //
 // A plain program with no test framework, following memory-bw/scan_test.cc, so
 // it needs nothing beyond a C++ compiler. It is NOT compiled into the runner
@@ -59,6 +62,133 @@ void expectContains(const char *buf, const char *needle, const char *what) {
   if (!contains(buf, needle)) {
     std::printf("FAIL: %s — message does not mention \"%s\".\n  message: %s\n", what, needle, buf);
     ++failures;
+  }
+}
+
+const char *name(burnin::Scope s) {
+  switch (s) {
+    case burnin::Scope::Unknown: return "Unknown";
+    case burnin::Scope::InScope: return "InScope";
+    case burnin::Scope::OutOfScope: return "OutOfScope";
+  }
+  return "?";
+}
+
+void expectScope(int major, int minor, burnin::Scope want, const char *why) {
+  const burnin::Scope got = burnin::scopeOf(major, minor);
+  if (got != want) {
+    std::printf("FAIL: scopeOf(%d.%d) = %s, want %s — %s\n", major, minor, name(got), name(want),
+                why);
+    ++failures;
+  }
+}
+
+// ── the SCOPE decision, which is the runner's only Skip ──────────────────────
+//
+// Issue #9: exit 2 had never executed. It fires only on a part that is not
+// compute capability 12.0/12.1, and the only accelerator available to this
+// project is a CC 12.1 GB10, which always takes the PASS path. dcgm-diag was
+// expected to be the first real-silicon exerciser on the theory that DCGM does
+// not support GB10; it does, so that route is gone.
+//
+// This is why the decision was lifted out of fp4_smoke.cu's main() and into a
+// CUDA-free header: the branch that cannot be reached on the hardware in the
+// room can still be driven to every corner by a plain C++ program. Exit 2 is the
+// contract's load-bearing distinction — a node that cannot run a test has NOT
+// failed it — and the cost of getting it wrong is the same false-negative class
+// that made healthy Sparks look broken.
+
+void testScopeGate() {
+  // In scope: the whole SM12x family, not just the arch a given image is built
+  // for. Both are real parts, and the family is deliberate — narrowing this to
+  // the built arch would make a wrong-arch IMAGE look like out-of-scope
+  // HARDWARE, and a fleet would report Skip when someone had pinned a bad tag.
+  expectScope(12, 1, burnin::Scope::InScope, "GB10 / DGX Spark, the part this runner was written for");
+  expectScope(12, 0, burnin::Scope::InScope, "the other SM12x member; the gate is the family");
+
+  // Out of scope: real silicon that genuinely cannot do NVFP4 block-scaled
+  // GEMM. These are the parts that would take the Skip, and the ones this
+  // project has none of — which is the whole reason this test exists.
+  expectScope(9, 0, burnin::Scope::OutOfScope, "H100 (sm_90): no block-scaled FP4");
+  expectScope(8, 9, burnin::Scope::OutOfScope, "L40S (sm_89)");
+  expectScope(8, 0, burnin::Scope::OutOfScope, "A100 (sm_80)");
+  expectScope(7, 5, burnin::Scope::OutOfScope, "T4 (sm_75)");
+  expectScope(7, 0, burnin::Scope::OutOfScope, "V100 (sm_70)");
+  expectScope(6, 1, burnin::Scope::OutOfScope, "Pascal");
+
+  // B200 is SM10x. It is NOT covered by this runner and must Skip here rather
+  // than be admitted and then fail somewhere downstream — SM10x needs its own
+  // image (issue #10), and a Skip is how this one says so honestly.
+  expectScope(10, 0, burnin::Scope::OutOfScope, "B200 (sm_100) needs its own runner image");
+  expectScope(10, 3, burnin::Scope::OutOfScope, "any other SM10x member");
+
+  // A newer minor in the same major is NOT admitted. The gate names the two
+  // capabilities the kernel is known to run on; a hypothetical 12.2 has not been
+  // established, and quietly admitting it would launch an untested path.
+  expectScope(12, 2, burnin::Scope::OutOfScope, "a future SM12x minor is not assumed to work");
+  expectScope(12, 9, burnin::Scope::OutOfScope, "nor any later one");
+
+  // A future major is likewise out of scope rather than in.
+  expectScope(13, 0, burnin::Scope::OutOfScope, "a future architecture");
+
+  // THE RULE THAT MATTERS MOST HERE. A capability that was never read is
+  // Unknown, never OutOfScope. Answering OutOfScope would let a node whose
+  // properties could not be interrogated record a clean Skip — an acceptance
+  // decision taken without looking at anything — which is the same failure as a
+  // fabricated measurement. Unknown runs on, and the existing error paths speak.
+  expectScope(-1, -1, burnin::Scope::Unknown, "an unread capability is unjudged, not unsupported");
+  expectScope(-1, 1, burnin::Scope::Unknown, "a half-read capability is still unread");
+  expectScope(12, -1, burnin::Scope::Unknown, "and a negative minor does not become 12.0");
+
+  // The two questions must not be collapsed: a part can be perfectly in scope
+  // and still be one this IMAGE has no cubin for. That combination is an Error
+  // (wrong tag pinned), never a Skip, and both halves are asserted together here
+  // because the bug would be silent if either drifted alone.
+  expectScope(12, 0, burnin::Scope::InScope, "an sm_121a image on a CC 12.0 part: the PART is in scope");
+  expectMatch("sm_121a", 12, 0, burnin::ArchMatch::Mismatch,
+              "...and the IMAGE is the thing that does not cover it");
+}
+
+// The Skip message has to name what was found. "requires compute capability
+// 12.0/12.1" alone leaves an operator to go and discover what the node actually
+// has, and a Skip nobody can attribute is a Skip nobody trusts.
+void testOutOfScopeMessage() {
+  char buf[512];
+  const int code = burnin::describeOutOfScope(buf, sizeof(buf), 9, 0);
+
+  check(code == burnin::kExitSkip, "an out-of-scope part exits Skip");
+  check(code != burnin::kExitFail, "an out-of-scope part is NEVER a hardware verdict");
+  check(code != burnin::kExitError, "an out-of-scope part is not an infrastructure error either");
+  expectContains(buf, "9.0", "the skip message names the capability that was found");
+  expectContains(buf, "12.0/12.1", "the skip message names the capability that is required");
+  expectContains(buf, "NOT failed", "the skip message says plainly that the part is not failed");
+
+  // Swept: whatever the part reports, a Skip is a Skip and the message is never
+  // empty. Nothing here may return the hardware verdict.
+  const int caps[][2] = {{9, 0}, {8, 9}, {10, 0}, {13, 7}, {0, 0}, {-1, -1}};
+  for (const auto &cap : caps) {
+    char b[512];
+    if (burnin::describeOutOfScope(b, sizeof(b), cap[0], cap[1]) != burnin::kExitSkip) {
+      std::printf("FAIL: describeOutOfScope(%d.%d) did not exit Skip\n", cap[0], cap[1]);
+      ++failures;
+    }
+    if (b[0] == '\0') {
+      std::printf("FAIL: describeOutOfScope(%d.%d) produced an empty message\n", cap[0], cap[1]);
+      ++failures;
+    }
+  }
+
+  // A short buffer truncates rather than overruns, as everywhere else here.
+  char guard[64];
+  std::memset(guard, 'X', sizeof(guard));
+  burnin::describeOutOfScope(guard, 32, 9, 0);
+  check(std::strlen(guard) < 32, "a short skip buffer truncates and stays NUL-terminated");
+  for (std::size_t i = 32; i < sizeof(guard); ++i) {
+    if (guard[i] != 'X') {
+      std::printf("FAIL: describeOutOfScope wrote past the buffer it was given\n");
+      ++failures;
+      break;
+    }
   }
 }
 
@@ -266,6 +396,8 @@ void testShortBufferTruncatesSafely() {
 }  // namespace
 
 int main() {
+  testScopeGate();
+  testOutOfScopeMessage();
   testArchMatch();
   testPreLaunchMismatchMessage();
   testWrongImageOutranksTheRuntimeError();

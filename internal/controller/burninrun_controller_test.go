@@ -33,6 +33,25 @@ tflops=104.37
 FP4_GEMM_PASS
 `
 
+// fp4SkipStdout is the same runner taking its SKIP path, captured 2026-08-03 on
+// a real GB10 (driver 580.82.09, CUDA 13.0.1, CUTLASS v4.6.1) from a build with
+// the compile-time capability injection described in fp4_smoke.cu.
+//
+// It exists because exit 2 had never executed (issue #9). Skip fires only on a
+// part that is not compute capability 12.0/12.1; this project has no such
+// accelerator, and the route everyone expected — dcgm-diag finding GB10
+// unsupported — turned out not to exist, because DCGM works on GB10.
+//
+// The `forced_compute_cap=9.0` line is kept verbatim. It is what such a build
+// prints, and printing it is what keeps a fault-injected verdict distinguishable
+// from a real one for as long as the result is stored.
+const fp4SkipStdout = `built_cuda_arch=sm_121a
+forced_compute_cap=9.0
+gpu_name=NVIDIA GB10
+compute_cap=9.0
+FP4_GEMM_SKIP: NVFP4 block-scaled GEMM requires compute capability 12.0/12.1, and this part reports 9.0 — the test does not apply to this hardware and the part is NOT failed; run a kind whose runner covers this architecture
+`
+
 type harness struct {
 	t         *testing.T
 	r         *BurnInRunReconciler
@@ -692,6 +711,56 @@ func TestRun_SkipDoesNotFail(t *testing.T) {
 	}
 	if run.Status.Skipped != 1 {
 		t.Errorf("skipped counter = %d, want 1", run.Status.Skipped)
+	}
+}
+
+// The same rule, driven end to end by compute-smoke's OWN captured skip output
+// rather than by a synthetic marker line, and with a threshold attached.
+//
+// The threshold is the part worth asserting. `nonfiniteCount Equal 0` is the
+// gate config/samples/node-acceptance.yaml actually ships, and a skipped run
+// emits no nonfiniteCount at all. Fail-closed evaluation would turn that
+// omission into a Failed test — a permanent hardware verdict, never retried —
+// against a node whose only crime is being out of scope for the kind. The exit
+// code has to settle the attempt BEFORE thresholds are considered, and this is
+// the test that says so.
+func TestRun_ComputeSmokeSkipFixtureIsSkippedNotFailed(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{
+			Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0",
+		}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 2, fp4SkipStdout, "Error")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	res := run.Status.Results[0]
+	if res.Phase != burninv1alpha1.RunSkipped {
+		t.Fatalf("result phase = %q, want Skipped (message: %q)", res.Phase, res.Message)
+	}
+	if res.Phase == burninv1alpha1.RunFailed {
+		t.Fatal("a skip became a hardware verdict; a Fail is never retried and permanently indicts the node")
+	}
+	if run.Status.Phase != burninv1alpha1.RunPassed || run.Status.Skipped != 1 {
+		t.Errorf("run phase = %q, skipped = %d, want Passed and 1", run.Status.Phase, run.Status.Skipped)
+	}
+	if run.Status.Failed != 0 || run.Status.Errored != 0 {
+		t.Errorf("a clean skip was counted as failed=%d errored=%d", run.Status.Failed, run.Status.Errored)
+	}
+	// The runner's reason has to reach the stored result, or an operator sees
+	// "Skipped" with nothing saying which hardware property caused it.
+	if !strings.Contains(res.Message, "compute capability 12.0/12.1") {
+		t.Errorf("message = %q, want the runner's own skip reason", res.Message)
+	}
+	// A skip still records what it learned before deciding, and the fault
+	// injection marker rides along with it — which is the point of printing it.
+	if res.Metrics["computeCap"] != "9.0" || res.Metrics["forcedComputeCap"] != "9.0" {
+		t.Errorf("skip did not record its identity metrics: %v", res.Metrics)
 	}
 }
 

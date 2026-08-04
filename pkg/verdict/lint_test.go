@@ -214,6 +214,89 @@ func TestValidateThresholds_FlagsAGateOnAnEvidenceOnlyMetric(t *testing.T) {
 	}
 }
 
+// The regression test for the gap that made issue #65 a bug rather than an
+// untidiness: a gate on a metric whose value is a LABEL passed every check this
+// linter makes, and then failed closed on every node forever.
+//
+// All three checks genuinely pass on these names — the grammar is valid
+// lowerCamelCase, UnitOf answers UnitNone (which is the legitimate
+// dimensionless-counter case, so exact comparison is not flagged), and
+// SafeToThresholdOn answers true for anything unregistered because the registry
+// is an open world. Nothing was left to notice that "true" is not a number.
+//
+// The fix is entirely in pkg/contract: a first-party runner's label-valued
+// metrics are now registered as Evidence, which is what turns SafeToThresholdOn
+// to false and makes the existing evidence check below fire. This test asserts
+// the OUTCOME rather than the mechanism, so it keeps holding if the mechanism
+// is later sharpened (see #75).
+func TestValidateThresholds_FlagsAGateOnALabelValuedMetric(t *testing.T) {
+	// The two a profile author is most likely to reach for after reading
+	// clockprobe's README — they are what the runner presents as its wedge
+	// verdict — plus the rest of the label-valued set across both runners.
+	labelled := map[string]string{
+		"pdWedgeSuspected":       "true",
+		"throttleClassification": "powerCap",
+		"clockFloorBasis":        "thermal",
+		"throttleReasons":        "swPowerCap,hwPowerBrake",
+		"nvmlUnsupported":        "enforcedPowerLimit,defaultPowerLimit",
+		"configWarnings":         "NVML handle resolved by index, not PCI bus id",
+		"gpuName":                "NVIDIA GB10",
+		"computeCap":             "12.1",
+		"pciBusId":               "0000:01:00.0",
+		"driverVersion":          "580.82.09",
+		"builtCudaArch":          "sm_121a",
+		"migMode":                "disabled",
+	}
+
+	for metric, reported := range labelled {
+		t.Run(metric, func(t *testing.T) {
+			// "== 1" is the shape an author reaches for on something that reads
+			// like a boolean, and it is exactly what #65 reproduced.
+			gate := th(metric, burninv1alpha1.EQ, "1")
+
+			ps := problemFor(t, gate)
+			if len(ps) == 0 {
+				t.Fatalf("ValidateThresholds reported nothing for a gate on %q, whose value is %q; "+
+					"this gate fails closed on every node forever and the failure reads as a hardware verdict",
+					metric, reported)
+			}
+			if !strings.Contains(ps[0].Reason, metric) {
+				t.Errorf("reason = %q, want it to name the metric", ps[0].Reason)
+			}
+
+			// The other half of the finding, and the reason it must be caught at
+			// authoring time: evaluation is unchanged and still fails closed.
+			// The linter is advisory — it does not rescue this gate, it warns
+			// while the author can still fix it.
+			out := Evaluate(map[string]string{metric: reported}, nil, []burninv1alpha1.Threshold{gate})
+			if out.Passed {
+				t.Fatalf("Evaluate passed a gate on the non-numeric value %q; it must fail closed", reported)
+			}
+
+			// Registering these UPGRADED the finding rather than replacing one
+			// with another of equal worth, and that is the point of registering
+			// rather than leaving them to the unregistered rule. Before, the
+			// most that could be said on a built-in kind was "this project has
+			// never heard of that name"; now the reason is the registry's own
+			// description, which tells the author the values the metric
+			// actually takes and what to gate on instead. Asserted so a future
+			// change cannot quietly demote it back.
+			aware := ValidateThresholdsForKind(burninv1alpha1.KindClockProbe,
+				[]burninv1alpha1.Threshold{gate})
+			if len(aware) == 0 {
+				t.Fatalf("the kind-aware form said nothing about a gate on %q", metric)
+			}
+			if strings.Contains(aware[0].Reason, "not in the metric registry") {
+				t.Errorf("reason = %q; %q is registered now, so the author should be told what its "+
+					"values ARE, not that we have never heard of it", aware[0].Reason, metric)
+			}
+			if !strings.Contains(aware[0].Reason, "evidence") {
+				t.Errorf("reason = %q, want the evidence finding", aware[0].Reason)
+			}
+		})
+	}
+}
+
 // A threshold that cannot be evaluated at all fails every node forever, and the
 // report looks like a fleet of bad parts. Catching it at admission costs one
 // error message.
@@ -273,12 +356,28 @@ func TestValidateThresholds_FlagsThresholdsThatCanNeverBeEvaluated(t *testing.T)
 
 // ─── Unregistered metrics: open world, except on a runner we ship ─────────────
 
-// The #65 instance, caught. clockprobe emits pdWedgeSuspected as
-// "true"/"false"/"unknown", so a gate on it is never numeric and fails closed on
-// every node forever — and every check this package had passed it clean, because
-// the name is grammatical and an unregistered name is legal.
+// The #65 instance, caught — now with the examples it applies to NEXT.
+//
+// This rule was written against pdWedgeSuspected, throttleClassification and
+// clockFloorBasis, which clockprobe emits as words and which nothing had
+// registered, so a gate on one was never numeric and failed closed on every node
+// forever while passing every check this package made. Those three are now
+// REGISTERED (as Evidence, which is #65's fix), so they no longer exercise this
+// rule — they exercise the evidence rule instead, which is asserted separately
+// below. Substituting them silently would have left this test passing while
+// checking nothing it was written for.
+//
+// The names here are their successors, and they are not hypothetical: clockprobe
+// emits nine per-reason sample counters that pkg/contract deliberately does NOT
+// register, because they are the vendor's own enum, they scale with the sample
+// interval, and throttledSamples already carries what acceptance needs. Being
+// integers, a gate on one evaluates and means what it says — so this is not the
+// fails-closed trap, it is the other reading in the message: a first-party name
+// somebody is now gating on, and gating is what promotes a name from incidental
+// evidence to acceptance-deciding. Register it at that point, or accept that
+// nothing guarantees a runner still emits it.
 func TestValidateThresholdsForKind_FlagsAnUnregisteredMetricOnABuiltInKind(t *testing.T) {
-	for _, metric := range []string{"pdWedgeSuspected", "throttleClassification", "clockFloorBasis"} {
+	for _, metric := range []string{"hwSlowdownSamples", "swPowerCapSamples", "gpuIdleSamples"} {
 		t.Run(metric, func(t *testing.T) {
 			ps := ValidateThresholdsForKind(burninv1alpha1.KindClockProbe,
 				[]burninv1alpha1.Threshold{th(metric, burninv1alpha1.EQ, "0")})
@@ -313,7 +412,11 @@ func TestValidateThresholdsForKind_SaysNothingAboutRunnersThisProjectDoesNotShip
 	thresholds := []burninv1alpha1.Threshold{
 		th("vendorFabricRetries", burninv1alpha1.EQ, "0"),
 		th("vendorLinkUtilPct", burninv1alpha1.GTE, "80"),
-		th("pdWedgeSuspected", burninv1alpha1.EQ, "0"),
+		// A first-party name that is unregistered on purpose. It belongs here
+		// rather than only among the vendor-shaped ones: the rule keys off the
+		// KIND, not off whether a name looks like ours, and a third-party runner
+		// reusing a spelling we happen to also emit must still go unremarked.
+		th("hwSlowdownSamples", burninv1alpha1.EQ, "0"),
 	}
 	for _, kind := range []burninv1alpha1.TestKind{
 		burninv1alpha1.KindCustom,
@@ -332,7 +435,7 @@ func TestValidateThresholdsForKind_SaysNothingAboutRunnersThisProjectDoesNotShip
 // public API with two dispatchers, and one of them has no TestKind to give.
 func TestValidateThresholds_IsTheKindAgnosticForm(t *testing.T) {
 	thresholds := []burninv1alpha1.Threshold{
-		th("pdWedgeSuspected", burninv1alpha1.EQ, "0"),
+		th("hwSlowdownSamples", burninv1alpha1.EQ, "0"),
 		th("gpuTempC", burninv1alpha1.LTE, "85"),
 	}
 	if got := ValidateThresholds(thresholds); len(got) != 0 {

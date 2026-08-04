@@ -1,13 +1,13 @@
-// arch_match.h — does the arch this binary was BUILT for cover the part it LANDED on?
+// arch_match.h — the two arch questions compute-smoke answers before it launches.
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright the Glimmer authors.
 //
-// Host-only, and deliberately free of CUDA. This is the decision an operator's
-// error message hangs off, so it is the part that most needs a test, and a
-// header that includes no CUDA can be compiled and exercised by a plain C++
+// Host-only, and deliberately free of CUDA. These are the decisions an
+// operator's verdict hangs off, so they are the part that most needs a test, and
+// a header that includes no CUDA can be compiled and exercised by a plain C++
 // compiler with no GPU anywhere in sight (see arch_match_test.cc, which
-// runners/compute-smoke/archmatch_test.go compiles and runs under `make test`).
+// runners/cxxtests_test.go compiles and runs under `make test`).
 //
 // WHY THIS EXISTS. fp4_smoke.cu used to learn "this image has no cubin for this
 // part" only from the CUDA runtime, via cudaErrorNoKernelImageForDevice. That
@@ -35,12 +35,30 @@
 //   - The finding is UNJUDGED, never a verdict. Every path here returns
 //     kExitError; see the exit contract below.
 //
-// This answers "does this image carry a cubin for this part?", which is a
-// question about the image that was pinned. It is NOT the scope gate in
-// fp4_smoke.cu's main(), which asks "can this part do NVFP4 block-scaled GEMM at
-// all?" — a question about the hardware, answered with Skip. Collapsing the two
-// would report a whole fleet as "acceptance not applicable" when the truth is
-// that an operator pinned the wrong tag.
+// TWO QUESTIONS, AND THEY MUST NOT BE COLLAPSED. Both are answered here, and
+// keeping them apart is the point of the file:
+//
+//   scopeOf(major, minor)              "can this part do NVFP4 block-scaled GEMM
+//                                      at all?" — a property of the HARDWARE.
+//                                      OutOfScope -> Skip, exit 2.
+//
+//   archMatch(builtArch, major, minor) "does this image carry a cubin for this
+//                                      part?" — a property of the IMAGE that was
+//                                      pinned. Mismatch -> Error, exit 3.
+//
+// Collapsing them would misreport one of the two. Narrowing the scope gate to
+// the built arch would make a wrong-arch image look like out-of-scope hardware,
+// and a whole fleet would report Skip — reading as "acceptance is not applicable
+// to these nodes" — when the truth is that an operator pinned the wrong tag.
+// Widening the image gate the other way would condemn a genuinely out-of-scope
+// part as a configuration error.
+//
+// The scope gate lives here, rather than inline in fp4_smoke.cu's main(), for
+// the reason the rest of this header exists: exit 2 is the contract's
+// load-bearing distinction — a node that cannot run a test has NOT failed it —
+// and it can only be exercised on hardware this project does not have. Being
+// CUDA-free is what lets a plain C++ test drive that decision to every corner
+// without a GPU. See issue #9.
 
 #ifndef BURNIN_ARCH_MATCH_H
 #define BURNIN_ARCH_MATCH_H
@@ -60,6 +78,56 @@ constexpr int kExitPass = 0;
 constexpr int kExitFail = 1;
 constexpr int kExitSkip = 2;
 constexpr int kExitError = 3;
+
+// ── the SCOPE gate: is NVFP4 block-scaled GEMM in scope for this part? ───────
+//
+// This is what produces the runner's only Skip, and Skip is the code that most
+// needs to be right: a node that cannot run a test has not failed it, and
+// collapsing the two is the false-negative class this runner was written to fix.
+// Exit 1 permanently indicts a node and is never retried by the operator.
+//
+// Deliberately the whole SM12x family (compute capability 12.0 and 12.1) rather
+// than the single arch this binary was built for — see the two-questions note at
+// the top of this file. An in-scope part whose cubin this image does not carry
+// passes here and is stopped by archMatch as an Error instead.
+//
+// Tri-state, for the same reason ArchMatch is. A Skip is a DECLARATION about the
+// hardware — "acceptance does not apply to this part" — and a runner may only
+// declare what it positively established. A negative capability means it was
+// never read, which is a real state (the first CUDA calls in main() can fail
+// before there is anything to latch), and it is emphatically not the same as
+// "this part cannot do FP4". Answering OutOfScope there would let an
+// uninterrogated node record a clean Skip, which is an acceptance that never
+// looked at anything. Unknown runs on and leaves the existing error paths to
+// speak, exactly as an Unknown ArchMatch does.
+enum class Scope {
+  Unknown,
+  InScope,
+  OutOfScope,
+};
+
+inline Scope scopeOf(int devMajor, int devMinor) {
+  if (devMajor < 0 || devMinor < 0) return Scope::Unknown;
+  if (devMajor == 12 && (devMinor == 0 || devMinor == 1)) return Scope::InScope;
+  return Scope::OutOfScope;
+}
+
+// The operator-facing text for an out-of-scope part, and the exit code to leave
+// with — kExitSkip, which is the whole reason this decision is separated out.
+//
+// It names the capability it found, because "requires compute capability
+// 12.0/12.1" on its own leaves an operator to go and discover what the node
+// actually has, and a Skip that nobody can attribute is a Skip nobody trusts.
+inline int describeOutOfScope(char *buf, std::size_t n, int devMajor, int devMinor) {
+  std::snprintf(buf, n,
+                "NVFP4 block-scaled GEMM requires compute capability 12.0/12.1, and this part "
+                "reports %d.%d — the test does not apply to this hardware and the part is NOT "
+                "failed; run a kind whose runner covers this architecture",
+                devMajor, devMinor);
+  return kExitSkip;
+}
+
+// ── the IMAGE gate ──────────────────────────────────────────────────────────
 
 // Whether the built arch covers the part in front of us.
 //

@@ -47,13 +47,31 @@ const (
 type TestKind string
 
 const (
-	KindGPUBurn      TestKind = "gpu-burn"       // Node: sustained FP compute + ECC watch
-	KindComputeSmoke TestKind = "compute-smoke"  // Node: quick arch-correct kernel (sm_121 FP4 / FP16 proxy)
-	KindDCGMDiag     TestKind = "dcgm-diag"      // Node: NVIDIA DCGM diagnostics
-	KindThermalSoak  TestKind = "thermal-soak"   // Node: hold load, assert no throttle/trip
-	KindNCCL         TestKind = "nccl"           // Pair/Group: all-reduce bus-bandwidth over the fabric
-	KindIBWriteBW    TestKind = "ib-write-bw"    // Pair: perftest ib_write_bw across the RDMA link
-	KindGPUDirect    TestKind = "gpudirect-rdma" // Pair: GPUDirect RDMA path validation
+	KindGPUBurn TestKind = "gpu-burn" // Node: sustained FP compute + ECC watch
+
+	// KindComputeSmoke is a Node-scope BURST: one arch-correct block-scaled
+	// NVFP4 GEMM, checked against a host reference, in milliseconds.
+	//
+	// It is deliberately not a soak, and it is the only kind that IGNORES
+	// DurationSeconds as a runtime budget — see BurstOnly. What it proves is
+	// that the real FP4 tensor-core instruction path executed on this part and
+	// produced the right answer; that is a correctness statement, and holding
+	// the same GEMM in a loop for two minutes would not make it a stronger one.
+	// It would make it a worse soak than the kinds that exist to be soaks:
+	// thermal-soak and gpu-burn both run on the shared duration-honouring load
+	// wrapper, and clockprobe holds a load specifically to judge sustained
+	// clocks. Converging compute-smoke onto that wrapper would duplicate all
+	// three and leave the fleet with no cheap correctness gate at all.
+	//
+	// So: one kind, one job. Pair it with a soak in a profile when a profile
+	// wants both — which is what config/samples/node-acceptance.yaml does.
+	KindComputeSmoke TestKind = "compute-smoke"
+
+	KindDCGMDiag    TestKind = "dcgm-diag"      // Node: NVIDIA DCGM diagnostics
+	KindThermalSoak TestKind = "thermal-soak"   // Node: hold load, assert no throttle/trip
+	KindNCCL        TestKind = "nccl"           // Pair/Group: all-reduce bus-bandwidth over the fabric
+	KindIBWriteBW   TestKind = "ib-write-bw"    // Pair: perftest ib_write_bw across the RDMA link
+	KindGPUDirect   TestKind = "gpudirect-rdma" // Pair: GPUDirect RDMA path validation
 
 	// KindMemoryBW is a Node-scope memory-bandwidth measurement: device-local
 	// STREAM-style bandwidth plus the host<->device and device<->device copy
@@ -176,6 +194,33 @@ var builtInKinds = func() map[TestKind]bool {
 // on this answer; it only decides how much advice an author is owed.
 func (k TestKind) IsBuiltIn() bool {
 	return builtInKinds[k]
+}
+
+// BurstOnly reports whether this kind's runner does one bounded burst of work
+// and therefore does NOT use DurationSeconds as a runtime budget.
+//
+// The operator injects BURNIN_DURATION_SECONDS into every runner at every
+// scope, and every runner in this repository reads it — except compute-smoke,
+// whose GEMM finishes in milliseconds no matter what it is asked for. That was
+// silently true for a long time while a shipped sample asked the kind for 120
+// seconds and got milliseconds (issue #25), which is the shape of dishonesty
+// this method exists to make impossible: the fact is now declared, the sample
+// guard in api/v1alpha1/samples_test.go refuses a duration on such a kind, and
+// runners/pins_test.go refuses the reverse — a kind claiming to honour a
+// duration whose runner source never reads the variable.
+//
+// DurationSeconds is not meaningless for a burst kind: it still bounds the
+// POD, via the deadline the reconciler derives from it, so an image that hangs
+// before reaching its kernel is still killed. What it does not do is decide how
+// long the test runs. Setting it on a burst kind therefore states a deadline
+// and nothing else, and a profile author who meant "burn this node in for two
+// minutes" wants a soak kind instead.
+//
+// KindCustom is never burst-only: the whole point of it is an image this
+// project knows nothing about, and claiming its runner ignores a duration would
+// be a guess about somebody else's code.
+func (k TestKind) BurstOnly() bool {
+	return k == KindComputeSmoke
 }
 
 // BurnInTestSpec defines one acceptance test.
