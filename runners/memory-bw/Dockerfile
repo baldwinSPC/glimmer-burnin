@@ -108,8 +108,25 @@ RUN got="$(git -C /nvbandwidth rev-parse HEAD)"; \
 #   prove); nvbandwidth measures copy-engine and C2C/PCIe bandwidth and uses none
 #   of them, so 121 is the honest translation of sm_121a here. Nothing silently
 #   downgrades: an unrecognised value fails the build rather than falling back.
+#   CMAKE_CUDA_ARCHITECTURES is ALWAYS passed, never omitted. Leaving it unset
+#   does not mean "use nvbandwidth's list" — CMake then resolves it itself, and
+#   its fallback wants to detect the architecture of a GPU present on the build
+#   machine. There is no GPU in a build container, so detection fails and CMake
+#   aborts while enabling the CUDA language, surfacing as the thoroughly
+#   misleading:
+#
+#       CMake Error: CMAKE_CXX_COMPILER not set, after EnableLanguage
+#
+#   That is what broke the arm64 half of the first multi-platform CI build. It
+#   had been masked because CI previously forced CUDA_ARCH=sm_121a, so the flag
+#   was always supplied by accident rather than by design.
+#
+#   all-major is the default because this runner is arch-insensitive: every
+#   testcase it runs is a copy-engine testcase that moves data without launching
+#   a kernel. It asks the toolkit for one cubin per major architecture it
+#   supports, which is portable across both platforms and needs no GPU present.
 RUN set -eu; \
-    cmake_arch=""; \
+    cmake_arch="all-major"; \
     if [ -n "${CUDA_ARCH:-}" ]; then \
       case "${CUDA_ARCH}" in \
         sm_[0-9][0-9]|sm_[0-9][0-9][a-z]|sm_[0-9][0-9][0-9]|sm_[0-9][0-9][0-9][a-z]) \
@@ -118,13 +135,13 @@ RUN set -eu; \
         all|all-major|native) cmake_arch="${CUDA_ARCH}" ;; \
         *) echo "memory-bw: cannot translate CUDA_ARCH='${CUDA_ARCH}' into a CMAKE_CUDA_ARCHITECTURES value" >&2; exit 1 ;; \
       esac; \
-      echo "memory-bw: CUDA_ARCH=${CUDA_ARCH} -> CMAKE_CUDA_ARCHITECTURES=${cmake_arch}"; \
     fi; \
+    echo "memory-bw: CUDA_ARCH='${CUDA_ARCH:-}' -> CMAKE_CUDA_ARCHITECTURES=${cmake_arch}"; \
     cmake -S /nvbandwidth -B /nvbandwidth/build \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
       -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc -L/usr/local/cuda/lib64/stubs" \
-      ${cmake_arch:+-DCMAKE_CUDA_ARCHITECTURES=${cmake_arch}} \
+      -DCMAKE_CUDA_ARCHITECTURES="${cmake_arch}" \
     && cmake --build /nvbandwidth/build --parallel "$(nproc)"
 
 RUN mkdir -p /out && install -m 0755 /nvbandwidth/build/nvbandwidth /out/nvbandwidth
