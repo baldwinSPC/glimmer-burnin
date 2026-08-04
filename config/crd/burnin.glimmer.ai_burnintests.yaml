@@ -697,7 +697,9 @@ spec:
                         whose name ends in a unit suffix (Gbps, GBs, MBs, Us, Ms, S, C, W, Pct, MHz,
                         Tflops) is continuous by construction — gate it with GreaterThanOrEqual
                         and/or LessThanOrEqual instead. pkg/verdict.ValidateThresholds reports this
-                        misuse at authoring time, before a run has condemned anything.
+                        misuse at authoring time, before a run has condemned anything: the operator
+                        runs it against the pinned plan at run start and records what it found on the
+                        BurnInRun's ThresholdsSound condition.
                       enum:
                       - GreaterThanOrEqual
                       - LessThanOrEqual
@@ -711,6 +713,14 @@ spec:
                         Names are lowerCamelCase and a dimensional metric ends in a unit suffix;
                         a name that breaks that grammar is dropped during parsing, so a threshold
                         naming one can never be satisfied.
+
+                        The pattern is the apiserver's half of that rule and it is deliberately
+                        only the half a regex can express: lowerCamelCase, which is what
+                        contract.ValidateMetricName checks first. The other half — that a name
+                        this project OWNS declares the unit it is registered with — needs the
+                        registry and is enforced at plan time, where a violation refuses the run
+                        as a config Error rather than condemning a node.
+                      pattern: ^[a-z][a-zA-Z0-9]*$
                       type: string
                     value:
                       description: |-
@@ -722,6 +732,14 @@ spec:
                         Under Equal/NotEqual the comparison is exact, so this should be a whole
                         number counted by a counter. Under GreaterThanOrEqual/LessThanOrEqual it
                         is a bound and any finite value is meaningful.
+
+                        The pattern admits exactly the finite decimal forms ("20", "10.8", "-3",
+                        "1e9") and refuses the ones that parse as float64 without expressing a
+                        bound ("NaN", "Inf", "+Inf"), along with the ones that do not parse at all
+                        ("twenty"). Every one of those is a gate that fails on every node forever
+                        and reports it in the shape of a hardware verdict, so the apiserver is the
+                        right place to say no — while the author is still holding the file.
+                      pattern: ^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$
                       type: string
                   required:
                   - comparison

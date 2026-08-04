@@ -128,6 +128,56 @@ const (
 	KindCustom TestKind = "custom" // any image; no built-in parsing
 )
 
+// BuiltInKinds are the kinds whose runner image, result parser and metric names
+// THIS PROJECT owns. They are the closed half of a deliberately open enum:
+// TestKind accepts any string, so a site can point its own image at the runner
+// contract without a release of this operator, and KindCustom exists to say so
+// explicitly.
+//
+// The distinction has one consumer and it is worth the hand-kept list. A
+// threshold naming a metric pkg/contract has never heard of is unremarkable on
+// somebody else's runner — the registry is an open world precisely so a
+// third-party measurement can be gated on — but on one of these kinds it is
+// either a registry entry this project forgot or a gate no runner will ever
+// satisfy. Only the second reading is dangerous, and neither is decidable
+// without knowing whose runner is about to be asked. See
+// verdict.ValidateThresholdsForKind.
+//
+// ADD A NEW KIND HERE when you add its constant above.
+// TestBuiltInKindsCoversEveryDeclaredKind fails otherwise.
+var BuiltInKinds = []TestKind{
+	KindGPUBurn,
+	KindComputeSmoke,
+	KindDCGMDiag,
+	KindThermalSoak,
+	KindNCCL,
+	KindIBWriteBW,
+	KindGPUDirect,
+	KindMemoryBW,
+	KindHostHealth,
+	KindClockProbe,
+	KindMemoryStress,
+}
+
+var builtInKinds = func() map[TestKind]bool {
+	m := make(map[TestKind]bool, len(BuiltInKinds))
+	for _, k := range BuiltInKinds {
+		m[k] = true
+	}
+	return m
+}()
+
+// IsBuiltIn reports whether this project ships the runner for this kind.
+//
+// KindCustom answers false because that is what it means, and an UNRECOGNISED
+// string answers false too — a kind this operator has never heard of is somebody
+// else's runner by definition, and guessing otherwise would apply this project's
+// expectations to an image it has never seen. Nothing that fails closed depends
+// on this answer; it only decides how much advice an author is owed.
+func (k TestKind) IsBuiltIn() bool {
+	return builtInKinds[k]
+}
+
 // BurnInTestSpec defines one acceptance test.
 type BurnInTestSpec struct {
 	// Kind selects built-in runner defaults + result parsing.
@@ -371,7 +421,9 @@ type HostPathMount struct {
 // whose name ends in a unit suffix (Gbps, GBs, MBs, Us, Ms, S, C, W, Pct, MHz,
 // Tflops) is continuous by construction — gate it with GreaterThanOrEqual
 // and/or LessThanOrEqual instead. pkg/verdict.ValidateThresholds reports this
-// misuse at authoring time, before a run has condemned anything.
+// misuse at authoring time, before a run has condemned anything: the operator
+// runs it against the pinned plan at run start and records what it found on the
+// BurnInRun's ThresholdsSound condition.
 // +kubebuilder:validation:Enum=GreaterThanOrEqual;LessThanOrEqual;Equal;NotEqual
 type Comparison string
 
@@ -433,7 +485,15 @@ type Threshold struct {
 	// Names are lowerCamelCase and a dimensional metric ends in a unit suffix;
 	// a name that breaks that grammar is dropped during parsing, so a threshold
 	// naming one can never be satisfied.
+	//
+	// The pattern is the apiserver's half of that rule and it is deliberately
+	// only the half a regex can express: lowerCamelCase, which is what
+	// contract.ValidateMetricName checks first. The other half — that a name
+	// this project OWNS declares the unit it is registered with — needs the
+	// registry and is enforced at plan time, where a violation refuses the run
+	// as a config Error rather than condemning a node.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9]*$`
 	Metric string `json:"metric"`
 
 	// +kubebuilder:validation:Required
@@ -447,7 +507,15 @@ type Threshold struct {
 	// Under Equal/NotEqual the comparison is exact, so this should be a whole
 	// number counted by a counter. Under GreaterThanOrEqual/LessThanOrEqual it
 	// is a bound and any finite value is meaningful.
+	//
+	// The pattern admits exactly the finite decimal forms ("20", "10.8", "-3",
+	// "1e9") and refuses the ones that parse as float64 without expressing a
+	// bound ("NaN", "Inf", "+Inf"), along with the ones that do not parse at all
+	// ("twenty"). Every one of those is a gate that fails on every node forever
+	// and reports it in the shape of a hardware verdict, so the apiserver is the
+	// right place to say no — while the author is still holding the file.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$`
 	Value string `json:"value"`
 
 	// Applicability decides what happens when the hardware cannot produce this

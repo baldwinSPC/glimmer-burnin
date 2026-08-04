@@ -215,6 +215,39 @@ disagree about the same hardware. One brain, two dispatchers.
   and changes nothing about evaluation, which still fails closed — including on
   a non-finite value, since `NaN` compares false against everything and would
   otherwise make `NotEqual` a gate that always passes.
+- **The threshold linter has three surfaces, and the severities land in
+  different places.** A warning nobody runs is not discoverability, so
+  `ValidateThresholds` is wired in rather than merely available. The CRD's
+  `Pattern` markers on `Threshold.Metric` and `Threshold.Value` refuse the
+  malformed spellings at the apiserver, which is the earliest and cheapest place
+  any of it can be said; `buildPlan` lints the resolved profile before a node is
+  cordoned; and `TestSamplesThresholdsLintClean` holds `config/samples/` to the
+  same bar in CI. Then: a **`Malformed`** problem REFUSES the run as a config
+  `Error` — a gate nothing can satisfy fails every node forever and would
+  otherwise be reported in the shape of a hardware verdict, which is exactly the
+  confusion `Error` is kept distinct from `Fail` to prevent. An **`Unsound`** one
+  does NOT block: it is recorded on the run's `ThresholdsSound` condition and the
+  run proceeds, because the gate does evaluate and this operator must not veto
+  profiles it merely does not understand. It is a condition rather than an Event
+  on purpose — an Event expires in an hour and the verdict it qualifies is kept
+  for years. Keep the split; do not promote advice to a refusal, and do not
+  demote a refusal to advice.
+- **Unregistered is legal, except on a runner this project ships.** The registry
+  is an OPEN world — a lowerCamelCase name nothing has registered is valid, so a
+  third-party runner can report a new measurement without a release of
+  `pkg/contract` — and that stays true. But the same silence hid a gate on a
+  `clockprobe` metric whose values are `true`/`false`/`unknown`, which fails
+  closed on every node forever. So `verdict.ValidateThresholdsForKind` asks the
+  question only where the answer is knowable: for a kind in
+  `v1alpha1.BuiltInKinds` this project owns the runner, the parser and the name,
+  so an unregistered gated metric is either a missing registry entry or a gate
+  nothing satisfies, and it is reported as `Unsound`. For `KindCustom` — and for
+  any unrecognised kind, since `TestKind` is an open enum — nothing is said, and
+  the kind-agnostic `ValidateThresholds` keeps exactly that behaviour. **Add a
+  new kind to `BuiltInKinds`** when you add its constant, or the check silently
+  stops applying to it. Writing a threshold is what promotes a name from
+  incidental evidence to acceptance-deciding, which is why registration is owed
+  at that point and not before.
 - **Metric names are a contract.** `pkg/contract/metrics.go` holds the registry
   and the grammar: lowerCamelCase, a dimensional metric ends in a registered
   unit suffix (`Gbps`, `GBs`, `MBs`, `Us`, `Ms`, `S`, `C`, `W`, `Pct`,

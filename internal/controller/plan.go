@@ -7,6 +7,7 @@ import (
 	"time"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
 
 // planAnnotation pins the fully-resolved execution plan onto the run at start.
@@ -72,6 +73,9 @@ type plannedTest struct {
 // can never launch, and a run that quietly waits out its deadline to say so is
 // a much worse report than one that refuses at start with the reason.
 func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targets []string, nodeCap int) (*plan, error) {
+	if err := refuseUnsatisfiableThresholds(tests); err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	p := &plan{
 		Version:  1,
@@ -168,6 +172,114 @@ func validateHostPaths(t resolvedTest) error {
 		byMountPath[m.MountPath] = true
 	}
 	return nil
+}
+
+// ─── The threshold linter's surface ───────────────────────────────────────────
+//
+// pkg/verdict.ValidateThresholds has existed since the epsilon question was
+// settled, and the answer to that question — no tolerance, the guidance is
+// delivered at authoring time instead — rests on an author actually being
+// warned. Until this ran, nothing called it. The two severities land in
+// different places here, and the split is the point:
+//
+//   - MALFORMED refuses the run, as a config Error, before a node is cordoned.
+//     A threshold that cannot be evaluated at all fails closed on every node
+//     forever, and a fleet-wide permanent failure reported as a hardware verdict
+//     is the exact confusion `Error` is kept distinct from `Fail` to prevent. It
+//     is a broken profile; the honest phase is the one that says our input was
+//     wrong, not the one that says the hardware was.
+//   - UNSOUND records a condition and runs anyway. It is a suspicion, not a
+//     proof — the gate evaluates, and it may well be doing what its author
+//     wanted. Refusing on suspicion would let this operator veto profiles it
+//     merely does not understand, which is a worse failure than a noisy note.
+
+// maxAdvisedThresholds bounds how many gates a report about thresholds spells
+// out — the refusal and the condition both. The count is always exact even when
+// the details are elided: a profile gating forty metrics must not produce a
+// status write the apiserver refuses, and a truncated list that lied about how
+// much it truncated would be worse than no list.
+const maxAdvisedThresholds = 5
+
+// refuseUnsatisfiableThresholds rejects a profile carrying a gate that no run
+// could satisfy.
+//
+// It reports EVERY malformed threshold across every test rather than the first,
+// because the caller is about to be told to go and fix a file: rediscovering the
+// second typo on the next run costs another cordon, another schedule, and
+// another wait.
+func refuseUnsatisfiableThresholds(tests []resolvedTest) error {
+	var bad []string
+	for _, t := range tests {
+		for _, p := range verdict.ValidateThresholdsForKind(t.spec.Kind, t.spec.Thresholds) {
+			if p.Severity != verdict.SeverityMalformed {
+				continue
+			}
+			bad = append(bad, fmt.Sprintf("test %q %s", t.name, p.Error()))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	shown := bad
+	if len(bad) > maxAdvisedThresholds {
+		shown = append(append([]string{}, bad[:maxAdvisedThresholds]...),
+			fmt.Sprintf("and %d more", len(bad)-maxAdvisedThresholds))
+	}
+	return fmt.Errorf(
+		"this profile carries %d threshold(s) that can never be satisfied, so the run is refused before any node is touched — "+
+			"every one of them would otherwise fail on every node, forever, and be reported in the same shape as a hardware "+
+			"verdict: %s",
+		len(bad), strings.Join(shown, "; "))
+}
+
+// thresholdAdvice is one unsound gate, carrying the test it was found in so an
+// operator reading a run's status knows which file to open.
+type thresholdAdvice struct {
+	test    string
+	problem verdict.Problem
+}
+
+// unsoundThresholds lints the PINNED plan.
+//
+// Pinned, not the live profile, for the same reason everything else downstream
+// reads the plan: the advisory has to describe the thresholds that actually
+// decided this run's verdict. It is also what lets the answer be recomputed
+// identically on the recovery path, after a crash between pinning the plan and
+// writing the run's status.
+func (p *plan) unsoundThresholds() []thresholdAdvice {
+	var out []thresholdAdvice
+	for _, t := range p.Tests {
+		for _, problem := range verdict.ValidateThresholdsForKind(t.Spec.Kind, t.Spec.Thresholds) {
+			if problem.Severity != verdict.SeverityUnsound {
+				continue
+			}
+			out = append(out, thresholdAdvice{test: t.Name, problem: problem})
+		}
+	}
+	return out
+}
+
+// summariseThresholdAdvice renders the condition message.
+func summariseThresholdAdvice(advice []thresholdAdvice) string {
+	shown := advice
+	if len(shown) > maxAdvisedThresholds {
+		shown = shown[:maxAdvisedThresholds]
+	}
+	parts := make([]string, 0, len(shown)+1)
+	for _, a := range shown {
+		parts = append(parts, fmt.Sprintf("test %q %s", a.test, a.problem.Error()))
+	}
+	if elided := len(advice) - len(shown); elided > 0 {
+		parts = append(parts, fmt.Sprintf("and %d more", elided))
+	}
+
+	gates := "gates"
+	if len(advice) == 1 {
+		gates = "gate"
+	}
+	return fmt.Sprintf(
+		"%d %s evaluate but may not mean what they say; the run proceeds and these do not affect its verdict: %s",
+		len(advice), gates, strings.Join(parts, "; "))
 }
 
 // pinPlan serialises the plan into the run's annotations (caller persists).

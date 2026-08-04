@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
 
 // TestSamplesDecodeStrictly decodes every document in config/samples against
@@ -71,6 +72,71 @@ func TestSamplesDecodeStrictly(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSamplesThresholdsLintClean runs the threshold linter over every gate the
+// shipped samples declare, at the severity the operator itself applies.
+//
+// This is the cheap half of giving verdict.ValidateThresholds a surface: the
+// reconciler warns the operators of a real cluster, and this warns us. Samples
+// are the first thing a new user applies and the thing they copy, so a sample
+// carrying a gate the operator would refuse — or one it would run while noting
+// that the verdict may not mean what it says — ships that mistake to everyone
+// who starts here.
+//
+// It is deliberately zero-tolerance, including for the ADVISORY severity that
+// does not block a run: an unsound gate may be a defensible choice in somebody's
+// profile, but it is never a defensible thing to hand a newcomer as an example.
+//
+// What it cannot check is the only thing that has actually gone wrong here: the
+// NUMBER. A clockprobe gate at `>= 90` failed a healthy part by seven points and
+// lints perfectly clean, because GreaterThanOrEqual is a sound comparison and
+// calibration is measured, not linted. This is a floor, not a substitute for
+// measure-then-pin.
+func TestSamplesThresholdsLintClean(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := burninv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	decoder := json.NewSerializerWithOptions(
+		json.DefaultMetaFactory, scheme, scheme,
+		json.SerializerOptions{Yaml: true, Strict: true},
+	)
+
+	files, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob samples: %v", err)
+	}
+
+	gated := 0
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, doc := range splitYAMLDocuments(string(raw)) {
+			obj, _, err := decoder.Decode([]byte(doc), nil, nil)
+			if err != nil {
+				continue // TestSamplesDecodeStrictly owns that failure.
+			}
+			bt, ok := obj.(*burninv1alpha1.BurnInTest)
+			if !ok || len(bt.Spec.Thresholds) == 0 {
+				continue
+			}
+			gated++
+			// The kind-aware form, because these are OUR runners: a sample
+			// gating a built-in kind on a metric no runner of that kind emits is
+			// exactly the trap this repo has already fallen into once.
+			for _, p := range verdict.ValidateThresholdsForKind(bt.Spec.Kind, bt.Spec.Thresholds) {
+				t.Errorf("%s: BurnInTest %q (kind %s) %s",
+					filepath.Base(file), bt.Name, bt.Spec.Kind, p.Error())
+			}
+		}
+	}
+	// A check that silently stops finding anything to check is not a check.
+	if gated == 0 {
+		t.Error("no sample declares a threshold — either the samples lost their gates or this test stopped finding them")
 	}
 }
 

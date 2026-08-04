@@ -50,6 +50,15 @@
 // continuous metric (and other unusable gates) at authoring time, while the
 // author can still fix it. Evaluation itself is unchanged and still fails
 // closed.
+//
+// That guidance is only worth something if something runs it, so in this
+// operator three surfaces do. The CRD's own patterns refuse the malformed
+// spellings at the apiserver; the reconciler lints the pinned plan before a node
+// is cordoned, refusing a threshold nothing could satisfy as a config Error and
+// recording an unsound one as an advisory condition on the BurnInRun; and a test
+// over config/samples holds the project's own examples to the same bar. A second
+// dispatcher owes its authors an equivalent surface — a warning nobody executes
+// is not discoverability.
 package verdict
 
 import (
