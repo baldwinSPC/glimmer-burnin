@@ -87,12 +87,17 @@ is injected at runtime from the host driver by the NVIDIA Container Toolkit.
 ## Build, test, lint
 
 ```sh
-make generate    # deepcopy methods (controller-gen)
-make manifests   # CRDs + RBAC
-make test        # unit tests
-make lint        # gofmt + go vet
-make build       # binary
-make all         # generate manifests fmt vet test build
+make generate        # deepcopy methods (controller-gen)
+make manifests       # CRDs + RBAC
+make test            # unit tests + envtest (envtest skips without its binaries)
+make lint            # gofmt + go vet
+make build           # binary
+make all             # generate manifests fmt vet test build
+
+make envtest-assets  # download the envtest kube-apiserver + etcd
+make test-envtest    # controller invariants against a REAL apiserver
+make e2e             # kind cluster + apply config/ + the e2e suite
+make e2e-clean       # delete the kind cluster
 ```
 
 After changing anything in `api/v1alpha1`, run `make generate manifests` and
@@ -102,6 +107,40 @@ After changing anything in `api/v1alpha1`, run `make generate manifests` and
 CI (`.github/workflows/ci.yml`) runs build, vet, gofmt, test, the
 no-glimmer-import guard, and the CRD drift check. All of them are **blocking** —
 nothing there is informational.
+
+### Three tiers of test, and what each one can see
+
+The unit suite runs against controller-runtime's **fake client**, which is a map
+with a type checker in front of it. Five bugs shipped through a green fake-client
+suite because of what that client does not do, so two more tiers exist above it.
+Write a new test at the LOWEST tier that can actually observe the property:
+
+| Tier | Runs | Sees |
+|---|---|---|
+| unit (`internal/…`, `pkg/…`) | every PR, seconds | pure logic, result bookkeeping, parsing, verdicts |
+| **envtest** (`test/envtest/`) | every PR, ~12s | RBAC enforcement, CRD schema + defaulting, the status subresource, **real resourceVersion conflicts** |
+| **e2e** (`test/e2e/`, tag `e2e`) | PR (core) / main + weekly (chaos) | a real **scheduler** and **kubelet**, the shipped manifests, DNS, manager restarts |
+
+- **`test/envtest`** needs the control-plane binaries and **skips itself** when
+  they are absent, so `go test ./...` stays green on a laptop. CI sets
+  `BURNIN_ENVTEST=required`, which turns that skip into a failure. Never remove
+  that: a suite that silently skips in CI is worse than no suite.
+- **`test/e2e`** is behind the `e2e` build tag so `go test ./...` can never pick
+  it up. Its most valuable part is not a test — it is the CI step that applies
+  `config/crd`, `config/rbac` and `config/manager` to a cluster, which is the
+  only thing that could have caught a release shipping with no deployment
+  manifest at all. That step runs first, before the image is even built.
+- The e2e runners are `sh -c` one-liners on **busybox**, deliberately. Hosted CI
+  has no GPU, and every bug this tier exists for is orchestration: scheduling,
+  cordoning, RBAC, rendezvous, delivery, recovery.
+- **What the PR tier does not guard**: the chaos e2e (manager restart,
+  rolling-update overlap, delete-mid-flight) runs on pushes to main, on the
+  weekly sweep and on demand, not on pull requests, because each case waits out a
+  leader-election lease. The same invariants are asserted deterministically on
+  every PR by `test/envtest/invariants_test.go`, which injects the
+  resourceVersion conflict rather than racing a rollout for it. What is genuinely
+  unguarded between merges is the interaction with a real kubelet — a pod
+  SIGTERMed by a departing manager, and the lease handover itself.
 
 It also builds runner IMAGES, which for a long time it did not, and that is why
 two runners once shipped in a PR having never been built. The matrix is derived
@@ -150,7 +189,10 @@ internal/sink/       sink delivery engine: webhook, ConfigMap, Prometheus
 internal/metrics/    Prometheus exposition of run state, registered on
                      controller-runtime's registry
 runners/             per-TestKind runner images, one directory each
-config/crd|rbac|samples/   generated manifests and examples
+config/crd|rbac|manager|samples/   generated manifests, the operator's own
+                     Deployment, and examples
+test/envtest/        controller invariants against a real apiserver + etcd
+test/e2e/            the shipped manifests on a real kind cluster (tag `e2e`)
 ```
 
 Public packages — importable by other projects, free of Kubernetes types:
@@ -355,6 +397,19 @@ disagree about the same hardware. One brain, two dispatchers.
   That is the right way round, since a cordon undone is visible and one command
   to redo, and a node the fleet silently loses has nothing left in the cluster
   that knows it was taken.
+- **A pod may only be destroyed once the status justifying its destruction is
+  readable from the apiserver.** The rule and its consequence in `terminate` are
+  documented at that function; what matters here is that it is now ASSERTED
+  rather than argued. `test/envtest/invariants_test.go` runs the scenario
+  against a real apiserver and makes the terminal status write lose a REAL
+  resourceVersion race — the competing write is performed and the apiserver
+  returns the 409 — then checks, at every pod deletion, that the run's durable
+  status already justified it. Reproducing that needs a real apiserver, which is
+  why the assertion did not exist while the only harness was the fake client.
+  Read it before reordering any write in `terminate` or `reconcileTerminal`.
+  The condition it depends on is the shipped Deployment's own shape: `replicas:
+  1` under the default RollingUpdate has `maxSurge` 1, so an apply starts the
+  second manager before the first is gone.
 - **Runner pods must tolerate the operator's own cordon.** The run cordons its
   target, which the node controller expresses as
   `node.kubernetes.io/unschedulable:NoSchedule`; a pod that does not tolerate it

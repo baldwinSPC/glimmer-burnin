@@ -36,20 +36,29 @@ func init() {
 	utilruntime.Must(burninv1alpha1.AddToScheme(scheme))
 }
 
-func main() {
-	var metricsAddr, probeAddr string
-	var enableLeaderElection bool
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. Ensures only one active manager.")
-	opts := zap.Options{Development: true}
-	opts.BindFlags(flag.CommandLine)
-	flag.Parse()
+// leaderElectionID is the name of the Lease the managers elect through. It is
+// not a display string: two managers that disagree about it are two managers
+// that both believe they are the leader.
+const leaderElectionID = "burnin.glimmer.ai"
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+// managerOptions builds the manager's configuration.
+//
+// It is a function rather than an inline literal so it can be tested. Each of
+// the three settings below is load-bearing somewhere the rest of the suite
+// cannot see:
+//
+//   - the Secret cache exclusion is what keeps the operator's ClusterRole free
+//     of list+watch on every secret in the cluster;
+//   - the leader-election ID is the Lease name, and config/manager grants
+//     access to leases in ONE namespace;
+//   - the leader-election NAMESPACE is passed explicitly rather than inferred.
+//     controller-runtime falls back to reading the in-cluster service-account
+//     file, which works in the shipped Deployment and fails outside it, and
+//     everything else in this operator that needs a namespace refuses to guess
+//     (see the NodeFingerprint wiring below). An empty value keeps the old
+//     inference, so nothing regresses for a pod that does not project it.
+func managerOptions(metricsAddr, probeAddr string, enableLeaderElection bool, podNamespace string) ctrl.Options {
+	return ctrl.Options{
 		Scheme: scheme,
 		// Secrets are read once per delivery to resolve a sink's bearer token.
 		// Reading them through the cache would lazily start a cluster-wide
@@ -63,10 +72,32 @@ func main() {
 			BindAddress: metricsAddr,
 			TLSOpts:     []func(*tls.Config){func(c *tls.Config) { c.MinVersion = tls.VersionTLS12 }},
 		},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "burnin.glimmer.ai",
-	})
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        leaderElectionID,
+		LeaderElectionNamespace: podNamespace,
+	}
+}
+
+func main() {
+	var metricsAddr, probeAddr string
+	var enableLeaderElection bool
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+		"Enable leader election for controller manager. Ensures only one active manager.")
+	opts := zap.Options{Development: true}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Projected by config/manager through the downward API. Two things need it:
+	// leader election above, and the NodeFingerprint capture below.
+	podNamespace := os.Getenv("POD_NAMESPACE")
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(),
+		managerOptions(metricsAddr, probeAddr, enableLeaderElection, podNamespace))
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -142,7 +173,7 @@ func main() {
 		Scheme:    mgr.GetScheme(),
 		APIReader: mgr.GetAPIReader(),
 		Recorder:  mgr.GetEventRecorderFor("nodefingerprint-controller"),
-		Namespace: os.Getenv("POD_NAMESPACE"),
+		Namespace: podNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeFingerprint")
 		os.Exit(1)

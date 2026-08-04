@@ -99,6 +99,20 @@ spec:
             - --leader-elect
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
+          env:
+            # Two things need the operator's own namespace and neither may
+            # guess at it: the leader-election Lease (the RoleBinding above
+            # grants leases in THIS namespace only, so electing in another one
+            # fails as a permission error that reads like a bug), and the
+            # NodeFingerprint capture, which writes namespaced objects about
+            # cluster-scoped Nodes. cmd/main.go falls back to the in-cluster
+            # service-account file when this is absent, but the downward API is
+            # the explicit form and it also works for a manager run outside a
+            # pod.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: metrics
               containerPort: 8080
