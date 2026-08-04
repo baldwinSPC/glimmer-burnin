@@ -58,7 +58,7 @@ jobs:
     # the QEMU step and this timeout — it becomes a native, minutes-long build.
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve image reference
         # github.repository_owner preserves the account's mixed case

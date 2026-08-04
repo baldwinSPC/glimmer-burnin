@@ -29,7 +29,7 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           # Read the toolchain from go.mod so CI and local builds never drift.
@@ -81,7 +81,7 @@ jobs:
     needs: build-test
     if: github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v4
       - name: Build multi-arch image (no push on CI)
@@ -137,7 +137,7 @@ jobs:
     outputs:
       runners: ${{ steps.plan.outputs.runners }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The plan diffs against the merge base, so the history has to be there.
           fetch-depth: 0
@@ -232,7 +232,7 @@ jobs:
       matrix:
         runner: ${{ fromJSON(needs.runner-plan.outputs.runners) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Skipped on a native arm64 runner, where there is nothing to emulate.
       - uses: docker/setup-qemu-action@v3
