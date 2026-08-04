@@ -1,5 +1,15 @@
 # Multi-arch build (linux/arm64 for DGX Spark Grace + linux/amd64).
-FROM --platform=$BUILDPLATFORM golang:1.24 AS build
+#
+# Keep this major.minor equal to the `go` directive in go.mod. CI asserts it
+# ("Dockerfile Go matches go.mod"), because the two drifting is invisible until
+# it isn't: everything reading go.mod — setup-go, local builds, `make test` —
+# moves to the new toolchain together, while this line stays behind and only
+# the image build fails. The image build does not run on pull requests, so the
+# break lands on main, already merged and already green everywhere a reviewer
+# looked. That is exactly how it happened: a dependency bump raised go.mod to
+# 1.26, this line stayed at 1.24, and every subsequent push to main failed on
+# `go mod download` with GOTOOLCHAIN=local refusing to fetch a newer toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace

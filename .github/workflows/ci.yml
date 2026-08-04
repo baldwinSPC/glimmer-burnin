@@ -47,6 +47,30 @@ jobs:
           fmt=$(gofmt -l .)
           if [ -n "$fmt" ]; then echo "gofmt needed on:"; echo "$fmt"; exit 1; fi
 
+      # Runs on pull requests, which is the whole point: the image build itself
+      # does not, so without this check a go.mod bump that outruns the
+      # Dockerfile is green on every PR and breaks main on merge.
+      #
+      # Deliberately the root Dockerfile only. The Go-based runners pin their own
+      # GO_IMAGE and are not bound by this go.mod: each runs `go mod init` inside
+      # the image over stdlib-only sources with GOPROXY=off, so they compile under
+      # any recent toolchain. Extending this check to them would force pointless
+      # bumps on images that never read this module.
+      - name: Dockerfile Go matches go.mod
+        run: |
+          want=$(awk '/^go [0-9]/ {split($2,v,"."); print v[1]"."v[2]; exit}' go.mod)
+          have=$(awk 'match($0, /^FROM .*golang:[0-9]+\.[0-9]+/) {
+                        s=substr($0, RSTART, RLENGTH); sub(/.*golang:/, "", s); print s; exit }' Dockerfile)
+          if [ -z "$want" ] || [ -z "$have" ]; then
+            echo "could not parse a Go version (go.mod='$want' Dockerfile='$have')"; exit 1
+          fi
+          if [ "$want" != "$have" ]; then
+            echo "go.mod requires Go $want but Dockerfile builds with golang:$have."
+            echo "Bump the FROM line in Dockerfile to golang:$want."
+            exit 1
+          fi
+          echo "Dockerfile golang:$have matches go.mod $want"
+
       # This also runs the checks that have no Go code of their own to attach to:
       # runners/pins_test.go (every upstream pinned to a commit, every runner
       # publishable), runners/ib-write-bw/fabric_contract_test.go and
