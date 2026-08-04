@@ -50,19 +50,24 @@ func TestEmittedMetricNamesObeyTheContract(t *testing.T) {
 	// The final line is the verdict, not a metric — and on a failing run it
 	// carries the offending "key=value" inside prose, which the parser
 	// correctly treats as a message rather than a measurement.
+	//
+	// DISTINCT keys, not lines: the stage breadcrumb is deliberately printed
+	// once per stage, and last-occurrence-wins is what makes the recorded value
+	// the furthest stage reached. Counting lines would read a progress marker as
+	// a name collision.
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	metricLines, verdictLine := lines[:len(lines)-1], lines[len(lines)-1]
 	if !strings.HasPrefix(verdictLine, "HOST_HEALTH_") {
 		t.Fatalf("last line = %q, want the verdict marker", verdictLine)
 	}
-	emitted := 0
+	emitted := map[string]bool{}
 	for _, line := range metricLines {
-		if strings.Contains(line, "=") {
-			emitted++
+		if key, _, ok := strings.Cut(line, "="); ok {
+			emitted[strings.TrimSpace(key)] = true
 		}
 	}
-	if parsed := len(res.Metrics) + len(res.Unmeasurable); emitted != parsed {
-		t.Errorf("%d printed metrics parsed into %d canonical names — two keys collide", emitted, parsed)
+	if parsed := len(res.Metrics) + len(res.Unmeasurable); len(emitted) != parsed {
+		t.Errorf("%d distinct printed keys parsed into %d canonical names — two keys collide", len(emitted), parsed)
 	}
 
 	// The five counters the host-health TestKind is defined by must reach the

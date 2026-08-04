@@ -195,6 +195,11 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"throttleClassification": {UnitNone, ThresholdUseEvidence},
 		"pdWedgeSuspected":       {UnitNone, ThresholdUseEvidence},
 		"clockFloorBasis":        {UnitNone, ThresholdUseEvidence},
+		"xidSource":              {UnitNone, ThresholdUseEvidence},
+		"nodeReady":              {UnitNone, ThresholdUseEvidence},
+		"hostHealthVersion":      {UnitNone, ThresholdUseEvidence},
+		"hostHealthStage":        {UnitNone, ThresholdUseEvidence},
+		"hostHealthPanic":        {UnitNone, ThresholdUseEvidence},
 	}
 
 	for name, w := range want {
