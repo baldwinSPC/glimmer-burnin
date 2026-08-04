@@ -1218,6 +1218,46 @@ func TestRun_ExitTwoWithoutADeclarationIsAnErrorNotASkip(t *testing.T) {
 	}
 }
 
+// TestRun_ACrashedRunnersMessageExplainsItself is #113: the phase was already
+// right and the RECORD was not.
+//
+// pkg/runner sets Result.UndeclaredSkip when a runner exits 2 with no skip
+// declaration, and for a while nothing in the operator read it. The stored
+// message was the runner's last non-key=value line, which for a Go panic is a
+// stack frame — so the durable record of a crashed runner was a file path and an
+// instruction offset, with nothing saying it exited 2, never declared a skip, or
+// most likely crashed. Status outlives the Events that accompany it by years,
+// which is why the explanation belongs there and not only in a log.
+func TestRun_ACrashedRunnersMessageExplainsItself(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 2,
+		"panic: runtime error: index out of range [3] with length 2\n\nmain.main()\n\t/src/main.go:132 +0x1d\n", "Error")
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if res.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error", res.Phase)
+	}
+	for _, want := range []string{"exited 2", "without declaring a skip", "UNJUDGED"} {
+		if !strings.Contains(res.Message, want) {
+			t.Errorf("stored message does not contain %q — a reader cannot tell this Error from any "+
+				"other.\nmessage = %q", want, res.Message)
+		}
+	}
+	// The trace tail is the only clue to what actually died; explaining the
+	// Error must not cost the evidence.
+	if !strings.Contains(res.Message, "main.go") {
+		t.Errorf("the runner's own last line was dropped rather than demoted to context: %q", res.Message)
+	}
+}
+
 // The corollary: a test that genuinely does not apply says so with exit 2, and
 // THAT is what produces Skipped — after the pod ran on the real hardware.
 func TestRun_RunnerExitTwoIsTheOnlySkip(t *testing.T) {
