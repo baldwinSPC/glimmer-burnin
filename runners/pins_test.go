@@ -412,12 +412,14 @@ func TestPublishWorkflowOffersEveryRunner(t *testing.T) {
 	}
 }
 
-// reclaimPathsPattern finds the one line each image-building workflow declares
-// the disk it frees before pulling a layer.
+// reclaimPathsPattern finds every line in which a workflow declares the disk it
+// frees before pulling a layer. EVERY, not the first: there are three copies
+// across two files, and a pattern matched once per file is how the third one
+// went unguarded for as long as it did.
 var reclaimPathsPattern = regexp.MustCompile(`(?m)^\s*RECLAIM_PATHS='([^']*)'`)
 
-// TestBothWorkflowsReclaimTheSameDisk guards a rule a reviewer cannot enforce by
-// reading one diff, because it spans two files that are never edited together.
+// TestEveryWorkflowReclaimsTheSameDisk guards a rule a reviewer cannot enforce by
+// reading one diff, because it spans copies that are never edited together.
 //
 // A hosted runner has ~14 GB free and ships 20-30 GB of preinstalled toolchains
 // no build here uses. The two heaviest runners (nccl, gpudirect-rdma) pull a
@@ -428,34 +430,58 @@ var reclaimPathsPattern = regexp.MustCompile(`(?m)^\s*RECLAIM_PATHS='([^']*)'`)
 // cannot write its own logs once the disk is full, so the build reports
 // BlobNotFound rather than the real error.
 //
-// ci.yml and publish-runner.yml must therefore reclaim the SAME paths. A
-// difference is not a style question: publish-runner.yml is the workflow whose
-// failure costs a hand-published image and a burned version tag, and it is the
-// one nobody exercises on a PR.
-func TestBothWorkflowsReclaimTheSameDisk(t *testing.T) {
-	declared := map[string]string{}
+// Every declaration must reclaim the SAME paths. A difference is not a style
+// question: publish-runner.yml is the workflow whose failure costs a
+// hand-published image and a burned version tag, and it is the one nobody
+// exercises on a PR.
+//
+// It compares ALL declarations rather than one per file because it has already
+// been fooled once. The e2e job added its own reclaim step with a hand-copied
+// four-path list against the canonical six, and the earlier form of this test —
+// FindStringSubmatch, first match per file — compared the runner-image copy to
+// publish-runner.yml and reported agreement while the third copy sat two
+// hundred lines above it, silently reclaiming two directories fewer.
+func TestEveryWorkflowReclaimsTheSameDisk(t *testing.T) {
+	type decl struct {
+		where string
+		paths string
+	}
+	var declared []decl
+
 	for _, wf := range []string{ciWorkflow, publishWorkflow} {
 		src, err := os.ReadFile(wf)
 		if err != nil {
 			t.Fatalf("reading %s: %v", wf, err)
 		}
-		m := reclaimPathsPattern.FindStringSubmatch(string(src))
-		if m == nil {
+		ms := reclaimPathsPattern.FindAllStringSubmatch(string(src), -1)
+		if len(ms) == 0 {
 			t.Fatalf("%s builds a runner image but declares no RECLAIM_PATHS. A hosted runner "+
 				"cannot hold two platforms of the CUDA devel image alongside its preinstalled "+
 				"toolchains, and the resulting ENOSPC surfaces as an unretrievable log rather "+
 				"than as an error.", wf)
 		}
-		if strings.TrimSpace(m[1]) == "" {
-			t.Errorf("%s declares an empty RECLAIM_PATHS, which reclaims nothing.", wf)
+		for i, m := range ms {
+			if strings.TrimSpace(m[1]) == "" {
+				t.Errorf("%s declaration %d is an empty RECLAIM_PATHS, which reclaims nothing.", wf, i+1)
+				continue
+			}
+			declared = append(declared, decl{
+				where: fmt.Sprintf("%s (declaration %d)", wf, i+1),
+				paths: strings.Join(strings.Fields(m[1]), " "),
+			})
 		}
-		declared[wf] = strings.Join(strings.Fields(m[1]), " ")
 	}
-	if declared[ciWorkflow] != declared[publishWorkflow] {
-		t.Errorf("the two image-building workflows reclaim different disk:\n  %s: %s\n  %s: %s\n"+
-			"They must match. publish-runner.yml is the one no PR exercises, so a divergence is "+
-			"discovered by a failed publish and a burned version tag.",
-			ciWorkflow, declared[ciWorkflow], publishWorkflow, declared[publishWorkflow])
+
+	if len(declared) == 0 {
+		return // every declaration was empty; already reported above.
+	}
+	for _, d := range declared[1:] {
+		if d.paths != declared[0].paths {
+			t.Errorf("disk-reclaim declarations disagree:\n  %s: %s\n  %s: %s\n"+
+				"All copies must match. publish-runner.yml is the one no PR exercises, so a "+
+				"divergence there is discovered by a failed publish and a burned version tag.",
+				declared[0].where, declared[0].paths, d.where, d.paths)
+		}
 	}
 }
 
