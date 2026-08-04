@@ -42,21 +42,25 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// All eleven images are v0.2.0, built natively on arm64 GB10 hardware, pushed
-// to GHCR, and anonymously pullable — verified by fetching a registry token
-// with no credentials and retrieving each manifest.
+// All eleven images are v0.3.0, published to GHCR, public, and anonymously
+// pullable.
 //
-// Each was exercised through the operator on a two-node DGX Spark cluster: the
-// Node-scope suite passed 10/10 across both nodes, and the Pair-scope fabric
-// suite passed with ib-write-bw at 99.61 Gb/s, nccl at 12.02 GB/s bus
-// bandwidth, and gpudirect-rdma correctly reporting exit 2 on hardware whose
-// unified memory has no peer-memory provider.
+// The measurements behind them were taken on a two-node DGX Spark cluster with
+// the v0.2.0 build of the same sources: the Node-scope suite passed 10/10 across
+// both nodes, and the Pair-scope fabric suite passed with ib-write-bw at
+// 99.61 Gb/s, nccl at 12.02 GB/s bus bandwidth, and gpudirect-rdma correctly
+// reporting exit 2 on hardware whose unified memory has no peer-memory provider.
 //
-// ARCHITECTURE: linux/arm64 only. On any other architecture these tags do not
-// resolve and a test of that kind with no explicit spec.runner.image records an
-// infrastructure Error for the node — never a hardware verdict. That is the
-// honest failure, but it is still a failure, so x86 users must set
-// spec.runner.image until multi-arch images ship.
+// ARCHITECTURE: linux/amd64 AND linux/arm64. A node pulls only its own
+// platform's layers, so one tag serves an x86 rack and a Grace rack alike, and
+// x86 users no longer need to set spec.runner.image to run at all.
+//
+// That is the HOST axis and it is not the GPU axis. A tag resolving on a host
+// says nothing about whether the image contains code for the accelerator in it —
+// compute-smoke is CC 12.x only and skips a B200 cleanly, and nccl ships one
+// gencode that an unlisted fleet must rebuild. Each runner's README states its
+// GPU coverage; conflating the two is how an operator ends up reporting Error on
+// hardware it simply was not built for.
 //
 // A missing entry fails fast and legibly at plan time ("set spec.runner.image");
 // a present-but-unpullable entry fails slowly, per node, and looks like an
@@ -71,22 +75,22 @@ var defaultRunnerImages = map[burninv1alpha1.TestKind]string{
 	// compute-smoke moves off v0.1.0 deliberately. That tag is public and
 	// immutable and stays exactly as it is, but it reports "no usable CUDA
 	// device", a wrong-arch image, and every CUDA runtime error as exit 1 —
-	// a hardware FAILURE verdict against the node. v0.2.0 is the first build
+	// a hardware FAILURE verdict against the node. v0.2.0 was the first build
 	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
-	// v0.1.0 keeps the old behaviour, which is why this is a new tag and not
-	// a repushed one.
-	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.2.0",
+	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
+	// repushed ones.
+	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.3.0",
 
-	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.2.0",
-	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.2.0",
-	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.2.0",
-	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.2.0",
-	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.2.0",
-	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.2.0",
-	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.2.0",
-	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.2.0",
-	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.2.0",
-	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.2.0",
+	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.3.0",
+	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.3.0",
+	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.3.0",
+	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.3.0",
+	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.3.0",
+	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.3.0",
+	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.3.0",
+	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.3.0",
+	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.3.0",
+	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.3.0",
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
