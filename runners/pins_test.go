@@ -6,7 +6,7 @@
 // have somewhere to be enforced from — a directory listing is the only thing
 // that knows how many runners there are.
 //
-// Three rules live here, and none of them is one a reviewer can enforce by
+// The rules below live here, and none of them is one a reviewer can enforce by
 // reading a single diff:
 //
 //   - Every upstream a runner fetches is pinned to a COMMIT, and the build
@@ -21,6 +21,12 @@
 //     (cxxtests_test.go). The C++ and CUDA runners cannot be tested from a Go
 //     package of their own, so their tests are plain programs that nothing ran
 //     until the sweep here existed.
+//   - Every runner either READS the duration the operator injects, or its kind
+//     says out loud that it does not. A runner that silently ignores the
+//     duration it was given reports a burn-in that did not happen.
+//   - No Dockerfile bakes in a fault-injection macro. Those switches exist so a
+//     branch no available hardware can reach gets exercised anyway; an image
+//     built with one would report a fabricated verdict for a whole fleet.
 package runners
 
 import (
@@ -31,6 +37,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 )
 
 // publishWorkflow is the workflow whose choice list must name every runner.
@@ -65,6 +73,149 @@ func TestEveryRunnerDirectoryHasADockerfile(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(d, "Dockerfile")); err != nil {
 			t.Errorf("runners/%s has no Dockerfile: %v", d, err)
 		}
+	}
+}
+
+// TestDurationIsHonouredOrDeclaredBurstOnly keeps a TestKind's promise about
+// BURNIN_DURATION_SECONDS tied to the code that does or does not read it.
+//
+// The operator injects that variable into every runner at every scope. For a
+// long time compute-smoke was the one runner that never read it, while a shipped
+// sample asked the kind for 120 seconds — so "node acceptance" burned nothing in
+// and nothing anywhere said so (issue #25). The resolution was to declare the
+// kind burst-only rather than to bolt a loop onto it, which means the honesty of
+// the whole arrangement now rests on that declaration staying true.
+//
+// So both directions are checked, from the filesystem rather than from a list:
+// a runner whose kind is NOT burst-only must actually read the variable, and a
+// runner whose kind IS burst-only must not. The second half is what catches the
+// happier failure — somebody adding a duration loop to compute-smoke and leaving
+// the kind, the sample and the README describing a burst.
+//
+// Only SOURCE is scanned. A README that merely mentions the variable is exactly
+// the kind of documentation this guard exists to stop trusting.
+func TestDurationIsHonouredOrDeclaredBurstOnly(t *testing.T) {
+	const durationEnv = "BURNIN_DURATION_SECONDS"
+
+	for _, d := range runnerDirs(t) {
+		// The directory name IS the TestKind value, which is what lets this run
+		// off a directory listing; TestEveryRunnerDirectoryHasADockerfile and
+		// the publish-workflow check rest on the same correspondence.
+		kind := burninv1alpha1.TestKind(d)
+		reads := false
+		err := filepath.WalkDir(d, func(path string, e os.DirEntry, err error) error {
+			if err != nil || e.IsDir() || reads {
+				return err
+			}
+			switch filepath.Ext(path) {
+			case ".go", ".cu", ".cuh", ".cc", ".h":
+			default:
+				return nil
+			}
+			// A test file naming the variable proves nothing about the runner.
+			if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, "_test.cc") {
+				return nil
+			}
+			src, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			if strings.Contains(string(src), durationEnv) {
+				reads = true
+			}
+			return nil
+		})
+		if err != nil {
+			t.Errorf("walking runners/%s: %v", d, err)
+			continue
+		}
+
+		switch {
+		case kind.BurstOnly() && reads:
+			t.Errorf("runners/%s reads %s, but TestKind(%q).BurstOnly() says it does not use a "+
+				"duration. If the runner now honours one, flip BurstOnly, restore durationSeconds "+
+				"to the sample, and update the kind doc — the three must agree",
+				d, durationEnv, d)
+		case !kind.BurstOnly() && !reads:
+			t.Errorf("no source file under runners/%s reads %s, yet TestKind(%q) is not declared "+
+				"burst-only. A test that silently ignores the duration it was given reports a "+
+				"burn-in that did not happen; either honour it, or declare the kind burst-only",
+				d, durationEnv, d)
+		}
+	}
+}
+
+// faultInjectionMacros are compile-time switches a runner source defines for
+// TEST builds only — the ones that make a branch reachable which the hardware in
+// front of us cannot reach on its own.
+//
+// compute-smoke's pair is the case: exit 2 fires only on a part that is not
+// compute capability 12.0/12.1, and no such accelerator is available to this
+// project, so the Skip path had never once executed (issue #9). Defining these
+// builds the same source with the same toolchain and tells it the device reports
+// a capability it does not have, which is how that path gets exercised on a real
+// GPU rather than only in a unit test.
+//
+// The guard below is the price of having them. A published runner image is what
+// a node's readiness gate executes, and a Skip means "acceptance does not apply
+// to this node" — so an image built with one of these defined would report a
+// clean, fabricated not-applicable for an entire fleet, with the retry budget
+// unspent and nothing in the result reading as wrong. The macros are
+// deliberately compile-time so no environment variable can reach them; this
+// makes sure no Dockerfile in the repository can bake one in either.
+var faultInjectionMacros = []string{
+	"BURNIN_FP4_FORCE_CC_MAJOR",
+	"BURNIN_FP4_FORCE_CC_MINOR",
+}
+
+// TestNoDockerfileDefinesAFaultInjectionMacro keeps the test-only switches out
+// of every image this repository can build.
+//
+// It sweeps every runner rather than only the one that has them today: the next
+// runner to need a fault-injection switch will copy the pattern, and the guard
+// should already be watching when it does.
+func TestNoDockerfileDefinesAFaultInjectionMacro(t *testing.T) {
+	for _, d := range runnerDirs(t) {
+		path := filepath.Join(d, "Dockerfile")
+		src, err := os.ReadFile(path)
+		if err != nil {
+			continue // TestEveryRunnerDirectoryHasADockerfile reports this.
+		}
+		for _, macro := range faultInjectionMacros {
+			if strings.Contains(string(src), macro) {
+				t.Errorf("%s defines the fault-injection macro %s; an image built with it would "+
+					"report a fabricated verdict for every node it ran on. Build such a binary by "+
+					"hand for a one-off experiment, never from a Dockerfile that can be published",
+					path, macro)
+			}
+		}
+	}
+}
+
+// TestFaultInjectionMacrosAnnounceThemselves asserts the other half of the same
+// safeguard, in the source rather than the build: a binary that WAS built with
+// one of these must say so on stdout.
+//
+// Belt and braces on purpose. The Dockerfile guard above stops the macro
+// reaching a published image; this stops a hand-built binary's output from being
+// mistaken for a real run — the marker is a key=value line, so it lands in the
+// stored TestResult and in the delivered envelope, and any verdict such a build
+// produced stays self-identifying for as long as the result exists.
+func TestFaultInjectionMacrosAnnounceThemselves(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("compute-smoke", "fp4_smoke.cu"))
+	if err != nil {
+		t.Fatalf("reading compute-smoke/fp4_smoke.cu: %v", err)
+	}
+	text := string(src)
+	for _, macro := range faultInjectionMacros {
+		if !strings.Contains(text, macro) {
+			t.Errorf("fp4_smoke.cu no longer mentions %s; if the switch was removed, remove it from "+
+				"faultInjectionMacros too rather than leaving a guard over nothing", macro)
+		}
+	}
+	if !strings.Contains(text, `printf("forced_compute_cap=`) {
+		t.Error("fp4_smoke.cu does not print a forced_compute_cap= marker; a fault-injected build " +
+			"must announce itself in its own output, or its verdicts are indistinguishable from real ones")
 	}
 }
 

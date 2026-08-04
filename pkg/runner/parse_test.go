@@ -25,6 +25,255 @@ tflops=101.99
 FP4_GEMM_PASS
 `
 
+// Verbatim stdout from ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.2.0 on a
+// real NVIDIA GB10 (driver 580.82.09), captured 2026-08-03 with
+// BURNIN_DURATION_SECONDS=20.
+//
+// This is the whole emitted set, which is the point: issue #65 found that 38 of
+// clockprobe's metrics were unregistered in pkg/contract, and an AUDIT of the
+// source missed nine of them (the per-reason sample counters below). Captured
+// output cannot miss any.
+const clockprobeGB10Stdout = `gpu_name=NVIDIA GB10
+compute_cap=12.1
+pci_bus_id=000F:01:00.0
+duration_requested_s=20
+warmup_s=4
+sample_window_s=16
+clock_floor_pct=70.00
+thermal_clock_floor_pct=50.00
+thermal_temp_threshold_c=80.00
+driver_version=580.82.09
+rated_boost_clock_mhz=3003
+load_threads=98304
+load_iters_per_launch=880945
+elapsed_s=21.01
+samples_taken=165
+load_launches=300
+sm_clock_mhz=2512
+sustained_clock_pct=83.65
+min_sm_clock_pct=82.45
+max_sm_clock_pct=83.98
+gpu_temp_c=61.0
+mean_temp_under_load_c=57.4
+temp_at_min_clock_c=56.0
+power_draw_w=66.83
+mean_power_w=62.63
+gpu_utilization_pct=85.39
+mem_utilization_pct=0.00
+sustained_fma_throughput_tflops=27.474
+peak_fma_throughput_tflops=27.477
+throughput_consistency_pct=99.99
+throttle_events=0
+throttled_samples=0
+throttle_reasons_mask=0
+gpu_idle_samples=0
+applications_clocks_setting_samples=0
+sw_power_cap_samples=0
+hw_slowdown_samples=0
+sync_boost_samples=0
+sw_thermal_slowdown_samples=0
+hw_thermal_slowdown_samples=0
+hw_power_brake_samples=0
+display_clock_setting_samples=0
+throttle_reasons=none
+throttle_classification=none
+pd_wedge_suspected=false
+clock_floor_applied_pct=70.00
+clock_floor_basis=general
+nvml_unsupported=enforcedPowerLimit,defaultPowerLimit,memClock
+unsupported_reads=3
+CLOCKPROBE_PASS
+`
+
+// clockprobeDiagnosticNames are the metrics clockprobe emits that are
+// deliberately NOT registered in pkg/contract: the per-bit decomposition of
+// throttleReasonsMask.
+//
+// They are listed here rather than pattern-matched so that adding a tenth
+// reason counter is a decision somebody makes, not something a suffix rule
+// swallows. See the note beside throttleReasonsMask in pkg/contract/metrics.go
+// for why they stay out: the vendor's own enum, scaled by the sample interval,
+// and already summarised for acceptance by throttledSamples/throttleEvents.
+//
+// Staying out is not the same as being invisible. They are integers, so no gate
+// on one fails closed — but verdict.ValidateThresholdsForKind does report an
+// unregistered metric on a kind this project ships, so an author who gates on
+// one is told to register it, which is the moment the name stops being
+// incidental evidence. That interaction is asserted in pkg/verdict's
+// TestValidateThresholdsForKind_FlagsAnUnregisteredMetricOnABuiltInKind, which
+// uses these very names.
+var clockprobeDiagnosticNames = map[string]bool{
+	"gpuIdleSamples":                   true,
+	"applicationsClocksSettingSamples": true,
+	"swPowerCapSamples":                true,
+	"hwSlowdownSamples":                true,
+	"syncBoostSamples":                 true,
+	"swThermalSlowdownSamples":         true,
+	"hwThermalSlowdownSamples":         true,
+	"hwPowerBrakeSamples":              true,
+	"displayClockSettingSamples":       true,
+}
+
+// TestParse_RealClockProbeOutputIsRegistered is issue #65's fix, asserted
+// against what the runner actually prints rather than against a reading of its
+// source.
+//
+// The registry is an open world on purpose, so being unregistered is not a bug
+// in general. It is a bug for a FIRST-PARTY runner, and specifically for a
+// metric whose value is a label: the grammar passes, UnitOf answers UnitNone,
+// and SafeToThresholdOn answers true for an unregistered name — so a gate on
+// "pdWedgeSuspected" passed every authoring-time check and then failed closed on
+// every node forever, reading as a hardware verdict on healthy hardware.
+func TestParse_RealClockProbeOutputIsRegistered(t *testing.T) {
+	got := Parse("clockprobe", clockprobeGB10Stdout, 0)
+
+	if got.Verdict != VerdictPass || got.Message != "CLOCKPROBE_PASS" {
+		t.Fatalf("Verdict = %q, Message = %q", got.Verdict, got.Message)
+	}
+	if len(got.InvalidNames) != 0 {
+		t.Errorf("our own runner emitted names the contract rejects: %v", got.InvalidNames)
+	}
+
+	for name, value := range got.Metrics {
+		if clockprobeDiagnosticNames[name] {
+			// Still has to obey the grammar and stay dimensionless: these are
+			// counts, and a name that picked up a unit suffix would be charted
+			// as a physical quantity.
+			if u := contract.UnitOf(name); u != contract.UnitNone {
+				t.Errorf("diagnostic counter %q declares unit %q; it is a count", name, u)
+			}
+			continue
+		}
+		m, ok := contract.Lookup(name)
+		if !ok {
+			t.Errorf("clockprobe emits %q=%q, which pkg/contract does not register and "+
+				"clockprobeDiagnosticNames does not except. Register it, or add it there with a "+
+				"reason — an unregistered first-party name is assumed safe to threshold on",
+				name, value)
+			continue
+		}
+		// The unit the name declares and the unit the registry claims must
+		// agree, or the registry is lying about data consumers will chart.
+		if u := contract.UnitOf(name); u != m.Unit {
+			t.Errorf("metric %q declares unit %q by name but is registered as %q", name, u, m.Unit)
+		}
+
+		// THE check this issue is about. If the value is not a number, the
+		// registry must refuse a threshold on it — a gate would be evaluated as
+		// a float64 and fail closed on every node forever.
+		if _, numeric := got.Numeric(name); !numeric {
+			if contract.SafeToThresholdOn(name) {
+				t.Errorf("clockprobe emits %q=%q, which is not numeric, yet the registry says it is "+
+					"safe to threshold on. A gate on it fails closed on every node forever and reads "+
+					"as a hardware verdict", name, value)
+			}
+		}
+	}
+
+	// The label-valued set, asserted by name as well as by shape: a future
+	// build that happened to emit a numeric-looking value must not quietly make
+	// one of these gateable again.
+	for _, name := range []string{
+		"gpuName", "computeCap", "pciBusId", "driverVersion",
+		"throttleReasons", "throttleClassification", "pdWedgeSuspected",
+		"clockFloorBasis", "nvmlUnsupported",
+	} {
+		if _, ok := got.Metrics[name]; !ok {
+			t.Errorf("the captured GB10 run no longer contains %q; this fixture has drifted", name)
+		}
+		if contract.SafeToThresholdOn(name) {
+			t.Errorf("%q is label-valued and must not be safe to threshold on", name)
+		}
+	}
+
+	// A GB10 finding worth pinning, because it decides how a threshold on the
+	// power metrics behaves in the field: this part's driver refuses BOTH power
+	// limit reads, so enforcedPowerLimitW, defaultPowerLimitW and the ratio
+	// derived from them are OMITTED — not zero. Omission fails a threshold
+	// closed, which is correct and is exactly why pkg/contract's description of
+	// powerLimitRatioPct says a gate on it must be scoped to parts that answer.
+	if got.Metrics["nvmlUnsupported"] != "enforcedPowerLimit,defaultPowerLimit,memClock" {
+		t.Errorf("nvmlUnsupported = %q; the fixture's GB10 finding has changed", got.Metrics["nvmlUnsupported"])
+	}
+	for _, absent := range []string{"powerLimitRatioPct", "enforcedPowerLimitW", "defaultPowerLimitW", "memClockMHz"} {
+		if v, ok := got.Metrics[absent]; ok {
+			t.Errorf("%q = %q was reported, but this part's driver refused the read; a runner must "+
+				"omit what it could not measure rather than print a number nobody took", absent, v)
+		}
+		// And it is NOT the unmeasurable sentinel either: "n/a" is a positive
+		// declaration that the hardware has nothing to report, and a driver
+		// refusing a read is not that claim.
+		if got.IsUnmeasurable(absent) {
+			t.Errorf("%q was declared unmeasurable; a refused read is an omission, not a declaration", absent)
+		}
+	}
+}
+
+// Verbatim stdout from compute-smoke taking its SKIP path, captured 2026-08-03
+// on the same real GB10 (driver 580.82.09, CUDA 13.0.1, CUTLASS v4.6.1).
+//
+// Exit 2 is the contract's load-bearing distinction — a node that cannot run a
+// test has NOT failed it — and until this capture it had never once executed
+// (issue #9). It fires only on a part that is not compute capability 12.0/12.1,
+// and this project has no such accelerator; dcgm-diag was expected to be the
+// first real-silicon exerciser on the theory that DCGM does not support GB10,
+// and it does, so that route is gone.
+//
+// So this is the real binary, the real toolchain and the real GPU, built with
+// the compile-time capability injection described in fp4_smoke.cu. The
+// `forced_compute_cap=9.0` line is left in ON PURPOSE rather than tidied away:
+// it is exactly what such a build prints, and it is what makes any verdict from
+// one self-identifying. A fixture that hid it would be claiming an H100
+// produced this.
+const computeSmokeSkipStdout = `built_cuda_arch=sm_121a
+forced_compute_cap=9.0
+gpu_name=NVIDIA GB10
+compute_cap=9.0
+FP4_GEMM_SKIP: NVFP4 block-scaled GEMM requires compute capability 12.0/12.1, and this part reports 9.0 — the test does not apply to this hardware and the part is NOT failed; run a kind whose runner covers this architecture
+`
+
+// The skip half of the golden case. Skip must never collapse into Fail: exit 1
+// is a hardware verdict the operator never retries, so misreading this output
+// would permanently indict every node that merely cannot take the test.
+func TestParse_RealComputeSmokeSkipOutput(t *testing.T) {
+	got := Parse("compute-smoke", computeSmokeSkipStdout, 2)
+
+	if got.Verdict != VerdictSkip {
+		t.Fatalf("Verdict = %q, want Skip — a part that cannot take this test has not failed it", got.Verdict)
+	}
+	if got.Verdict == VerdictFail {
+		t.Fatal("a skip was read as a hardware failure")
+	}
+	if !strings.HasPrefix(got.Message, "FP4_GEMM_SKIP:") {
+		t.Errorf("Message = %q, want the FP4_GEMM_SKIP sentinel", got.Message)
+	}
+	// The reason has to survive into the message, or an operator sees a bare
+	// "Skipped" with nothing saying which hardware property caused it.
+	if !strings.Contains(got.Message, "compute capability 12.0/12.1") {
+		t.Errorf("Message = %q, want it to carry the runner's reason", got.Message)
+	}
+	if len(got.InvalidNames) != 0 {
+		t.Errorf("our own runner emitted names the contract rejects: %v", got.InvalidNames)
+	}
+
+	// A skip still reports what it learned before deciding. That matters for the
+	// Error/Skip distinction downstream: a runner that reported nothing at all
+	// measured nothing, which is a different finding (see ReportedNothing).
+	if got.ReportedNothing() {
+		t.Error("the skip reported no key=value line at all; it printed identity before deciding")
+	}
+	for name, want := range map[string]string{
+		"builtCudaArch":    "sm_121a",
+		"gpuName":          "NVIDIA GB10",
+		"computeCap":       "9.0",
+		"forcedComputeCap": "9.0",
+	} {
+		if got.Metrics[name] != want {
+			t.Errorf("Metrics[%q] = %q, want %q", name, got.Metrics[name], want)
+		}
+	}
+}
+
 func TestParse_RealComputeSmokeOutput(t *testing.T) {
 	got := Parse("compute-smoke", computeSmokeStdout, 0)
 

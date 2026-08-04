@@ -41,9 +41,10 @@ RUN got="$(git -C /cutlass rev-parse HEAD)"; \
     echo "CUTLASS ${CUTLASS_REF} = ${got}: OK"
 
 COPY fp4_smoke.cu /src/fp4_smoke.cu
-# Host-only and CUDA-free: it decides whether CUDA_ARCH covers the part the
-# image lands on, which is why it can be unit-tested with a plain C++ compiler
-# and no GPU (arch_match_test.cc, run by `make test` via archmatch_test.go).
+# Host-only and CUDA-free: it decides whether this part is in scope at all and
+# whether CUDA_ARCH covers it, which is why both can be unit-tested with a plain
+# C++ compiler and no GPU (arch_match_test.cc, run by `make test` via
+# runners/cxxtests_test.go).
 COPY arch_match.h /src/arch_match.h
 
 # -cudart static is nvcc's default on Linux but stated explicitly so the intent
@@ -66,6 +67,50 @@ RUN mkdir -p /out && /usr/local/cuda/bin/nvcc \
 # Fail the build rather than ship an image that silently drags in an NVIDIA .so.
 RUN ldd /out/fp4_smoke | tee /out/ldd.txt \
     && ! grep -qiE 'libcud(art|a)|libnv' /out/ldd.txt
+
+# ── both sides of the block-scaled-MMA guard get compiled, every build ────────
+#
+# fp4_smoke.cu's kernel is wrapped in
+#   #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(..._SM121_SUPPORTED)
+# with an #else that reports the part UNJUDGED.  Every build so far took the #if
+# side, so the #else had never been compiled at all and a syntax or logic error
+# in it would have surfaced only on a CUTLASS or CUDA downgrade — on a fleet
+# (issue #9).  These two checks are cheap and they close it from both directions.
+#
+# 1. The #else compiles.  It is forced with BURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA
+#    rather than by building for an older arch, because the arch flag does not
+#    reach it: measured against CUTLASS v4.6.1 with CUDA 13.0.1, BOTH
+#    CUTLASS_ARCH_MMA_SM120_SUPPORTED and ..._SM121_SUPPORTED are defined even
+#    for `-arch=sm_80`, so a pre-Blackwell build still takes the #if side.  Only
+#    a pre-v4.5.0 CUTLASS leaves them undefined, and cloning a second stale
+#    upstream into every build to compile eight lines is the worse trade.
+#
+#    Everything else is identical to the release compile above, so this really is
+#    the shipped source on the shipped toolchain.  The binary is a compile
+#    artefact: written to /tmp, asserted, deleted, never copied into the final
+#    image.  grep -a because the marker is a string literal inside an ELF.
+ARG GUARD_MARK="was not compiled with SM120/SM121 block-scaled MMA support"
+RUN /usr/local/cuda/bin/nvcc \
+      -std=c++17 -O3 -arch=${CUDA_ARCH} --expt-relaxed-constexpr \
+      -DBURNIN_CUDA_ARCH="\"${CUDA_ARCH}\"" -DBURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA \
+      -cudart static -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc \
+      -I /cutlass/include -I /cutlass/tools/util/include \
+      -o /tmp/fp4_smoke_no_mma /src/fp4_smoke.cu \
+    && grep -aq "${GUARD_MARK}" /tmp/fp4_smoke_no_mma \
+    && echo "#else branch compiled and linked: OK" \
+    && rm -f /tmp/fp4_smoke_no_mma
+#
+# 2. The SHIPPED binary took the #if side.  This is the one with teeth: if a
+#    CUTLASS bump ever stopped defining those macros for our real arch, the
+#    build above would still succeed and we would publish an immutable tag that
+#    reports "not compiled with block-scaled MMA support" — an Error — on every
+#    node in a fleet.  The #else message can only be in the binary if the #else
+#    was compiled, so its ABSENCE is the proof the kernel is really in there.
+RUN if grep -aq "${GUARD_MARK}" /out/fp4_smoke; then \
+      echo "refusing to build: ${CUDA_ARCH} did not enable block-scaled MMA, so this image would report every node UNJUDGED" >&2; \
+      exit 1; \
+    fi; \
+    echo "block-scaled MMA kernel compiled in for ${CUDA_ARCH}: OK"
 
 # ── final: no NVIDIA layers ───────────────────────────────────────────────────
 # cc-debian13 carries a glibc at least as new as the ubuntu24.04 build stage.

@@ -140,6 +140,84 @@ func TestSamplesThresholdsLintClean(t *testing.T) {
 	}
 }
 
+// TestNoSampleRequestsADurationARunnerIgnores is issue #25's acceptance
+// criterion, mechanised.
+//
+// The operator injects BURNIN_DURATION_SECONDS into every runner, and for a long
+// time config/samples/node-acceptance.yaml asked compute-smoke for 120 seconds
+// and got milliseconds — the runner has no duration loop and never did. Nothing
+// was wrong at runtime; the sample was simply describing a burn-in that did not
+// happen, and a sample is the first thing a new user copies.
+//
+// It is the DURATION counterpart to TestSamplesThresholdsLintClean above, and
+// the two catch different things: the linter judges the gates a sample declares,
+// and this judges a field the runner will silently ignore. Neither subsumes the
+// other — a sample can lint perfectly clean while asking a burst kind to burn a
+// node in for two minutes.
+//
+// The rule is narrow on purpose: it does not say a burst kind may never be given
+// a duration, because DurationSeconds legitimately bounds the POD through the
+// reconciler's deadline. It says a SAMPLE must not, because a sample is
+// documentation, and a number a reader will take for a runtime budget must not
+// appear next to a kind that does not use it as one.
+func TestNoSampleRequestsADurationARunnerIgnores(t *testing.T) {
+	forEachSampleTest(t, func(t *testing.T, file string, i int, spec burninv1alpha1.BurnInTestSpec) {
+		if spec.Kind.BurstOnly() && spec.DurationSeconds != 0 {
+			t.Errorf("%s document %d: kind %q is burst-only and does not use DurationSeconds as a "+
+				"runtime budget, but this sample asks for %ds — a reader will take that for a burn-in "+
+				"that never happens. Drop it, or use a duration-bearing kind",
+				filepath.Base(file), i, spec.Kind, spec.DurationSeconds)
+		}
+	})
+}
+
+// forEachSampleTest decodes every BurnInTest document in config/samples and
+// hands its spec to fn. Non-BurnInTest documents are skipped;
+// TestSamplesDecodeStrictly is what asserts they all decode at all.
+//
+// The two tests above each build their own decoder inline. Consolidating them
+// onto this helper is worth doing, but not in the change that introduced it.
+func forEachSampleTest(t *testing.T, fn func(t *testing.T, file string, doc int, spec burninv1alpha1.BurnInTestSpec)) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := burninv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	decoder := json.NewSerializerWithOptions(
+		json.DefaultMetaFactory, scheme, scheme,
+		json.SerializerOptions{Yaml: true, Strict: true},
+	)
+
+	files, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob samples: %v", err)
+	}
+	seen := 0
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for i, doc := range splitYAMLDocuments(string(raw)) {
+			obj, _, err := decoder.Decode([]byte(doc), nil, nil)
+			if err != nil {
+				continue // TestSamplesDecodeStrictly reports this.
+			}
+			test, ok := obj.(*burninv1alpha1.BurnInTest)
+			if !ok {
+				continue
+			}
+			seen++
+			fn(t, file, i+1, test.Spec)
+		}
+	}
+	// Asserted rather than assumed: a glob or a decode that quietly stopped
+	// matching would leave this sweep passing while checking nothing.
+	if seen == 0 {
+		t.Fatal("no BurnInTest documents found in config/samples; this guard is checking nothing")
+	}
+}
+
 // splitYAMLDocuments splits a multi-document YAML stream on "---" separators,
 // dropping documents that are only comments or whitespace. It is deliberately
 // simple: these are the project's own samples, not arbitrary user input, and a

@@ -123,7 +123,11 @@ become native, and the honest thing is then to build every runner on every PR.
 Several guards need no Docker at all and so run in `make test`:
 `runners/pins_test.go` (every upstream pinned to a commit the build asserts;
 every `FROM`'s ARG declared before the first `FROM`; every runner offered by the
-publish workflow), the shared-source drift guards described below, and
+publish workflow; every runner either reading `BURNIN_DURATION_SECONDS` or its
+kind declaring itself burst-only; no Dockerfile defining a fault-injection
+macro), `api/v1alpha1/samples_test.go` (every sample decodes strictly, every
+sample threshold survives the linter, and no sample asks a burst-only kind for a
+duration), the shared-source drift guards described below, and
 `runners/cxxtests_test.go`, which compiles and runs every `*_test.cc` in the
 tree. That last one is how a C++/CUDA runner gets unit tests at all: the part
 worth testing is never the part needing a GPU, so it is kept in a CUDA-free
@@ -251,9 +255,46 @@ disagree about the same hardware. One brain, two dispatchers.
 - **Metric names are a contract.** `pkg/contract/metrics.go` holds the registry
   and the grammar: lowerCamelCase, a dimensional metric ends in a registered
   unit suffix (`Gbps`, `GBs`, `MBs`, `Us`, `Ms`, `S`, `C`, `W`, `Pct`,
-  `Tflops`), a dimensionless counter does not. A runner's own key is mapped to
-  the canonical name by the alias table in `pkg/runner/parse.go`; parsing is
-  last-occurrence-wins, so two keys must never alias to the same name.
+  `Tflops`, `MHz`), a dimensionless counter does not. A runner's own key is
+  mapped to the canonical name by the alias table in `pkg/runner/parse.go`;
+  parsing is last-occurrence-wins, so two keys must never alias to the same name.
+- **A first-party metric whose value is a LABEL must be registered, as
+  `Evidence`.** The registry is an open world and that is right for third-party
+  runners, but it has one consequence that is a bug for our own: an unregistered
+  name is assumed thresholdable. `pdWedgeSuspected` is `true|false|unknown`,
+  `throttleClassification` is one of five words, `computeCap` is `12.1` — a
+  threshold is compared as a `float64`, so a gate on any of them passed every
+  authoring-time check and then failed closed on EVERY node forever, reading as
+  a hardware verdict on healthy hardware. Registering them turns
+  `SafeToThresholdOn` to false, so the gate is reported as `Unsound` on every
+  surface the bullets above describe. `computeCap` is the sly one: it parses, so
+  the gate silently compares a `major.minor` version as a decimal. The identity
+  metrics (`gpuName`, `pciBusId`, `driverVersion`, `builtCudaArch`) are the same
+  class. This is a stronger duty than the unregistered rule above and does not
+  overlap it: that rule can only say "nothing has registered this name", which is
+  advice about a name; this one makes the registry state what the values ARE, so
+  the author is told what to gate on instead. Diagnostic INTEGERS may stay
+  unregistered — clockprobe's nine per-reason counters deliberately do — because
+  no gate on one fails closed; the unregistered rule still asks for registration
+  the moment somebody gates on one, which is the right moment. Asserted against
+  real captured runner output in
+  `pkg/runner.TestParse_RealClockProbeOutputIsRegistered`, because an audit of
+  the source missed nine metrics and a capture cannot.
+- **A kind that ignores `BURNIN_DURATION_SECONDS` says so, in code.** Every
+  runner here reads it except `compute-smoke`, whose GEMM finishes in
+  milliseconds however long it is asked for — while a shipped sample requested
+  120 s, so "node acceptance" burned nothing in and nothing said so.
+  `TestKind.BurstOnly()` is that declaration, and two guards keep behaviour, kind
+  doc and sample from drifting apart again: `runners/pins_test.go` refuses a
+  non-burst kind whose runner source never reads the variable AND a burst kind
+  whose source does, and `api/v1alpha1/samples_test.go` refuses a sample that
+  sets `durationSeconds` on a burst kind. The resolution is deliberately "stop
+  pretending" rather than "add a loop": a burst proves the arch-correct
+  instruction path executed and got the right answer, which a longer run does not
+  strengthen, and looping it would duplicate `thermal-soak`, `gpu-burn` and
+  `clockprobe` while costing the fleet its one cheap correctness gate. One kind,
+  one job. `durationSeconds` still bounds the POD deadline for a burst kind; it
+  just does not decide how long the test runs.
 - **`Error` is not `Fail`.** An infrastructure error (image pull, scheduling)
   must stay distinguishable from a hardware verdict. Do not collapse them. The
   consequence with teeth is the retry rule: `retryOnErrorLimit` re-runs an
@@ -372,6 +413,36 @@ disagree about the same hardware. One brain, two dispatchers.
   `compute-smoke` shipped `v0.1.0` reporting all three of those as exit 1; that
   is the shape of the bug to look for. The skip path matters for the same
   reason: a node that cannot run a test must skip cleanly, not report a failure.
+- **A branch no available hardware can reach still gets exercised — three ways,
+  and the strongest one is on real silicon.** `compute-smoke`'s exit 2 fires only
+  on a part that is not CC 12.0/12.1, this project has none, and the assumed
+  route (DCGM being unsupported on GB10) turned out not to exist. So: the
+  decision is lifted into a CUDA-free header and unit-tested exhaustively
+  (`arch_match.h`'s `scopeOf`, driven by `arch_match_test.cc` under `make test`);
+  the sentinel is asserted end to end in Go from CAPTURED output, through the
+  parser and through the reconciler with a threshold attached, so a skipped
+  run's missing metric is proven not to fail closed into a hardware verdict; and
+  a **compile-time** fault-injection macro builds the same source with the same
+  toolchain and tells it the device reports a capability it does not have, which
+  is how `FP4_GEMM_SKIP` / exit 2 was finally observed on a real GB10.
+  Fault injection has three rules and none may be relaxed: it is COMPILE-TIME so
+  no environment variable can reach it; no Dockerfile may define it, which
+  `runners/pins_test.go` fails the build over, because an image built with one
+  would report a fabricated "acceptance does not apply" for a whole fleet with
+  the retry budget unspent; and such a build must ANNOUNCE itself in a
+  `key=value` line (`forced_compute_cap=`), so the marker rides into the stored
+  result and the delivered envelope and the verdict stays self-identifying for as
+  long as it exists.
+- **A compile-time `#else` fallback is compiled by the build, not by hope.**
+  `compute-smoke`'s block-scaled-MMA guard had an `#else` no build had ever
+  compiled, so an error in it would have surfaced first on a fleet. The arch flag
+  cannot reach it — measured on CUTLASS v4.6.1 / CUDA 13.0.1, both
+  `CUTLASS_ARCH_MMA_SM120_SUPPORTED` and `..._SM121_SUPPORTED` are defined even
+  for `-arch=sm_80` — so the Dockerfile forces it with a macro and asserts the
+  message is in the artefact. The second half is the one with teeth: the SHIPPED
+  binary must NOT contain that message, which is the proof the real kernel is in
+  there. Without it a CUTLASS bump that stopped defining those macros would
+  publish an immutable tag reporting every node `Error`.
 - **Environment the operator injects.** `BURNIN_DURATION_SECONDS` and
   `BURNIN_ATTEMPT` at every scope; a **Pair**-scope pod additionally gets:
 
