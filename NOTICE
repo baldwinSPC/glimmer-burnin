@@ -47,6 +47,9 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
       /usr/local/dcgm mount point), which is how DCGM already reaches GPU
       nodes.
 
+      The DCGM source (v4.2.3) is cloned at build time only, to assert field
+      ids against dcgm_fields.h; nothing from that clone is redistributed.
+
       This entry previously claimed DCGM was "Apache-2.0, built from source"
       with "its LICENSE travelling in the image". That was wrong on both
       counts and is corrected here. DCGM's *source* is Apache-2.0, but its
