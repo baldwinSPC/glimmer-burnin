@@ -77,6 +77,90 @@ type NotEvaluated struct {
 	Reason string
 }
 
+// Cause says who should act on a violation. It is the axis that separates a
+// statement about the hardware from a statement about the machinery or about
+// the profile — a separation that matters because all three arrive as the same
+// Failed test, and only one of them is a reason to touch a node.
+type Cause string
+
+const (
+	// CauseMeasurement is the hardware falling short of a bar that was applied
+	// to a real measurement. This is the only cause that is evidence about the
+	// part.
+	CauseMeasurement Cause = "Measurement"
+
+	// CauseEvidence is a runner report that cannot support a judgement at all:
+	// the metric is missing, unparseable, non-finite, self-contradictory, or
+	// declared unmeasurable under a gate that requires it. The node is unjudged,
+	// not condemned — though the threshold still fails closed.
+	CauseEvidence Cause = "Evidence"
+
+	// CauseAuthoring is a broken threshold. No hardware is implicated and no
+	// node should be touched; the profile needs fixing. ValidateThresholds
+	// catches these before a run, and this cause is what they look like when
+	// one slips through anyway.
+	CauseAuthoring Cause = "Authoring"
+)
+
+// ViolationKind is the specific route by which a threshold went unsatisfied.
+// It is finer-grained than Cause so the taxonomy can gain routes without
+// reclassifying the ones already there.
+type ViolationKind string
+
+const (
+	// KindUnsatisfied is a real measurement that failed the comparison.
+	KindUnsatisfied ViolationKind = "Unsatisfied"
+	// KindNotReported is a metric absent from both the metrics and the
+	// unmeasurable set. Absence is not a declaration.
+	KindNotReported ViolationKind = "NotReported"
+	// KindNonNumeric is a metric value that does not parse as a float64.
+	KindNonNumeric ViolationKind = "NonNumeric"
+	// KindNonFinite is a metric that parsed as NaN or ±Inf.
+	KindNonFinite ViolationKind = "NonFinite"
+	// KindContradictory is a metric both reported and declared unmeasurable.
+	KindContradictory ViolationKind = "Contradictory"
+	// KindUnmeasurableRequired is a metric declared unmeasurable under an
+	// applicability that requires it.
+	KindUnmeasurableRequired ViolationKind = "UnmeasurableRequired"
+	// KindThresholdValueNonNumeric is a threshold whose Value does not parse.
+	KindThresholdValueNonNumeric ViolationKind = "ThresholdValueNonNumeric"
+	// KindThresholdValueNonFinite is a threshold whose Value is NaN or ±Inf.
+	KindThresholdValueNonFinite ViolationKind = "ThresholdValueNonFinite"
+)
+
+// Cause reports which cause this kind belongs to. It is the single mapping
+// between the two, so a Violation's Kind and Cause can never disagree. An
+// unrecognised kind answers CauseEvidence: the conservative reading is that we
+// could not establish anything, never that the hardware is at fault.
+func (k ViolationKind) Cause() Cause {
+	switch k {
+	case KindUnsatisfied:
+		return CauseMeasurement
+	case KindThresholdValueNonNumeric, KindThresholdValueNonFinite:
+		return CauseAuthoring
+	default:
+		return CauseEvidence
+	}
+}
+
+// Violation is one threshold that was not satisfied. Its shape deliberately
+// mirrors Problem in lint.go — Index, Metric, a classification, and a Reason
+// that is a full sentence — so the package has one vocabulary for "here is
+// every problem, classified" rather than two.
+type Violation struct {
+	// Index is the threshold's position in the slice it was found in.
+	Index int
+	// Metric is the threshold's metric name, as written.
+	Metric string
+	// Cause says who should act. Always Kind.Cause().
+	Cause Cause
+	// Kind is the specific route.
+	Kind ViolationKind
+	// Reason is the human-readable explanation. For the first violation this is
+	// exactly Outcome.Message.
+	Reason string
+}
+
 // Outcome is the result of evaluating a test's thresholds.
 type Outcome struct {
 	// Passed reports that no threshold was violated. Un-evaluated thresholds do
@@ -85,9 +169,28 @@ type Outcome struct {
 	// together.
 	Passed bool
 	// Message names the FIRST violated threshold. Empty when Passed.
+	//
+	// FROZEN. Every threshold is now evaluated (see Violations), but this field
+	// keeps the value it had when evaluation stopped at the first violation,
+	// character for character. Callers that want the whole picture read
+	// Violations; callers that predate it observe no change.
 	Message string
 	// NotEvaluated lists the thresholds that were not applied, in spec order.
+	//
+	// FROZEN, and deliberately INCOMPLETE when a threshold was violated: it
+	// holds the un-evaluated thresholds found BEFORE the first violation, which
+	// is what stopping there used to yield. A gate sitting after the first
+	// violation is absent here even though it too went un-applied — read
+	// Violations and this together for the complete picture, or see GEP-0561
+	// for why the truncation was kept rather than quietly widened.
 	NotEvaluated []NotEvaluated
+	// Violations lists EVERY threshold that was not satisfied, in spec order,
+	// each classified by Cause. Empty exactly when Passed.
+	//
+	// This is the field to read. Message is one of these; this is all of them,
+	// so an operator sees every gate a node missed in one run instead of
+	// rediscovering them one burn-in cycle at a time.
+	Violations []Violation
 }
 
 // NotEvaluatedMessage renders the un-evaluated thresholds for a human-readable
@@ -125,22 +228,38 @@ func (o Outcome) NotEvaluatedMessage() string {
 //     the threshold is NOT EVALUATED. It appears in Outcome.NotEvaluated, and
 //     it is the caller's job to surface that; it is not a pass.
 //
-// Evaluation stops at the first violation, so Message names one threshold. The
-// un-evaluated thresholds found before it are still returned — they are
-// evidence about the run either way.
+// EVERY threshold is evaluated, and Violations holds all of them. Message and
+// NotEvaluated nonetheless report exactly what they reported when evaluation
+// stopped at the first violation: Message is Violations[0].Reason, and
+// NotEvaluated is truncated at the first violation. That is deliberate — this
+// package is public API with two dispatchers, and widening a field they already
+// read would change acceptance reporting for both. See GEP-0561.
 func Evaluate(
 	metrics map[string]string,
 	unmeasurable map[string]bool,
 	thresholds []burninv1alpha1.Threshold,
 ) Outcome {
 	var out Outcome
-	fail := func(format string, args ...any) Outcome {
-		out.Passed = false
-		out.Message = fmt.Sprintf(format, args...)
-		return out
+
+	// Accumulated in full; truncated at the first violation on the way out, so
+	// the frozen field keeps its old value while Violations stays complete.
+	var notEvaluated []NotEvaluated
+	notEvaluatedAtFirstViolation := -1
+
+	fail := func(i int, th burninv1alpha1.Threshold, kind ViolationKind, format string, args ...any) {
+		if len(out.Violations) == 0 {
+			notEvaluatedAtFirstViolation = len(notEvaluated)
+		}
+		out.Violations = append(out.Violations, Violation{
+			Index:  i,
+			Metric: th.Metric,
+			Cause:  kind.Cause(),
+			Kind:   kind,
+			Reason: fmt.Sprintf(format, args...),
+		})
 	}
 
-	for _, th := range thresholds {
+	for i, th := range thresholds {
 		raw, reported := metrics[th.Metric]
 
 		if unmeasurable[th.Metric] {
@@ -148,28 +267,32 @@ func Evaluate(
 				// The runner said both things about one metric. Which claim is
 				// true is unknowable from here, so the gate fails closed rather
 				// than picking the convenient one.
-				return fail("metric %q was reported as %q AND declared unmeasurable; the runner's output is self-contradictory", th.Metric, raw)
+				fail(i, th, KindContradictory, "metric %q was reported as %q AND declared unmeasurable; the runner's output is self-contradictory", th.Metric, raw)
+				continue
 			}
 			// Only the runner's explicit declaration reaches here; absence is
 			// handled below and stays a failure regardless of Applicability.
 			if th.Applicability == burninv1alpha1.RequiredIfMeasurable {
-				out.NotEvaluated = append(out.NotEvaluated, NotEvaluated{
+				notEvaluated = append(notEvaluated, NotEvaluated{
 					Metric: th.Metric,
 					Reason: ReasonUnmeasurable,
 				})
 				continue
 			}
-			return fail("metric %q is %s and this threshold is %s; "+
+			fail(i, th, KindUnmeasurableRequired, "metric %q is %s and this threshold is %s; "+
 				"set applicability=RequiredIfMeasurable if the gate should be skipped where the hardware cannot measure it",
 				th.Metric, ReasonUnmeasurable, applicabilityOf(th))
+			continue
 		}
 
 		if !reported {
-			return fail("metric %q was not reported by the runner", th.Metric)
+			fail(i, th, KindNotReported, "metric %q was not reported by the runner", th.Metric)
+			continue
 		}
 		got, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
-			return fail("metric %q=%q is not numeric", th.Metric, raw)
+			fail(i, th, KindNonNumeric, "metric %q=%q is not numeric", th.Metric, raw)
+			continue
 		}
 		if math.IsNaN(got) || math.IsInf(got, 0) {
 			// strconv accepts "NaN" and "Inf". A non-finite value is not a
@@ -177,20 +300,31 @@ func Evaluate(
 			// against everything, so it fails a floor closed but SATISFIES
 			// NotEqual against every value on earth. That is the one way this
 			// comparison could hand out an acceptance nobody measured.
-			return fail("metric %q=%q is not a finite measurement", th.Metric, raw)
+			fail(i, th, KindNonFinite, "metric %q=%q is not a finite measurement", th.Metric, raw)
+			continue
 		}
 		want, err := strconv.ParseFloat(th.Value, 64)
 		if err != nil {
-			return fail("threshold value %q for %q is not numeric", th.Value, th.Metric)
+			fail(i, th, KindThresholdValueNonNumeric, "threshold value %q for %q is not numeric", th.Value, th.Metric)
+			continue
 		}
 		if math.IsNaN(want) || math.IsInf(want, 0) {
-			return fail("threshold value %q for %q is not a finite number", th.Value, th.Metric)
+			fail(i, th, KindThresholdValueNonFinite, "threshold value %q for %q is not a finite number", th.Value, th.Metric)
+			continue
 		}
 		if !compare(got, th.Comparison, want) {
-			return fail("%s: got %g, need %s %g", th.Metric, got, th.Comparison, want)
+			fail(i, th, KindUnsatisfied, "%s: got %g, need %s %g", th.Metric, got, th.Comparison, want)
+			continue
 		}
 	}
-	out.Passed = true
+
+	if len(out.Violations) == 0 {
+		out.Passed = true
+		out.NotEvaluated = notEvaluated
+		return out
+	}
+	out.Message = out.Violations[0].Reason
+	out.NotEvaluated = notEvaluated[:notEvaluatedAtFirstViolation]
 	return out
 }
 
