@@ -301,19 +301,87 @@ jobs:
         # with none. It failed against a manifest list that was completely
         # correct, which is the right direction for a check to be wrong in, but it
         # cost a run.
+        #
+        # The whitespace was only the trigger. What made that failure expensive to
+        # read is that a step which could not PARSE its input still delivered a
+        # verdict about the artefact — "does not serve linux/amd64" about a tag
+        # that served it — and the obvious response to that message is to re-cut a
+        # release which was in fact correct. So the manifest is parsed structurally
+        # now, and the two situations are kept apart on every branch below: a
+        # platform genuinely absent is a verdict about the image, and ANY failure
+        # to read says outright that it is not one. It is the same distinction the
+        # operator draws between Fail and Error, for the same reason.
         env:
           REF: ${{ needs.prepare.outputs.ref }}
         run: |
           set -euo pipefail
-          raw=$(docker buildx imagetools inspect "${REF}" --raw)
-          for want in amd64 arm64; do
-            if ! grep -qE "\"architecture\"[[:space:]]*:[[:space:]]*\"${want}\"" <<<"${raw}"; then
-              echo "::error::${REF} does not serve linux/${want}"
-              docker buildx imagetools inspect "${REF}" || true
-              exit 1
-            fi
-            echo "  linux/${want}: present"
+
+          # An entry with NO platform block is dropped rather than rendered as
+          # "null/null". That is not pedantry: a rendered null is a non-empty
+          # result, so it would sail past the could-not-read branch below and come
+          # back out as "does not serve linux/amd64" — this same bug, one layer
+          # down. The fixture covers that shape.
+          platforms() {
+            jq -r '[.manifests[]
+                    | .platform // {}
+                    | select((.os // "") != "" and (.architecture // "") != "")
+                    | select(.os != "unknown" and .architecture != "unknown")
+                    | "\(.os)/\(.architecture)"] | unique | .[]'
+          }
+
+          # The parser is exercised on known-good input before it is trusted on the
+          # real thing. A silent change in the inspect output would otherwise leave
+          # the expression matching nothing at all, which is precisely how the
+          # first version of this step came to fail a correct release.
+          self_test='{"manifests":[
+            {"platform":{"architecture":"arm64","os":"linux"}},
+            {"platform":{"architecture":"unknown","os":"unknown"},
+             "annotations":{"vnd.docker.reference.type":"attestation-manifest"}},
+            {"digest":"sha256:no-platform-block-at-all"},
+            {"platform":{"architecture":"amd64","os":"linux"}}]}'
+          if [ "$(platforms <<<"${self_test}" | tr '\n' ' ')" != "linux/amd64 linux/arm64 " ]; then
+            echo "::error::the platform extraction in this step is broken — it cannot read a known-good index, so it proves NOTHING about ${REF}. This is a bug in this workflow, not in the image."
+            platforms <<<"${self_test}" || true
+            exit 1
+          fi
+
+          if ! raw=$(docker buildx imagetools inspect "${REF}" --raw); then
+            echo "::error::could not inspect ${REF}. The tag was pushed but cannot be read back, so it is UNVERIFIED — this is not a statement that it is wrong."
+            exit 1
+          fi
+
+          # A multi-platform tag has to be an index. A plain image manifest has no
+          # .manifests at all, and must not be reported as unreadable.
+          if [ "$(jq -r 'has("manifests")' <<<"${raw}")" != "true" ]; then
+            echo "::error::${REF} is not a manifest list (mediaType $(jq -r '.mediaType // "absent"' <<<"${raw}")) — it can serve at most one platform"
+            jq . <<<"${raw}"
+            exit 1
+          fi
+
+          # Attestation manifests ride in the same index as unknown/unknown. They
+          # are not platforms and must never be counted as one.
+          got=$(platforms <<<"${raw}")
+          if [ -z "${got}" ]; then
+            echo "::error::${REF} parsed as an index but named no platform at all. This check proved NOTHING about the tag — do NOT read it as a verdict on the image, and do not re-cut a release over it. The inspect output has changed shape and this step needs fixing."
+            jq . <<<"${raw}"
+            exit 1
+          fi
+
+          echo "platforms in ${REF}:"
+          sed 's/^/  /' <<<"${got}"
+
+          # Every missing platform is named, not just the first: fixing one and
+          # rediscovering the next is two publish cycles for one fault, and a
+          # publish cycle burns a version number that cannot be reused.
+          missing=""
+          for want in linux/amd64 linux/arm64; do
+            grep -qxF "${want}" <<<"${got}" || missing="${missing} ${want}"
           done
+          if [ -n "${missing}" ]; then
+            echo "::error::${REF} does not serve:${missing}"
+            docker buildx imagetools inspect "${REF}" || true
+            exit 1
+          fi
           echo "both platforms present in ${REF}"
 
       - name: Report
