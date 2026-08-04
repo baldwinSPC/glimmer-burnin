@@ -41,6 +41,10 @@ RUN got="$(git -C /cutlass rev-parse HEAD)"; \
     echo "CUTLASS ${CUTLASS_REF} = ${got}: OK"
 
 COPY fp4_smoke.cu /src/fp4_smoke.cu
+# Host-only and CUDA-free: it decides whether CUDA_ARCH covers the part the
+# image lands on, which is why it can be unit-tested with a plain C++ compiler
+# and no GPU (arch_match_test.cc, run by `make test` via archmatch_test.go).
+COPY arch_match.h /src/arch_match.h
 
 # -cudart static is nvcc's default on Linux but stated explicitly so the intent
 # survives a toolchain change.  -static-libstdc++/-static-libgcc are host-compiler

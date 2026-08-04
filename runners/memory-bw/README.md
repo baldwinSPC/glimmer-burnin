@@ -214,10 +214,10 @@ decides whether a non-zero exit is corruption (Fail) or anything else (Error).
 c++ -std=c++17 -Wall -Wextra -o /tmp/scan_test scan_test.cc && /tmp/scan_test
 ```
 
-It needs no test framework and is not compiled into the image. Note that **CI
-does not run it** — `make test` covers Go packages only, and this runner is
-native like `compute-smoke` and `clockprobe`. Run it by hand when you touch the
-scanner.
+It needs no test framework and is not compiled into the image. **`make test` and
+CI do run it**: `runners/cxxtests_test.go` sweeps the tree for every
+`*_test.cc`, compiles it with the line above and runs it, so a native runner's
+unit tests are gated like any other. No Docker, no CUDA toolchain, no GPU.
 
 The operator-side parser for this kind — the alias table that maps
 `h2d_bandwidth_gbs` and friends onto canonical metric names — lives in
@@ -301,5 +301,5 @@ for `memory-bw` is added to `defaultRunnerImages` in
    matrix scan has more than one cell to read per testcase.
 2. **A node with no accelerator exits 2, not 1.** The skip path is the one that
    matters most and is the one a single healthy Spark cannot exercise.
-3. **`scan_test.cc` is still not run by CI** (`make test` covers Go packages
-   only). Run it by hand when you touch the scanner.
+3. ~~**`scan_test.cc` is still not run by CI**~~ — closed:
+   `runners/cxxtests_test.go` compiles and runs it under `make test`.

@@ -6,8 +6,8 @@
 // have somewhere to be enforced from — a directory listing is the only thing
 // that knows how many runners there are.
 //
-// Two rules live here, and both are rules a reviewer cannot enforce by reading
-// one diff:
+// Three rules live here, and none of them is one a reviewer can enforce by
+// reading a single diff:
 //
 //   - Every upstream a runner fetches is pinned to a COMMIT, and the build
 //     asserts it. A published runner tag is immutable and a node's readiness
@@ -17,6 +17,10 @@
 //     `runner` input is a hand-written choice list; a directory missing from it
 //     cannot be built at all, and a defaultRunnerImages entry pointing at a tag
 //     no workflow can produce is an ImagePullBackOff with no way out.
+//   - Every C++ unit test a runner ships is actually compiled and run
+//     (cxxtests_test.go). The C++ and CUDA runners cannot be tested from a Go
+//     package of their own, so their tests are plain programs that nothing ran
+//     until the sweep here existed.
 package runners
 
 import (

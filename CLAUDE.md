@@ -123,7 +123,13 @@ become native, and the honest thing is then to build every runner on every PR.
 Several guards need no Docker at all and so run in `make test`:
 `runners/pins_test.go` (every upstream pinned to a commit the build asserts;
 every `FROM`'s ARG declared before the first `FROM`; every runner offered by the
-publish workflow), plus the shared-source drift guards described below.
+publish workflow), the shared-source drift guards described below, and
+`runners/cxxtests_test.go`, which compiles and runs every `*_test.cc` in the
+tree. That last one is how a C++/CUDA runner gets unit tests at all: the part
+worth testing is never the part needing a GPU, so it is kept in a CUDA-free
+header (`compute-smoke/arch_match.h`) with a plain C++ test beside it. Note a
+runner directory containing a `.cc` file cannot also hold a Go file — `go build`
+rejects C++ sources outside cgo — which is why the sweep lives in `runners/`.
 
 ---
 
@@ -389,6 +395,21 @@ disagree about the same hardware. One brain, two dispatchers.
 - Arch targets are deliberate. `sm_121a` emits a cubin for GB10 only, with no
   PTX fallback, so a pass proves the real instruction path ran rather than an
   emulated one. Do not "helpfully" widen an arch target to make a build succeed.
+- **A wrong arch does not reliably announce itself, so do not wait for the
+  launch to tell you.** `cudaErrorNoKernelImageForDevice` fires only when the
+  loader refuses outright — an `sm_121a` cubin on a CC 12.0 part. The other
+  direction is not refused at all: SM121 is binary-compatible with SM120, so an
+  `sm_120a` image LOADS on a CC 12.1 GB10 and trips a device-side assert inside
+  the kernel, reaching the operator as a bare "device-side assert triggered"
+  under several hundred lines of CUTLASS template text. `compute-smoke`
+  therefore establishes the mismatch from the `BURNIN_CUDA_ARCH` string and the
+  reported compute capability, and refuses BEFORE launching. Doing it before
+  matters twice over: `cudaErrorAssert` is sticky and poisons the context, and a
+  container log is stdout and stderr MERGED while `pkg/runner.Parse` takes
+  `Result.Message` from the LAST non-`key=value` line — so kernel spew arriving
+  after the diagnosis overwrites it in the stored result. It stays an `Error`
+  and never a `Skip`, and an arch string it cannot parse is Unknown rather than
+  a mismatch: a runner may only declare what it positively established.
 
 ---
 
