@@ -289,21 +289,32 @@ jobs:
         # both pull. A manifest list that silently lost a platform would publish
         # an immutable tag that half the fleet cannot run, and the failure would
         # surface as an ImagePullBackOff on the nodes rather than here.
+        #
+        # This is a CONFIRMATION, not the guard. It necessarily runs after
+        # `imagetools create`, because there is no tag to inspect before that, so
+        # a failure here means a bad tag already exists. The step that actually
+        # prevents one is the digest count above, which refuses to create anything
+        # unless both platforms pushed.
+        #
+        # The registry pretty-prints its JSON — `"architecture": "amd64"`, with a
+        # space — and the first version of this matched `"architecture":"amd64"`
+        # with none. It failed against a manifest list that was completely
+        # correct, which is the right direction for a check to be wrong in, but it
+        # cost a run.
         env:
           REF: ${{ needs.prepare.outputs.ref }}
         run: |
           set -euo pipefail
-          got=$(docker buildx imagetools inspect "${REF}" --raw \
-                  | grep -oE '"architecture":"[a-z0-9]+"' | sort -u || true)
-          echo "platforms in ${REF}:"; echo "${got}"
+          raw=$(docker buildx imagetools inspect "${REF}" --raw)
           for want in amd64 arm64; do
-            if ! grep -q "\"architecture\":\"${want}\"" <<<"${got}"; then
+            if ! grep -qE "\"architecture\"[[:space:]]*:[[:space:]]*\"${want}\"" <<<"${raw}"; then
               echo "::error::${REF} does not serve linux/${want}"
               docker buildx imagetools inspect "${REF}" || true
               exit 1
             fi
+            echo "  linux/${want}: present"
           done
-          echo "both platforms present"
+          echo "both platforms present in ${REF}"
 
       - name: Report
         env:
