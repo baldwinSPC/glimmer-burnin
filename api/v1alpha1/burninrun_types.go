@@ -49,6 +49,31 @@ func (p RunPhase) IsTerminal() bool {
 	}
 }
 
+// Admission conditions.
+//
+// A refused run is terminal with phase Error, because Error is exactly what it
+// means: the machinery declined to run, and the hardware was never judged. It
+// deliberately does NOT get a phase of its own — a new terminal phase would have
+// to be understood by every consumer of the delivery envelope before any of them
+// could tell it from a pass, and a consumer that does not recognise a phase is a
+// consumer that might treat it as one. The condition below is what makes the
+// CAUSE machine-readable without moving the verdict.
+const (
+	// ConditionRunAdmitted says whether this run was allowed to take its
+	// targets. False with reason TargetsBusy means another run already holds
+	// one of them; the message names it.
+	ConditionRunAdmitted = "Admitted"
+
+	// ReasonRunAdmitted: the targets were free (or the run was forced).
+	ReasonRunAdmitted = "TargetsAvailable"
+	// ReasonRunForced: the targets were NOT free and spec.force admitted the
+	// run anyway. Recorded separately from ReasonRunAdmitted so a verdict
+	// produced under deliberate contention is identifiable as such.
+	ReasonRunForced = "AdmittedByForce"
+	// ReasonTargetsBusy: refused, because an already-active run holds a target.
+	ReasonTargetsBusy = "TargetsBusy"
+)
+
 // CancelPolicy decides what happens to work already in flight when a run is
 // cancelled.
 // +kubebuilder:validation:Enum=Graceful;Immediate
@@ -107,6 +132,38 @@ type BurnInRunSpec struct {
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	MaxConcurrentNodes *int32 `json:"maxConcurrentNodes,omitempty"`
+
+	// Force admits this run even when one of its targets is already held by
+	// another active BurnInRun. DEFAULT false, and it should stay false.
+	//
+	// THIS IS THE ESCAPE HATCH ON A FACILITY INTERLOCK, not a way to go faster.
+	// MaxConcurrentNodes bounds how many nodes ONE run drives at full power;
+	// nothing about it bounds how many runs drive the same node, and two runs
+	// each honouring a cap of 1 on the same node are two full-power soaks on one
+	// machine — twice the power, twice the heat, and each run believing it is
+	// compliant. That is what admission refuses, and it is why the refusal is
+	// the default rather than a warning.
+	//
+	// The refusal is also a correctness gate, not only a facility one. Two soaks
+	// contending for the same accelerators, memory bandwidth and fabric measure
+	// each other rather than the hardware, so both report degraded numbers and a
+	// healthy node earns a failing verdict — or, as observed on real hardware,
+	// the kubelet kills one of them and the run reports exit 137 against a node
+	// that was never at fault.
+	//
+	// Setting it is a statement that the overlap is deliberate and that the
+	// power and cooling headroom has been checked by the person setting it. It
+	// is recorded on the run and in the exported envelope, so a verdict produced
+	// under contention can be identified as such months later.
+	//
+	// It does NOT disable the cordon ownership rules. A forced run still refuses
+	// to take, overwrite or release a node another run has stamped, and it still
+	// records the node's PRE-BURN-IN schedulability rather than the cordon it
+	// finds — a forced overlap must not be able to launder another run's cordon
+	// into permanent prior state.
+	//
+	// +kubebuilder:default=false
+	Force *bool `json:"force,omitempty"`
 
 	// RetryOnErrorLimit is how many extra attempts a test gets after an ERROR.
 	// Default 0 — no retries.
