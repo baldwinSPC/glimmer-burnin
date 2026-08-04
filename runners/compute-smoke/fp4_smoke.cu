@@ -48,6 +48,12 @@
 #include <cmath>
 #include <cstdlib>
 
+// Host-only, CUDA-free, and therefore testable without a GPU: it decides
+// whether the arch this binary was built for covers the part it landed on, and
+// composes the operator-facing message when it does not. See arch_match.h for
+// why that decision cannot be left to the CUDA runtime's error code.
+#include "arch_match.h"
+
 #include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"
 #include "cutlass/gemm/dispatch_policy.hpp"
@@ -70,15 +76,26 @@ constexpr int kM = 1024, kN = 1024, kK = 1024;
 // fp32 accumulation order. Normalised by max|ref|, anything sane sits well under this.
 constexpr float kTolerance = 0.01f;
 
-constexpr int kExitPass = 0;
-constexpr int kExitFail = 1;
-constexpr int kExitSkip = 2;
-constexpr int kExitError = 3;
+// The exit contract lives in arch_match.h, where a test can reach it and assert
+// the property that matters: nothing describing a failed measurement ever
+// returns kExitFail.
+using burnin::kExitError;
+using burnin::kExitFail;
+using burnin::kExitPass;
+using burnin::kExitSkip;
 
 // The arch this binary was actually compiled for, so a triager reading a stored
 // result can see the image/part mismatch without having to go and inspect the
 // image that produced it.
 constexpr const char *kBuiltArch = BURNIN_CUDA_ARCH;
+
+// The compute capability this run actually found, latched in main() the moment
+// cudaGetDeviceProperties answers, so that any later failure can be compared
+// against kBuiltArch. Negative means "not read yet", which is a real state: the
+// first two CUDA calls in main() can fail before there is anything to latch,
+// and burnin::archMatch answers Unknown for it rather than guessing.
+int gDeviceMajor = -1;
+int gDeviceMinor = -1;
 
 // fail() is ONLY for a measured verdict about the silicon. If you are reaching
 // for it because something went wrong, you want errored().
@@ -102,25 +119,39 @@ int skipped(const char *why) {
 
 // A CUDA error is never a hardware verdict here.
 //
-// cudaErrorNoKernelImageForDevice is named explicitly because it is the one an
-// operator can act on, and because it is exactly the case this file used to
-// report as a hardware failure: the compute-capability gate below admits the
-// whole 12.0/12.1 family, while the default build pins a single arch, so an
-// in-scope part can legitimately reach the kernel launch with no cubin to run.
-// That is a statement about which image was pinned, not about the part.
+// This is only the CUDA-to-plain-C++ translation; the decision and the wording
+// live in arch_match.h so they can be tested without a GPU. Three codes are
+// named, and the rest fall through to the runtime's own string:
+//
+//   - cudaErrorNoKernelImageForDevice / cudaErrorInvalidDeviceFunction is the
+//     loader refusing the cubin outright, and it is the case this file once
+//     reported as a hardware failure. The scope gate in main() admits the whole
+//     12.0/12.1 family while a build pins a single arch, so an in-scope part can
+//     legitimately reach the launch with nothing to run. That is a statement
+//     about which image was pinned, not about the part.
+//   - cudaErrorAssert is a device-side assert, which is STICKY: it poisons the
+//     context, so every later CUDA call in this process fails too. It is named
+//     because the loader does NOT always refuse a wrong-arch cubin — an sm_120a
+//     image loads on a CC 12.1 GB10 and asserts inside the kernel instead — and
+//     because "device-side assert triggered" on its own tells an operator
+//     nothing about what to change.
+//
+// Whichever code arrived, an established image/part mismatch outranks it as the
+// explanation; describeCudaFailure applies that precedence.
 int cudaErrored(const char *where, cudaError_t err) {
-  char buf[640];
+  burnin::CudaFailure kind = burnin::CudaFailure::Other;
   if (err == cudaSuccess) {
-    std::snprintf(buf, sizeof(buf), "%s (no CUDA error was latched)", where);
+    kind = burnin::CudaFailure::NoErrorLatched;
   } else if (err == cudaErrorNoKernelImageForDevice || err == cudaErrorInvalidDeviceFunction) {
-    std::snprintf(buf, sizeof(buf),
-                  "%s: %s — this image carries no cubin for the part it landed on "
-                  "(built for %s). The hardware is UNJUDGED; pin an image built for this "
-                  "compute capability and re-run",
-                  where, cudaGetErrorString(err), kBuiltArch);
-  } else {
-    std::snprintf(buf, sizeof(buf), "%s: %s", where, cudaGetErrorString(err));
+    kind = burnin::CudaFailure::NoKernelImage;
+  } else if (err == cudaErrorAssert) {
+    kind = burnin::CudaFailure::DeviceAssert;
   }
+
+  char buf[768];
+  burnin::describeCudaFailure(buf, sizeof(buf), where, kind,
+                              err == cudaSuccess ? nullptr : cudaGetErrorString(err), kBuiltArch,
+                              gDeviceMajor, gDeviceMinor);
   return errored(buf);
 }
 
@@ -321,6 +352,8 @@ int main() {
     return cudaErrored("no usable CUDA device (cudaGetDevice)", e);
   if (cudaError_t e = cudaGetDeviceProperties(&props, dev); e != cudaSuccess)
     return cudaErrored("no usable CUDA device (cudaGetDeviceProperties)", e);
+  gDeviceMajor = props.major;
+  gDeviceMinor = props.minor;
   std::printf("gpu_name=%s\ncompute_cap=%d.%d\n", props.name, props.major, props.minor);
 
   // The SCOPE gate, and it is deliberately the whole SM12x family rather than
@@ -333,16 +366,54 @@ int main() {
   // built arch would make a wrong-arch image look like out-of-scope hardware,
   // and a whole fleet would report Skip — reading as "acceptance not applicable"
   // — when in truth the operator pinned the wrong tag. So an in-scope part with
-  // no cubin runs on and surfaces at the launch as an Error (see cudaErrored),
-  // which is the retryable, hardware-unjudged phase and names the fix.
+  // no cubin passes THIS gate and is stopped by the image gate below as an
+  // Error, which is the retryable, hardware-unjudged phase and names the fix.
   //
-  // Note it cannot be settled statically either: nvcc's __CUDA_ARCH_LIST__
-  // records 1210 for sm_121a and 1200 for both sm_120a and sm_120f, and only
-  // the "f" form also covers 12.1 — so the macro cannot distinguish an image
-  // that runs here from one that does not. Where we cannot know, we say we do
-  // not know.
+  // Note the image question cannot be settled by a preprocessor macro: nvcc's
+  // __CUDA_ARCH_LIST__ records 1210 for sm_121a and 1200 for both sm_120a and
+  // sm_120f, and only the "f" form also covers 12.1 — so the macro cannot
+  // distinguish an image that runs here from one that does not. That is why the
+  // gate below compares the BURNIN_CUDA_ARCH string, which does carry the
+  // distinction, against the capability the device reported. Where even that
+  // cannot answer, it says so and runs on rather than guessing.
   if (!(props.major == 12 && (props.minor == 0 || props.minor == 1)))
     return skipped("NVFP4 block-scaled GEMM requires compute capability 12.0/12.1");
+
+  // The IMAGE gate, and the second of the two questions above: the part is in
+  // scope, so does this image actually carry code for it? Answered here, from
+  // the arch baked in at build time and the capability the device just
+  // reported, rather than left to whatever the runtime latches at the launch.
+  //
+  // It has to be answered here because the launch does not answer it reliably.
+  // The loader refuses an sm_121a cubin on a CC 12.0 part, and that direction
+  // was always caught. The other direction is not refused at all: SM121 is
+  // binary-compatible with SM120, so an sm_120a image LOADS on a CC 12.1 GB10
+  // and then trips a device-side assert inside the CUTLASS kernel. Measured on
+  // real hardware, that reached the operator as a bare "warmup
+  // cudaDeviceSynchronize: device-side assert triggered" naming neither the
+  // arch nor the fix.
+  //
+  // Refusing BEFORE the launch is what makes this worth doing, rather than only
+  // improving the message afterwards. Nothing is launched, so no assert fires,
+  // so the CUDA context is not poisoned and CUTLASS emits none of its several
+  // hundred lines of template assert text. That spew is not merely ugly: a
+  // container log is stdout and stderr MERGED, and pkg/runner.Parse takes
+  // Result.Message from the LAST line that is not key=value — so a CUTLASS line
+  // landing after our diagnosis becomes the message stored in the TestResult,
+  // and the operator loses the one line that told them what to change.
+  //
+  // Conservative by construction: burnin::archMatch reports Mismatch only where
+  // it is positively established, and answers Unknown for an arch string it
+  // does not recognise (a hand-built binary carries "unknown"). An Unknown runs
+  // on and leaves the runtime error to speak, exactly as before. And this is an
+  // Error, never a Skip: reporting it as out-of-scope hardware would tell a
+  // whole fleet that acceptance does not apply to it when the truth is that
+  // somebody pinned the wrong tag.
+  if (burnin::archMatch(kBuiltArch, props.major, props.minor) == burnin::ArchMatch::Mismatch) {
+    char buf[768];
+    burnin::describeArchMismatch(buf, sizeof(buf), kBuiltArch, props.major, props.minor);
+    return errored(buf);
+  }
 
 #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
   return run();
