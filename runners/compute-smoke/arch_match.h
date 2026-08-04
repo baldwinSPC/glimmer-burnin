@@ -1,4 +1,4 @@
-// arch_match.h — the two arch questions compute-smoke answers before it launches.
+// arch_match.h — the three arch questions compute-smoke answers before it launches.
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright the Glimmer authors.
@@ -35,23 +35,50 @@
 //   - The finding is UNJUDGED, never a verdict. Every path here returns
 //     kExitError; see the exit contract below.
 //
-// TWO QUESTIONS, AND THEY MUST NOT BE COLLAPSED. Both are answered here, and
-// keeping them apart is the point of the file:
+// THREE QUESTIONS, AND THEY MUST NOT BE COLLAPSED. All three are answered here,
+// and keeping them apart is the point of the file:
 //
 //   scopeOf(major, minor)              "can this part do NVFP4 block-scaled GEMM
 //                                      at all?" — a property of the HARDWARE.
 //                                      OutOfScope -> Skip, exit 2.
 //
-//   archMatch(builtArch, major, minor) "does this image carry a cubin for this
-//                                      part?" — a property of the IMAGE that was
-//                                      pinned. Mismatch -> Error, exit 3.
+//   kernelCovers(major, minor)         "does this image's KERNEL implement the
+//                                      MMA path this part uses?" — a property of
+//                                      the SOURCE that was compiled.
+//                                      WrongFamily -> Error, exit 3.
 //
-// Collapsing them would misreport one of the two. Narrowing the scope gate to
-// the built arch would make a wrong-arch image look like out-of-scope hardware,
-// and a whole fleet would report Skip — reading as "acceptance is not applicable
-// to these nodes" — when the truth is that an operator pinned the wrong tag.
-// Widening the image gate the other way would condemn a genuinely out-of-scope
-// part as a configuration error.
+//   archMatch(builtArch, major, minor) "does this image carry a cubin for this
+//                                      part?" — a property of the GENCODE the
+//                                      image was built with.
+//                                      Mismatch -> Error, exit 3.
+//
+// Collapsing any two misreports one of them. Narrowing the scope gate to the
+// family this image happens to cover makes a part that this image simply does
+// not serve look like out-of-scope hardware, and a whole fleet reports Skip —
+// reading as "acceptance is not applicable to these nodes" — when the truth is
+// that acceptance applies perfectly well and nobody ran it. Widening the image
+// gates the other way would condemn a genuinely out-of-scope part as a
+// configuration error.
+//
+// THE THIRD QUESTION IS WHY B200 WAS BEING MISREPORTED (issue #10). SM10x
+// datacenter Blackwell does NVFP4 block-scaled GEMM in hardware — it is exactly
+// the thing this runner exists to verify — but by a different instruction path
+// (tcgen05.mma with TMEM accumulation) that needs a different CUTLASS kernel,
+// not merely a different gencode of this one. scopeOf used to answer OutOfScope
+// for CC 10.x with the comment "needs its own runner image", which is a
+// statement about THIS IMAGE wearing the costume of a statement about the
+// silicon. A B200 fleet therefore recorded a clean Skip — "the test does not
+// apply to this hardware" — for a test that applies and was never run, and the
+// run settled Passed around it. That is the exact false negative the two-question
+// split was drawn to prevent, reached through the gate that was supposed to
+// prevent it.
+//
+// The failure direction settles the doubt on any part this file is unsure
+// about. Being wrong towards InScope costs an Error: hardware unjudged, retried
+// under retryOnErrorLimit, and the run does not pass. Being wrong towards
+// OutOfScope costs a Skip: acceptance certified as inapplicable to hardware
+// nobody looked at, on the one phase the operator never retries. Prefer
+// InScope.
 //
 // The scope gate lives here, rather than inline in fp4_smoke.cu's main(), for
 // the reason the rest of this header exists: exit 2 is the contract's
@@ -86,10 +113,24 @@ constexpr int kExitError = 3;
 // collapsing the two is the false-negative class this runner was written to fix.
 // Exit 1 permanently indicts a node and is never retried by the operator.
 //
-// Deliberately the whole SM12x family (compute capability 12.0 and 12.1) rather
-// than the single arch this binary was built for — see the two-questions note at
-// the top of this file. An in-scope part whose cubin this image does not carry
-// passes here and is stopped by archMatch as an Error instead.
+// Deliberately BROADER than what this image can execute — see the three-questions
+// note at the top of this file. It answers only "does NVFP4 block-scaled GEMM
+// exist on this silicon", so it admits:
+//
+//   CC 12.0, 12.1   consumer/workstation Blackwell (RTX PRO 6000, RTX 50xx,
+//                   GB10). This image's own kernel; runs here.
+//   CC 10.x         datacenter Blackwell (B100/B200/GB200 at 10.0, B300/GB300
+//                   at 10.3). NVFP4 in hardware by the tcgen05.mma path, which
+//                   this image does NOT implement — kernelCovers stops it as an
+//                   Error naming issue #10, never as a Skip.
+//
+// CC 10.x is admitted as a whole MAJOR family rather than an enumerated list of
+// minors, because a new datacenter Blackwell minor is far likelier to have NVFP4
+// than not, and the cost of being wrong runs the safe way: an in-scope part this
+// image cannot serve reports Error and is retried, while an out-of-scope verdict
+// would certify it. The SM12x arm stays an exact pair for the opposite reason —
+// a future 12.x minor is a part we have no reason to believe anything about, and
+// it will be caught by kernelCovers or archMatch either way.
 //
 // Tri-state, for the same reason ArchMatch is. A Skip is a DECLARATION about the
 // hardware — "acceptance does not apply to this part" — and a runner may only
@@ -109,7 +150,62 @@ enum class Scope {
 inline Scope scopeOf(int devMajor, int devMinor) {
   if (devMajor < 0 || devMinor < 0) return Scope::Unknown;
   if (devMajor == 12 && (devMinor == 0 || devMinor == 1)) return Scope::InScope;
+  if (devMajor == 10) return Scope::InScope;  // datacenter Blackwell; see above
   return Scope::OutOfScope;
+}
+
+// ── the KERNEL gate: does this image's kernel implement this part's MMA path? ─
+//
+// The question between the other two, and the one issue #10 is about. A part can
+// be squarely in scope for NVFP4 block-scaled GEMM and still be unservable by
+// this image, because "NVFP4 block-scaled GEMM" is not one instruction path:
+//
+//   SM12x  cutlass::arch::Sm120 block-scaled tensor op — what fp4_smoke.cu
+//          compiles, and the only path in this image.
+//   SM10x  tcgen05.mma with TMEM accumulation — a different CUTLASS kernel with
+//          different tile and cluster shapes and a different mainloop schedule.
+//          NOT a gencode of the SM12x kernel: building this source with
+//          -arch=sm_100a would compile an Sm120 kernel and emit it for a part
+//          that cannot run it.
+//
+// So this is deliberately NOT derived from BURNIN_CUDA_ARCH. The gencode says
+// which cubins are in the binary; this says which kernel was written. They fail
+// differently and the remedies are different — a gencode mismatch is "rebuild
+// with CUDA_ARCH=…", a kernel-family mismatch is "that runner does not exist
+// yet", and telling an operator to rebuild for an arch whose kernel this source
+// does not contain would send them round a loop that cannot terminate.
+enum class KernelCoverage {
+  Unknown,
+  Covers,
+  WrongFamily,
+};
+
+// kKernelFamilyMajor is the compute-capability major whose block-scaled MMA path
+// fp4_smoke.cu implements. It is a fact about the SOURCE, so it is a constant
+// here rather than anything derived from a build flag: an image built with a
+// different -arch still contains this kernel and no other.
+constexpr int kKernelFamilyMajor = 12;
+
+inline KernelCoverage kernelCovers(int devMajor, int devMinor) {
+  if (devMajor < 0 || devMinor < 0) return KernelCoverage::Unknown;
+  return devMajor == kKernelFamilyMajor ? KernelCoverage::Covers : KernelCoverage::WrongFamily;
+}
+
+// The operator-facing text for an in-scope part this image's kernel does not
+// implement, and the exit code — kExitError, because the hardware is UNJUDGED.
+//
+// It must not suggest a CUDA_ARCH, which is the whole reason it is separate from
+// describeArchMismatch: no gencode of this source runs on this part.
+inline int describeWrongKernelFamily(char *buf, std::size_t n, int devMajor, int devMinor) {
+  std::snprintf(buf, n,
+                "this part reports compute capability %d.%d, which DOES do NVFP4 block-scaled "
+                "GEMM — but by the tcgen05.mma path, and this image implements only the SM%dx "
+                "path. Nothing was launched and the hardware is UNJUDGED: the test applies to "
+                "this part and was not run, which is NOT the same as it not applying. There is "
+                "no CUDA_ARCH that fixes this, because the kernel itself is different; an SM10x "
+                "runner image is tracked as issue #10",
+                devMajor, devMinor, kKernelFamilyMajor);
+  return kExitError;
 }
 
 // The operator-facing text for an out-of-scope part, and the exit code to leave
@@ -248,12 +344,21 @@ inline int describeArchMismatch(char *buf, std::size_t n, const char *builtArch,
                                 int devMinor) {
   char want[16];
   detail::archTargetFor(want, sizeof(want), devMajor, devMinor);
+  // The family-target hint is only true of the SM12x pair, where sm_120f really
+  // does cover both members. Offered on any other part it is advice that cannot
+  // work, and this function is reached with the caller having already
+  // established that a rebuild IS the remedy — so the one thing it must not do
+  // is name the wrong one. In practice fp4_smoke.cu's kernel gate settles CC
+  // 10.x before this is reached; the condition is here so that stays true if the
+  // gates are ever reordered.
+  const char *familyHint =
+      (devMajor == 12) ? ", or sm_120f for one binary covering CC 12.0 and 12.1" : "";
   std::snprintf(buf, n,
                 "this image carries no cubin for the part it landed on: it was built for %s, "
                 "and this part reports compute capability %d.%d. Nothing was launched, so the "
                 "hardware is UNJUDGED; rebuild or pin an image whose arch covers this part "
-                "(CUDA_ARCH=%s, or sm_120f for one binary covering CC 12.0 and 12.1) and re-run",
-                builtArch, devMajor, devMinor, want);
+                "(CUDA_ARCH=%s%s) and re-run",
+                builtArch, devMajor, devMinor, want, familyHint);
   return kExitError;
 }
 

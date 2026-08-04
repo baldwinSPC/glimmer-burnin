@@ -7,9 +7,13 @@ actually compute — not merely that a container started.
 This variant targets **NVIDIA Blackwell SM120/SM121** (GB10 / DGX Spark, compute
 capability 12.0–12.1) and exercises **NVFP4** block-scaled GEMM.
 
-> SM10x (B200) block-scaled kernels use a different instruction path
-> (`tcgen05.mma`, TMEM accumulation) and are **not** interchangeable with SM12x
-> (warp-level `mma.sync` / `mxf4nvf4`). A separate runner is needed for those cards.
+> SM10x (B200/GB200, B300/GB300) block-scaled kernels use a different
+> instruction path (`tcgen05.mma`, TMEM accumulation) and are **not**
+> interchangeable with SM12x (warp-level `mma.sync` / `mxf4nvf4`). A separate
+> runner is needed for those cards — issue #10. On one of them this image reports
+> **`Error`, exit 3, hardware unjudged**, never a `Skip`: NVFP4 acceptance
+> applies to a B200, so recording it as "not applicable" would certify a fleet
+> for the very capability nobody measured.
 
 ## Output contract
 
@@ -73,13 +77,14 @@ Nothing that merely *prevented* a measurement may use it.
 
 ### The compute-capability gate, and the arch the binary was built for
 
-These are deliberately **two different questions**, and this runner answers them
-separately:
+These are deliberately **three different questions**, and this runner answers
+them separately, in this order:
 
 | question | about | outcome |
 |---|---|---|
-| Can this part be asked to do NVFP4 block-scaled GEMM at all? | the hardware | not CC 12.0/12.1 → **Skip** (exit 2) |
-| Does *this image* carry a cubin for it? | the image that was pinned | no → **Error** (exit 3) |
+| Can this part be asked to do NVFP4 block-scaled GEMM at all? | the **hardware** | no → **Skip** (exit 2) |
+| Does this image's **kernel** implement this part's MMA path? | the **source** that was compiled | no → **Error** (exit 3) |
+| Does this image carry a **cubin** for it? | the **gencode** it was built with | no → **Error** (exit 3) |
 
 The scope gate admits the whole `12.0`/`12.1` family, while the default build
 pins `sm_121a` (CC 12.1 only). So a **CC 12.0 part is in scope, passes the scope
@@ -92,9 +97,20 @@ built arch would report a whole fleet as "not applicable" when the truth is that
 the operator pinned the wrong tag; `Error` is the retryable, hardware-unjudged
 phase and it names the fix.
 
-Both decisions live in [`arch_match.h`](arch_match.h) — host-only and free of
-CUDA — as `scopeOf()` and `archMatch()`, so a plain C++ program can drive them
-to every compute capability with no GPU in the room. See
+**The middle question is issue #10, and it used to be answered by the first
+one.** `scopeOf()` reported CC 10.x as out of scope, with the comment "needs its
+own runner image" — a statement about *this image* wearing the costume of a
+statement about the *silicon*. A B200 is not out of scope for NVFP4; it does
+NVFP4 in hardware, by an instruction path this image does not implement. So a
+B200 fleet recorded a clean `Skip` for a test that applies and was never run, and
+the run settled `Passed` around it. The kernel gate now stops it as an `Error`
+that names the issue, and deliberately does **not** suggest a `CUDA_ARCH`:
+rebuilding this source with `-arch=sm_100a` would compile the `arch::Sm120`
+kernel and emit it for a part that cannot run it, which is advice with no exit.
+
+All three decisions live in [`arch_match.h`](arch_match.h) — host-only and free
+of CUDA — as `scopeOf()`, `kernelCovers()` and `archMatch()`, so a plain C++
+program can drive them to every compute capability with no GPU in the room. See
 [how the Skip path is exercised](#how-the-skip-path-is-exercised) for why that
 matters more here than anywhere else in this runner.
 
@@ -110,9 +126,10 @@ support GB10, and DCGM works on GB10.
 It is now covered three ways, in ascending order of how much they prove:
 
 1. **`scopeOf()` is unit-tested exhaustively** in
-   [`arch_match_test.cc`](arch_match_test.cc) — H100, L40S, A100, T4, V100,
-   B200, a hypothetical CC 12.2, and an unread capability — under `make test`,
-   with no Docker, no CUDA and no GPU.
+   [`arch_match_test.cc`](arch_match_test.cc) — H100, L40S, A100, T4, V100, a
+   hypothetical CC 12.2, and an unread capability — under `make test`, with no
+   Docker, no CUDA and no GPU. B200 and B300 are in that file too, but as the
+   `InScope` + `WrongFamily` pair, which is the combination issue #10 turned on.
 2. **The sentinel is asserted end to end in Go** from captured output, in
    `pkg/runner`'s parser tests and through the reconciler in
    `internal/controller` — the latter with `nonfiniteCount Equal 0` attached, so
@@ -265,10 +282,12 @@ and nothing else. So:
 | x86 host with… | result |
 |---|---|
 | RTX PRO 6000 Blackwell, RTX 5090 (CC 12.0) | **works** with the amd64 default |
-| H100, H200, A100, L40S (CC 9.0 / 8.x) | **Skip**, exit 2 — out of scope for NVFP4 |
-| B200, B300 (CC 10.0/10.3) | **Skip**, exit 2 — SM10x uses `tcgen05.mma` with TMEM accumulation, a different instruction path that needs its own runner |
+| H100, H200, A100, L40S (CC 9.0 / 8.x) | **Skip**, exit 2 — genuinely out of scope: no block-scaled FP4 on these parts at all |
+| B200, GB200 (CC 10.0), B300, GB300 (CC 10.3) | **Error**, exit 3, **unjudged** — these parts DO have NVFP4, by the `tcgen05.mma` + TMEM path this image does not implement. The test applies and was not run |
 
-None of those is a hardware `Fail`. Building the image for `linux/amd64` does not
+Only the first row is a `Skip`, and the distinction is the point: a `Skip` says
+acceptance does not apply, which is true of an A100 and false of a B200. None of
+these is a hardware `Fail`. Building the image for `linux/amd64` does not
 and cannot fix them: they are GPU-architecture limits, and the fix is a **second
 runner** for SM10x (tracked as issue #10), not PTX in this one. Adding a PTX
 fallback here would let a JIT'd or emulated path produce a passing result without
