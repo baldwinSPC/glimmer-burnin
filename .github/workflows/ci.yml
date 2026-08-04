@@ -159,12 +159,18 @@ jobs:
       # toolchain layer plus the operator image is enough to matter. Two runner
       # image builds have already hit ENOSPC in this repository, and a job that
       # dies out of disk cannot even write its own logs.
+      #
+      # RECLAIM_PATHS is duplicated verbatim in the runner-image job below and in
+      # publish-runner.yml; runners/pins_test.go fails if any of the three drift.
       - name: Reclaim disk
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          RECLAIM_PATHS='/usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift'
           echo "== df before"; df -h /
-          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup; do
-            [ -e "$d" ] || continue
+          for d in ${RECLAIM_PATHS}; do
+            # An absent path is NOT an error — see the note on the runner-image
+            # copy below.
+            if [ ! -e "$d" ]; then echo "  absent   $d"; continue; fi
             if sudo rm -rf "$d"; then echo "  removed  $d"; else echo "  FAILED   $d"; fi
           done
           echo "== df after"; df -h /
