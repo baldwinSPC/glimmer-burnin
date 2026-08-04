@@ -19,11 +19,30 @@ permissions:
   contents: read
 
 # A superseded PR run is wasted money here: the runner builds are QEMU builds
-# billed by the minute. Pushes to main are not cancelled — main's history is what
-# the weekly sweep and the publish workflow are reasoned about from.
+# billed by the minute. Pushes to main must NEVER be cancelled — main's history is
+# what the weekly sweep and the publish workflow are reasoned about from.
+#
+# The separation is made by the GROUP, not by cancel-in-progress, and that is the
+# whole point. This previously read
+#
+#     group: ${{ github.workflow }}-${{ github.ref }}
+#     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+#
+# which put every push to main in ONE group and then tried to spare them with a
+# flag. It did not: consecutive merges cancelled each other, timestamped to the
+# second — the run for #99 died at 08:25:53, the second the run for #100 started
+# at 08:25:52. Because the merge queue that night was busy, main's eleven-runner
+# validation was killed every time before it finished, and a compute-smoke build
+# break survived on main precisely because the only run that could see it was
+# cancelled by the next merge.
+#
+# Giving each main push its own group (keyed by run_id, which is unique per run)
+# makes cancellation structurally impossible there rather than conditionally
+# suppressed. PR runs still share a group per ref, so a force-push still
+# supersedes its predecessor.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   build-test:
