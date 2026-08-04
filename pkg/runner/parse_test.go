@@ -798,6 +798,41 @@ func TestParse_UnmeasurableIsLastOccurrenceWins(t *testing.T) {
 	}
 }
 
+// ReportedNothing is the difference between "this runner did not measure" and
+// "this runner did not measure THAT". Only the first is a machinery fault; the
+// second is fail-closed's job. Widening this predicate weakens acceptance for
+// every consumer, so each boundary is pinned.
+func TestResult_ReportedNothing(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdout string
+		exit   int
+		want   bool
+	}{
+		{"no output whatsoever", "", 0, true},
+		{"a marker line and nothing else", "FP4_GEMM_PASS\n", 0, true},
+		{"prose only", "CUDA driver version is insufficient\n", 1, true},
+		{"blank lines only", "\n\n   \n", 0, true},
+
+		// Everything below is a runner that DID emit key=value output, however
+		// unhelpfully. None of it may qualify.
+		{"one real metric", "nonfinite_count=0\n", 0, false},
+		{"a full report", computeSmokeStdout, 0, false},
+		// An "n/a" is a positive declaration about the hardware, not silence.
+		{"only unmeasurable declarations", "ecc_errors=n/a\nrows_remapped=n/a\n", 0, false},
+		// A rejected name is still a line the runner printed: it looked, and
+		// named its finding badly. That is a runner bug, not an absent harvest.
+		{"only contract-invalid names", "Ecc_Errors=4\n", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Parse("compute-smoke", tc.stdout, tc.exit).ReportedNothing(); got != tc.want {
+				t.Errorf("ReportedNothing() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResult_Numeric(t *testing.T) {
 	got := Parse("compute-smoke", computeSmokeStdout, 0)
 

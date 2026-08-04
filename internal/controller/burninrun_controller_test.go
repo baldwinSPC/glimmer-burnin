@@ -2859,6 +2859,217 @@ func TestRun_LogFetchFailureIsErrorNotThresholdFail(t *testing.T) {
 	}
 }
 
+// The incident from #66, reproduced: the runner pod is SIGTERMed, its trap
+// exits 0, and the log fetch SUCCEEDS and returns nothing. The log-fetch guard
+// cannot fire (no error) and the deadline guard cannot fire (no
+// DeadlineExceeded), so the empty map used to reach fail-closed evaluation and
+// come back as a hardware Fail against a healthy node.
+func TestRun_EmptyHarvestIsErrorNotThresholdFail(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-85a9"),
+		smokeTest("thermal",
+			burninv1alpha1.Threshold{Metric: "throttleEvents", Comparison: burninv1alpha1.EQ, Value: "0"},
+			burninv1alpha1.Threshold{Metric: "sustainedClockPct", Comparison: burninv1alpha1.GTE, Value: "70"}),
+		profile("acceptance", nil, false, testRef("thermal")),
+		newRun("run1", "acceptance", "spark-85a9"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	// Exit 0, empty stdout, no pod-level Reason. Nothing here is an error the
+	// machinery can see — which is precisely why this hole existed.
+	h.finishPod(h.pods("run1")["spark-85a9"], 0, "", "Completed")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	res := run.Status.Results[0]
+	if res.Phase != burninv1alpha1.RunError {
+		t.Fatalf("empty harvest = %q, want Error — a runner that measured nothing is not a hardware verdict: %q", res.Phase, res.Message)
+	}
+	if run.Status.Failed != 0 {
+		t.Errorf("an unmeasured node was counted as a hardware failure: failed=%d", run.Status.Failed)
+	}
+	if run.Status.Errored != 1 {
+		t.Errorf("errored counter = %d, want 1", run.Status.Errored)
+	}
+	// The message has to say what happened. Naming one arbitrary threshold is
+	// what sent a real operator hunting a thermal fault that did not exist.
+	if !strings.Contains(res.Message, "no metrics at all") {
+		t.Errorf("message does not say the runner reported nothing: %q", res.Message)
+	}
+	if strings.Contains(res.Message, "throttleEvents") {
+		t.Errorf("message blames one arbitrary threshold instead of the empty harvest: %q", res.Message)
+	}
+}
+
+// The guard against over-applying the fix, and the more important half of it.
+// A runner that reported SOME metrics looked at the hardware, so a gated metric
+// it did not produce is a real missing measurement and must still Fail. If this
+// ever goes green as Error or Passed, fail-closed has been broken.
+func TestRun_PartialMetricsStillFailClosedOnTheGatedMetric(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "throttleEvents", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	// Six real metrics, none of them the gated one.
+	h.finishPod(h.pods("run1")["spark-a"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	res := run.Status.Results[0]
+	if res.Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("partial harvest = %q, want Failed — a metric a reporting runner owed and omitted is a fail-closed failure: %q", res.Phase, res.Message)
+	}
+	if run.Status.Failed != 1 {
+		t.Errorf("failed counter = %d, want 1", run.Status.Failed)
+	}
+	if !strings.Contains(res.Message, "throttleEvents") {
+		t.Errorf("a fail-closed failure must name the metric it is about: %q", res.Message)
+	}
+}
+
+// A test with no acceptance bar is unaffected: exit 0 alone is the whole gate,
+// and there is no threshold evaluation to protect from an empty map.
+func TestRun_EmptyHarvestWithoutThresholdsIsUnchanged(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4"), // no thresholds
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 0, "", "Completed")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Results[0].Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("result = %q, want Passed — with no thresholds, exit 0 is the gate: %q",
+			run.Status.Results[0].Phase, run.Status.Results[0].Message)
+	}
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Errorf("run phase = %q, want Passed", run.Status.Phase)
+	}
+}
+
+// Exit 1 is the runner's own assertion about the hardware, not one this
+// operator inferred from an absence. The empty-harvest rule must never reach up
+// and overturn it into a retryable Error.
+func TestRun_ExitOneWithMetricsIsStillAHardwareFail(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	// Every thresholded metric is present and satisfied; the runner failed it
+	// on its own judgement anyway, and that judgement stands.
+	h.finishPod(h.pods("run1")["spark-a"], 1, fp4Stdout, "Error")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Results[0].Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("exit 1 = %q, want Failed", run.Status.Results[0].Phase)
+	}
+	if run.Status.Errored != 0 {
+		t.Errorf("a runner-reported failure was downgraded to Error: errored=%d", run.Status.Errored)
+	}
+}
+
+// The sharp edge of the same rule. A runner that detects a fault and dies
+// before it prints a single metric has still DETECTED A FAULT, and exit 1 says
+// so. Erasing that into a retryable Error because the harvest happens to be
+// empty would lose a real hardware failure — the exact opposite of the defect
+// being fixed, and the more dangerous direction of the two.
+func TestRun_ExitOneWithNoMetricsIsStillAHardwareFail(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 1, "", "Error")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Results[0].Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("exit 1 with an empty harvest = %q, want Failed — the runner's own verdict is not this operator's to overturn",
+			run.Status.Results[0].Phase)
+	}
+	if run.Status.Failed != 1 {
+		t.Errorf("failed = %d, want 1", run.Status.Failed)
+	}
+}
+
+// Zero metrics is the NORMAL shape of a skip — a runner that found the test
+// inapplicable had nothing to measure. Thresholds are not evaluated on this
+// path at all, so there is no invented Fail to guard against, and turning a
+// clean skip into a retried Error would break the skip/fail distinction in a
+// new direction.
+func TestRun_SkipWithNoMetricsIsStillASkipNotAnError(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 2, "", "Error")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Results[0].Phase != burninv1alpha1.RunSkipped {
+		t.Fatalf("exit 2 with no metrics = %q, want Skipped: %q",
+			run.Status.Results[0].Phase, run.Status.Results[0].Message)
+	}
+	if run.Status.Errored != 0 {
+		t.Errorf("a clean skip was turned into an Error: errored=%d", run.Status.Errored)
+	}
+}
+
+// Error is the retryable phase, so an interrupted execution now gets the
+// re-run that a Fail could never have had. An interrupted test is exactly the
+// thing worth running again.
+func TestRun_EmptyHarvestIsRetriedThenSettlesError(t *testing.T) {
+	run := newRun("run1", "acceptance", "spark-a")
+	run.Spec.RetryOnErrorLimit = int32p(1)
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		run,
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 0, "", "Completed")
+	h.reconcile("run1")
+
+	// A second pod exists only because the first attempt was Error, not Fail.
+	h.reconcile("run1")
+	second := h.pods("run1")["spark-a"]
+	if second.Labels[labelAttempt] != "2" {
+		t.Fatalf("attempt label = %q, want 2 — an empty harvest must be retryable", second.Labels[labelAttempt])
+	}
+	h.finishPod(second, 0, "", "Completed")
+	h.reconcileUntilSettled("run1")
+
+	got := h.run("run1")
+	if got.Status.Results[0].Phase != burninv1alpha1.RunError {
+		t.Fatalf("result = %q, want Error after the retry budget is spent", got.Status.Results[0].Phase)
+	}
+	if got.Status.Failed != 0 {
+		t.Errorf("failed=%d, want 0", got.Status.Failed)
+	}
+}
+
 // The plan is pinned at start: editing the profile mid-run must not change
 // what the run executes or which tests count as required.
 func TestRun_PlanIsHermeticAgainstProfileEdits(t *testing.T) {
@@ -3248,6 +3459,32 @@ func TestPair_ProducesOneResultCarryingBothNodes(t *testing.T) {
 	}
 	if run.Status.Phase != burninv1alpha1.RunPassed {
 		t.Errorf("run phase = %q, want Passed", run.Status.Phase)
+	}
+}
+
+// The same hole on the pair path: the client is the measuring side, and a
+// client killed before it printed leaves the merged harvest empty. Both ends
+// exited 0 and both logs read fine, so neither existing guard fires — and a
+// link nobody measured must not be recorded as a bad link.
+func TestPair_EmptyMergedHarvestIsErrorNotAFailedLink(t *testing.T) {
+	h := newPairHarness(t, burninv1alpha1.Threshold{
+		Metric: "bandwidthGbps", Comparison: burninv1alpha1.GTE, Value: "89",
+	})
+	server, client := runPairToStart(h)
+	h.finishPod(client, 0, "", "Completed")             // SIGTERM trap, nothing printed
+	h.finishPod(server, 0, ibServerStdout, "Completed") // served, measured nothing
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	res := run.Status.Results[0]
+	if res.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error — no traffic was measured across this link: %s", res.Phase, res.Message)
+	}
+	if run.Status.Failed != 0 {
+		t.Errorf("an unmeasured link was counted as a hardware failure: failed=%d", run.Status.Failed)
+	}
+	if !strings.Contains(res.Message, "no metrics at all") {
+		t.Errorf("message does not say the harvest was empty: %q", res.Message)
 	}
 }
 

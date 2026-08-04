@@ -103,6 +103,28 @@ type Result struct {
 // on the hardware it ran against.
 func (r Result) IsUnmeasurable(name string) bool { return r.Unmeasurable[name] }
 
+// ReportedNothing reports whether the parse found NO key=value line at all: no
+// metric, no "n/a" declaration, not even a name the contract rejected. Half of
+// the runner contract came back — the exit code — and the other half is simply
+// absent.
+//
+// This is deliberately NOT "the metric a threshold names is missing", and the
+// difference is the whole point. A runner that printed forty numbers and
+// omitted the forty-first looked at this hardware; that omission is a real
+// missing measurement and pkg/verdict fails it closed, as it must. A runner
+// that printed nothing measured nothing — it was killed, evicted, or died
+// before its first line — and there is no hardware verdict to be drawn from it
+// at any exit code. A dispatcher must not let fail-closed evaluation
+// manufacture one out of the absence.
+//
+// It lives here rather than in a dispatcher because both dispatchers parse with
+// this package, and a predicate this load-bearing must not be re-derived — two
+// callers disagreeing about whether a runner reported anything is two callers
+// disagreeing about whether a node is broken.
+func (r Result) ReportedNothing() bool {
+	return len(r.Metrics) == 0 && len(r.Unmeasurable) == 0 && len(r.InvalidNames) == 0
+}
+
 // aliases maps a runner's own key to the canonical metric name, for the cases
 // generic normalisation cannot reach. Keyed by TestKind.
 //
