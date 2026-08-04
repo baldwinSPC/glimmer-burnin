@@ -5,6 +5,7 @@ import (
 	"math"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
@@ -340,5 +341,90 @@ func TestEvaluate_NotEvaluatedStaysTruncatedAtTheFirstViolation(t *testing.T) {
 func TestViolationKind_UnknownIsEvidenceNotMeasurement(t *testing.T) {
 	if got := ViolationKind("SomethingNew").Cause(); got != CauseEvidence {
 		t.Errorf("unknown kind classified as %q, want %q — an unknown route has not established anything about the part", got, CauseEvidence)
+	}
+}
+
+// ─── ViolationSummary ────────────────────────────────────────────────────────
+
+func TestOutcome_ViolationSummaryIsEmptyBelowTwoViolations(t *testing.T) {
+	// Nothing to summarise: Message already says all of it.
+	none := Evaluate(map[string]string{"goodMetricGBs": "50"}, nil,
+		[]burninv1alpha1.Threshold{th("goodMetricGBs", burninv1alpha1.GTE, "20")})
+	if s := none.ViolationSummary(); s != "" {
+		t.Errorf("a passing outcome summarised %q, want empty", s)
+	}
+
+	one := Evaluate(map[string]string{"busBandwidthGBs": "12"}, nil,
+		[]burninv1alpha1.Threshold{th("busBandwidthGBs", burninv1alpha1.GTE, "20")})
+	if s := one.ViolationSummary(); s != "" {
+		t.Errorf("a single violation summarised %q, want empty — Message already names it", s)
+	}
+}
+
+// The summary names the CAUSE of each further violation, because that is what
+// decides who acts on it.
+func TestOutcome_ViolationSummaryNamesCauses(t *testing.T) {
+	got := Evaluate(
+		map[string]string{"busBandwidthGBs": "12", "goodMetricGBs": "50"},
+		nil,
+		[]burninv1alpha1.Threshold{
+			th("busBandwidthGBs", burninv1alpha1.GTE, "20"),   // first — in Message
+			th("gpuTempC", burninv1alpha1.LTE, "85"),          // Evidence: not reported
+			th("goodMetricGBs", burninv1alpha1.GTE, "twenty"), // Authoring
+		},
+	)
+	s := got.ViolationSummary()
+
+	for _, want := range []string{"2 more gates failed", "gpuTempC", "not measured", "goodMetricGBs", "profile error"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("summary = %q, want it to contain %q", s, want)
+		}
+	}
+	// The first violation is Message's job; repeating it here would double-count.
+	if strings.Contains(s, "busBandwidthGBs") {
+		t.Errorf("summary = %q, want it to cover only the violations beyond the first", s)
+	}
+}
+
+// Singular/plural, because a report that says "1 more gates" reads as a bug in
+// the operator and invites doubt about the number beside it.
+func TestOutcome_ViolationSummaryAgreesInNumber(t *testing.T) {
+	got := Evaluate(
+		map[string]string{"busBandwidthGBs": "12"},
+		nil,
+		[]burninv1alpha1.Threshold{
+			th("busBandwidthGBs", burninv1alpha1.GTE, "20"),
+			th("gpuTempC", burninv1alpha1.LTE, "85"),
+		},
+	)
+	if s := got.ViolationSummary(); !strings.Contains(s, "1 more gate failed") {
+		t.Errorf("summary = %q, want the singular form", s)
+	}
+}
+
+// A profile that gates forty metrics must not produce a forty-item sentence in
+// a status field — but the COUNT stays exact even when the names are elided.
+func TestOutcome_ViolationSummaryBoundsTheNamesNotTheCount(t *testing.T) {
+	metrics := map[string]string{}
+	var thresholds []burninv1alpha1.Threshold
+	for i := 0; i < 12; i++ {
+		name := fmt.Sprintf("metric%dGBs", i)
+		metrics[name] = "1"
+		thresholds = append(thresholds, th(name, burninv1alpha1.GTE, "20"))
+	}
+	got := Evaluate(metrics, nil, thresholds)
+	if len(got.Violations) != 12 {
+		t.Fatalf("Violations = %d, want all 12 recorded", len(got.Violations))
+	}
+
+	s := got.ViolationSummary()
+	if !strings.Contains(s, "11 more gates failed") {
+		t.Errorf("summary = %q, want the exact count of the remainder", s)
+	}
+	if !strings.Contains(s, "and 7 more") {
+		t.Errorf("summary = %q, want the elided remainder counted (11 - %d named)", s, maxNamedViolations)
+	}
+	if named := strings.Count(s, "(hardware)"); named != maxNamedViolations {
+		t.Errorf("summary named %d metrics, want %d", named, maxNamedViolations)
 	}
 }

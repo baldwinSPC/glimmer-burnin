@@ -327,6 +327,16 @@ type TestResult struct {
 	// Message is a human-readable outcome (a failing threshold, the real error).
 	Message string `json:"message,omitempty"`
 
+	// Violations lists EVERY threshold the deciding attempt did not satisfy, in
+	// spec order — the same attempt Metrics came from, so the two always explain
+	// the same execution. Empty unless Phase is Failed.
+	//
+	// Message names only the first, because that field is frozen; this is the
+	// complete picture. Read Cause before acting: a Failed test can mix a
+	// hardware shortfall with a broken threshold, and only the former is a
+	// reason to touch a node.
+	Violations []Violation `json:"violations,omitempty"`
+
 	// RepeatsRequired is the resolved BurnInTestSpec.RepeatCount for this run:
 	// how many passing executions this test owes per node. Pinned onto the
 	// result so a verdict stays readable after the BurnInTest is edited.
@@ -348,6 +358,49 @@ type TestResult struct {
 
 	// Attempts is the per-execution history, in order.
 	Attempts []TestAttempt `json:"attempts,omitempty"`
+}
+
+// Violation is one threshold a test did not satisfy, as recorded on a result.
+//
+// It mirrors verdict.Violation rather than reusing it, and that is forced
+// rather than chosen: pkg/verdict imports this package, so importing it back
+// would be a cycle. The controller maps between them in one place. If a field
+// is added there, add it here too — a violation the API cannot express is a
+// violation an operator never sees.
+//
+// Cause and Kind are deliberately NOT +kubebuilder:validation:Enum. An enum on
+// a STATUS field turns every future violation kind into a rejected status
+// write, which would wedge the run that discovered it — the failure mode would
+// be a burn-in that cannot record why it failed. The vocabulary is documented
+// in pkg/verdict and validated there, where getting it wrong costs a test
+// rather than a run.
+type Violation struct {
+	// Index is the threshold's position in the test's spec.thresholds, so a
+	// report can point at the offending entry rather than at the test.
+	// +kubebuilder:validation:Minimum=0
+	Index int32 `json:"index"`
+
+	// Metric is the threshold's metric name, as written in the profile.
+	Metric string `json:"metric"`
+
+	// Cause says who should act, and is the field to read first:
+	//
+	//   Measurement — the hardware fell short. This one is about the part.
+	//   Evidence    — the runner's report could not support a judgement
+	//                 (metric missing, unparseable, non-finite, contradictory,
+	//                 or declared unmeasurable under a gate that requires it).
+	//                 The node is unjudged, not condemned.
+	//   Authoring   — the threshold itself is broken. No hardware is implicated
+	//                 and no node should be touched; the profile needs fixing.
+	Cause string `json:"cause"`
+
+	// Kind is the specific route, finer-grained than Cause (e.g. Unsatisfied,
+	// NotReported, ThresholdValueNonNumeric). See pkg/verdict.
+	Kind string `json:"kind"`
+
+	// Reason is the full sentence explaining this violation. For the first
+	// violation it is exactly the leading text of Message.
+	Reason string `json:"reason,omitempty"`
 }
 
 // BurnInRunStatus tracks execution and the exported verdict.
