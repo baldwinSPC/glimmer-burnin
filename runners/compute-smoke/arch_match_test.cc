@@ -116,11 +116,18 @@ void testScopeGate() {
   expectScope(7, 0, burnin::Scope::OutOfScope, "V100 (sm_70)");
   expectScope(6, 1, burnin::Scope::OutOfScope, "Pascal");
 
-  // B200 is SM10x. It is NOT covered by this runner and must Skip here rather
-  // than be admitted and then fail somewhere downstream — SM10x needs its own
-  // image (issue #10), and a Skip is how this one says so honestly.
-  expectScope(10, 0, burnin::Scope::OutOfScope, "B200 (sm_100) needs its own runner image");
-  expectScope(10, 3, burnin::Scope::OutOfScope, "any other SM10x member");
+  // B200 is SM10x, and it is IN SCOPE — issue #10, and the reversal this test
+  // exists to lock down. Datacenter Blackwell does NVFP4 block-scaled GEMM in
+  // hardware; what it does not have here is a kernel, because the tcgen05.mma
+  // path is a different CUTLASS kernel rather than a different gencode of this
+  // one. Answering OutOfScope made a statement about THIS IMAGE while wearing
+  // the costume of a statement about the silicon, and a B200 fleet recorded a
+  // clean Skip — "acceptance does not apply to this hardware" — for a test that
+  // applies and was never run. The kernel gate below is what stops it, as an
+  // Error, which leaves the fleet unjudged rather than certified.
+  expectScope(10, 0, burnin::Scope::InScope, "B200 / GB200 (sm_100) can do NVFP4; this image cannot");
+  expectScope(10, 3, burnin::Scope::InScope, "B300 / GB300 (sm_103), same family");
+  expectScope(10, 7, burnin::Scope::InScope, "an unreleased SM10x minor errs towards unjudged, not certified");
 
   // A newer minor in the same major is NOT admitted. The gate names the two
   // capabilities the kernel is known to run on; a hypothetical 12.2 has not been
@@ -147,6 +154,86 @@ void testScopeGate() {
   expectScope(12, 0, burnin::Scope::InScope, "an sm_121a image on a CC 12.0 part: the PART is in scope");
   expectMatch("sm_121a", 12, 0, burnin::ArchMatch::Mismatch,
               "...and the IMAGE is the thing that does not cover it");
+}
+
+// ── the kernel gate (issue #10) ──────────────────────────────────────────────
+
+const char *kernelName(burnin::KernelCoverage c) {
+  switch (c) {
+    case burnin::KernelCoverage::Unknown: return "Unknown";
+    case burnin::KernelCoverage::Covers: return "Covers";
+    case burnin::KernelCoverage::WrongFamily: return "WrongFamily";
+  }
+  return "?";
+}
+
+void expectKernel(int major, int minor, burnin::KernelCoverage want, const char *why) {
+  const burnin::KernelCoverage got = burnin::kernelCovers(major, minor);
+  if (got != want) {
+    std::printf("FAIL: kernelCovers(%d.%d) = %s, want %s — %s\n", major, minor, kernelName(got),
+                kernelName(want), why);
+    ++failures;
+  }
+}
+
+// The third question. A part can be in scope for NVFP4 and still be one this
+// image's KERNEL does not implement, and that combination has to be an Error:
+// the test applies, and nobody ran it.
+void testKernelGate() {
+  expectKernel(12, 1, burnin::KernelCoverage::Covers, "GB10: the path this source compiles");
+  expectKernel(12, 0, burnin::KernelCoverage::Covers, "the other SM12x member");
+
+  // THE ONE THAT MATTERS. In scope AND wrong kernel family, together, because
+  // the bug was silent while either half was read on its own.
+  expectScope(10, 0, burnin::Scope::InScope, "a B200 is in scope for NVFP4...");
+  expectKernel(10, 0, burnin::KernelCoverage::WrongFamily, "...and this image has no kernel for it");
+  expectScope(10, 3, burnin::Scope::InScope, "a B300 likewise...");
+  expectKernel(10, 3, burnin::KernelCoverage::WrongFamily, "...and likewise no kernel");
+
+  // Out-of-scope parts never reach this gate in fp4_smoke.cu, but the answer
+  // still has to be the honest one rather than an accident of ordering.
+  expectKernel(9, 0, burnin::KernelCoverage::WrongFamily, "H100 is not the SM12x kernel family");
+
+  // Unread capability is Unknown here too, for the reason it is everywhere in
+  // this header: a runner may only declare what it positively established.
+  expectKernel(-1, -1, burnin::KernelCoverage::Unknown, "an unread capability is unjudged");
+  expectKernel(12, -1, burnin::KernelCoverage::Unknown, "a half-read capability is still unread");
+}
+
+// The wrong-kernel-family message must NOT suggest a CUDA_ARCH. Rebuilding this
+// source with -arch=sm_100a compiles an Sm120 kernel and emits it for a part
+// that cannot run it, so the advice would send an operator round a loop with no
+// exit — which is precisely why this message is separate from the gencode one.
+void testWrongKernelFamilyMessage() {
+  char buf[640];
+  const int code = burnin::describeWrongKernelFamily(buf, sizeof(buf), 10, 0);
+
+  check(code == burnin::kExitError, "a wrong kernel family is an Error");
+  check(code != burnin::kExitSkip, "and NEVER a Skip: acceptance applies to this part");
+  check(code != burnin::kExitFail, "and never a hardware verdict");
+  expectContains(buf, "10.0", "the message names the capability that was found");
+  expectContains(buf, "UNJUDGED", "the message says the hardware was not judged");
+  expectContains(buf, "#10", "the message points at the issue tracking the missing runner");
+
+  // The negative assertion, and the reason this function exists: no CUDA_ARCH
+  // advice, because none of it would work.
+  if (std::strstr(buf, "CUDA_ARCH=") != nullptr) {
+    std::printf("FAIL: the wrong-kernel-family message suggests a CUDA_ARCH, which cannot fix it:\n%s\n", buf);
+    ++failures;
+  }
+
+  // Truncates rather than overruns, as everywhere else here.
+  char guard[64];
+  std::memset(guard, 'X', sizeof(guard));
+  burnin::describeWrongKernelFamily(guard, 32, 10, 0);
+  check(std::strlen(guard) < 32, "a short buffer truncates and stays NUL-terminated");
+  for (std::size_t i = 32; i < sizeof(guard); ++i) {
+    if (guard[i] != 'X') {
+      std::printf("FAIL: describeWrongKernelFamily wrote past the buffer it was given\n");
+      ++failures;
+      break;
+    }
+  }
 }
 
 // The Skip message has to name what was found. "requires compute capability
@@ -398,6 +485,8 @@ void testShortBufferTruncatesSafely() {
 int main() {
   testScopeGate();
   testOutOfScopeMessage();
+  testKernelGate();
+  testWrongKernelFamilyMessage();
   testArchMatch();
   testPreLaunchMismatchMessage();
   testWrongImageOutranksTheRuntimeError();

@@ -56,11 +56,25 @@ ARG CUTLASS_SHA=e05f953a5b3d38adc240df2ff928e0421c2abba3
 #
 # WHAT THIS RUNNER STILL CANNOT DO, and it is a GPU-arch limit, not a CPU-arch
 # one: the kernel is CUTLASS `arch::Sm120` block-scaled NVFP4, so it exists for
-# CC 12.x and nothing else.  An x86 host with an H100 (sm_90) or a B200 (sm_100)
-# gets an image that starts, reports `compute_cap=`, and exits 2 (out of scope)
-# or 3 (no cubin for this part) — never a hardware Fail.  SM10x block-scaled
-# GEMM uses tcgen05.mma with TMEM accumulation and is a SEPARATE runner; see
-# README.md and issue #10.  Do not "fix" that by adding PTX here.
+# CC 12.x and nothing else.  Never a hardware Fail, and the two remaining parts
+# are reported differently on purpose:
+#
+#   H100 (sm_90), A100, L40S …  exit 2, Skip.  These parts have no block-scaled
+#                               FP4 at all, so acceptance genuinely does not
+#                               apply to them.
+#   B200/GB200 (sm_100),        exit 3, Error, UNJUDGED.  These parts DO have
+#   B300/GB300 (sm_103)         NVFP4 — by the tcgen05.mma + TMEM path, which
+#                               this kernel does not implement — so the test
+#                               applies and was not run.  Reporting that as a
+#                               Skip certified a B200 fleet as out of scope for
+#                               the very capability it has; see issue #10 and
+#                               the three-questions note in arch_match.h.
+#
+# SM10x is a SEPARATE runner, not a CUDA_ARCH of this one: --build-arg
+# CUDA_ARCH=sm_100a would compile this `arch::Sm120` kernel and emit it for a
+# part that cannot run it.  That is why sm_100a is NOT offered in
+# publish-runner.yml's cuda_arch list, and why the runtime gate names the issue
+# rather than suggesting a rebuild.  Do not "fix" any of this by adding PTX here.
 #
 # Set CUDA_ARCH explicitly to override BOTH platforms — e.g. sm_120f for one
 # binary covering CC 12.0 + 12.1.  An explicit value is honoured as given.

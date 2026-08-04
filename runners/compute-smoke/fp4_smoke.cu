@@ -420,6 +420,25 @@ int main() {
     return skipped(buf);
   }
 
+  // The KERNEL gate, and it runs BEFORE the image gate on purpose.
+  //
+  // A CC 10.x part fails both: this image has no SM10x cubin, and it has no
+  // SM10x kernel either. Only one of those is the actionable finding. Reporting
+  // the gencode mismatch first would tell an operator to rebuild with
+  // CUDA_ARCH=sm_100a — which compiles, produces an Sm120 kernel emitted for a
+  // part that cannot run it, and sends them round a loop with no exit. Saying
+  // "the kernel for this path does not exist here yet, see #10" is the truth and
+  // is actionable in one step.
+  //
+  // It is an Error and emphatically not a Skip: NVFP4 acceptance APPLIES to a
+  // B200, and a Skip would record a fleet as out of scope for the very
+  // capability it has. See the three-questions note in arch_match.h.
+  if (burnin::kernelCovers(props.major, props.minor) == burnin::KernelCoverage::WrongFamily) {
+    char buf[640];
+    burnin::describeWrongKernelFamily(buf, sizeof(buf), props.major, props.minor);
+    return errored(buf);
+  }
+
   // The IMAGE gate, and the second of the two questions above: the part is in
   // scope, so does this image actually carry code for it? Answered here, from
   // the arch baked in at build time and the capability the device just
