@@ -923,38 +923,95 @@ func (r *BurnInRunReconciler) completeAttempt(
 	recount(run)
 }
 
+// emptyHarvestMessage is what an execution that produced no runner output at
+// all is recorded as. It says what actually happened — the runner measured
+// nothing — rather than naming whichever threshold happened to be evaluated
+// first, which is what made this failure mode so misleading to read.
+const emptyHarvestMessage = "runner exited 0 but reported no metrics at all — it measured nothing, so the test's %d threshold(s) could not be evaluated; no verdict (a runner killed or evicted before it printed looks like this)"
+
 // attemptOutcome converts one runner execution into a phase.
 //
 // Thresholds are evaluated HERE, once, against a completed execution — never
 // against a checkpoint. A mid-run sample that dips below a bar is not a
 // failure, because the run is not over.
+//
+// This is the single choke point where a runner.Result becomes a phase, for
+// Node and Pair scope alike, which is why the empty-harvest rule below lives
+// here rather than beside the log-fetch rule in each caller.
 func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhase, string) {
 	var phase burninv1alpha1.RunPhase
 	message := parsed.Message
 
 	switch parsed.Verdict {
 	case runner.VerdictPass:
-		// Exit 0 says the runner is content; the thresholds are the profile's
-		// own acceptance bar, evaluated fail-closed — a threshold naming a
-		// metric the runner never emitted is a failure, not a pass.
-		out := verdict.Evaluate(parsed.Metrics, parsed.Unmeasurable, t.Spec.Thresholds)
-		if out.Passed {
-			phase = burninv1alpha1.RunPassed
-		} else {
-			phase = burninv1alpha1.RunFailed
-			message = out.Message
+		switch {
+		case len(t.Spec.Thresholds) > 0 && parsed.ReportedNothing():
+			// Exit 0 and not one key=value line, with an acceptance bar to
+			// clear. The runner did not measure this hardware — a SIGTERM, an
+			// eviction or a controller replacement mid-run all land exactly
+			// here — so there is nothing for the thresholds to judge. Handing
+			// an empty map to fail-closed evaluation manufactures a hardware
+			// verdict out of an absence, and condemns a healthy node for the
+			// machinery's fault. Error means "we do not know", and we do not.
+			//
+			// THIS DOES NOT RELAX FAIL-CLOSED, and it must never be widened
+			// until it does. A runner that reported SOME metrics and omitted a
+			// gated one still Fails below: it looked at the hardware, and a
+			// measurement it owed and did not produce is exactly the silence
+			// that must never satisfy acceptance. Only the TOTAL absence of
+			// output qualifies, because that is not evidence of anything.
+			//
+			// Error is also the retryable phase, so retryOnErrorLimit now
+			// re-runs such an execution instead of settling a hardware verdict
+			// on the first interrupted attempt. That is the desired behaviour:
+			// an interrupted test is precisely the thing worth running again,
+			// and a genuine hardware fault will still be there next time.
+			phase = burninv1alpha1.RunError
+			message = fmt.Sprintf(emptyHarvestMessage, len(t.Spec.Thresholds))
+			if parsed.Message != "" {
+				// The last non-metric line, when there was one. A runner that
+				// died saying "CUDA driver version is insufficient" has told us
+				// the actual cause, and it must not be dropped on the floor.
+				message = strings.TrimSpace(message + " [runner said: " + parsed.Message + "]")
+			}
+
+		default:
+			// Exit 0 says the runner is content; the thresholds are the
+			// profile's own acceptance bar, evaluated fail-closed — a threshold
+			// naming a metric the runner never emitted is a failure, not a pass.
+			out := verdict.Evaluate(parsed.Metrics, parsed.Unmeasurable, t.Spec.Thresholds)
+			if out.Passed {
+				phase = burninv1alpha1.RunPassed
+			} else {
+				phase = burninv1alpha1.RunFailed
+				message = out.Message
+			}
+			// A RequiredIfMeasurable gate the hardware cannot measure was not
+			// applied, and the report has to say so. Appending it to the message
+			// puts it on the TestResult and therefore in the delivered envelope: a
+			// Passed test whose ECC gate never ran must never be indistinguishable
+			// from one whose ECC gate ran and was satisfied.
+			if why := out.NotEvaluatedMessage(); why != "" {
+				message = strings.TrimSpace(message + " [" + why + "]")
+			}
 		}
-		// A RequiredIfMeasurable gate the hardware cannot measure was not
-		// applied, and the report has to say so. Appending it to the message
-		// puts it on the TestResult and therefore in the delivered envelope: a
-		// Passed test whose ECC gate never ran must never be indistinguishable
-		// from one whose ECC gate ran and was satisfied.
-		if why := out.NotEvaluatedMessage(); why != "" {
-			message = strings.TrimSpace(message + " [" + why + "]")
-		}
+
 	case runner.VerdictFail:
+		// Exit 1 is the runner's OWN assertion that this hardware failed, and
+		// it is honoured whether or not any metric came with it. The empty
+		// harvest above is a guard against a Fail this operator invented; it is
+		// not licence to overturn one the runner reported. A runner that
+		// detects a fault and dies before printing has still detected a fault,
+		// and erasing that into a retryable Error would lose it.
 		phase = burninv1alpha1.RunFailed
 	case runner.VerdictSkip:
+		// Exit 2 is likewise the runner's own declaration, made after looking
+		// at the device: this test does not apply here. Zero metrics is the
+		// NORMAL shape of a skip — there was nothing to measure — and no
+		// threshold is evaluated on this path, so there is no invented Fail to
+		// prevent. Applying the empty-harvest rule here would turn every clean
+		// skip into a retried Error, which is the "skip must stay distinct"
+		// invariant broken in a new direction.
 		phase = burninv1alpha1.RunSkipped
 	default:
 		phase = burninv1alpha1.RunError
