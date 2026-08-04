@@ -45,6 +45,27 @@ type BurnInRunReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader reads straight from the apiserver, bypassing the informer
+	// cache. The manager wires it from mgr.GetAPIReader(); nil falls back to
+	// the cached client, which is what a test that does not care gets.
+	//
+	// It is used for exactly two reads, and the rule for adding a third is
+	// stated once here: a read goes uncached ONLY when a stale answer would
+	// permanently take a node away from the fleet. Those two are the run's
+	// start-time capture of prior schedulability and the release path's search
+	// for the nodes it owns. Everything else — pods, the run itself, profiles,
+	// tests — stays cached, because a stale answer there costs a wasted pass
+	// and is corrected by the next one.
+	//
+	// The failure this exists to prevent (issue #84): a run that cordons a node
+	// and releases it seconds later leaves the informer holding the cordoned
+	// version. The NEXT run's capture then reads Unschedulable=true, records it
+	// as pre-existing, and honours that record at teardown — leaving a node
+	// permanently out of the scheduler that nothing in the cluster knows is
+	// held. It is intermittent by construction: it needs a recent cordon on the
+	// same node, which is exactly what a back-to-back schedule produces.
+	APIReader client.Reader
+
 	// PodLogs fetches a pod's stdout — the runner's metrics channel. It is
 	// called both when a pod terminates and, for checkpointing, while it is
 	// still running; the parser's last-occurrence-wins rule is what makes a
@@ -69,6 +90,16 @@ func (r *BurnInRunReconciler) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+// uncached is the reader for the two node reads that must not be served from a
+// cache. It degrades to the cached client when no APIReader is wired, so a
+// reconciler built by hand still works — but the manager always wires one.
+func (r *BurnInRunReconciler) uncached() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 func (r *BurnInRunReconciler) forgetMetrics(namespace, name string) {
@@ -1226,11 +1257,9 @@ func (r *BurnInRunReconciler) cancel(ctx context.Context, run *burninv1alpha1.Bu
 			run.Annotations = map[string]string{}
 		}
 		run.Annotations[cancellingAnnotation] = reason
-		saved := run.Status
-		if err := r.Update(ctx, run); err != nil {
+		if err := r.updateKeepingStatus(ctx, run); err != nil {
 			return ctrl.Result{}, err
 		}
-		run.Status = saved
 	}
 
 	message := "run cancelled: " + run.Annotations[cancellingAnnotation]
@@ -1388,22 +1417,21 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 	}
 	recount(run)
 
-	// A terminal run must not keep burning the hardware: fail-fast, a
-	// resolution error and an immediate cancel can all leave pods in flight.
-	// Terminated pods are kept until the run's own TTL for post-mortem logs.
-	if err := r.deleteLivePods(ctx, run); err != nil {
-		return ctrl.Result{}, err
-	}
 	// Release before the finalizer comes off, and before anything can return
 	// early: a node held by a run that will never step again is capacity the
 	// fleet silently loses.
+	//
+	// Uncordoning is safe to do before the status write in a way that killing a
+	// pod is not: it is level-based and idempotent, reconcileTerminal repeats it
+	// on every pass while the finalizer is on, and getting it wrong costs a
+	// cordon the operator can see and redo. Killing a pod destroys an execution
+	// that cannot be recovered, which is why that step now waits below.
 	if _, err := r.releaseCordons(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	delivered := r.deliverPhase(ctx, run, sinks, phase)
 
-	metaDirty := controllerutil.RemoveFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
 	if !delivered {
 		// The terminal envelope is the one delivery with no later transition
 		// to carry it; mark it pending so the terminal loop keeps retrying.
@@ -1411,25 +1439,70 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 			run.Annotations = map[string]string{}
 		}
 		run.Annotations[pendingDeliveryAnnotation] = string(phase)
-		metaDirty = true
-	}
-	if metaDirty {
-		// Update() refreshes the object from the server, which still holds the
-		// PRE-terminal status — silently reverting everything written above.
-		// Re-apply the whole status after the metadata write.
-		saved := run.Status
-		if err := r.Update(ctx, run); err != nil {
+		if err := r.updateKeepingStatus(ctx, run); err != nil {
 			return ctrl.Result{}, err
 		}
-		run.Status = saved
 	}
 	if err := r.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// THE VERDICT IS DURABLE. Only now is it safe to stop the hardware being
+	// burned: fail-fast, a resolution error and an immediate cancel can all
+	// leave pods in flight, and a terminal run must not keep loading a node.
+	// Terminated pods are kept until the run's own TTL for post-mortem logs.
+	//
+	// THE ORDER IS THE FIX FOR ISSUE #84 AND MUST NOT BE PUT BACK. Killing the
+	// pods first meant that when either write above lost the resourceVersion
+	// race — which is the conflict that appears in the report alongside the
+	// kills — the reconcile returned an error, the terminal status was
+	// discarded, and the run went back to believing it was Running with an open
+	// execution. Its next pass then found the pod IT had just killed, harvested
+	// the SIGKILL, and recorded the hardware as `Error: runner terminated
+	// abnormally (exit 137)` — the operator condemning a healthy node for its
+	// own act, 30 s into a 100 s soak. With the write first, a lost race costs
+	// one wasted pass and nothing else, because nothing has been destroyed.
+	//
+	// A failure here leaves live pods behind a terminal run; reconcileTerminal
+	// sweeps them, so the cleanup stays level-based rather than depending on
+	// this one call succeeding.
+	if err := r.deleteLivePods(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// The finalizer comes off LAST, because it is the standing record that this
+	// run still owes the cluster something — a cordon to give back, and a pod to
+	// stop. Removing it above, alongside the pending-delivery annotation, meant
+	// that a failed pod deletion left a runner burning a node behind a finished
+	// run with nothing left to reap it: reconcileTerminal's sweep is gated on
+	// this finalizer, so dropping it early is dropping the only thing that would
+	// have come back.
+	if controllerutil.RemoveFinalizer(run, burninv1alpha1.FinalizerCordonCleanup) {
+		if err := r.updateKeepingStatus(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if !delivered {
 		return ctrl.Result{RequeueAfter: terminalDeliveryRetryInterval}, nil
 	}
 	return r.handleTTL(ctx, run)
+}
+
+// updateKeepingStatus writes an object's METADATA without letting the write
+// clobber the status the caller has just computed.
+//
+// Update() refreshes the object in place from the server's response, and the
+// server still holds the PRE-terminal status — so a bare Update silently
+// reverts everything the caller wrote into run.Status and the subsequent
+// Status().Update persists the reversion. This exists so that trap is written
+// down once instead of being re-derived at each of the four call sites.
+func (r *BurnInRunReconciler) updateKeepingStatus(ctx context.Context, run *burninv1alpha1.BurnInRun) error {
+	saved := run.Status
+	if err := r.Update(ctx, run); err != nil {
+		return err
+	}
+	run.Status = saved
+	return nil
 }
 
 // reconcileTerminal serves an already-finished run.
@@ -1445,6 +1518,15 @@ func (r *BurnInRunReconciler) reconcileTerminal(ctx context.Context, run *burnin
 	// Checking it here keeps a terminal run that is merely waiting out its TTL
 	// from listing every node in the cluster on each poll.
 	if controllerutil.ContainsFinalizer(run, burninv1alpha1.FinalizerCordonCleanup) {
+		// A terminal run must not still be loading a node. terminate deletes
+		// its live pods AFTER the verdict is durable, so a conflict, a restart
+		// or an apiserver blip between those two steps can leave one behind;
+		// converging here rather than trusting that one call is what keeps the
+		// cleanup level-based. It costs nothing on the ordinary path, where
+		// there is nothing live to find.
+		if err := r.deleteLivePods(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
 		released, err := r.releaseCordons(ctx, run)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -1455,11 +1537,9 @@ func (r *BurnInRunReconciler) reconcileTerminal(ctx context.Context, run *burnin
 			}
 		}
 		controllerutil.RemoveFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
-		saved := run.Status
-		if err := r.Update(ctx, run); err != nil {
+		if err := r.updateKeepingStatus(ctx, run); err != nil {
 			return ctrl.Result{}, err
 		}
-		run.Status = saved
 	}
 
 	if phase, pending := run.Annotations[pendingDeliveryAnnotation]; pending {

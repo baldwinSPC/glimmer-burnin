@@ -57,11 +57,21 @@ func cordonOwnerID(run *burninv1alpha1.BurnInRun) string {
 //
 // A node that does not exist yet is simply absent from the map; cordonNode falls
 // back to reading it, which is what the operator did everywhere before.
+//
+// IT READS UNCACHED, AND THAT IS NOT AN OPTIMISATION. Capturing at the right
+// MOMENT — before this run's first cordon — is only half the requirement; the
+// other half is reading the node as it actually is at that moment. An informer
+// still holding the version a run five seconds ago cordoned answers "already
+// unschedulable" about a node that has since been released, the run records
+// that as pre-existing, and teardown faithfully makes it permanent. The
+// contamination the comment in markRunning warns about therefore does not only
+// come from this run's own footprint: it comes from the PREVIOUS run's, through
+// the cache. See issue #84.
 func (r *BurnInRunReconciler) capturePriorSchedulability(ctx context.Context, targets []string) map[string]bool {
 	prior := map[string]bool{}
 	for _, name := range targets {
 		var node corev1.Node
-		if err := r.Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
+		if err := r.uncached().Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
 			continue
 		}
 		prior[name] = node.Spec.Unschedulable
@@ -265,6 +275,15 @@ func (r *BurnInRunReconciler) releaseNode(ctx context.Context, run *burninv1alph
 	logger := log.FromContext(ctx)
 	owner := cordonOwnerID(run)
 
+	// Cached, deliberately, and the reason is the rule that decides which reads
+	// go uncached at all. What follows this read is an Update of the SAME
+	// object, so a stale reading cannot become a stale write: the apiserver
+	// refuses it on resourceVersion and the next pass reads again. The reads
+	// that had to move off the cache are the ones whose answer is RECORDED
+	// somewhere else (capturePriorSchedulability, into the run's status) or used
+	// to decide NOT to act (releaseCordons' scan, which finds nothing and
+	// concludes there is nothing to give back). Neither of those has an
+	// optimistic-concurrency check standing behind it.
 	var node corev1.Node
 	err := r.Get(ctx, types.NamespacedName{Name: name}, &node)
 	switch {
@@ -331,13 +350,20 @@ func equalNames(a, b []string) bool {
 // burn-in finished is how a node under maintenance starts receiving production
 // traffic mid-update.
 //
+// The scan is UNCACHED. Scanning at all is the recovery story; scanning a cache
+// is a recovery story with a hole in it, because the informer can be holding a
+// node version from before this run stamped it. The release would then find
+// nothing to give back, drop its finalizer, and leave a cordoned node with a
+// live owner annotation and no object left in the cluster that owes it a
+// release — the precise strand this function exists to prevent. See #59 and #84.
+//
 // It mutates run.Status.CordonedNodes; the caller persists it.
 func (r *BurnInRunReconciler) releaseCordons(ctx context.Context, run *burninv1alpha1.BurnInRun) (bool, error) {
 	logger := log.FromContext(ctx)
 	owner := cordonOwnerID(run)
 
 	var nodes corev1.NodeList
-	if err := r.List(ctx, &nodes); err != nil {
+	if err := r.uncached().List(ctx, &nodes); err != nil {
 		return false, err
 	}
 

@@ -84,6 +84,9 @@ func main() {
 	if err := (&controller.BurnInRunReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// The uncached reader, for the two node reads whose staleness costs the
+		// fleet a node rather than a reconcile. See BurnInRunReconciler.APIReader.
+		APIReader: mgr.GetAPIReader(),
 		PodLogs: func(ctx context.Context, namespace, name string) (string, error) {
 			// Keep the TAIL, not the head: runners report progressively and
 			// the parser's contract is last-occurrence-wins, so the settled
