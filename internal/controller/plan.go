@@ -91,7 +91,7 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 			return nil, fmt.Errorf("profile lists test %q twice — test names are result identity and must be unique", t.name)
 		}
 		seen[t.name] = true
-		if err := validatePairTopology(t, targets, nodeCap); err != nil {
+		if err := validateTopology(t, targets, nodeCap); err != nil {
 			return nil, err
 		}
 		if err := validateHostPaths(t); err != nil {
@@ -102,12 +102,70 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 	return p, nil
 }
 
-// validatePairTopology enforces what a Pair-scope test needs from the run.
+// validateTopology enforces what a multi-node test needs from the run.
 //
-// Both rules refuse at START rather than mid-flight, and both produce an Error
-// naming what was actually found. A Pair test that ran against the wrong
-// topology would not fail — it would produce a plausible-looking number for a
-// link nobody asked about, which is the one outcome worse than no number.
+// Every rule refuses at START rather than mid-flight, and every one produces an
+// Error naming what was actually found. A Pair or Group test that ran against
+// the wrong topology would not fail — it would produce a plausible-looking
+// number for a link or a collective nobody asked about, which is the one outcome
+// worse than no number.
+func validateTopology(t resolvedTest, targets []string, nodeCap int) error {
+	switch t.spec.Scope {
+	case burninv1alpha1.ScopePair:
+		return validatePairTopology(t, targets, nodeCap)
+	case burninv1alpha1.ScopeGroup:
+		return validateGroupTopology(t, targets, nodeCap)
+	}
+	return nil
+}
+
+// validateGroupTopology enforces what a Group-scope test needs from the run.
+//
+// A Group runs on EVERY target, one rank each, so there is no target-count rule
+// beyond needing enough nodes to be a collective at all — and there is no
+// upper bound, because the target list IS the group. What there is instead is
+// the interlock, which bites much harder here than at Pair scope: a group holds
+// all N of its nodes for its whole duration, so it needs N of the cap's slots,
+// and at any smaller cap it can never start.
+func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error {
+	if len(targets) < 2 {
+		return fmt.Errorf(
+			"test %q is Group scope and needs at least two target nodes, but this run's target resolved to %d (%v) — "+
+				"a collective has no meaning with fewer; name more nodes in spec.target.nodeNames, or use a nodeSelector "+
+				"that matches them",
+			t.name, len(targets), targets)
+	}
+	if dup := firstDuplicate(targets); dup != "" {
+		return fmt.Errorf(
+			"test %q is Group scope but node %q appears in the target list more than once — every rank must be a "+
+				"DISTINCT node, or two ranks would contend for the same hardware and the collective would measure "+
+				"that contention instead of the fabric",
+			t.name, dup)
+	}
+	if nodeCap < len(targets) {
+		return fmt.Errorf(
+			"test %q is Group scope across %d nodes but spec.maxConcurrentNodes is %d — a group is one indivisible "+
+				"unit of load that holds EVERY one of its nodes for the whole test, so it needs %d of the cap's slots "+
+				"and can never start at %d; set spec.maxConcurrentNodes to at least %d, having checked that %d nodes "+
+				"at full load is within the room's power and cooling headroom",
+			t.name, len(targets), nodeCap, len(targets), nodeCap, len(targets), len(targets))
+	}
+	return nil
+}
+
+// firstDuplicate returns the first node name that appears twice, or "".
+func firstDuplicate(targets []string) string {
+	seen := map[string]bool{}
+	for _, n := range targets {
+		if seen[n] {
+			return n
+		}
+		seen[n] = true
+	}
+	return ""
+}
+
+// validatePairTopology enforces what a Pair-scope test needs from the run.
 func validatePairTopology(t resolvedTest, targets []string, nodeCap int) error {
 	if t.spec.Scope != burninv1alpha1.ScopePair {
 		return nil

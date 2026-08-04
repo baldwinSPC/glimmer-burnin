@@ -221,7 +221,7 @@ func (r *BurnInRunReconciler) startPair(
 		return advancePending, none, nil
 	}
 
-	svc := headlessServiceForPair(run, index, attempt, t.Name)
+	svc := headlessServiceForRendezvous(run, index, attempt, t.Name)
 	if err := controllerutil.SetControllerReference(run, svc, r.Scheme); err != nil {
 		return advancePending, none, err
 	}
@@ -229,7 +229,8 @@ func (r *BurnInRunReconciler) startPair(
 		return advancePending, none, err
 	}
 
-	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, serverNode, run.Spec.Target, &pairing{
+	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, serverNode, run.Spec.Target, &rendezvous{
+		scope:    burninv1alpha1.ScopePair,
 		role:     pairRoleServer,
 		service:  svc.Name,
 		peerRole: pairRoleClient,
@@ -333,9 +334,10 @@ func (r *BurnInRunReconciler) gateClientOnServer(
 		return advancePending, advanceEffect{dirty: opened}, nil
 	}
 
-	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, clientNode, run.Spec.Target, &pairing{
+	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, clientNode, run.Spec.Target, &rendezvous{
+		scope:    burninv1alpha1.ScopePair,
 		role:     pairRoleClient,
-		service:  pairServiceName(run, index, attempt),
+		service:  rendezvousServiceName(run, index, attempt),
 		peerRole: pairRoleServer,
 		peerNode: serverNode,
 	})

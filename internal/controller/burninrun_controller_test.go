@@ -841,23 +841,25 @@ func TestRun_FailFastSkipsRemainingTests(t *testing.T) {
 	}
 }
 
-// Group scope is still beyond this operator version. It must land as Error —
-// silently skipping a required acceptance test would pass hardware by omission.
-// Pair is now executed and has its own section further down; this is the test
-// that keeps the honest failure honest for what is left.
+// A scope this operator version does not recognise must land as Error — silently
+// skipping a required acceptance test would pass hardware by omission. Node,
+// Pair and Group all execute now, so what this guards is the OPEN-ENUM case: a
+// run created against a newer CRD, or simply a typo in spec.scope.
 func TestRun_UnsupportedScopeIsErrorNotSkip(t *testing.T) {
-	group := &burninv1alpha1.BurnInTest{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "nccl-group"},
+	future := &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "nccl-mesh"},
 		Spec: burninv1alpha1.BurnInTestSpec{
-			Kind:   burninv1alpha1.KindNCCL,
-			Scope:  burninv1alpha1.ScopeGroup,
+			Kind: burninv1alpha1.KindNCCL,
+			// Not a scope this build knows. TestScope is a string on the API, so
+			// this is reachable rather than hypothetical.
+			Scope:  burninv1alpha1.TestScope("Mesh"),
 			Runner: &burninv1alpha1.RunnerSpec{Image: "example.invalid/nccl:v1"},
 		},
 	}
 	h := newHarness(t,
 		gb10Node("spark-a"), gb10Node("spark-b"), gb10Node("spark-c"),
-		group,
-		profile("acceptance", nil, false, testRef("nccl-group")),
+		future,
+		profile("acceptance", nil, false, testRef("nccl-mesh")),
 		withNodeCap(newRun("run1", "acceptance", "spark-a", "spark-b", "spark-c"), 3),
 	)
 	h.reconcile("run1")
@@ -867,7 +869,7 @@ func TestRun_UnsupportedScopeIsErrorNotSkip(t *testing.T) {
 	if run.Status.Results[0].Phase != burninv1alpha1.RunError {
 		t.Fatalf("unsupported scope = %q, want Error: %q", run.Status.Results[0].Phase, run.Status.Results[0].Message)
 	}
-	if !strings.Contains(run.Status.Results[0].Message, "Group") {
+	if !strings.Contains(run.Status.Results[0].Message, "Mesh") {
 		t.Errorf("the message does not name the scope that was refused: %q", run.Status.Results[0].Message)
 	}
 	if run.Status.Phase != burninv1alpha1.RunError {
@@ -3956,7 +3958,7 @@ func TestPair_RecreatedRunGetsAFreshRendezvous(t *testing.T) {
 	second := newRun("run1", "fabric", "spark-a", "spark-b")
 	second.UID = types.UID("uid-run1-second")
 
-	if pairServiceName(first, 0, 1) == pairServiceName(second, 0, 1) {
+	if rendezvousServiceName(first, 0, 1) == rendezvousServiceName(second, 0, 1) {
 		t.Error("the rendezvous Service name ignores the run UID; a recreated run would inherit the old one's endpoints")
 	}
 	if podNameForRole(first, 0, "spark-a", 1, pairRoleServer) == podNameForRole(second, 0, "spark-a", 1, pairRoleServer) {
@@ -3965,7 +3967,7 @@ func TestPair_RecreatedRunGetsAFreshRendezvous(t *testing.T) {
 	if podNameForRole(first, 0, "spark-a", 1, pairRoleServer) == podNameForRole(first, 0, "spark-a", 1, pairRoleClient) {
 		t.Error("the two ends of one pair share a pod name")
 	}
-	if pairServiceName(first, 0, 1) == pairServiceName(first, 0, 2) {
+	if rendezvousServiceName(first, 0, 1) == rendezvousServiceName(first, 0, 2) {
 		t.Error("a retry reuses the previous attempt's Service; its selector could still resolve a dead server")
 	}
 }

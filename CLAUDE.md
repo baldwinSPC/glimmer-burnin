@@ -182,7 +182,7 @@ rejects C++ sources outside cgo — which is why the sweep lives in `runners/`.
 api/v1alpha1/        CRD types: BurnInTest, BurnInProfile, BurnInRun,
                      BurnInSchedule, BurnInSink, NodeFingerprint
 internal/controller/ the reconcilers: BurnInRun (run core, cordon, plan,
-                     pods, Pair rendezvous, delivery), BurnInSchedule,
+                     pods, Pair + Group rendezvous, delivery), BurnInSchedule,
                      NodeFingerprint
 internal/sink/       sink delivery engine: webhook, ConfigMap, Prometheus
                      selection, retry and idempotency
@@ -348,6 +348,32 @@ disagree about the same hardware. One brain, two dispatchers.
   (`completeAttempt`), shared by Node and Pair scope; keep it that way.
   `TestAttempt.Trigger` records why every attempt happened, so the rule is
   auditable from a stored result long after the run.
+- **A Group verdict is about the COLLECTIVE, and Group needs neither JobSet nor
+  OpenMPI.** Group scope runs one rank per target node — target *i* is rank *i*,
+  pinned in the plan — all rendezvous'd through one headless Service, producing
+  exactly ONE `TestResult` naming EVERY node. Rank 0 is the root: it starts
+  first and no other rank is created until it is Ready, which is Pair's gate for
+  Pair's reason. The env contract is `BURNIN_RANK`, `BURNIN_NRANKS`,
+  `BURNIN_ROOT_HOST`, `BURNIN_ROOT_NODE` and deliberately no rank list;
+  `BURNIN_ROLE` is ABSENT so a runner keying off server/client fails loudly
+  rather than treating rank 4 as a client. The dependencies were specified in the
+  issue and are refused on evidence: gang scheduling solves partial placement
+  under contention, and every rank here is pinned by hostname to a node this
+  operator has ALREADY admitted and cordoned, so there is no placement decision
+  left — while JobSet would be a controller every adopter must install and a
+  second owner of pod lifecycle, which would make the "a pod may only be
+  destroyed once the status justifying it is readable" invariant unassertable.
+  OpenMPI needs a launcher able to start a process on another node, which on
+  Kubernetes means an sshd and a key on every accelerator node in the fleet;
+  `nccl_pair.cu` already records that argument and it only gets stronger at N>2.
+  Three rules differ from Pair and each follows a real difference: EVERY rank is
+  waited for (a collective is synchronous, so its ranks finish together, and one
+  that has not finished is one the collective is still waiting on — whereas a
+  Pair server may legitimately linger); a rank that never reported is NOT a pass,
+  because a collective is only measured if every rank took part; and a deadline
+  names the ranks that actually hung, because every healthy rank blocks on the
+  faulty one and would otherwise be indicted equally. `maxConcurrentNodes` must
+  be >= the target count, refused at start.
 - **A Pair verdict is about the LINK.** Pair scope runs two pods — a server on
   the first target, a client on the second, rendezvous'd through a headless
   Service (`internal/controller/pair.go`) — and produces exactly ONE `TestResult`
@@ -534,6 +560,15 @@ disagree about the same hardware. One brain, two dispatchers.
   | `BURNIN_ROLE` | `server` or `client` |
   | `BURNIN_PEER_HOST` | the peer's DNS name, `<peer-role>.<service>.<ns>.svc` |
   | `BURNIN_PEER_NODE` | the peer's node name (for messages, never for addressing) |
+
+  A **Group**-scope pod gets a different set, and no `BURNIN_ROLE`:
+
+  | Variable | Value |
+  |---|---|
+  | `BURNIN_RANK` | this pod's 0-based rank |
+  | `BURNIN_NRANKS` | how many ranks the collective has |
+  | `BURNIN_ROOT_HOST` | rank 0's DNS name, `rank-0.<service>.<ns>.svc` |
+  | `BURNIN_ROOT_NODE` | rank 0's node name (for messages, never for addressing) |
 
   That is the whole rendezvous contract: which end of the link this is, and
   where the other end answers. A fabric runner image needs nothing else — one

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -412,6 +413,151 @@ exit 3`, port)
 		}
 	}
 	assertNoStrandedCordon(t, ns, "pair-run", server, peer)
+}
+
+// TestAGroupScopeRunRendezvousEveryRankThroughOneService is Group scope on a
+// real scheduler: three pods, three nodes, one collective, one verdict.
+//
+// It is the same shape of assertion the Pair test makes and for the same
+// reason — the rendezvous is only real if every rank RESOLVES the root through
+// the headless Service and connects to it — but three ranks is where the things
+// that distinguish a group from a pair become observable. At n=2 the root has
+// exactly one worker to gate, "all ranks" and "the other rank" are the same set,
+// and a report that named the wrong rank would still name the only other one.
+//
+// What only a real cluster can check here: the scheduler placing three pinned
+// pods onto three cordoned nodes, cluster DNS publishing three per-pod A records
+// under one Service, and the operator holding every worker back until the root
+// is Ready.
+func TestAGroupScopeRunRendezvousEveryRankThroughOneService(t *testing.T) {
+	workers := workerNodes(t)
+	if len(workers) < 3 {
+		t.Skipf("Group scope needs at least three distinct worker nodes; this cluster has %d", len(workers))
+	}
+	ns := newNamespace(t)
+	ranks := workers[:3]
+	watcher := watchCordons(t, ranks...)
+
+	const (
+		collectivePort int32 = 5100
+		healthPort     int32 = 5101
+	)
+
+	// THE ROOT ACCEPTS EXACTLY ONE CONNECTION PER WORKER AND THEN EXITS.
+	//
+	// That last part is the difference from the Pair harness, and it mirrors the
+	// difference in the contract: a Pair settles when its CLIENT terminates,
+	// because a server is a listener that may legitimately linger, whereas every
+	// rank of a collective is a PARTICIPANT and they finish together. The
+	// operator waits for all of them, so a root that looped forever would be
+	// killed at its deadline and the run would report a hang that never happened.
+	//
+	// The readiness probe goes on a SEPARATE port, which is the pattern the
+	// project's own guidance asks for rather than an accident of this harness. A
+	// tcpSocket probe proves a listener is up the only way TCP allows — by
+	// connecting to it — and that connection is a real one. Pointed at the
+	// collective port it would be accepted as a rank, consume one of the N-1
+	// slots, and leave a real worker connecting to a socket that is no longer
+	// accepting. `ib_write_bw` and the nccl-tests server accept a bounded count
+	// for exactly the same reason, so this is the shape a real fabric runner
+	// wants too.
+	rootSh := fmt.Sprintf(`
+( while true; do nc -l -p %d >/dev/null 2>&1; done ) &
+echo root listening for $((BURNIN_NRANKS-1)) rank\(s\) on %d
+joined=0
+while [ $joined -lt $((BURNIN_NRANKS-1)) ]; do
+  nc -l -p %d >/dev/null 2>&1
+  joined=$((joined+1))
+  echo rank joined "($joined of $((BURNIN_NRANKS-1)))"
+done
+echo busBandwidthGBs=15.97
+echo ranksJoined=$joined
+exit 0`, healthPort, collectivePort, collectivePort)
+
+	// A worker reaches the root by the name the operator handed it, which only
+	// resolves if the Service exists and every pod carries a hostname and a
+	// subdomain. Exit 3 on failure and never 1: a rendezvous that did not happen
+	// is not a statement about the fabric, and exit 1 would permanently indict
+	// it with the retry budget unspent.
+	workerSh := fmt.Sprintf(`
+i=0
+while [ $i -lt 60 ]; do
+  if nc -w 3 "$BURNIN_ROOT_HOST" %d </dev/null >/dev/null 2>&1; then
+    echo rank "$BURNIN_RANK" of "$BURNIN_NRANKS" joined via "$BURNIN_ROOT_HOST"
+    exit 0
+  fi
+  i=$((i+1)); sleep 1
+done
+echo could not reach the root at "$BURNIN_ROOT_HOST" - the rendezvous Service or its per-pod DNS is missing
+exit 3`, collectivePort)
+
+	// ONE image, ONE command, every rank. The runner learns which rank it is from
+	// BURNIN_RANK and nothing else — no rank list, no topology, no Kubernetes.
+	groupSh := fmt.Sprintf("if [ \"${BURNIN_RANK:-}\" = 0 ]; then\n%s\nelse\n%s\nfi", rootSh, workerSh)
+
+	create(t,
+		shellTest(ns, "collective", groupSh, func(bt *burninv1alpha1.BurnInTest) {
+			bt.Spec.Scope = burninv1alpha1.ScopeGroup
+			bt.Spec.DurationSeconds = 120
+			bt.Spec.Runner.ReadinessProbe = &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(healthPort)},
+				},
+				PeriodSeconds:    1,
+				FailureThreshold: 90,
+			}
+			bt.Spec.Thresholds = []burninv1alpha1.Threshold{
+				{Metric: "busBandwidthGBs", Comparison: burninv1alpha1.GTE, Value: "1"},
+			}
+		}),
+		profileFor(ns, "collective-suite", nil, "collective"),
+		runFor(ns, "group-run", "collective-suite", ranks, func(r *burninv1alpha1.BurnInRun) {
+			// A group is one indivisible unit of load holding EVERY one of its
+			// nodes, so it costs one slot per rank and can never start at a
+			// smaller cap.
+			r.Spec.MaxConcurrentNodes = int32p(int32(len(ranks)))
+		}),
+	)
+
+	run := awaitTerminal(t, ns, "group-run", 10*time.Minute)
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("phase = %q, want Passed: %s", run.Status.Phase, summarise(run))
+	}
+
+	// ONE verdict, naming EVERY node in rank order. Splitting a collective per
+	// node would produce three claims no single node can support.
+	if n := len(run.Status.Results); n != 1 {
+		t.Fatalf("group produced %d results, want exactly 1: %s", n, summarise(run))
+	}
+	res := run.Status.Results[0]
+	if len(res.Nodes) != len(ranks) {
+		t.Fatalf("result names %v, want all of %v", res.Nodes, ranks)
+	}
+	for i, want := range ranks {
+		if res.Nodes[i] != want {
+			t.Errorf("Nodes[%d] = %q, want %q — ranks come from the pinned target order", i, res.Nodes[i], want)
+		}
+	}
+	// The root's numbers are the collective's, and they had to survive the merge
+	// to reach the threshold that was evaluated against them.
+	if res.Metrics["busBandwidthGBs"] == "" {
+		t.Errorf("no busBandwidthGBs on the result — the root's numbers did not reach the verdict: %v", res.Metrics)
+	}
+	// Proof the rendezvous actually happened rather than the pods merely running:
+	// the root counted the workers that connected to it.
+	if got := res.Metrics["ranksJoined"]; got != strconv.Itoa(len(ranks)-1) {
+		t.Errorf("ranksJoined = %q, want %d — not every rank reached the root through cluster DNS",
+			got, len(ranks)-1)
+	}
+
+	// Every node was held for the whole test, which is what "a group costs one
+	// slot per rank" means in the room.
+	for _, n := range ranks {
+		if !watcher.sawCordon(n) {
+			t.Errorf("node %s was never cordoned during the group test — a group holds EVERY one of its nodes", n)
+		}
+	}
+	assertNoStrandedCordon(t, ns, "group-run", ranks...)
 }
 
 // TestTheConfigMapSinkReceivesTheTerminalEnvelope is the export contract.
