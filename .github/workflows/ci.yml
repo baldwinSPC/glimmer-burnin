@@ -109,9 +109,15 @@ jobs:
   # be: this repository is private on a personal account, so GitHub's free arm64
   # hosted runners are unavailable and every arm64 stage runs under QEMU. One
   # measured data point: compute-smoke, the cheapest of the CUDA runners, took
-  # 14m19s cold. The heavy ones compile five gencodes of a template-dense .cu, or
+  # 14m19s cold. The heavy ones compile six gencodes of a template-dense .cu, or
   # build NCCL from source, under that emulation. Eleven of those on every push
   # would spend hours of billed minutes to rebuild code the push did not touch.
+  #
+  # The images are now built for linux/amd64 AND linux/arm64. That does NOT
+  # double the bill: amd64 is native on these hosted runners, so the added half
+  # runs at full speed while the pre-existing arm64 half stays the expensive one.
+  # The cheap tier below is unaffected, because a runner in it has no emulated
+  # stage on EITHER platform.
   #
   # So the selection is:
   #
@@ -128,10 +134,14 @@ jobs:
   #
   # What that leaves unguarded: for up to seven days, a runner can break for a
   # reason outside its own directory and this workflow will not say so. Narrowing
-  # that costs money until the repo is public. When it is, set the repository
-  # variable ARM64_RUNNER to `ubuntu-24.04-arm`: the builds become native and
-  # minutes long, the QEMU step below skips itself, and the honest thing is then
-  # to build all eleven on every PR and delete this job.
+  # that costs money until the repo is public. When it is, the fix is no longer
+  # "run everything on an arm64 host" — with two platforms that only moves the
+  # emulation to the other half. The right shape then is one job per platform
+  # (ubuntu-latest for amd64, ubuntu-24.04-arm for arm64), each building natively
+  # and pushing by digest, with a merge step assembling the manifest list. That is
+  # a bigger change than this one and is deliberately not folded into it; the
+  # ARM64_RUNNER variable below remains as the stopgap that makes the arm64 half
+  # native at the cost of emulating the amd64 half.
   runner-plan:
     runs-on: ubuntu-latest
     outputs:
@@ -219,8 +229,11 @@ jobs:
     # time on a change that does not compile.
     needs: [build-test, runner-plan]
     if: needs.runner-plan.outputs.runners != '[]'
-    # Set the repository variable ARM64_RUNNER to `ubuntu-24.04-arm` once this
-    # repo is public: native arm64 turns these from hours into minutes.
+    # Setting the repository variable ARM64_RUNNER to `ubuntu-24.04-arm` (once
+    # this repo is public and the free arm64 hosted runners are available) makes
+    # the arm64 half native and the amd64 half emulated — worth it only while the
+    # arm64 stages are the heavy ones, which they are today. The real fix is the
+    # per-platform split described above.
     runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-latest' }}
     # Matches publish-runner.yml. A CUDA build under QEMU can run for hours, and
     # the default 360-minute ceiling has been hit before.
@@ -232,29 +245,87 @@ jobs:
       matrix:
         runner: ${{ fromJSON(needs.runner-plan.outputs.runners) }}
     steps:
+      # ── FIRST, before anything pulls a layer ──────────────────────────────────
+      # A hosted ubuntu-latest runner has roughly 14 GB free and ships 20-30 GB of
+      # preinstalled toolchains nothing here uses. That is not enough for the two
+      # heaviest runners: nccl and gpudirect-rdma each pull the ~10 GB CUDA devel
+      # image plus a golang stage plus an ubuntu runtime stage, and both failed
+      # ~2.5 minutes in with ENOSPC on a SINGLE-platform build. The symptom was an
+      # unretrievable log (BlobNotFound), because the runner could not write its
+      # own diagnostics — the real message was only in the check annotation:
+      #
+      #   System.IO.IOException: No space left on device :
+      #     '/home/runner/actions-runner/cached/.../_diag/Worker_....log'
+      #
+      # Two platforms means two full sets of layers for every stage in the same
+      # job, so this got strictly worse with the multi-arch change, not better.
+      #
+      # UNCONDITIONAL rather than gated on the cheap/expensive tier below. That
+      # tier is derived from which stages are EMULATED, which is a CPU-time
+      # property and not a disk one — a "cheap" runner can still pull a large
+      # base image — and publish-runner.yml has no tier at all. One rule in both
+      # workflows is cheaper to reason about than two, and ~30 s is far under the
+      # cost of the failure it prevents, whose diagnostics are unreadable.
+      #
+      # Plain shell rather than a marketplace action: this repo pins its
+      # dependencies deliberately, and an unpinned third-party action holding
+      # `rm -rf` on the runner is a poor trade for fifteen lines of shell.
+      #
+      # It runs BEFORE `id: started`, so the wall-clock figure reported at the end
+      # stays a measurement of the image build and not of this.
+      #
+      # RECLAIM_PATHS is duplicated verbatim in publish-runner.yml and
+      # runners/pins_test.go fails if the two drift.
+      - name: Reclaim disk before the image build
+        run: |
+          set -uo pipefail
+          RECLAIM_PATHS='/usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift'
+          echo "== df before"; df -h /
+          for d in ${RECLAIM_PATHS}; do
+            # An absent path is NOT an error. The runner image's contents change
+            # between releases, and this step must not become a tripwire on a
+            # runner that simply stopped shipping one of these.
+            if [ ! -e "$d" ]; then echo "  absent   $d"; continue; fi
+            if sudo rm -rf "$d"; then echo "  removed  $d"; else echo "  FAILED   $d"; fi
+          done
+          # The preloaded container images are several GB and nothing here uses
+          # them. This runs before setup-buildx, so it cannot evict a layer or a
+          # cache entry this job produced.
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          echo "== df after"; df -h /
+
       - uses: actions/checkout@v7
 
-      # Skipped on a native arm64 runner, where there is nothing to emulate.
+      # ALWAYS needed now that the matrix is two platforms: whichever
+      # architecture the hosted runner is, the other one is emulated. It used to
+      # be skipped on a native arm64 runner because arm64 was the only target.
       - uses: docker/setup-qemu-action@v3
-        if: runner.arch != 'ARM64'
       - uses: docker/setup-buildx-action@v4
 
       - id: started
         run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      - name: Build ${{ matrix.runner }} (linux/arm64, no push)
+      - name: Build ${{ matrix.runner }} (linux/amd64 + linux/arm64, no push)
         uses: docker/build-push-action@v7
         with:
           context: runners/${{ matrix.runner }}
-          platforms: linux/arm64
+          # BOTH, because an arm64-only runner image is unusable by every x86
+          # adopter — H100, B200, MI300 — and that was the single largest barrier
+          # to adopting this project. amd64 is the CHEAP half here: it is native
+          # on GitHub's hosted runners, so adding it costs a fraction of what the
+          # existing QEMU arm64 half already costs.
+          platforms: linux/amd64,linux/arm64
           push: false
-          # Build what gets PUBLISHED. publish-runner.yml defaults to sm_121a
-          # (GB10, no PTX fallback), and an arch target is not a detail here — a
-          # pass is meant to prove the real instruction path compiled, so a CI
-          # build at a different arch would be proving something else. Runners
-          # whose Dockerfile does not declare CUDA_ARCH ignore it.
-          build-args: |
-            CUDA_ARCH=sm_121a
+          # No CUDA_ARCH build-arg, deliberately. It used to pin sm_121a, which
+          # is GB10 — a Grace part with no x86 host in existence — so forcing it
+          # across a two-platform matrix would build an amd64 image whose device
+          # code cannot run on any amd64 machine. The runners that compile device
+          # code now default their gencode PER TARGET PLATFORM (compute-smoke:
+          # arm64 sm_121a / amd64 sm_120a; nccl: arm64 sm_121 / amd64 sm_90), and
+          # leaving the arg unset is what selects those defaults. That is still
+          # "build what gets published": publish-runner.yml's cuda_arch input
+          # defaults to `default`, which resolves to exactly the same thing.
+          #
           # Scoped per runner so the eleven caches do not evict each other's
           # layers on sight. GitHub's Actions cache is 10 GB per REPOSITORY and a
           # CUDA build stage is multiple GB, so expect the heavy runners to miss
@@ -283,6 +354,12 @@ jobs:
         run: |
           set -euo pipefail
           secs=$(( $(date +%s) - STARTED ))
-          if [ "${RUNNER_ARCH}" = ARM64 ]; then how=native; else how=QEMU; fi
-          printf '### `%s` — %dm %02ds (linux/arm64, %s)\n' \
+          # Both platforms are built, so exactly one of them is emulated: name
+          # which, or the number below is not interpretable.
+          if [ "${RUNNER_ARCH}" = ARM64 ]; then
+            how='arm64 native, amd64 QEMU'
+          else
+            how='amd64 native, arm64 QEMU'
+          fi
+          printf '### `%s` — %dm %02ds (linux/amd64 + linux/arm64; %s)\n' \
             "$KIND" "$((secs / 60))" "$((secs % 60))" "$how" >> "$GITHUB_STEP_SUMMARY"

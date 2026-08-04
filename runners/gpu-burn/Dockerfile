@@ -70,8 +70,25 @@ FROM ${CUDA_IMAGE} AS build
 # NOTE: the publish-runner workflow's CUDA_ARCH input is deliberately NOT
 # consumed here, for the reason above.  Override CUDA_ARCH_FLAGS instead to trim
 # or extend the list for your fleet; a single -arch=sm_121 also works.
+#
+# The list is ONE list for both host architectures, because a gencode says
+# nothing about the CPU the container runs on.  What it covers, with CUDA's
+# minor-version binary compatibility (a cubin for CC X.Y runs on CC X.Z, Z >= Y):
+#
+#   sm_80   CC 8.0 – 8.9   A100, A10/A40, L4/L40S
+#   sm_90   CC 9.0         H100, H200, GH200
+#   sm_100  CC 10.0 – 10.x B200, B300, GB200, GB300
+#   sm_120  CC 12.0        RTX PRO 6000 Blackwell, RTX 50xx
+#   sm_121  CC 12.1        GB10 / DGX Spark
+#   PTX     CC >= 12.1     JIT fallback for anything newer
+#
+# sm_100 was added because it was the one gap that mattered for x86 adopters:
+# compute_121 PTX cannot JIT DOWN onto CC 10.x, so before it a B200 had no code
+# in this image at all — and silent data corruption is precisely what a
+# Blackwell fleet wants this runner to look for.
 ARG CUDA_ARCH_FLAGS="-gencode arch=compute_80,code=sm_80 \
 -gencode arch=compute_90,code=sm_90 \
+-gencode arch=compute_100,code=sm_100 \
 -gencode arch=compute_120,code=sm_120 \
 -gencode arch=compute_121,code=sm_121 \
 -gencode arch=compute_121,code=compute_121"

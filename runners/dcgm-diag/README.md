@@ -202,6 +202,13 @@ docker build -t glimmer-burnin-dcgm-diag:dev .
 Build args: `DCGM_REF` (default `v4.2.3`), `DCGM_SHA`, `DCGM_REPO`, `GO_IMAGE`,
 `RUNTIME_IMAGE`.
 
+The image is published as a manifest list for `linux/amd64` and `linux/arm64`.
+Multi-arch costs this runner nothing: every stage is `--platform=$BUILDPLATFORM`
+and the wrapper is a `CGO_ENABLED=0` Go binary, so both platforms cross-compile
+natively with no QEMU. There is no GPU-architecture axis — this image compiles no
+device code and ships no DCGM, so the `publish-runner` workflow's `cuda_arch`
+input is ignored here.
+
 `DCGM_REF` must be a tag that exists **in git**. NVIDIA tags the repository
 `v4.2.3`; the `-1` suffix on package and container versions (`4.2.3-1`) is a
 packaging revision that exists in NGC and apt and has never existed in git.

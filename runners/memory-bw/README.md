@@ -175,7 +175,7 @@ Build args:
 | `CUDA_IMAGE` | `nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04` | Build stage only; no CUDA layer is shipped. |
 | `NVBANDWIDTH_REF` | `v0.10.0` | Git tag built from source, and the value reported as `nvbandwidth_ref`. |
 | `NVBANDWIDTH_SHA` | `82fc4e8c…` | The commit that tag must resolve to. The build refuses otherwise: `nvbandwidth_ref` is the provenance of every number this runner publishes, so a moved tag would make that line a false statement about which code produced the measurement. Bump it with `NVBANDWIDTH_REF`, resolving it with `git ls-remote https://github.com/NVIDIA/nvbandwidth.git 'refs/tags/<ref>'`. |
-| `CUDA_ARCH` | *(empty)* | Empty uses nvbandwidth's own architecture list. Set e.g. `121` for a native GB10 cubin. |
+| `CUDA_ARCH` | *(empty)* | Empty uses nvbandwidth's own architecture list, which is correct on both host architectures. Set e.g. `121` for a native GB10 cubin. Accepts an nvcc gencode name (`sm_121a`) or a bare number; the build translates and refuses anything it cannot. |
 | `RUNTIME_IMAGE` | `gcr.io/distroless/cc-debian13` | Final base. Pin by digest for a release build. |
 | `NVBANDWIDTH_PATH` | `/usr/local/bin/nvbandwidth` | Where the tool is installed; the wrapper is compiled against this value. |
 
@@ -192,6 +192,12 @@ it runs are copy-engine testcases, which move data without launching a kernel.
 It matters only if the plan in `memory_bw.cc` is switched to the `_sm` variants
 — and then it matters completely, because a JIT-compiled kernel is not the code
 path a gate is trying to accept.
+
+`CUDA_ARCH` is the **GPU** axis and is independent of the host architecture. The
+image is published as a manifest list for `linux/amd64` and `linux/arm64`, and
+the empty default is right on both: nvbandwidth's own list already spans the
+parts either host architecture is deployed with. That is why this runner needed
+no per-platform default, unlike `compute-smoke` and `nccl`.
 
 The build fails rather than ship a bad image if any of the following is true,
 checked against `DT_NEEDED` with `objdump`:

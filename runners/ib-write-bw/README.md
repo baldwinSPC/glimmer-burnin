@@ -352,6 +352,14 @@ A fabric runner must not be able to fail that way.
 | perftest | `v4.4-0.37` (`5fb4f10…`) | see the copyleft finding above; **also** the v4.5 series does not compile against stock rdma-core (50.0 on Ubuntu 24.04, 56.1 on Debian trixie) — it needs the AES-XTS crypto mkey API from `mlx5dv` that only MLNX_OFED/DOCA ships. Both constraints were verified by building every v4.5 tag on both distributions. |
 | base | `debian:trixie-slim` | build and runtime are the same release, so the glibc perftest was linked against is the one it runs on |
 
+**Host architecture.** The image is published as a manifest list for
+`linux/amd64` and `linux/arm64`. This runner never touches the accelerator, so it
+has **no GPU-architecture axis at all** and the `publish-runner` workflow's
+`cuda_arch` input is ignored here. x86 was perftest's original platform and
+nothing in this build is arm-specific. Only the perftest stage is emulated when
+cross-building; the Go wrapper is `--platform=$BUILDPLATFORM` and cross-compiles
+for free.
+
 ## Verified on
 
 Two DGX Sparks (NVIDIA GB10, aarch64, driver 580.82.09), ConnectX-7 at PCIe Gen5

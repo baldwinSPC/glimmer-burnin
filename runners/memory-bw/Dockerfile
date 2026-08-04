@@ -56,6 +56,12 @@ ARG NVBANDWIDTH_SHA=82fc4e8c6afa0babb8687793678f615b3b8d793e
 # list only matters if you switch the plan in memory_bw.cc to the _sm variants —
 # and then it matters completely, because a JIT-compiled kernel is not the code
 # path a gate is trying to accept.
+#
+# CUDA_ARCH is the GPU axis and is INDEPENDENT of TARGETARCH, the host axis. This
+# image builds for linux/amd64 and linux/arm64 alike, and the empty default is
+# correct on both: nvbandwidth's own list already spans the parts either host
+# architecture is deployed with. That is why this runner needed no per-platform
+# default, unlike compute-smoke and nccl.
 ARG CUDA_ARCH=
 
 # Re-declared so the pre-FROM value is visible inside this stage.

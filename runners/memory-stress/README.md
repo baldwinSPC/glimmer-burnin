@@ -248,6 +248,14 @@ The build **asserts the upstream commit**: a tag can be moved, and a moved tag
 would silently change every node's memory tester. Bumping `STRESSAPPTEST_REF`
 means bumping `STRESSAPPTEST_SHA` with it, or the build refuses.
 
+The image is published as a manifest list for `linux/amd64` and `linux/arm64`.
+There is no GPU-architecture axis here — this runner never touches the
+accelerator — and nothing about stressapptest is arm-specific: `v1.0.11` is the
+floor because it is the first release with aarch64 vector support, and x86 has
+been its primary platform since it was written. Only the stressapptest stage is
+emulated when cross-building; the Go wrapper is `--platform=$BUILDPLATFORM` and
+cross-compiles for free.
+
 `v1.0.11` is the floor: it is the first release with aarch64 vector-instruction
 support, and GB10 is arm64.
 

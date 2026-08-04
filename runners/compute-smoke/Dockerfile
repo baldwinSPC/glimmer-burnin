@@ -1,6 +1,11 @@
 # Runner image for the "compute-smoke" TestKind: a fast, arch-correct kernel that
 # proves the accelerator's tensor cores actually compute.  This variant targets
-# NVIDIA Blackwell SM120/SM121 (GB10 / DGX Spark) and exercises NVFP4.
+# NVIDIA Blackwell SM120/SM121 (GB10 / DGX Spark on arm64, RTX PRO 6000 Blackwell
+# and the other x86 SM120 parts on amd64) and exercises NVFP4.
+#
+# The image is built for linux/amd64 AND linux/arm64.  Those are HOST
+# architectures and say nothing about which GPU the image can measure; see the
+# CUDA_ARCH block below, which is where that decision is made.
 #
 # Licensing note — this is why the build is multi-stage.  The CUDA toolchain is
 # used at BUILD time only; none of its layers are shipped.  The final image
@@ -13,6 +18,12 @@
 ARG CUDA_IMAGE=nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04
 FROM ${CUDA_IMAGE} AS build
 
+# BuildKit supplies this; it must still be declared to be visible in the stage.
+# The nvcc stage runs EMULATED on the platform it is not native to, which is why
+# amd64 (native on GitHub's hosted runners) is the cheap half of this matrix and
+# arm64 is the 14-minute QEMU half.
+ARG TARGETARCH
+
 # v4.5.0 is the floor: its changelog is the first to report block-scaled MMA
 # working on Spark (SM121).  Earlier releases mis-handle this exact card.
 ARG CUTLASS_REF=v4.6.1
@@ -23,10 +34,37 @@ ARG CUTLASS_REF=v4.6.1
 # bumping CUTLASS_SHA with it; resolve the new value with
 # `git ls-remote https://github.com/NVIDIA/cutlass.git refs/tags/<ref>`.
 ARG CUTLASS_SHA=e05f953a5b3d38adc240df2ff928e0421c2abba3
-# sm_121a = GB10 (compute capability 12.1).  An "a" target emits a cubin for that
-# capability only — no PTX fallback — which is what we want for a smoke test that
-# must prove the real instruction path ran.  Use sm_120f to cover CC 12.0 + 12.1.
-ARG CUDA_ARCH=sm_121a
+
+# ── CPU architecture and GPU architecture are ORTHOGONAL ─────────────────────
+#
+# TARGETARCH is the HOST the container runs on (linux/amd64 vs linux/arm64).
+# CUDA_ARCH is the GPU gencode.  Conflating them produces images nobody can use:
+# an amd64 image full of sm_121a device code is dead weight, because CC 12.1 is
+# GB10, GB10 is a Grace part, and there is no x86 host with one.
+#
+# So CUDA_ARCH defaults PER TARGET PLATFORM, and both defaults are "a" targets:
+#
+#   arm64 → sm_121a   GB10 / DGX Spark            (CC 12.1)
+#   amd64 → sm_120a   RTX PRO 6000 Blackwell,     (CC 12.0)
+#                     RTX 5090 and the rest of
+#                     the x86 SM120 Blackwells
+#
+# An "a" target emits a cubin for that capability ONLY — no PTX fallback — which
+# is the whole proof this runner offers: a pass means the real block-scaled MMA
+# instruction path executed rather than something JIT-compiled or emulated.  The
+# amd64 default is a DIFFERENT arch, not a widened one; it keeps the property.
+#
+# WHAT THIS RUNNER STILL CANNOT DO, and it is a GPU-arch limit, not a CPU-arch
+# one: the kernel is CUTLASS `arch::Sm120` block-scaled NVFP4, so it exists for
+# CC 12.x and nothing else.  An x86 host with an H100 (sm_90) or a B200 (sm_100)
+# gets an image that starts, reports `compute_cap=`, and exits 2 (out of scope)
+# or 3 (no cubin for this part) — never a hardware Fail.  SM10x block-scaled
+# GEMM uses tcgen05.mma with TMEM accumulation and is a SEPARATE runner; see
+# README.md and issue #10.  Do not "fix" that by adding PTX here.
+#
+# Set CUDA_ARCH explicitly to override BOTH platforms — e.g. sm_120f for one
+# binary covering CC 12.0 + 12.1.  An explicit value is honoured as given.
+ARG CUDA_ARCH=
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -56,9 +94,25 @@ COPY arch_match.h /src/arch_match.h
 # no other way to report what it was compiled for: __CUDA_ARCH_LIST__ records
 # 1200 for both sm_120a and sm_120f, and only the "f" form also runs on 12.1, so
 # the macro cannot answer "does this image run on the part in front of me?".
-RUN mkdir -p /out && /usr/local/cuda/bin/nvcc \
-      -std=c++17 -O3 -arch=${CUDA_ARCH} --expt-relaxed-constexpr \
-      -DBURNIN_CUDA_ARCH="\"${CUDA_ARCH}\"" \
+#
+# CUDA_ARCH is resolved HERE rather than in the ARG default because the default
+# depends on TARGETARCH, and an ARG default cannot branch.  An empty CUDA_ARCH
+# means "this platform's default"; anything else is used verbatim.
+RUN set -eu; \
+    arch="${CUDA_ARCH:-}"; \
+    if [ -z "${arch}" ]; then \
+      case "${TARGETARCH}" in \
+        arm64) arch=sm_121a ;; \
+        amd64) arch=sm_120a ;; \
+        *) echo "compute-smoke: no default gencode for TARGETARCH='${TARGETARCH}'." >&2; \
+           echo "  Pass --build-arg CUDA_ARCH=sm_1XXa naming the part you are building for." >&2; \
+           exit 1 ;; \
+      esac; \
+    fi; \
+    echo "compute-smoke: TARGETARCH=${TARGETARCH} -> CUDA_ARCH=${arch}"; \
+    mkdir -p /out && /usr/local/cuda/bin/nvcc \
+      -std=c++17 -O3 -arch="${arch}" --expt-relaxed-constexpr \
+      -DBURNIN_CUDA_ARCH="\"${arch}\"" \
       -cudart static -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc \
       -I /cutlass/include -I /cutlass/tools/util/include \
       -o /out/fp4_smoke /src/fp4_smoke.cu

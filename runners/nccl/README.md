@@ -375,20 +375,48 @@ be an unconditional assertion instead of an exception list.
 | Thing | Pin | Note |
 |---|---|---|
 | NCCL | `v2.27.7-1` (`593de54…`) | licence asserted at build time |
-| gencode | `-gencode=arch=compute_121,code=sm_121` | **GB10 only** |
+| gencode | *per host platform*, see below | one architecture, deliberately |
 | CUDA toolchain (build only) | `nvcr.io/nvidia/cuda:12.9.1-devel-ubuntu24.04` | |
 | runtime base | `ubuntu:24.04` | |
 
-**The arch target is deliberate.** `sm_121` is GB10, the hardware this runner was
-verified on. Each extra architecture multiplies NCCL's device-code build time and
-every node's image pull, so a fleet on different silicon should **rebuild** with
-its own gencode (`--build-arg NCCL_GENCODE=...`) rather than have this default to
-"everything". Guessing on a fleet's behalf is the thing `CLAUDE.md` warns against.
+## Host architecture, GPU architecture, and the one build arg you may need
 
-The harness itself is built `-arch=sm_121` without the `a` suffix, unlike
-`compute-smoke`: it launches no kernel of its own — every kernel it runs is
-NCCL's — so an `a` target would constrain the binary without proving anything
-about the instruction path.
+The image is published as a manifest list for **`linux/amd64` and
+`linux/arm64`** — that is the CPU axis, and it says nothing about which GPU the
+image can talk to. `NCCL_GENCODE` is the GPU axis, and it is where this runner
+asks something of you.
+
+**The arch target is deliberate and it is a single architecture.** Each extra
+architecture multiplies NCCL's device-code build time and every node's image
+pull; the prebuilt `libnccl` that carries them all is 411 MB, paid by every node
+on every readiness gate. So the default is one part per host architecture,
+chosen as the part that architecture is actually deployed with:
+
+| host | `NCCL_GENCODE` default | harness `CUDA_ARCH` | parts |
+|---|---|---|---|
+| `linux/arm64` | `-gencode=arch=compute_121,code=sm_121` | `sm_121` | GB10 / DGX Spark — the hardware this runner was verified on |
+| `linux/amd64` | `-gencode=arch=compute_90,code=sm_90` | `sm_90` | H100, H200 — the dominant x86 multi-node NCCL parts |
+
+**This is the runner where "usable on x86" means "usable with a gencode that
+matches your GPU".** A single `code=sm_XX` target carries no PTX, so an x86 fleet
+on B200, L40S or A100 gets an image with no kernels for its part and must
+rebuild:
+
+```sh
+docker build \
+  --build-arg NCCL_GENCODE=-gencode=arch=compute_100,code=sm_100 \
+  --build-arg CUDA_ARCH=sm_100 \
+  runners/nccl        # B200 / GB200
+```
+
+Override **both** or neither: a harness compiled for a part NCCL has no kernels
+for is an image that cannot run anywhere. Guessing "everything" on a fleet's
+behalf is the alternative, and it costs every node in every fleet a 400 MB pull
+to avoid one build argument.
+
+The harness is built without the `a` suffix, unlike `compute-smoke`: it launches
+no kernel of its own — every kernel it runs is NCCL's — so an `a` target would
+constrain the binary without proving anything about the instruction path.
 
 ## Verified on
 

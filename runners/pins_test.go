@@ -36,6 +36,10 @@ import (
 // publishWorkflow is the workflow whose choice list must name every runner.
 const publishWorkflow = "../.github/workflows/publish-runner.yml"
 
+// ciWorkflow is the other workflow that builds a runner image. It and
+// publishWorkflow must agree about the disk they reclaim first.
+const ciWorkflow = "../.github/workflows/ci.yml"
+
 // runnerDirs lists every directory under runners/, from the filesystem. It is
 // deliberately not a hand-written list: the whole point of the checks below is
 // that a twelfth runner cannot be added without them noticing it.
@@ -254,6 +258,53 @@ func TestPublishWorkflowOffersEveryRunner(t *testing.T) {
 	for name := range offered {
 		t.Errorf("%s offers %q, which is not a directory under runners/. Publishing it would fail "+
 			"with an empty build context.", publishWorkflow, name)
+	}
+}
+
+// reclaimPathsPattern finds the one line each image-building workflow declares
+// the disk it frees before pulling a layer.
+var reclaimPathsPattern = regexp.MustCompile(`(?m)^\s*RECLAIM_PATHS='([^']*)'`)
+
+// TestBothWorkflowsReclaimTheSameDisk guards a rule a reviewer cannot enforce by
+// reading one diff, because it spans two files that are never edited together.
+//
+// A hosted runner has ~14 GB free and ships 20-30 GB of preinstalled toolchains
+// no build here uses. The two heaviest runners (nccl, gpudirect-rdma) pull a
+// ~10 GB CUDA devel image plus a golang stage plus an ubuntu runtime stage, and
+// since the images are built for linux/amd64 AND linux/arm64 in one job, that is
+// two full sets of layers. Both runners failed with ENOSPC before the reclaim
+// step existed — and the failure is close to undiagnosable, because the runner
+// cannot write its own logs once the disk is full, so the build reports
+// BlobNotFound rather than the real error.
+//
+// ci.yml and publish-runner.yml must therefore reclaim the SAME paths. A
+// difference is not a style question: publish-runner.yml is the workflow whose
+// failure costs a hand-published image and a burned version tag, and it is the
+// one nobody exercises on a PR.
+func TestBothWorkflowsReclaimTheSameDisk(t *testing.T) {
+	declared := map[string]string{}
+	for _, wf := range []string{ciWorkflow, publishWorkflow} {
+		src, err := os.ReadFile(wf)
+		if err != nil {
+			t.Fatalf("reading %s: %v", wf, err)
+		}
+		m := reclaimPathsPattern.FindStringSubmatch(string(src))
+		if m == nil {
+			t.Fatalf("%s builds a runner image but declares no RECLAIM_PATHS. A hosted runner "+
+				"cannot hold two platforms of the CUDA devel image alongside its preinstalled "+
+				"toolchains, and the resulting ENOSPC surfaces as an unretrievable log rather "+
+				"than as an error.", wf)
+		}
+		if strings.TrimSpace(m[1]) == "" {
+			t.Errorf("%s declares an empty RECLAIM_PATHS, which reclaims nothing.", wf)
+		}
+		declared[wf] = strings.Join(strings.Fields(m[1]), " ")
+	}
+	if declared[ciWorkflow] != declared[publishWorkflow] {
+		t.Errorf("the two image-building workflows reclaim different disk:\n  %s: %s\n  %s: %s\n"+
+			"They must match. publish-runner.yml is the one no PR exercises, so a divergence is "+
+			"discovered by a failed publish and a burned version tag.",
+			ciWorkflow, declared[ciWorkflow], publishWorkflow, declared[publishWorkflow])
 	}
 }
 
