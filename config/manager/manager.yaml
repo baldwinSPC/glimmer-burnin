@@ -94,7 +94,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: manager
-          image: ghcr.io/baldwinspc/glimmer-burnin:v0.2.0
+          image: ghcr.io/baldwinspc/glimmer-burnin:v0.3.0
           args:
             - --leader-elect
             - --metrics-bind-address=:8080
