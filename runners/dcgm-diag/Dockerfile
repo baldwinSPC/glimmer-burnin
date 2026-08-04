@@ -113,8 +113,20 @@ ARG DCGM_REPO=https://github.com/NVIDIA/DCGM.git
 # found". Pinned, never a branch: "whatever main was that morning" is not a
 # reproducible acceptance verdict.
 ARG DCGM_REF=v4.2.3
+# A tag is not an identity: it can be moved, and this one decides whether the
+# field-id assertion below is checking against the header the runner was written
+# for. NVIDIA tags DCGM with ANNOTATED tags, so this is the COMMIT the tag peels
+# to (`git ls-remote … 'refs/tags/v4.2.3^{}'`), which is what a shallow clone
+# leaves at HEAD — not the tag object's own sha, which is 0f3607ae.
+ARG DCGM_SHA=6e947dcac9b3160d61d98fea4741d51d4bec5c1f
 RUN set -eu; \
     GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 -b "${DCGM_REF}" "${DCGM_REPO}" /dcgm-src; \
+    got="$(git -C /dcgm-src rev-parse HEAD)"; \
+    if [ "${got}" != "${DCGM_SHA}" ]; then \
+      echo "refusing to build: ${DCGM_REF} is ${got}, expected ${DCGM_SHA}" >&2; \
+      exit 1; \
+    fi; \
+    echo "DCGM ${DCGM_REF} = ${got}: OK"; \
     hdr=$(find /dcgm-src -name dcgm_fields.h -print -quit); \
     [ -n "$hdr" ] || { echo "BUILD ASSERTION FAILED: dcgm_fields.h not found in the DCGM source"; exit 1; }; \
     echo "checking field ids against $hdr (DCGM ${DCGM_REF})"; \

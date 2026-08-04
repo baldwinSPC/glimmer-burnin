@@ -16,6 +16,13 @@ FROM ${CUDA_IMAGE} AS build
 # v4.5.0 is the floor: its changelog is the first to report block-scaled MMA
 # working on Spark (SM121).  Earlier releases mis-handle this exact card.
 ARG CUTLASS_REF=v4.6.1
+# A tag is not an identity: it can be moved.  A published runner image is what a
+# node's readiness gate executes and its tag is immutable, so a moved upstream
+# tag would change what that image computes with no audit trail — and CUTLASS is
+# the kernel itself here, not a peripheral dependency.  Bumping CUTLASS_REF means
+# bumping CUTLASS_SHA with it; resolve the new value with
+# `git ls-remote https://github.com/NVIDIA/cutlass.git refs/tags/<ref>`.
+ARG CUTLASS_SHA=e05f953a5b3d38adc240df2ff928e0421c2abba3
 # sm_121a = GB10 (compute capability 12.1).  An "a" target emits a cubin for that
 # capability only — no PTX fallback — which is what we want for a smoke test that
 # must prove the real instruction path ran.  Use sm_120f to cover CC 12.0 + 12.1.
@@ -25,6 +32,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 -b ${CUTLASS_REF} https://github.com/NVIDIA/cutlass.git /cutlass
+
+RUN got="$(git -C /cutlass rev-parse HEAD)"; \
+    if [ "${got}" != "${CUTLASS_SHA}" ]; then \
+      echo "refusing to build: ${CUTLASS_REF} is ${got}, expected ${CUTLASS_SHA}" >&2; \
+      exit 1; \
+    fi; \
+    echo "CUTLASS ${CUTLASS_REF} = ${got}: OK"
 
 COPY fp4_smoke.cu /src/fp4_smoke.cu
 

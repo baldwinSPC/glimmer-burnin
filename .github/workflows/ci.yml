@@ -5,6 +5,25 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      all_runners:
+        description: 'Build every runner image, not only the ones this change touches'
+        type: boolean
+        default: true
+  schedule:
+    # The full runner matrix, weekly. See the runner-plan job for why this is a
+    # sweep on a timer rather than a gate on every PR.
+    - cron: '23 5 * * 1'
+
+permissions:
+  contents: read
+
+# A superseded PR run is wasted money here: the runner builds are QEMU builds
+# billed by the minute. Pushes to main are not cancelled — main's history is what
+# the weekly sweep and the publish workflow are reasoned about from.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-test:
@@ -28,6 +47,11 @@ jobs:
           fmt=$(gofmt -l .)
           if [ -n "$fmt" ]; then echo "gofmt needed on:"; echo "$fmt"; exit 1; fi
 
+      # This also runs the checks that have no Go code of their own to attach to:
+      # runners/pins_test.go (every upstream pinned to a commit, every runner
+      # publishable), runners/ib-write-bw/fabric_contract_test.go and
+      # runners/thermal-soak/soak_contract_test.go (the duplicated runner sources
+      # have not drifted).
       - name: Test
         run: go test ./... -count=1
 
@@ -41,10 +65,12 @@ jobs:
           fi
           echo "standalone: no glimmer import found"
 
+      # Blocking. A stale CRD is not a cosmetic drift: config/crd is what a
+      # cluster validates a BurnInTest against, so a field that exists in the Go
+      # type and not in the manifest is silently dropped by the apiserver — the
+      # run then executes a spec nobody wrote, and the operator's own defaulting
+      # hides it.
       - name: CRD/deepcopy drift check
-        # Informational for now — tighten to a hard gate once the generation
-        # baseline is confirmed stable across environments.
-        continue-on-error: true
         run: |
           go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 object:headerFile=hack/boilerplate.go.txt paths=./api/...
           go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd rbac:roleName=burnin-manager-role webhook paths=./... output:crd:artifacts:config=config/crd output:rbac:artifacts:config=config/rbac
@@ -66,22 +92,197 @@ jobs:
           push: false
           tags: ghcr.io/baldwinspc/glimmer-burnin:ci
 
-  # The compute-smoke runner compiles CUTLASS for sm_121a, which only makes sense
-  # for linux/arm64 (GB10). On an amd64 runner that means QEMU emulation, and a
-  # CUTLASS template build under emulation is slow (minutes, not seconds) — so this
-  # is opt-in rather than part of every PR. Build-only: publishing is a deliberate,
-  # separately-approved step.
-  runner-compute-smoke:
+  # ── which runner images to build ──────────────────────────────────────────────
+  #
+  # Every directory under runners/ produces an image a node's readiness gate
+  # executes. Two of them once shipped in a PR having never been built at all —
+  # memory-bw with an ARG a later FROM could not see, dcgm-diag with a Go compile
+  # error — because CI built exactly one runner, compute-smoke, and only on
+  # workflow_dispatch. That job is gone; this plans the matrix instead.
+  #
+  # The list comes from the FILESYSTEM, never from a hand-written array, so a
+  # twelfth runner is covered the moment its directory exists. (runners/pins_test.go
+  # holds the other end of that: it fails if a runner directory has no Dockerfile,
+  # or is missing from the publish workflow's choice list.)
+  #
+  # WHY THIS IS NOT SIMPLY "BUILD ALL ELEVEN ON EVERY PR", which is what it should
+  # be: this repository is private on a personal account, so GitHub's free arm64
+  # hosted runners are unavailable and every arm64 stage runs under QEMU. One
+  # measured data point: compute-smoke, the cheapest of the CUDA runners, took
+  # 14m19s cold. The heavy ones compile five gencodes of a template-dense .cu, or
+  # build NCCL from source, under that emulation. Eleven of those on every push
+  # would spend hours of billed minutes to rebuild code the push did not touch.
+  #
+  # So the selection is:
+  #
+  #   * the runners this change TOUCHES — which is the case that matters, because
+  #     a runner's Docker build context is its own directory and nothing else can
+  #     affect it. The PR that shipped the two broken Dockerfiles touched exactly
+  #     those directories;
+  #   * plus the runners that cost almost nothing (every build stage is
+  #     --platform=$BUILDPLATFORM, so nothing runs emulated), as a standing smoke
+  #     test that the build tooling itself still works;
+  #   * plus, WEEKLY and on demand, all of them — which is what catches the decay
+  #     no diff of ours causes: a base image that moved, an apt package that
+  #     vanished, an upstream that retagged.
+  #
+  # What that leaves unguarded: for up to seven days, a runner can break for a
+  # reason outside its own directory and this workflow will not say so. Narrowing
+  # that costs money until the repo is public. When it is, set the repository
+  # variable ARM64_RUNNER to `ubuntu-24.04-arm`: the builds become native and
+  # minutes long, the QEMU step below skips itself, and the honest thing is then
+  # to build all eleven on every PR and delete this job.
+  runner-plan:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    outputs:
+      runners: ${{ steps.plan.outputs.runners }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The plan diffs against the merge base, so the history has to be there.
+          fetch-depth: 0
+
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          ALL: ${{ inputs.all_runners }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          # Space-separated, not newline-separated: this is both iterated over and
+          # membership-tested with `case " $all " in *" $d "*`, and that pattern
+          # silently matches nothing against newlines.
+          all=$(ls -d runners/*/ | xargs -n1 basename | sort | tr '\n' ' ')
+
+          # A runner is CHEAP when no RUN executes in an emulated stage — that is,
+          # every stage with work in it is pinned to --platform=$BUILDPLATFORM and
+          # cross-compiles. Derived rather than listed so a new Go-only runner
+          # joins the per-PR tier by itself, and a runner that grows an emulated
+          # stage leaves it by itself.
+          cheap=""
+          for d in $all; do
+            if [ "$(awk '
+                  /^[[:space:]]*FROM[[:space:]]/ { emulated = (index($0, "--platform=$BUILDPLATFORM") == 0); next }
+                  /^[[:space:]]*RUN[[:space:]]/  { if (emulated) slow = 1 }
+                  END { print (slow ? "slow" : "cheap") }' "runners/$d/Dockerfile")" = cheap ]; then
+              cheap="$cheap $d"
+            fi
+          done
+
+          selected=""
+          why=""
+          if [ "$EVENT" = schedule ] || [ "$ALL" = true ]; then
+            selected="$all"
+            why="full sweep (${EVENT})"
+          else
+            case "$EVENT" in
+              pull_request) base="$BASE_SHA" ;;
+              push)         base="$BEFORE_SHA" ;;
+              *)            base="" ;;
+            esac
+
+            if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              # No usable base — a new branch, or a force-push. Build everything
+              # rather than guess: an unbuilt runner is the failure this job exists
+              # to prevent, and a slow run is the cheaper mistake.
+              selected="$all"
+              why="no usable diff base; building all"
+            else
+              changed=$(git diff --name-only "$base"...HEAD -- runners/ | cut -d/ -f2 | sort -u || true)
+              touched=""
+              for d in $changed; do
+                case " $all " in *" $d "*) touched="$touched $d" ;; esac
+              done
+              selected=$(printf '%s\n' $touched $cheap | sort -u)
+              why="changed:${touched:- none} + always:${cheap}"
+            fi
+          fi
+
+          json=$(printf '%s\n' $selected | jq -R . | jq -sc 'map(select(length > 0))')
+          echo "runners=${json}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Runner image matrix"
+            echo
+            echo "- selection: \`${why}\`"
+            echo "- building: \`${json}\`"
+            echo "- cheap tier (no emulated stage):\`${cheap}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── build the runner images ───────────────────────────────────────────────────
+  # Build only: publishing is a deliberate, separately-approved step in
+  # publish-runner.yml, and this job holds no registry credentials at all.
+  runner-images:
+    # build-test is a minute and these are hours: there is no sense spending QEMU
+    # time on a change that does not compile.
+    needs: [build-test, runner-plan]
+    if: needs.runner-plan.outputs.runners != '[]'
+    # Set the repository variable ARM64_RUNNER to `ubuntu-24.04-arm` once this
+    # repo is public: native arm64 turns these from hours into minutes.
+    runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-latest' }}
+    # Matches publish-runner.yml. A CUDA build under QEMU can run for hours, and
+    # the default 360-minute ceiling has been hit before.
+    timeout-minutes: 350
+    strategy:
+      # One broken runner must not hide the state of the other ten — the whole
+      # point of the matrix is to find out which of them build.
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(needs.runner-plan.outputs.runners) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Skipped on a native arm64 runner, where there is nothing to emulate.
       - uses: docker/setup-qemu-action@v3
+        if: runner.arch != 'ARM64'
       - uses: docker/setup-buildx-action@v3
-      - name: Build compute-smoke runner (linux/arm64, no push)
+
+      - id: started
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Build ${{ matrix.runner }} (linux/arm64, no push)
         uses: docker/build-push-action@v6
         with:
-          context: runners/compute-smoke
+          context: runners/${{ matrix.runner }}
           platforms: linux/arm64
           push: false
-          tags: ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:ci
+          # Build what gets PUBLISHED. publish-runner.yml defaults to sm_121a
+          # (GB10, no PTX fallback), and an arch target is not a detail here — a
+          # pass is meant to prove the real instruction path compiled, so a CI
+          # build at a different arch would be proving something else. Runners
+          # whose Dockerfile does not declare CUDA_ARCH ignore it.
+          build-args: |
+            CUDA_ARCH=sm_121a
+          # Scoped per runner so the eleven caches do not evict each other's
+          # layers on sight. GitHub's Actions cache is 10 GB per REPOSITORY and a
+          # CUDA build stage is multiple GB, so expect the heavy runners to miss
+          # more often than they hit; the cheap ones hit reliably. If the export
+          # cost ever exceeds the saving, dropping cache-to here is a one-line
+          # change — and going native arm64 makes the question moot.
+          #
+          # ignore-error=true because the cache is an optimisation and this job is
+          # a GATE: a full-cache or cache-service failure must not be reported as
+          # "this runner does not build", which is the one thing the job is here
+          # to answer.
+          cache-from: type=gha,scope=runner-${{ matrix.runner }}
+          cache-to: type=gha,mode=max,scope=runner-${{ matrix.runner }},ignore-error=true
+          tags: ghcr.io/baldwinspc/glimmer-burnin-${{ matrix.runner }}:ci
+
+      # Reported so the cost of this matrix is a measurement rather than an
+      # estimate, and so the decision above can be revisited from data.
+      - name: Report wall-clock
+        if: always()
+        env:
+          # Not RUNNER_* and not GITHUB_*: those prefixes are reserved by Actions
+          # and a job-level env cannot override them, so the value silently
+          # becomes the Actions runner's own.
+          KIND: ${{ matrix.runner }}
+          STARTED: ${{ steps.started.outputs.at }}
+        run: |
+          set -euo pipefail
+          secs=$(( $(date +%s) - STARTED ))
+          if [ "${RUNNER_ARCH}" = ARM64 ]; then how=native; else how=QEMU; fi
+          printf '### `%s` — %dm %02ds (linux/arm64, %s)\n' \
+            "$KIND" "$((secs / 60))" "$((secs % 60))" "$how" >> "$GITHUB_STEP_SUMMARY"

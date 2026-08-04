@@ -100,7 +100,30 @@ After changing anything in `api/v1alpha1`, run `make generate manifests` and
 `config/rbac/*`). CI checks for drift.
 
 CI (`.github/workflows/ci.yml`) runs build, vet, gofmt, test, the
-no-glimmer-import guard, and the CRD drift check.
+no-glimmer-import guard, and the CRD drift check. All of them are **blocking** —
+nothing there is informational.
+
+It also builds runner IMAGES, which for a long time it did not, and that is why
+two runners once shipped in a PR having never been built. The matrix is derived
+from the filesystem, never from a hand-written list:
+
+- on a PR or push: every runner whose **directory the change touches** (a
+  runner's Docker build context is its own directory, so nothing outside it can
+  affect the image), plus the runners with no emulated build stage, as a
+  standing smoke test;
+- **weekly**, and on `workflow_dispatch`: all of them, which is what catches a
+  base image or an apt package moving under a runner nobody edited.
+
+Build-only; publishing stays manual in `publish-runner.yml`. The split exists
+because this repo is private, so arm64 builds run under QEMU and are billed by
+the minute. When the repo goes public, set the repository variable
+`ARM64_RUNNER` to `ubuntu-24.04-arm`: the QEMU step skips itself, the builds
+become native, and the honest thing is then to build every runner on every PR.
+
+Several guards need no Docker at all and so run in `make test`:
+`runners/pins_test.go` (every upstream pinned to a commit the build asserts;
+every `FROM`'s ARG declared before the first `FROM`; every runner offered by the
+publish workflow), plus the shared-source drift guards described below.
 
 ---
 
@@ -343,6 +366,26 @@ disagree about the same hardware. One brain, two dispatchers.
 - Published tags are **immutable**. Never republish a tag a gate pins; cut a new
   version. Silently changing a tag changes every node's verdict with no audit
   trail.
+- **Every upstream is pinned to a COMMIT, and the build asserts it.** An
+  `<UPSTREAM>_REF` (a tag) is always accompanied by an `<UPSTREAM>_SHA`, and the
+  Dockerfile refuses to build when the clone is not that commit. A tag is a
+  mutable pointer; because our published image tag is immutable, a moved
+  upstream tag would change what a fleet is measured by with nothing in this
+  repo recording it. Resolve a new value with `git ls-remote <repo>
+  'refs/tags/<ref>' 'refs/tags/<ref>^{}'`, taking the peeled `^{}` value for an
+  annotated tag (DCGM's are annotated) — that is what a shallow clone leaves at
+  HEAD. `runners/pins_test.go` fails a `_REF` with no asserted `_SHA`.
+- **Sources duplicated across runners are guarded, not merely copied.** Each
+  runner is its own Docker build context and `COPY` cannot reach outside one, so
+  shared code is physically duplicated. Two contract tests make drift impossible
+  to land silently: `runners/thermal-soak/soak_contract_test.go` for the soak
+  pair (`soak_core.cuh`, `nvml_dynamic.h`, and clockprobe's subset of that
+  header), and `runners/ib-write-bw/fabric_contract_test.go` for the fabric trio.
+  The fabric table is TOTAL — every filename present in two or more of
+  ib-write-bw/nccl/gpudirect-rdma must be declared either shared (byte-identical)
+  or forked (with the reason), and a new duplicate fails until it is. nccl's
+  `memlock.go` and `rendezvous.go` are deliberate forks; a copy-paste that
+  resynced them would also fail, because a declared fork must really differ.
 - Arch targets are deliberate. `sm_121a` emits a cubin for GB10 only, with no
   PTX fallback, so a pass proves the real instruction path ran rather than an
   emulated one. Do not "helpfully" widen an arch target to make a build succeed.

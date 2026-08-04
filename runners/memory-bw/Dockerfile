@@ -38,6 +38,13 @@ FROM ${CUDA_IMAGE} AS build
 # Pinned, and pinned deliberately: a runner image is executed by a node's
 # readiness gate, so the tag a gate pins must always mean the same measurement.
 ARG NVBANDWIDTH_REF=v0.10.0
+# And a tag alone does not deliver that, because a tag can be moved. The runner
+# reports NVBANDWIDTH_REF in its own output as the provenance of every number it
+# publishes, so a moved tag would make that line a false statement about which
+# code produced the measurement. Bumping NVBANDWIDTH_REF means bumping
+# NVBANDWIDTH_SHA with it; resolve it with
+# `git ls-remote https://github.com/NVIDIA/nvbandwidth.git refs/tags/<ref>`.
+ARG NVBANDWIDTH_SHA=82fc4e8c6afa0babb8687793678f615b3b8d793e
 
 # Empty means "use nvbandwidth's own architecture list", which is what its
 # CMakeLists picks per CUDA version and which includes PTX for JIT fallback.
@@ -59,6 +66,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 -b ${NVBANDWIDTH_REF} https://github.com/NVIDIA/nvbandwidth.git /nvbandwidth
+
+RUN got="$(git -C /nvbandwidth rev-parse HEAD)"; \
+    if [ "${got}" != "${NVBANDWIDTH_SHA}" ]; then \
+      echo "refusing to build: ${NVBANDWIDTH_REF} is ${got}, expected ${NVBANDWIDTH_SHA}" >&2; \
+      exit 1; \
+    fi; \
+    echo "nvbandwidth ${NVBANDWIDTH_REF} = ${got}: OK"
 
 # Three things in this invocation are load-bearing:
 #
