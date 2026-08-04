@@ -50,13 +50,15 @@ type BurnInRunReconciler struct {
 	// cache. The manager wires it from mgr.GetAPIReader(); nil falls back to
 	// the cached client, which is what a test that does not care gets.
 	//
-	// It is used for exactly two reads, and the rule for adding a third is
-	// stated once here: a read goes uncached ONLY when a stale answer would
-	// permanently take a node away from the fleet. Those two are the run's
-	// start-time capture of prior schedulability and the release path's search
-	// for the nodes it owns. Everything else — pods, the run itself, profiles,
-	// tests — stays cached, because a stale answer there costs a wasted pass
-	// and is corrected by the next one.
+	// It is used for exactly three reads, and the rule for adding a fourth is
+	// stated once here: a read goes uncached ONLY when a stale answer would cost
+	// the fleet something a later pass cannot get back — a node permanently out
+	// of the scheduler, or hardware driven past what it was budgeted for. Those
+	// three are the run's start-time capture of prior schedulability, the
+	// release path's search for the nodes it owns, and the admission scan for
+	// runs already holding this run's targets. Everything else — pods, the run
+	// itself, profiles, tests — stays cached, because a stale answer there costs
+	// a wasted pass and is corrected by the next one.
 	//
 	// The failure this exists to prevent (issue #84): a run that cordons a node
 	// and releases it seconds later leaves the informer holding the cordoned
@@ -65,6 +67,11 @@ type BurnInRunReconciler struct {
 	// permanently out of the scheduler that nothing in the cluster knows is
 	// held. It is intermittent by construction: it needs a recent cordon on the
 	// same node, which is exactly what a back-to-back schedule produces.
+	//
+	// The admission read (issue #81) has the same shape and a heavier cost: the
+	// runs that contend are created seconds apart, so an informer that has not
+	// yet observed the first one lets the second admit itself onto hardware the
+	// first is already saturating.
 	APIReader client.Reader
 
 	// PodLogs fetches a pod's stdout — the runner's metrics channel. It is
@@ -222,6 +229,19 @@ func (r *BurnInRunReconciler) start(ctx context.Context, run *burninv1alpha1.Bur
 		return r.finalizeError(ctx, run, profileSinks(profile), resolveErr)
 	}
 
+	// ADMISSION, and it is here for a reason: after the targets are known and
+	// before the plan is pinned, which is the last moment at which the run still
+	// holds nothing — no finalizer, no cordon, no pod. A refusal from this point
+	// costs the fleet nothing to undo, and one taken any later would not.
+	//
+	// It answers the question maxConcurrentNodes cannot: not "how many nodes is
+	// THIS run driving" but "is anybody else already driving these". See
+	// admission.go.
+	admitted, res, err := r.admit(ctx, run, targets, profileSinks(profile))
+	if err != nil || !admitted {
+		return res, err
+	}
+
 	p, err := buildPlan(profile, tests, targets, maxConcurrentNodes(run))
 	if err != nil {
 		return r.finalizeError(ctx, run, profileSinks(profile), err)
@@ -233,7 +253,12 @@ func (r *BurnInRunReconciler) start(ctx context.Context, run *burninv1alpha1.Bur
 	// write before anything can cordon a node. It must never be possible to
 	// hold a node without holding the finalizer that guarantees its release.
 	controllerutil.AddFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
-	if err := r.Update(ctx, run); err != nil {
+	// updateKeepingStatus, not a bare Update: the admission decision above lives
+	// in run.Status.Conditions and has not been persisted yet, and Update
+	// refreshes the object in place from the server's response — which still
+	// holds the empty pre-start status. A bare write here would silently discard
+	// the record of why this run was allowed to take its targets.
+	if err := r.updateKeepingStatus(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
 	return r.markRunning(ctx, run, p)
@@ -243,7 +268,7 @@ func (r *BurnInRunReconciler) markRunning(ctx context.Context, run *burninv1alph
 	// Recovery path: a crash between pinning the plan and here can land on a
 	// run that never got the finalizer written.
 	if controllerutil.AddFinalizer(run, burninv1alpha1.FinalizerCordonCleanup) {
-		if err := r.Update(ctx, run); err != nil {
+		if err := r.updateKeepingStatus(ctx, run); err != nil {
 			return ctrl.Result{}, err
 		}
 	}

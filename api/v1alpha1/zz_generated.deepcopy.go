@@ -195,6 +195,11 @@ func (in *BurnInRunSpec) DeepCopyInto(out *BurnInRunSpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.Force != nil {
+		in, out := &in.Force, &out.Force
+		*out = new(bool)
+		**out = **in
+	}
 	if in.RetryOnErrorLimit != nil {
 		in, out := &in.RetryOnErrorLimit, &out.RetryOnErrorLimit
 		*out = new(int32)

@@ -133,9 +133,14 @@ func main() {
 	// It refuses to guess, and a fingerprint written where nobody looks is a
 	// verdict nobody can audit — so an unresolvable namespace is fatal here
 	// rather than silently disabling the capture.
+	//
+	// It also carries the orphaned-cordon reaper, which is why it gets the
+	// uncached reader: the reaper removes a cordon stamp on the strength of its
+	// owning run being absent, and a cache miss is not an absence.
 	if err := (&controller.NodeFingerprintReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
+		APIReader: mgr.GetAPIReader(),
 		Recorder:  mgr.GetEventRecorderFor("nodefingerprint-controller"),
 		Namespace: os.Getenv("POD_NAMESPACE"),
 	}).SetupWithManager(mgr); err != nil {

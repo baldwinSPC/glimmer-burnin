@@ -43,6 +43,15 @@ const (
 	// stacks power draw the way MaxConcurrentNodes does, so the facility
 	// interlock argument on that field applies here too, multiplied by the
 	// number of runs in flight.
+	//
+	// It is no longer the last line of defence, and that is worth knowing
+	// before choosing it: a created run whose targets DO overlap an active one
+	// is now refused at its own admission, terminally, naming the run that
+	// holds the node. So the failure mode of getting this wrong changed from
+	// "two soaks on one machine and a wrong verdict" to "a tick that produces a
+	// refused run". The refusal is loud and costs no hardware, but a schedule
+	// that keeps producing them is still misconfigured — Forbid is the answer,
+	// not spec.force on the template.
 	ConcurrencyAllow ScheduleConcurrencyPolicy = "Allow"
 )
 

@@ -54,6 +54,30 @@ implemented.
 | `NodeFingerprint` | The captured hardware/network identity (GPUs, NICs/RDMA) a verdict is bound to — and the drift detector between runs. |
 | `BurnInSink` | Where results are exported. The **only** integration seam. |
 
+## Two runs never share a node
+
+`maxConcurrentNodes` is a **facility interlock** — it bounds how many nodes one
+run drives to their power and thermal limits at once, and it defaults to 1. It
+bounds nothing *across* runs, and the cordon cannot: runner pods must tolerate
+`node.kubernetes.io/unschedulable`, because the operator cordons the node it is
+about to test, so a second run's pods schedule onto the first run's cordoned node
+without complaint. Two runs each honouring a cap of 1 on the same node are two
+full-power soaks on one machine, and each believes it is compliant.
+
+So a run whose targets overlap an already-active run is **refused at start**: a
+terminal `Error` (no hardware was judged — never a `Failed`), an `Admitted=False`
+condition with reason `TargetsBusy`, and a message naming the run that holds the
+node. Nothing is queued — a burn-in is scheduled maintenance, and silently
+waiting behind another run makes its duration unpredictable. Re-create the run
+when the first finishes, or set **`spec.force: true`** to accept the contention
+deliberately; a forced run records `Admitted=True` with reason `AdmittedByForce`,
+so a verdict measured under contention stays identifiable as one.
+
+A cordon stamp naming a `BurnInRun` that no longer exists is **reaped** from the
+node side, restoring the schedulability the stamp records. The check is an
+uncached read matching name *and* UID — a recreated run of the same name is a
+different run — so a live run's node is never released out from under it.
+
 ## Test kinds
 
 **All eleven kinds ship a runner image, and every one is published and public**

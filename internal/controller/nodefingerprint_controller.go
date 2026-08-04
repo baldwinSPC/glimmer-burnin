@@ -55,9 +55,27 @@ import (
 //     an Event and stops. Launching runs on drift is policy, and policy that
 //     saturates accelerators across a fleet is not something a hash comparison
 //     gets to trigger on its own.
+//
+// It also carries the orphaned-cordon reaper, which is not a fingerprinting
+// concern and is here for one reason: this is the only reconciler that watches
+// Nodes. A stranded cordon has to be found on a cluster where no BurnInRun is
+// reconciling — that is the definition of the state — so the sweep cannot live
+// in the run reconciler. See cordonreaper.go.
 type NodeFingerprintReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// APIReader reads straight from the apiserver, bypassing the informer
+	// cache. The manager wires it from mgr.GetAPIReader(); nil falls back to the
+	// cached client.
+	//
+	// It exists for ONE read: the reaper's check that a cordon stamp's owning
+	// run is gone. A cache miss is not an absence — an informer that has not yet
+	// observed a freshly created run reports exactly that — and reaping on it
+	// would release a node a live run is driving at full power. Nothing else
+	// here needs it; fingerprinting a stale node costs a pass and is corrected
+	// by the next one.
+	APIReader client.Reader
 
 	// Recorder emits the drift Event. Nil is tolerated (the condition is still
 	// written) so the reconciler is usable without a manager.
@@ -81,6 +99,16 @@ func (r *NodeFingerprintReconciler) now() time.Time {
 	return time.Now()
 }
 
+// uncached is the reader for the reaper's absence check. It degrades to the
+// cached client when no APIReader is wired, so a reconciler built by hand still
+// works — but the manager always wires one.
+func (r *NodeFingerprintReconciler) uncached() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 // digestSchemeVersion identifies the hashing scheme. It is part of both the
 // hash input and the stored value, so a change to what counts as salient
 // re-baselines every node instead of announcing a fleet-wide hardware change.
@@ -99,12 +127,22 @@ const serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccou
 
 // +kubebuilder:rbac:groups=burnin.glimmer.ai,resources=nodefingerprints,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=burnin.glimmer.ai,resources=nodefingerprints/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// The reaper reads the run a cordon stamp names, and edits the node to give it
+// back, so this controller needs more than the read access fingerprinting alone
+// would call for. See cordonreaper.go.
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=burnin.glimmer.ai,resources=burninruns,verbs=get;list;watch
 
 // Reconcile captures one node's identity. The request names a Node; the
 // fingerprint is derived, compared with the stored one, and written only when
 // something actually changed.
+//
+// It also reaps an orphaned burn-in cordon, and does that FIRST. The two jobs
+// are independent, and the reap must not be reachable only through a successful
+// fingerprint: a node whose fingerprint cannot be written — a name collision, a
+// rejected status update — is still a node that may be stranded, and stranded
+// capacity is the more urgent of the two.
 func (r *NodeFingerprintReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -122,9 +160,17 @@ func (r *NodeFingerprintReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// res carries the reaper's re-examination timer, which every return below
+	// has to preserve: dropping it on the way out of a fingerprint no-op would
+	// stop the only thing that ever comes back to look at a stamped node.
+	res, err := r.reapCordon(ctx, &node)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	fp, err := r.ensureFingerprint(ctx, &node)
 	if err != nil || fp == nil {
-		return ctrl.Result{}, err
+		return res, err
 	}
 
 	desired := observeNode(&node)
@@ -152,7 +198,7 @@ func (r *NodeFingerprintReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	applyDriftCondition(&desired, drift, change, fp.Generation)
 
 	if reflect.DeepEqual(*before, desired) {
-		return ctrl.Result{}, nil
+		return res, nil
 	}
 	fp.Status = desired
 	if err := r.Status().Update(ctx, fp); err != nil {
@@ -167,7 +213,7 @@ func (r *NodeFingerprintReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				"— verdicts recorded against the previous fingerprint no longer describe this node",
 				node.Name, change))
 	}
-	return ctrl.Result{}, nil
+	return res, nil
 }
 
 // ensureFingerprint returns the NodeFingerprint for a node, creating it if it
@@ -900,10 +946,22 @@ func (r *NodeFingerprintReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// nodeIdentityChanged drops the node updates that cannot change a fingerprint.
+// nodeIdentityChanged drops the node updates this controller has no use for.
 // Kubelets heartbeat every few seconds on every node in the cluster; without
 // this the controller would wake once per heartbeat per node purely to hash
 // facts that did not move.
+//
+// Create and Delete events are deliberately not filtered, so the initial list at
+// manager startup reconciles every node once. That is when a stranded cordon
+// left by a previous manager gets its first look, and it is the only pass a
+// cluster with no BurnInRuns will ever get for free.
+//
+// The cordon stamp is NOT a fingerprint input — it is this operator's own
+// bookkeeping, and salientLabels deliberately excludes everything in this
+// project's domain so a burn-in cannot make the hardware look like it drifted.
+// It is watched here anyway, because a node acquiring a stamp is what arms the
+// reaper's re-examination timer. Without it, a node stamped after its last
+// reconcile would not be looked at again until the manager's resync hours later.
 func nodeIdentityChanged() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -913,7 +971,9 @@ func nodeIdentityChanged() predicate.Predicate {
 				return true
 			}
 			return !maps.Equal(oldNode.Labels, newNode.Labels) ||
-				oldNode.Status.NodeInfo != newNode.Status.NodeInfo
+				oldNode.Status.NodeInfo != newNode.Status.NodeInfo ||
+				oldNode.Annotations[burninv1alpha1.AnnotationCordonOwner] !=
+					newNode.Annotations[burninv1alpha1.AnnotationCordonOwner]
 		},
 	}
 }

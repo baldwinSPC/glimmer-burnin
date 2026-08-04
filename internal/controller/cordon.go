@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,6 +42,34 @@ func cordonOwnerID(run *burninv1alpha1.BurnInRun) string {
 	return run.Namespace + "/" + run.Name + "/" + string(run.UID)
 }
 
+// cordonOwner is a parsed AnnotationCordonOwner value.
+type cordonOwner struct {
+	namespace string
+	name      string
+	uid       string
+}
+
+// parseCordonOwner reads a stamp back into the run it names.
+//
+// It is STRICT — exactly three non-empty segments — and that is a safety
+// property, not tidiness. The only consumer is the reaper, whose whole job is to
+// remove a stamp on the strength of its owner being provably absent, and it can
+// only prove absence of a run it can name exactly. A value that does not parse
+// is left alone: it was not written by this operator, and "I cannot read this"
+// is not evidence that the node is free.
+func parseCordonOwner(value string) (cordonOwner, bool) {
+	parts := strings.Split(value, "/")
+	if len(parts) != 3 {
+		return cordonOwner{}, false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return cordonOwner{}, false
+		}
+	}
+	return cordonOwner{namespace: parts[0], name: parts[1], uid: parts[2]}, true
+}
+
 // capturePriorSchedulability records how the run FOUND its targets, before it
 // has touched any of them. It is called once, from markRunning, and its result
 // is written to status.priorUnschedulable and never recomputed.
@@ -74,12 +103,60 @@ func (r *BurnInRunReconciler) capturePriorSchedulability(ctx context.Context, ta
 		if err := r.uncached().Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
 			continue
 		}
-		prior[name] = node.Spec.Unschedulable
+		prior[name] = preBurnInSchedulability(&node)
 	}
 	if len(prior) == 0 {
 		return nil
 	}
 	return prior
+}
+
+// preBurnInSchedulability answers "what was this node before ANY burn-in
+// touched it", which is a different and stricter question than "is it
+// unschedulable now".
+//
+// A NODE CARRYING A CORDON STAMP IS NOT IN ITS PRIOR STATE, BY DEFINITION. The
+// stamp says a burn-in put it where it is, and it comes with that run's own
+// record of how the node was found. That record — not the live spec — is the
+// node's pre-burn-in state, and copying it is the only reading that cannot
+// launder somebody's transient cordon into a permanent one.
+//
+// This is issue #80, and it is worth stating what it looked like, because the
+// bug is not in any of the code it passed through. Three runs targeted the same
+// two nodes. The first found spark-85a9 schedulable and cordoned it. The second
+// and third captured their prior state while that cordon was held, read
+// `unschedulable=true`, and recorded it as the node's PRE-EXISTING state. The
+// release path then did exactly what its bookkeeping told it — it logged
+// `restoredUnschedulable: true` — and re-asserted a cordon whose real owner had
+// already let go. The state is self-perpetuating: every overlapping run
+// re-observes the cordon and re-records prior=true, and the last one to release
+// also clears its own annotations, so the node ends unschedulable with NO stamp
+// at all. That end state is strictly worse than an orphaned stamp, because there
+// is nothing left for a reaper to key on and nothing in the operator's telemetry
+// that says the node is stranded. Half a two-node fleet, gone, silently.
+//
+// Admission (see admission.go) now stops overlapping runs from existing in the
+// first place, and this is the second line: spec.force deliberately allows the
+// overlap, and a forced run must still not be able to make another run's cordon
+// permanent.
+//
+// THE NEGATIVE MATTERS AS MUCH AS THE POSITIVE, and it is the reason this reads
+// the stamp rather than simply reporting `false` for any cordoned node. A node
+// an administrator drained, or that another controller cordoned, carries NO
+// stamp — and it must still be recorded as prior=true and left cordoned on the
+// way out. Returning a node under maintenance to service because a burn-in
+// finished is the failure this whole file's first invariant exists to prevent.
+//
+// A stamp with no accompanying prior record is treated as prior=false. The two
+// annotations are written in a single update and cannot come apart on their own,
+// so this means the pair was edited out of band — and the one thing the stamp
+// still attests is that a BURN-IN cordoned the node, never an administrator.
+// Burn-in cordons are always temporary, so the node is owed back.
+func preBurnInSchedulability(node *corev1.Node) bool {
+	if _, stamped := node.Annotations[burninv1alpha1.AnnotationCordonOwner]; stamped {
+		return node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] == burninv1alpha1.PriorUnschedulableTrue
+	}
+	return node.Spec.Unschedulable
 }
 
 // priorUnschedulable answers, for one node, what the run must restore it to.
