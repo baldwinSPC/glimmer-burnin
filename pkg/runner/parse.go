@@ -30,6 +30,7 @@
 package runner
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -56,7 +57,16 @@ const (
 	VerdictError Verdict = "Error"
 )
 
-// VerdictFor maps an exit code to its meaning.
+// VerdictFor maps an exit code to its meaning, FROM THE EXIT CODE ALONE.
+//
+// Exit 2 is the one code this is not sufficient for, and callers deciding a real
+// verdict should use Parse instead. An unrecovered Go panic — and every Go
+// runtime fatal error, including out-of-memory, concurrent map writes and stack
+// exhaustion — terminates the process with status 2. A crashed runner therefore
+// arrives here indistinguishable from one that deliberately skipped, and Skip is
+// the worst possible place for that to land: it is never retried, it does not
+// affect the run's verdict, and it reports the node as one the test did not
+// apply to. See DeclaresSkip.
 func VerdictFor(exitCode int) Verdict {
 	switch exitCode {
 	case 0:
@@ -69,6 +79,30 @@ func VerdictFor(exitCode int) Verdict {
 		return VerdictError
 	}
 }
+
+// skipMarker matches a runner's positive declaration that it skipped: an
+// upper-case token ending in _SKIP at the start of a line. Every runner in this
+// repository that can legitimately skip already prints one — FP4_GEMM_SKIP,
+// NCCL_SKIP, IB_WRITE_BW_SKIP, GPUDIRECT_RDMA_SKIP, STRESSAPPTEST_SKIP,
+// DCGM_DIAG_SKIP, MEMORY_BW_SKIP, CLOCKPROBE_SKIP — so requiring it codifies
+// what they already do rather than asking anything new of them.
+var skipMarker = regexp.MustCompile(`(?m)^[A-Z][A-Z0-9_]*_SKIP\b`)
+
+// DeclaresSkip reports whether the runner's output positively declares a skip.
+//
+// This exists because exit 2 by itself cannot be trusted. A skip is a CLAIM
+// ABOUT THE HARDWARE — "acceptance does not apply to this node" — and this
+// project's rule is that a runner may only declare what it positively
+// established. The same rule already governs the `n/a` unmeasurable sentinel,
+// where absence is likewise not a declaration.
+//
+// The camouflage this defeats is close to perfect otherwise. A panicking Go
+// runner exits 2 and, because a container log merges stdout and stderr, its
+// output is a stack trace with no key=value line at all — byte-for-byte the
+// shape of a legitimate skip, whose normal form is exactly "no metrics". The
+// stored Message becomes a stack frame like "/src/main.go:132 +0x1d", which
+// reads as nothing in particular.
+func DeclaresSkip(stdout string) bool { return skipMarker.MatchString(stdout) }
 
 // Unmeasurable is the reserved metric VALUE with which a runner declares that
 // this hardware cannot produce a measurement at all. Matched
@@ -97,6 +131,13 @@ type Result struct {
 	// are reported rather than silently dropped: a runner emitting an unusable
 	// name should be visible, not invisible.
 	InvalidNames []string
+	// UndeclaredSkip records that the runner exited 2 without declaring a skip,
+	// so Verdict is Error rather than Skip. Kept as a field rather than left
+	// implicit because the two readings send an engineer to opposite places: a
+	// real skip means "this node is out of scope", and this means "the runner
+	// died and the node is unjudged". A consumer reporting the verdict should
+	// say which it is looking at.
+	UndeclaredSkip bool
 }
 
 // IsUnmeasurable reports whether the runner declared this metric unmeasurable
@@ -257,6 +298,20 @@ func Parse(kind, stdout string, exitCode int) Result {
 		ExitCode:     exitCode,
 		Metrics:      map[string]string{},
 		Unmeasurable: map[string]bool{},
+	}
+	// A skip must be DECLARED, not merely exited. Exit 2 with nothing claiming a
+	// skip is a runner that died on the way — most often a Go panic or runtime
+	// fatal error, both of which exit 2 — and that is an Error: the hardware is
+	// unjudged, the retry budget is available, and the run does not settle
+	// Passed around a node nobody measured.
+	//
+	// It fails towards Error rather than towards Skip on purpose. Error is the
+	// recoverable mistake — a runner that skips honestly but forgets the marker
+	// is reported as unjudged and retried, which is visible and cheap. The
+	// opposite mistake certifies a fleet nobody looked at.
+	if exitCode == 2 && !DeclaresSkip(stdout) {
+		res.Verdict = VerdictError
+		res.UndeclaredSkip = true
 	}
 	kindAliases := aliases[kind]
 
