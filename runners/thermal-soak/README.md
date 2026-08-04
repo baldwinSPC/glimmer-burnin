@@ -374,10 +374,22 @@ being latched for NVML to report.
 
 Point 3 is the one to carry away: **on this hardware `sustainedClockPct` is a
 backstop, not the thermal verdict.** The verdict is `throttleEvents`. The floor
-exists to catch a part wedged far below its class — a power-delivery wedge on
-this platform lands in the 30–50 % range, see [`../clockprobe`](../clockprobe) —
-not to grade performance. 60 splits the gap: ten points below the measured
-69.9 % asymptote, ten points above the wedge ceiling.
+exists to catch a part wedged far below its class, not to grade performance.
+
+**60 is derived from the measured side alone:** ten points of headroom under the
+69.9 % asymptote in the table above. The wedge is *not* an input to it. No
+power-delivery-wedged part has ever been put through this runner
+([#61](https://github.com/baldwinSPC/glimmer-burnin/issues/61)) — this project
+**estimates** a wedged GB10 sits near **20 %** of rated boost, from a researched
+pin point of ~611 MHz against the 3003 MHz rated boost this fleet reports
+(611/3003 = 20.3 %), which agrees in order of magnitude with GEP-0178's
+independent "~4× slow while reporting 96 % utilization". Earlier revisions of
+this file said 30–50 % and described 60 as "ten points above the wedge ceiling";
+that figure had no derivation behind it, so the gap it appeared to split was not
+real. What the estimate does support is only the weak claim that the floor
+clears a wedge comfortably: a part at 20 % misses this floor by forty points,
+and would have missed it under the discarded figure too. Do not tighten the
+floor towards a wedge estimate — measure one first.
 
 This was not theoretical. The default shipped in the first draft of this runner
 was 75, chosen from the 25-second measurement, and the 600-second calibration run

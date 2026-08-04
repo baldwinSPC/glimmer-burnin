@@ -26,9 +26,11 @@
 //
 // thermal-soak is the EXCEPTION and this runner does not claim otherwise: it
 // applies its own sustained-clock floor (THERMAL_SOAK_MIN_CLOCK_PCT, default 60%
-// of rated boost) and fails below it, and that floor was calibrated against this
-// exact failure mode — a wedge on GB10 lands in the 30-50% range. A wedged part
-// put through a soak should fail the soak.
+// of rated boost) and fails below it. That floor sits ten points under the
+// MEASURED 69.9% asymptote of a healthy part rather than being calibrated
+// against a wedge, but this project's ESTIMATE of where a wedge lands — near 20%
+// of rated boost, see the NOT VERIFIED note below — is far enough under it that
+// a wedged part put through a soak should fail the soak.
 //
 // What this probe adds is COST and ATTRIBUTION, not exclusive coverage. It
 // defaults to 60 seconds against the soak's 900, which is the difference between
@@ -40,7 +42,12 @@
 //
 // NOT VERIFIED: that thermal-soak fires on a genuinely wedged part is inferred
 // from reading thermal_soak.cu, not observed. No wedged Spark was available to
-// run either test against.
+// run either test against, and WHERE A WEDGE LANDS HAS NEVER BEEN MEASURED HERE.
+// The 20% figure is an estimate: a researched pin point of ~611 MHz over the
+// 3003 MHz rated boost this fleet reports (611/3003 = 20.3%), agreeing in order
+// of magnitude with GEP-0178's independent "~4x slow at 96% reported
+// utilization". Do not tighten any threshold on the strength of it. Tracked as
+// issue #61.
 //
 // HOW IT WORKS
 // ------------

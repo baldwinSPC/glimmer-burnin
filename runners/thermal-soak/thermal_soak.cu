@@ -88,10 +88,22 @@ const soak::Keys kKeys = {
 //
 // Point 3 is why this floor is a BACKSTOP and not the thermal verdict. The
 // verdict is throttleEvents; the floor exists to catch a part wedged far below
-// its class (a power-delivery wedge on this platform lands in the 30-50% range;
-// see runners/clockprobe), not to grade performance. 60 splits the gap: ten
-// points below the measured 69.9% asymptote, ten points above the wedge
-// ceiling.
+// its class, not to grade performance.
+//
+// 60 is derived from the MEASURED side ALONE: ten points of headroom under the
+// 69.9% asymptote in the table above, which is what this fleet actually
+// produced. The wedge is NOT a calibration input for it, because no wedged part
+// has ever been measured — see issue #61. This project ESTIMATES that a
+// PD-wedged GB10 sits near 20% of rated boost, from a researched pin point of
+// ~611 MHz against the 3003 MHz rated boost this fleet reports (611/3003 =
+// 20.3%), which agrees in order of magnitude with GEP-0178's independent "~4x
+// slow while reporting 96% utilization". An earlier revision of this comment
+// said 30-50% and called 60 "ten points above the wedge ceiling"; that figure
+// had no derivation behind it and the arithmetic it justified was never real.
+// All the estimate supports is the weak claim that the floor clears a wedge
+// with room to spare — at 20% a part misses this floor by forty points, and it
+// would still miss it under the discarded 30-50% figure. Do not tighten this
+// number towards a wedge estimate; measure one first.
 //
 // A gate that fires on everything is worse than no gate, because it gets
 // disabled — and then it is not watching when something really does wedge.

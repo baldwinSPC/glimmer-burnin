@@ -73,9 +73,17 @@ spec:
     #
     # Critically, all of that happens with zero throttle reasons reported, so
     # throttleEvents below is the real thermal verdict and this gate is a
-    # WEDGE BACKSTOP, not a performance gate. A GB10 pinned by the USB-C
-    # Power-Delivery fault sits near 20% — nowhere near 70 — so a floor set for
-    # the wedge does not need to be tight against normal decay.
+    # WEDGE BACKSTOP, not a performance gate.
+    #
+    # 70 is set by the healthy-hardware measurement above and by nothing else.
+    # Where a wedged part actually sits is NOT measured: this project ESTIMATES
+    # near 20% of rated boost, from a researched pin point of ~611 MHz over the
+    # measured 3003 MHz rated boost (611/3003 = 20.3%), which agrees in order of
+    # magnitude with GEP-0178's independent "~4x slow at 96% utilization" but has
+    # never been confirmed against wedged silicon (issue #61). Treat it as the
+    # reason this gate has slack rather than as a calibration input — if the
+    # estimate is optimistic the gate still fires, and if you tighten toward it
+    # you are trading healthy nodes for a number nobody took.
     - metric: sustainedClockPct
       comparison: GreaterThanOrEqual
       value: "70"
