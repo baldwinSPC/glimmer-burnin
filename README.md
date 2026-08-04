@@ -56,21 +56,47 @@ implemented.
 
 ## Test kinds
 
-Node scope, with a runner in this repo:
+**All eleven kinds ship a runner image, and every one is published and public**
+under `ghcr.io/baldwinspc/glimmer-burnin-<kind>:v0.2.0`. A test that names no
+`spec.runner.image` gets the built-in default for its kind; `spec.runner.image`
+overrides it, which is the seam new hardware arrives through.
 
-| Kind | What it gates | Runner |
-|------|---------------|--------|
-| `compute-smoke` | Arch-correct FP4 kernel; `nonfiniteCount` | [`runners/compute-smoke`](./runners/compute-smoke) |
-| `clockprobe` | Sustained clocks under load — catches a part pinned in a low P-state that every health check calls healthy | [`runners/clockprobe`](./runners/clockprobe) |
-| `dcgm-diag` | NVIDIA DCGM diagnostics; XIDs, remapped rows, PCIe replays | [`runners/dcgm-diag`](./runners/dcgm-diag) |
-| `host-health` | Passive host/driver fault counters over the window | [`runners/host-health`](./runners/host-health) |
-| `memory-bw` | Device, H2D, D2H and D2D bandwidth | [`runners/memory-bw`](./runners/memory-bw) |
-| `memory-stress` | Host DIMM stress via stressapptest (Apache-2.0) | [`runners/memory-stress`](./runners/memory-stress) |
+| Kind | Scope | What it gates | Built on |
+|------|-------|---------------|----------|
+| `compute-smoke` | Node | Arch-correct FP4 block-scaled GEMM against a host reference; `nonfiniteCount` | NVIDIA CUTLASS (BSD-3, header-only) |
+| `clockprobe` | Node | Sustained clock under load — catches a part pinned in a low P-state that every health check calls healthy | ours |
+| `thermal-soak` | Node | Clock and temperature over a long duration, sampled throughout | ours |
+| `gpu-burn` | Node | Correctness under sustained load: same arithmetic, same answer, for hours | ours (see below) |
+| `memory-bw` | Node | Host-to-device, device-to-host and on-device copy bandwidth | NVIDIA nvbandwidth (Apache-2.0) |
+| `memory-stress` | Node | Host DIMM stress | stressapptest (Apache-2.0) |
+| `host-health` | Node | Passive host/driver fault counters over the window; ECC, Xid, PCIe replays | ours (Go stdlib) |
+| `dcgm-diag` | Node | NVIDIA DCGM diagnostics | wrapper only — **DCGM is not shipped**, see below |
+| `ib-write-bw` | **Pair** | RDMA write bandwidth and latency across the link | linux-rdma/perftest (**BSD-2 option**) |
+| `nccl` | **Pair** | Collective bus bandwidth and miscompares | nccl-tests + NCCL (BSD-3) |
+| `gpudirect-rdma` | **Pair** | NIC-to-GPU peer-memory path | linux-rdma/perftest (**BSD-2 option**) |
 
-Kinds the parser understands but that ship **no** runner here — `gpu-burn`,
-`thermal-soak`, `nccl`, `ib-write-bw`, `gpudirect-rdma` — require an explicit
-`spec.runner.image`, and say so at plan time rather than pull-failing per node.
 `custom` is any image honouring the runner contract, with no built-in parsing.
+
+Two of these carry a caveat worth reading before you rely on them:
+
+- **`dcgm-diag` ships no DCGM.** Every DCGM *binary* package carries the NVIDIA
+  DCGM License — §2(c) forbids distribution — even though the source is
+  Apache-2.0. The image is our wrapper alone; the site mounts DCGM at
+  `/usr/local/dcgm`. Without that mount the runner reports **Error**, not Fail:
+  the hardware was never judged.
+- **`gpu-burn` contains no code from [wilicc/gpu-burn](https://github.com/wilicc/gpu-burn).**
+  Its licence is fine (BSD-2); what it *links* is not. Its numeric core is
+  cuBLAS, and cuBLAS is a CUDA **toolkit** library, so the Container Toolkit
+  does not inject it the way it injects `libcuda.so.1` — a working image would
+  have to redistribute `libcublas`. The method is the value here (run a large
+  GEMM repeatedly, compare each result against the first, count elements that
+  differ), so this is a self-contained SGEMM instead. It shares its kernel with
+  `thermal-soak`, which makes the two kinds' throughput figures the same
+  measurement rather than two different numbers under one metric name.
+
+Full provenance and per-image licence assertions are in [NOTICE](./NOTICE);
+each runner's Dockerfile fails the build if a shipped binary references an
+NVIDIA redistributable.
 
 ## Heterogeneity
 
@@ -169,18 +195,40 @@ Working end to end for **Node-scope and Pair-scope** tests: CRDs, manager, run
 reconciler (pinned plan, wave cordoning, concurrency interlock, repeats,
 error-retry, checkpointing, two-pod Pair rendezvous), schedule and fingerprint
 reconcilers, threshold evaluation, and sink delivery over webhook / ConfigMap /
-Prometheus.
+Prometheus. All eleven runner images are published and public.
 
-Not done: Group scope is recorded as `Error` rather than executed (see
-[Scope](#scope-what-runs-today)). No `nccl` or `ib-write-bw` runner image ships
-in this repo yet, so a Pair test must name its own `spec.runner.image`.
+### Qualified on hardware, not only in CI
 
-**Runner images: only `compute-smoke:v0.1.0` is published.** The other five
-runners have source, Dockerfiles and tests in this repo, and
-`internal/controller/pods.go` names the tags they *will* be published under, but
-those tags are not in the registry yet. Until they are pushed by the manual
-`publish-runner` workflow, use an explicit `spec.runner.image` — otherwise the
-pod pull-fails and the run reports an infrastructure Error for that node.
+Two NVIDIA DGX Sparks (GB10, `sm_121`), Kubernetes v1.32.0, ConnectX-7 over
+200G RoCE. Node-scope: **10/10 passed** across both nodes. Pair-scope:
+`ib-write-bw` 99.61 Gb/s at 1.56 µs, `nccl` 12.02 GB/s bus bandwidth with zero
+miscompares, `gpudirect-rdma` correctly **Skipped** (GB10 exposes no
+peer-memory provider).
+
+That exercise is also where most of this design's sharp edges came from. **Every
+acceptance threshold that had been derived from a spec sheet rather than
+measured was wrong**, and most of them would have failed healthy hardware — a
+`busBandwidthGBs >= 20` gate is 160 Gb/s, arithmetically impossible over a
+~100 Gb/s link. The convention that came out of it, and the one to copy: **ship
+thresholdless, gather fleet baselines, then pin.** The sample profiles carry
+their measurements in comments next to each number so a reader can see what the
+gate is made of.
+
+### Known limitations
+
+- **Group scope is not implemented** and settles as an honest `Error` — never a
+  silent pass. See [Scope](#scope-what-runs-today).
+- **The `v0.2.0` runner tags are `linux/arm64` only.** Published tags are
+  immutable, so multi-arch begins at the next tag; until then an x86 fleet must
+  build its own and set `spec.runner.image`.
+- **Fabric tests need a node-level `RLIMIT_MEMLOCK` raise.** containerd ships an
+  8 MiB limit that RDMA registration lands exactly on. See
+  [the prerequisite section](#cluster-prerequisite-for-the-fabric-tests) — the
+  failure does not name its own cause.
+- **`dcgm-diag` needs the site to mount DCGM**, for the licensing reason above.
+- **`thermal-soak`'s power-delivery-wedge detection is inferred from source, not
+  observed** — no wedged part was available to test against. Tracked in
+  [#61](https://github.com/baldwinSPC/glimmer-burnin/issues/61).
 
 ## License
 

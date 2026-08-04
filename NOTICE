@@ -91,6 +91,26 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
       standard library (BSD-3-Clause).
 
+  runners/thermal-soak, runners/gpu-burn
+    - no third-party component. Both images are built entirely from this
+      project's own Apache-2.0 source (thermal_soak.cu / gpu_burn.cu over a
+      shared soak_core.cuh), reaching NVML by dlopen against the driver's
+      libnvidia-ml.so.1 at runtime, with no NVIDIA header vendored.
+
+      Stated explicitly rather than omitted, because "gpu-burn" is the name of
+      an existing project and the absence of an entry here would otherwise look
+      like an oversight. This image contains NO code from wilicc/gpu-burn. That
+      project's own licence is BSD-2-Clause and would have been acceptable; the
+      obstacle is what it links. Its numeric core is cuBLAS, which is covered by
+      the NVIDIA CUDA EULA and is a TOOLKIT library rather than a driver
+      library — the NVIDIA Container Toolkit injects libcuda.so.1 and
+      libnvidia-ml.so.1 from the host, and does not inject libcublas. Shipping a
+      working cuBLAS-based image would therefore mean redistributing an NVIDIA
+      redistributable, which the runner-image rule in CLAUDE.md forbids. The
+      kernel here is an independently written SGEMM; only the METHOD (repeat a
+      large GEMM, compare each result against the first, count differing
+      elements) is common, and a method is not a copyrightable work.
+
 linux-rdma/perftest
   Copyright (c) 2005-2023 Mellanox Technologies Ltd. and contributors.
   Dual-licensed: GPL-2.0-only OR BSD-2-Clause (the "OpenIB.org BSD license").
