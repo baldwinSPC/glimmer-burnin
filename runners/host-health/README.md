@@ -356,8 +356,10 @@ Build args: `GO_IMAGE` (default `golang:1.24`), `BASE_IMAGE` (default
 `gcr.io/distroless/cc-debian13`).
 
 The binary is pure Go with `CGO_ENABLED=0`, cross-compiled from
-`$BUILDPLATFORM`, so `linux/arm64` builds natively on an amd64 runner — no QEMU,
-unlike the compute-smoke runner.
+`$BUILDPLATFORM`, so **both** `linux/amd64` and `linux/arm64` build natively on
+whichever runner CI is on — no QEMU on either platform, unlike the compute-smoke
+runner. The image is published as a manifest list covering both. This runner
+compiles no device code, so it has no GPU-architecture axis at all.
 
 The build **fails** unless the binary is statically linked and neither its `ldd`
 output nor its own bytes mention `libcuda*`, `libcudart*` or `libnv*`. Scanning

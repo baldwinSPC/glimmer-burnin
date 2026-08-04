@@ -27,8 +27,10 @@ ARG BASE_IMAGE=gcr.io/distroless/cc-debian13
 
 # ── build ─────────────────────────────────────────────────────────────────────
 # BUILDPLATFORM + GOOS/GOARCH: this is a pure-Go binary, so cross-compiling is
-# free and the arm64 image builds natively on an amd64 runner.  No QEMU, unlike
-# the compute-smoke runner.
+# free and BOTH the amd64 and the arm64 image build natively on whichever runner
+# CI happens to be on.  No QEMU on either platform, unlike the compute-smoke
+# runner — which is why this runner is in CI's cheap tier and multi-arch here
+# costs nothing at all.
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 ARG TARGETOS
 ARG TARGETARCH

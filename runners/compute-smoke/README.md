@@ -232,6 +232,47 @@ testable without a GPU. `arch_match_test.cc` covers the classification, the
 message, and the property that matters most — that no failure it describes ever
 returns exit 1 — and `runners/cxxtests_test.go` compiles and runs it under
 `make test`, with no Docker and no CUDA toolchain.
+### Host architecture and GPU architecture are orthogonal
+
+They are two different questions and conflating them produces images nobody can
+use. The image ships as a manifest list for **both** host architectures:
+
+| axis | values | what it selects |
+|---|---|---|
+| host (CPU) | `linux/amd64`, `linux/arm64` | the machine the container runs on |
+| GPU | `CUDA_ARCH` | the cubin nvcc emits |
+
+`CUDA_ARCH` therefore defaults **per host platform**, and both defaults are `a`
+targets with no PTX fallback, so the proof this runner offers is unchanged:
+
+| host | default `CUDA_ARCH` | CC | parts |
+|---|---|---|---|
+| `linux/arm64` | `sm_121a` | 12.1 | GB10 / DGX Spark |
+| `linux/amd64` | `sm_120a` | 12.0 | RTX PRO 6000 Blackwell, RTX 5090, the other x86 SM120 parts |
+
+An `sm_121a` amd64 image would be dead weight: CC 12.1 is GB10, GB10 is a Grace
+part, and there is no x86 host with one. The amd64 default is a **different**
+arch, not a widened one.
+
+Passing `CUDA_ARCH` explicitly applies it to **both** platforms; the
+`publish-runner` workflow's `default` choice is what selects the table above.
+
+### What this runner still cannot do on x86, and why it is not a CPU problem
+
+The kernel is CUTLASS `arch::Sm120` block-scaled NVFP4. It exists for CC 12.x
+and nothing else. So:
+
+| x86 host with… | result |
+|---|---|
+| RTX PRO 6000 Blackwell, RTX 5090 (CC 12.0) | **works** with the amd64 default |
+| H100, H200, A100, L40S (CC 9.0 / 8.x) | **Skip**, exit 2 — out of scope for NVFP4 |
+| B200, B300 (CC 10.0/10.3) | **Skip**, exit 2 — SM10x uses `tcgen05.mma` with TMEM accumulation, a different instruction path that needs its own runner |
+
+None of those is a hardware `Fail`. Building the image for `linux/amd64` does not
+and cannot fix them: they are GPU-architecture limits, and the fix is a **second
+runner** for SM10x (tracked as issue #10), not PTX in this one. Adding a PTX
+fallback here would let a JIT'd or emulated path produce a passing result without
+the FP4 units ever running, which destroys the only claim this test makes.
 
 > **Image tags.** The published `v0.1.0` image predates this fix and reports all
 > of the above as exit 1. Published tags are immutable and it is not being
@@ -304,8 +345,15 @@ docker build -t glimmer-burnin-compute-smoke:dev .
 ```
 
 Build args: `CUDA_IMAGE`, `CUTLASS_REF` (default `v4.6.1`), `CUTLASS_SHA`,
-`CUDA_ARCH` (default `sm_121a`; use `sm_120f` for one binary covering CC 12.0 +
-12.1).
+`CUDA_ARCH` (default *per host platform* — `sm_121a` on arm64, `sm_120a` on
+amd64; use `sm_120f` for one binary covering CC 12.0 + 12.1). See
+[Host architecture and GPU architecture are orthogonal](#host-architecture-and-gpu-architecture-are-orthogonal).
+
+The image is built for `linux/amd64` and `linux/arm64`:
+
+```sh
+docker buildx build --platform linux/amd64,linux/arm64 -t glimmer-burnin-compute-smoke:dev .
+```
 
 The build **asserts the upstream commit**: a tag can be moved, and here CUTLASS
 is the kernel itself, so a moved tag would change what every node was accepted

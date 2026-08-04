@@ -222,6 +222,14 @@ supports `sm_121`. (perftest uses only the CUDA driver API and launches no
 kernel, so no gencode is involved and a binary built against 12.9 headers runs
 fine on the 580.x driver.)
 
+**Host architecture.** The image is published as a manifest list for
+`linux/amd64` and `linux/arm64`. Because no gencode is involved, this runner has
+**no GPU-architecture axis at all** — one image works against any NVIDIA
+accelerator whose driver supports the peer-memory path, on either host
+architecture. The `publish-runner` workflow's `cuda_arch` input is ignored here.
+Only the perftest stage is emulated when cross-building; the Go wrapper is
+`--platform=$BUILDPLATFORM`.
+
 ## Verified on
 
 Two DGX Sparks (NVIDIA GB10, aarch64, driver 580.82.09) with ConnectX-7 over RoCE

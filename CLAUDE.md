@@ -562,9 +562,37 @@ disagree about the same hardware. One brain, two dispatchers.
   or forked (with the reason), and a new duplicate fails until it is. nccl's
   `memlock.go` and `rendezvous.go` are deliberate forks; a copy-paste that
   resynced them would also fail, because a declared fork must really differ.
+- **CPU architecture and GPU architecture are ORTHOGONAL, and conflating them
+  produces images nobody can use.** `linux/amd64` vs `linux/arm64` is the HOST
+  the container runs on; `sm_121a` / `sm_90` / `sm_100` is the GPU gencode. An
+  x86 host with an H100 needs `linux/amd64` AND `sm_90`; an amd64 image
+  containing only `sm_121a` device code helps nobody, because CC 12.1 is GB10,
+  GB10 is a Grace part, and there is no x86 host with one. Every runner image
+  and the operator image are built `linux/amd64,linux/arm64` in both `ci.yml`
+  and `publish-runner.yml`; amd64 is NATIVE on GitHub's hosted runners and is
+  the cheap half of that matrix, arm64 is the QEMU half. Where the gencode
+  cannot be one value for both hosts it defaults PER TARGET PLATFORM inside the
+  Dockerfile (an empty `CUDA_ARCH` selects that default; an explicit value
+  applies to both platforms) — `compute-smoke` arm64 `sm_121a` / amd64
+  `sm_120a`, `nccl` arm64 `sm_121` / amd64 `sm_90`.
 - Arch targets are deliberate. `sm_121a` emits a cubin for GB10 only, with no
   PTX fallback, so a pass proves the real instruction path ran rather than an
   emulated one. Do not "helpfully" widen an arch target to make a build succeed.
+  The amd64 default for that runner is `sm_120a` — a DIFFERENT arch, also with
+  no PTX fallback, not a widened one. Where a runner's claim does not depend on
+  which instructions ran (the soak family: `clockprobe`, `thermal-soak`,
+  `gpu-burn`) it compiles a list of real cubins instead, and that list must
+  cover the parts x86 fleets actually run: `sm_80` (A100 through L40S, by
+  minor-version binary compatibility), `sm_90` (H100/H200), `sm_100`
+  (B200/B300/GB200), `sm_120`, `sm_121`, plus PTX. Note that PTX only JITs
+  UPWARD — `compute_121` PTX cannot rescue a CC 10.x part, which is why
+  `sm_100` has to be an explicit cubin.
+- **A runner may honestly require a gencode parameter, and saying so is better
+  than guessing.** `nccl` builds ONE gencode on purpose (the prebuilt libnccl
+  carrying them all is 411 MB, paid by every node on every readiness gate), so
+  an x86 B200 fleet must rebuild with `--build-arg NCCL_GENCODE=…`. Make that
+  parameter obvious in the Dockerfile, the README and the workflow input rather
+  than papering over it with a default that silently measures nothing.
 - **A wrong arch does not reliably announce itself, so do not wait for the
   launch to tell you.** `cudaErrorNoKernelImageForDevice` fires only when the
   loader refuses outright — an `sm_121a` cubin on a CC 12.0 part. The other

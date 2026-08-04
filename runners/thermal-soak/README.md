@@ -447,8 +447,21 @@ docker build -t ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:vX.Y.Z runners/th
 Build args: `CUDA_IMAGE` (default `nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04`)
 and `CUDA_ARCH_FLAGS`.
 
-The default arch list ships real cubins for sm_80 / sm_90 / sm_120 / sm_121 plus
-a PTX fallback — deliberately wider than `compute-smoke`'s single `sm_121a`
+**Host architecture is a separate axis from GPU architecture.** The image is
+published as a manifest list for `linux/amd64` **and** `linux/arm64`; the gencode
+list below is the same on both, because an `sm_90` cubin is the same device code
+whether the host is x86 or Grace.
+
+The default arch list ships real cubins for sm_80 / sm_90 / **sm_100** / sm_120 /
+sm_121 plus a PTX fallback. With CUDA's minor-version binary compatibility (a
+cubin for CC X.Y runs on CC X.Z where Z ≥ Y) that covers A100/A10/L40S (`sm_80`),
+H100/H200/GH200 (`sm_90`), B200/B300/GB200/GB300 (`sm_100`), RTX PRO 6000
+Blackwell (`sm_120`) and GB10 (`sm_121`). `sm_100` was the one gap that mattered
+for x86 adopters: `compute_121` PTX cannot JIT **down** onto CC 10.x, so before
+it a B200 had no code in this image at all, and a soak that cannot launch on the
+part it was sent to is an `Error` on every node of a Blackwell fleet.
+
+The list is deliberately wider than `compute-smoke`'s single `sm_121a`
 target. `compute-smoke` pins one arch with no fallback because its claim is "the
 real block-scaled FP4 instruction path executed", so the narrow target IS the
 proof. A soak claims something else: that the part held its clock and kept

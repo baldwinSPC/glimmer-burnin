@@ -42,19 +42,44 @@ ARG RUNTIME_IMAGE=ubuntu:24.04
 # ── NCCL, from source ─────────────────────────────────────────────────────────
 FROM ${CUDA_IMAGE} AS nccl-build
 
+# BuildKit supplies this; it must still be declared to be visible in the stage.
+ARG TARGETARCH
+
 ARG NCCL_REPO=https://github.com/NVIDIA/nccl.git
 ARG NCCL_REF=v2.27.7-1
 # A tag is not an identity: it can be moved.  Bumping NCCL_REF means bumping
 # NCCL_SHA with it.
 ARG NCCL_SHA=593de54e52679b51428571c13271e2ea9f91b1b1
 
-# THE ARCH TARGET IS DELIBERATE.  sm_121 is GB10 (DGX Spark), the hardware this
-# runner was verified on.  Widening it is a real decision with a real cost — each
-# additional architecture multiplies NCCL's device-code build time and the size
-# of every node's image pull — so a fleet on different silicon should REBUILD
-# with its own gencode rather than this defaulting to "everything".  Overriding
-# it is a one-line --build-arg; guessing on a fleet's behalf is not.
-ARG NCCL_GENCODE=-gencode=arch=compute_121,code=sm_121
+# THE ARCH TARGET IS DELIBERATE, AND IT IS A DIFFERENT AXIS FROM TARGETARCH.
+#
+# TARGETARCH is the HOST (linux/amd64 vs linux/arm64).  NCCL_GENCODE is the GPU.
+# A single gencode is deliberate: each additional architecture multiplies NCCL's
+# device-code build time and the size of every node's image pull, and the
+# prebuilt libnccl that carries them all is 411 MB.  So the default is ONE part
+# per host architecture, chosen as the part that architecture is actually
+# deployed with:
+#
+#   arm64 → compute_121/sm_121   GB10 / DGX Spark, the hardware this runner was
+#                                verified on
+#   amd64 → compute_90/sm_90     H100 / H200, the dominant x86 multi-node NCCL
+#                                part.  Also covers CC 9.x by minor-version
+#                                binary compatibility.
+#
+# THIS IS THE RUNNER WHERE "USABLE ON x86" MEANS "USABLE WITH A GENCODE THAT
+# MATCHES YOUR GPU".  An x86 fleet on B200 (sm_100), L40S (sm_89) or A100
+# (sm_80) must REBUILD with its own value — there is no PTX fallback in a single
+# `code=sm_XX` target, so NCCL will simply have no kernel for the part.  That is
+# a one-line --build-arg:
+#
+#   docker build --build-arg NCCL_GENCODE=-gencode=arch=compute_100,code=sm_100 .
+#
+# Guessing "everything" on a fleet's behalf is the alternative, and it costs
+# every node in every fleet a 400 MB pull to avoid one build argument.
+#
+# Empty means "this platform's default"; any other value is used verbatim on
+# every platform.  Set the harness's CUDA_ARCH to match when you override this.
+ARG NCCL_GENCODE=
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git make g++ python3 \
@@ -79,19 +104,38 @@ RUN set -e; \
     grep -qi "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS" LICENSE.txt; \
     echo "NCCL ${NCCL_REF} is BSD-3-Clause: OK"
 
-RUN make -j"$(nproc)" src.build NVCC_GENCODE="${NCCL_GENCODE}" \
+# The per-platform default is resolved here rather than in the ARG, because an
+# ARG default cannot branch on TARGETARCH.
+RUN set -eu; \
+    gencode="${NCCL_GENCODE:-}"; \
+    if [ -z "${gencode}" ]; then \
+      case "${TARGETARCH}" in \
+        arm64) gencode="-gencode=arch=compute_121,code=sm_121" ;; \
+        amd64) gencode="-gencode=arch=compute_90,code=sm_90" ;; \
+        *) echo "nccl: no default gencode for TARGETARCH='${TARGETARCH}'." >&2; \
+           echo "  Pass --build-arg NCCL_GENCODE=-gencode=arch=compute_XX,code=sm_XX." >&2; \
+           exit 1 ;; \
+      esac; \
+    fi; \
+    echo "nccl: TARGETARCH=${TARGETARCH} -> NVCC_GENCODE=${gencode}"; \
+    make -j"$(nproc)" src.build NVCC_GENCODE="${gencode}" \
     && ls -l /nccl/build/lib/
 
 # ── the harness: nccl_pair ────────────────────────────────────────────────────
 FROM ${CUDA_IMAGE} AS harness-build
 
+ARG TARGETARCH
 ARG NCCL_REF=v2.27.7-1
 # sm_121a would emit a cubin for GB10 with no PTX fallback.  This harness is NOT
 # the place for that: it launches no kernel of its own — every kernel it runs is
 # NCCL's — so an "a" target here would constrain the wrapper without proving
 # anything about the instruction path.  compute-smoke is where that argument
 # belongs.
-ARG CUDA_ARCH=sm_121
+#
+# The default MIRRORS NCCL_GENCODE above (arm64 → sm_121, amd64 → sm_90), because
+# a harness compiled for a part NCCL has no kernels for is an image that cannot
+# run anywhere.  Override BOTH together or neither.
+ARG CUDA_ARCH=
 
 RUN apt-get update && apt-get install -y --no-install-recommends g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -109,8 +153,18 @@ COPY nccl_pair.cu /src/nccl_pair.cu
 #
 # -static-libstdc++/-static-libgcc are host-compiler flags and MUST go through
 # -Xcompiler; passed bare, nvcc fails outright.
-RUN mkdir -p /out && /usr/local/cuda/bin/nvcc \
-      -std=c++17 -O3 -arch=${CUDA_ARCH} \
+RUN set -eu; \
+    arch="${CUDA_ARCH:-}"; \
+    if [ -z "${arch}" ]; then \
+      case "${TARGETARCH}" in \
+        arm64) arch=sm_121 ;; \
+        amd64) arch=sm_90 ;; \
+        *) echo "nccl: no default CUDA_ARCH for TARGETARCH='${TARGETARCH}'." >&2; exit 1 ;; \
+      esac; \
+    fi; \
+    echo "nccl harness: TARGETARCH=${TARGETARCH} -> CUDA_ARCH=${arch}"; \
+    mkdir -p /out && /usr/local/cuda/bin/nvcc \
+      -std=c++17 -O3 -arch="${arch}" \
       -I /opt/nccl/include \
       -cudart static \
       -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc \

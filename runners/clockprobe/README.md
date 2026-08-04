@@ -377,8 +377,41 @@ docker build -t glimmer-burnin-clockprobe:dev .
 
 Build args: `CUDA_IMAGE`, `CUDA_ARCH_FLAGS`.
 
-The default `CUDA_ARCH_FLAGS` builds real cubins for sm_80, sm_90, sm_120 and
-sm_121 plus a compute_121 PTX fallback. That is a **deliberate** contrast with
+### Host architecture vs GPU architecture
+
+These are two different axes and the image is published on both:
+
+| axis | value | what it selects |
+|---|---|---|
+| host (CPU) | `linux/amd64` **and** `linux/arm64` | the machine the container runs on |
+| GPU | `CUDA_ARCH_FLAGS` | the device code nvcc emits |
+
+The image is a manifest list covering both host architectures, so an x86 node
+and a Grace node pull the same tag. Nothing about the gencode list changes
+between them — an `sm_90` cubin is the same device code either way.
+
+### The gencode list
+
+The default `CUDA_ARCH_FLAGS` builds real cubins for sm_80, sm_90, **sm_100**,
+sm_120 and sm_121 plus a compute_121 PTX fallback. With CUDA's minor-version
+binary compatibility (a cubin for CC X.Y runs on CC X.Z where Z ≥ Y) that covers:
+
+| cubin | compute capability | parts |
+|---|---|---|
+| `sm_80` | 8.0 – 8.9 | A100, A10/A40, L4/L40S |
+| `sm_90` | 9.0 | H100, H200, GH200 |
+| `sm_100` | 10.0 – 10.x | B200, B300, GB200, GB300 |
+| `sm_120` | 12.0 | RTX PRO 6000 Blackwell, RTX 50xx |
+| `sm_121` | 12.1 | GB10 / DGX Spark |
+| PTX | ≥ 12.1 | JIT fallback for anything newer |
+
+`sm_100` was the one gap that mattered for x86 adopters: `compute_121` PTX
+cannot JIT **down** onto CC 10.x, so before it a B200 had no code in this image
+at all. An L40S (CC 8.9) runs the `sm_80` cubin rather than an `sm_89`-tuned
+one, which is fine here — the measurands are achieved clock and FFMA throughput,
+and a fleet declares its own thresholds against its own baseline.
+
+That list is a **deliberate** contrast with
 `compute-smoke`, which pins `sm_121a` with no fallback, and it is not a
 relaxation of the "do not widen an arch target" rule:
 

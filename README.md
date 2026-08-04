@@ -129,6 +129,34 @@ A new accelerator or NIC ships a **runner image**, not a controller change — t
 vendor-neutral; vendor specifics live in images (mirrors how Glimmer keeps vendor
 logic behind a single seam).
 
+### Host architecture is not GPU architecture
+
+Two independent axes, and conflating them is how an operator ends up unusable on
+half the fleets it was written for:
+
+| axis | values | selected by |
+|---|---|---|
+| **host (CPU)** | `linux/amd64`, `linux/arm64` | the image's manifest list |
+| **GPU** | `sm_80`, `sm_90`, `sm_100`, `sm_120`, `sm_121`, … | the runner's gencode build arg |
+
+The operator image and **every** runner image are built for `linux/amd64` and
+`linux/arm64`. A node pulls only its own platform's layers, so one tag serves an
+x86 rack and a Grace rack alike.
+
+The GPU axis is per runner and is documented in each runner's README:
+
+| runner | GPU coverage |
+|---|---|
+| `clockprobe`, `thermal-soak`, `gpu-burn` | cubins for sm_80 / sm_90 / sm_100 / sm_120 / sm_121 + PTX — covers A100 through GB300 out of the box |
+| `memory-bw` | nvbandwidth's own arch list; copy-engine testcases launch no kernel, so the gencode does not affect any reported number |
+| `compute-smoke` | **CC 12.x only** — the NVFP4 kernel is CUTLASS `arch::Sm120`. Defaults `sm_121a` on arm64, `sm_120a` on amd64. An H100 or B200 gets a clean `Skip`, never a `Fail`; SM10x needs its own runner |
+| `nccl` | **one gencode, and you may need to change it.** Defaults `sm_121` on arm64, `sm_90` on amd64; a B200 or L40S fleet must rebuild with `--build-arg NCCL_GENCODE=…` |
+| `ib-write-bw`, `gpudirect-rdma`, `memory-stress`, `host-health`, `dcgm-diag` | no gencode — nothing to choose |
+
+> The already-published `compute-smoke:v0.1.0` tag is **`linux/arm64` only**, and
+> published tags are immutable, so it stays that way. Multi-arch starts at the
+> next tag.
+
 ## Quick start
 
 ```sh

@@ -310,11 +310,23 @@ docker build -t ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:vX.Y.Z runners/gpu-bu
 
 Build args: `CUDA_IMAGE` (default `nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04`)
 and `CUDA_ARCH_FLAGS`. The default list ships real cubins for sm_80 / sm_90 /
-sm_120 / sm_121 plus a PTX fallback — deliberately wider than compute-smoke's
-single `sm_121a`, because silent data corruption is a fleet-wide concern and PTX
-JIT compiles FFMA one-to-one, so a JIT-compiled GEMM produces the same bit
-patterns and cannot fake a miscompare count either way. The `publish-runner`
-workflow's `CUDA_ARCH` input is deliberately not consumed here.
+**sm_100** / sm_120 / sm_121 plus a PTX fallback — deliberately wider than
+compute-smoke's single `sm_121a`, because silent data corruption is a fleet-wide
+concern and PTX JIT compiles FFMA one-to-one, so a JIT-compiled GEMM produces
+the same bit patterns and cannot fake a miscompare count either way. The
+`publish-runner` workflow's `CUDA_ARCH` input is deliberately not consumed here.
+
+**Host architecture is a separate axis from GPU architecture.** The image is
+published as a manifest list for `linux/amd64` **and** `linux/arm64`; the
+gencode list above is the same on both, because an `sm_90` cubin is the same
+device code whether the host is x86 or Grace. With CUDA's minor-version binary
+compatibility (a cubin for CC X.Y runs on CC X.Z where Z ≥ Y) the list covers
+A100/A10/L40S (`sm_80`), H100/H200/GH200 (`sm_90`), B200/B300/GB200/GB300
+(`sm_100`), RTX PRO 6000 Blackwell (`sm_120`) and GB10 (`sm_121`). `sm_100` was
+the one gap that mattered for x86 adopters: `compute_121` PTX cannot JIT **down**
+onto CC 10.x, so before it a Blackwell datacentre part had no code in this image
+at all — and silent data corruption is exactly what such a fleet wants this
+runner to look for.
 
 `soak_core.cuh` and `nvml_dynamic.h` are **byte-identical copies** of
 [`../thermal-soak`](../thermal-soak)'s, because the publish workflow builds each
