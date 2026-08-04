@@ -486,7 +486,16 @@ disagree about the same hardware. One brain, two dispatchers.
   reported unjudged and retried, which is visible and cheap, while the opposite
   mistake certifies a fleet nobody looked at. Every runner here that can skip
   already prints a marker, and `runners/pins_test.go` fails if one is renamed
-  into a form `pkg/runner.DeclaresSkip` no longer recognises.
+  into a form `pkg/runner.DeclaresSkip` no longer recognises. **A marker is not
+  always one literal**, and the guard resolves both halves: the soak family
+  (`thermal-soak`, `gpu-burn`) prints `markerPrefix + "_SKIP"` from the shared
+  `soak_core.cuh`, so the only literal in their sources is the bare suffix and
+  neither directory contributed anything to the sweep until it composed them —
+  the same blindness that pattern's own comment warns about, reached by a
+  different route, on two runners that really do skip (no accelerator visible,
+  MIG enabled). A suffix found with no `markerPrefix` declared in the directory
+  is itself a failure: a marker nothing in the repository can predict is a
+  marker nothing can check.
 - **A branch no available hardware can reach still gets exercised — three ways,
   and the strongest one is on real silicon.** `compute-smoke`'s exit 2 fires only
   on a part that is not CC 12.0/12.1, this project has none, and the assumed
