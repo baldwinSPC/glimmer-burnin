@@ -161,7 +161,7 @@ spec:
   # veth and nicLinkDownEvents is omitted (and any threshold on it fails).
   hostNetwork: true
   runner:
-    image: ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.1.0
+    image: ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.2.0
     # Both of these are for the /dev/kmsg Xid scan and nothing else; see
     # "What the pod needs". Drop them and xidEvents is omitted, not zeroed.
     privileged: true
