@@ -269,7 +269,26 @@ func TestAPairScopeRunRendezvousThroughItsHeadlessService(t *testing.T) {
 	// The server binds a socket and holds it. The readinessProbe below is what
 	// turns "the container started" into "the listener is up", which is the
 	// gate the client waits on.
-	serverSh := fmt.Sprintf(`echo listening on %d; nc -l -p %d >/dev/null 2>&1; echo peer disconnected; sleep 30`, port, port)
+	//
+	// It accepts in a LOOP, and that is load-bearing rather than tidiness. A
+	// tcpSocket probe proves a listener is up the only way TCP allows: by
+	// connecting to it. That connection is a real one — busybox `nc -l` accepts
+	// it, the probe closes it, and a single-shot listener then exits, having
+	// served the probe and nobody else. The gate meant to guarantee the listener
+	// is up is the thing that consumes it, and the client arrives to a closed
+	// port a moment after the operator was told the server was ready.
+	//
+	// The operator read that correctly, which is why this was worth finding: the
+	// run settled `Error` with "server pass (exit 0): peer disconnected; client
+	// error (exit 3): could not reach peer". A server that exits 0 before the
+	// client ever connected is an Error and never a pass, because no traffic
+	// crossed the link — so the harness was wrong and the contract was right.
+	//
+	// Real fabric runners are exposed to the same trap. `ib_write_bw` and the
+	// nccl-tests server accept a bounded number of connections, so a probe that
+	// spends one can leave the client connecting to nothing. Prefer a probe on a
+	// port the measurement does not use, or a server that re-accepts.
+	serverSh := fmt.Sprintf(`echo listening on %d; while true; do nc -l -p %d >/dev/null 2>&1; done`, port, port)
 	// The client is the deciding side, and it earns that here: it has to reach
 	// the server by the name the operator handed it, which only resolves if the
 	// headless Service exists and both pods carry a hostname and a subdomain.

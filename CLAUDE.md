@@ -520,6 +520,17 @@ disagree about the same hardware. One brain, two dispatchers.
   client that connects before its server has bound its socket dies with a
   connection error that reads as a fabric fault. A `tcpSocket` probe on the
   runner's own port converts the gate into a real statement about a listener.
+  **But the probe SPENDS a connection, and that is not free.** TCP admits no
+  way to prove a listener is up other than connecting to it, so the probe is a
+  real client: the server accepts it, the probe closes it, and a server that
+  accepts a bounded number of connections has served the probe instead of the
+  client. The gate meant to guarantee the listener is up is then the thing that
+  consumes it, and the client arrives at a closed port a moment after the
+  operator was told the server was ready. `ib_write_bw` and the nccl-tests
+  server both accept a bounded count. Probe a port the measurement does not use,
+  or make the server re-accept; the e2e's own `nc -l` server had exactly this
+  bug and the operator correctly settled the run `Error` — server exit 0 with no
+  traffic across the link is never a pass.
 - **`n/a` is a reserved metric value** (case-insensitive), and the only way a
   runner declares a counter unmeasurable on the hardware in front of it. Emit it
   where you asked and the hardware has nothing to report; omit the key where the
