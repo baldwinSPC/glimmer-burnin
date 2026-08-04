@@ -25,10 +25,12 @@ type sysInfo struct {
 	cpus       int
 }
 
-// readSysInfo probes /proc and /sys beneath root. root is "" in production and
-// a temporary directory in tests — the numbers this returns decide a node's
-// verdict, so the arithmetic that consumes them has to be testable without a
-// container.
+// readSysInfo probes /proc and /sys beneath root. root is productionRoot ("/")
+// in production and a temporary directory in tests — the numbers this returns
+// decide a node's verdict, so the arithmetic that consumes them has to be
+// testable without a container. It must stay ABSOLUTE in production: an empty
+// root joins to relative paths, which read the right files only while the
+// process happens to be running in /.
 func readSysInfo(root string) (sysInfo, error) {
 	total, available, err := readMeminfo(filepath.Join(root, "proc", "meminfo"))
 	if err != nil {

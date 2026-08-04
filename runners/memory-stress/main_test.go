@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -192,6 +193,51 @@ func TestExecuteKillsAWedgedRunAndReportsError(t *testing.T) {
 	// The evidence it did gather still reaches the log.
 	if m := metrics(t, out.String()); m["elapsed_s"] == "" {
 		t.Errorf("a killed run reported no elapsed time:\n%s", out.String())
+	}
+}
+
+// The production root is the one input every other test in this package injects
+// around: they all pass a temp dir, so an empty root — which filepath.Join turns
+// into the RELATIVE "proc/meminfo" — kept reading the right files purely because
+// the image sets no WORKDIR and the process therefore starts in /. Anything that
+// moved the working directory (a WORKDIR, a command:/workingDir: in the pod
+// spec, a wrapper entrypoint) would have made every node exit 3 at once, which
+// is an unjudged fleet rather than a visible crash.
+//
+// The decoy is what makes this a real test rather than a Linux-only one: it is
+// a /proc a relative root WOULD read, planted where the bug would look. A node's
+// verdict must never be sized from whatever the working directory happens to
+// hold, on any host.
+func TestProductionRootDoesNotDependOnTheWorkingDirectory(t *testing.T) {
+	const decoyTotalKB = 999999999
+	t.Chdir(fakeRoot(t, map[string]string{
+		"proc/meminfo": fmt.Sprintf("MemTotal: %d kB\nMemAvailable: %d kB\n", decoyTotalKB, decoyTotalKB),
+	}))
+
+	if got := filepath.Join(productionRoot, "proc", "meminfo"); got != "/proc/meminfo" {
+		t.Fatalf("the production root resolves meminfo to %q, want %q — sizing inputs must not be read relative to the working directory", got, "/proc/meminfo")
+	}
+	if sys, err := readSysInfo(productionRoot); err == nil && sys.memTotalBytes == decoyTotalKB*1024 {
+		t.Fatalf("readSysInfo sized this node from the decoy /proc in the working directory (MemTotal %d kB)", decoyTotalKB)
+	}
+
+	// The production call itself, sized explicitly so the outcome turns on
+	// whether the sizing inputs were found and not on the memory of whatever
+	// machine is running the test.
+	var out, errOut bytes.Buffer
+	code, reason := execute(&out, &errOut, env(map[string]string{
+		"BURNIN_DURATION_SECONDS":  "60",
+		"BURNIN_MEMORY_MB":         "1",
+		"BURNIN_STRESSAPPTEST_BIN": fakeSat(t, cleanRun, 0),
+	}), productionRoot)
+
+	// On Linux the real /proc/meminfo is there and the run passes. On a host
+	// without one it is an Error — also correct, and its message has to name the
+	// ABSOLUTE path, which is what proves where it looked. The one outcome that
+	// must never happen is a verdict sized from the decoy.
+	if code != exitPass && !strings.Contains(reason, "/proc/meminfo") {
+		t.Fatalf("exit = %d (%s) from a working directory other than /; the runner did not read its sizing inputs from an absolute path\nstdout:\n%s\nstderr:\n%s",
+			code, reason, out.String(), errOut.String())
 	}
 }
 
