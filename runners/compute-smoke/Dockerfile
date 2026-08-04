@@ -99,6 +99,14 @@ COPY arch_match.h /src/arch_match.h
 # CUDA_ARCH is resolved HERE rather than in the ARG default because the default
 # depends on TARGETARCH, and an ARG default cannot branch.  An empty CUDA_ARCH
 # means "this platform's default"; anything else is used verbatim.
+#
+# The resolved value is written to /out/cuda_arch because THREE later steps need
+# it and a shell variable does not survive the end of a RUN.  It was previously
+# resolved into a local, and the two guard steps below kept referring to
+# ${CUDA_ARCH} — which is empty on every default build, so `nvcc -arch=` had no
+# argument at all.  Neither branch caught it alone: the per-platform default and
+# the #else guard were written on separate branches, each green, and the break
+# appeared only once both were on main.  One resolution, one file, three readers.
 RUN set -eu; \
     arch="${CUDA_ARCH:-}"; \
     if [ -z "${arch}" ]; then \
@@ -111,7 +119,8 @@ RUN set -eu; \
       esac; \
     fi; \
     echo "compute-smoke: TARGETARCH=${TARGETARCH} -> CUDA_ARCH=${arch}"; \
-    mkdir -p /out && /usr/local/cuda/bin/nvcc \
+    mkdir -p /out && printf '%s' "${arch}" > /out/cuda_arch; \
+    /usr/local/cuda/bin/nvcc \
       -std=c++17 -O3 -arch="${arch}" --expt-relaxed-constexpr \
       -DBURNIN_CUDA_ARCH="\"${arch}\"" \
       -cudart static -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc \
@@ -144,9 +153,11 @@ RUN ldd /out/fp4_smoke | tee /out/ldd.txt \
 #    artefact: written to /tmp, asserted, deleted, never copied into the final
 #    image.  grep -a because the marker is a string literal inside an ELF.
 ARG GUARD_MARK="was not compiled with SM120/SM121 block-scaled MMA support"
-RUN /usr/local/cuda/bin/nvcc \
-      -std=c++17 -O3 -arch=${CUDA_ARCH} --expt-relaxed-constexpr \
-      -DBURNIN_CUDA_ARCH="\"${CUDA_ARCH}\"" -DBURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA \
+RUN set -eu; \
+    arch="$(cat /out/cuda_arch)"; \
+    /usr/local/cuda/bin/nvcc \
+      -std=c++17 -O3 -arch="${arch}" --expt-relaxed-constexpr \
+      -DBURNIN_CUDA_ARCH="\"${arch}\"" -DBURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA \
       -cudart static -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc \
       -I /cutlass/include -I /cutlass/tools/util/include \
       -o /tmp/fp4_smoke_no_mma /src/fp4_smoke.cu \
@@ -160,11 +171,13 @@ RUN /usr/local/cuda/bin/nvcc \
 #    reports "not compiled with block-scaled MMA support" — an Error — on every
 #    node in a fleet.  The #else message can only be in the binary if the #else
 #    was compiled, so its ABSENCE is the proof the kernel is really in there.
-RUN if grep -aq "${GUARD_MARK}" /out/fp4_smoke; then \
-      echo "refusing to build: ${CUDA_ARCH} did not enable block-scaled MMA, so this image would report every node UNJUDGED" >&2; \
+RUN set -eu; \
+    arch="$(cat /out/cuda_arch)"; \
+    if grep -aq "${GUARD_MARK}" /out/fp4_smoke; then \
+      echo "refusing to build: ${arch} did not enable block-scaled MMA, so this image would report every node UNJUDGED" >&2; \
       exit 1; \
     fi; \
-    echo "block-scaled MMA kernel compiled in for ${CUDA_ARCH}: OK"
+    echo "block-scaled MMA kernel compiled in for ${arch}: OK"
 
 # ── final: no NVIDIA layers ───────────────────────────────────────────────────
 # cc-debian13 carries a glibc at least as new as the ubuntu24.04 build stage.

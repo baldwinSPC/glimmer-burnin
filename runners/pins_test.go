@@ -459,6 +459,51 @@ func TestBothWorkflowsReclaimTheSameDisk(t *testing.T) {
 	}
 }
 
+// emptyArchArgPattern matches an ARG that declares a gencode with NO default,
+// i.e. one whose value is resolved later in the build.
+var emptyArchArgPattern = regexp.MustCompile(`(?m)^ARG\s+CUDA_ARCH=\s*$`)
+
+// rawArchUsePattern matches an nvcc invocation that takes its gencode straight
+// from the ARG rather than from the resolved value.
+var rawArchUsePattern = regexp.MustCompile(`-arch=["']?\$\{?CUDA_ARCH`)
+
+// TestNoRunnerCompilesAgainstAnUnresolvedArch stops a build flag from silently
+// becoming empty.
+//
+// A runner whose gencode depends on TARGETARCH cannot express that as an ARG
+// default, because an ARG default cannot branch. compute-smoke therefore declares
+// `ARG CUDA_ARCH=` (empty) and resolves the real value inside the build. Any step
+// that then refers to ${CUDA_ARCH} gets the EMPTY string, and `nvcc -arch=` with
+// no argument fails — or worse, a flag that merely reads oddly compiles for the
+// wrong part.
+//
+// This is written from a break rather than from theory. The per-platform default
+// (#86) and the #else-branch guard (#96) were developed on separate branches.
+// Each was green: #86 resolved the arch into a shell local and used it, #96 added
+// two steps referring to ${CUDA_ARCH} back when that ARG still carried a real
+// default. Neither diff was wrong on its own, and a clean textual merge said
+// nothing, so the failure appeared for the first time on main with both present.
+// A guard that reads the whole file is the only thing that could have seen it.
+func TestNoRunnerCompilesAgainstAnUnresolvedArch(t *testing.T) {
+	for _, d := range runnerDirs(t) {
+		path := filepath.Join(d, "Dockerfile")
+		src, err := os.ReadFile(path)
+		if err != nil {
+			continue // TestEveryRunnerDirectoryHasADockerfile owns that failure.
+		}
+		if !emptyArchArgPattern.Match(src) {
+			continue // A real ARG default means ${CUDA_ARCH} is never empty.
+		}
+		if loc := rawArchUsePattern.FindIndex(src); loc != nil {
+			line := 1 + strings.Count(string(src[:loc[0]]), "\n")
+			t.Errorf("%s:%d passes -arch=${CUDA_ARCH}, but this Dockerfile declares "+
+				"`ARG CUDA_ARCH=` with no default, so that expands to the empty string on every "+
+				"build that does not override it. Read the value the build resolved "+
+				"(/out/cuda_arch) instead.", path, line)
+		}
+	}
+}
+
 // sortedUnique returns the first submatch of each match, deduplicated. An ARG is
 // re-declared once per build stage that consumes it, so the same upstream
 // appears several times in one Dockerfile.
