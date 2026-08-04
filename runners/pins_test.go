@@ -555,6 +555,51 @@ var skipMarkerLiteral = regexp.MustCompile(`(?i)[A-Za-z][A-Za-z0-9_]*_skip[a-z]*
 // rather than skip declarations.
 func looksLikeAMarker(tok string) bool { return tok != strings.ToLower(tok) }
 
+// A marker is not always spelled out in one piece. The soak family builds
+// its own at runtime — soak_core.cuh does
+//
+//	emitMarker(k, "_SKIP", reason, kExitSkip)   // prints markerPrefix + "_SKIP"
+//
+// so the only literal in thermal-soak's and gpu-burn's sources is the bare
+// suffix, which skipMarkerLiteral cannot match: that pattern requires a leading
+// letter. Both directories therefore contributed NOTHING to the sweep below,
+// which is the same blindness the pattern's own comment describes, reached by a
+// different route — and both runners really do skip (no accelerator visible,
+// MIG enabled). Renaming markerPrefix to "Thermal-Soak" would have turned every
+// one of those skips into an Error with no test saying so.
+//
+// So the two halves are found separately and composed. Only QUOTED literals
+// count, or a comment mentioning _SKIP would invent a marker for a runner that
+// has none.
+var (
+	quotedLiteral      = regexp.MustCompile(`"([^"\\\n]|\\.)*"`)
+	composedSkipSuffix = regexp.MustCompile(`(?i)^_skip[a-z]*$`)
+)
+
+// markerPrefixesIn reads the prefix half out of one source file.
+//
+// The value is the first quoted literal on a line naming the field, which
+// covers the C++ designated-comment idiom (/*markerPrefix=*/"GPU_BURN") and a
+// plain assignment alike. The printf that CONSUMES the prefix sits on a line
+// naming it too, so its format string has to be excluded — a prefix is a bare
+// token with no verbs, escapes or separators. That filter stops deliberately
+// short of requiring upper case, so a mis-cased prefix is still collected and
+// still fails the check.
+func markerPrefixesIn(src string) []string {
+	var out []string
+	for _, line := range strings.Split(src, "\n") {
+		if !strings.Contains(line, "markerPrefix") {
+			continue
+		}
+		for _, quoted := range quotedLiteral.FindAllString(line, -1) {
+			if p := strings.Trim(quoted, `"`); p != "" && !strings.ContainsAny(p, "%\\, \t") {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
 // TestEverySkipMarkerIsOneTheParserRecognises ties each runner's skip
 // declaration to the parser that has to believe it.
 //
@@ -572,6 +617,7 @@ func looksLikeAMarker(tok string) bool { return tok != strings.ToLower(tok) }
 func TestEverySkipMarkerIsOneTheParserRecognises(t *testing.T) {
 	for _, d := range runnerDirs(t) {
 		found := map[string]bool{}
+		var suffixes, prefixes []string
 		err := filepath.WalkDir(d, func(path string, e os.DirEntry, err error) error {
 			if err != nil || e.IsDir() {
 				return err
@@ -593,11 +639,30 @@ func TestEverySkipMarkerIsOneTheParserRecognises(t *testing.T) {
 					found[m] = true
 				}
 			}
+			for _, quoted := range quotedLiteral.FindAllString(string(src), -1) {
+				if lit := strings.Trim(quoted, `"`); composedSkipSuffix.MatchString(lit) {
+					suffixes = append(suffixes, lit)
+				}
+			}
+			prefixes = append(prefixes, markerPrefixesIn(string(src))...)
 			return nil
 		})
 		if err != nil {
 			t.Errorf("walking runners/%s: %v", d, err)
 			continue
+		}
+		// The composed half. A suffix with no prefix anywhere in the directory
+		// is a failure in itself: the runner prints a marker at runtime that
+		// nothing in the repository can predict, so nothing can check it.
+		if len(suffixes) > 0 && len(prefixes) == 0 {
+			t.Errorf("runners/%s composes its skip marker from a %q suffix, but declares no markerPrefix "+
+				"anywhere in the directory — nothing can say what this runner actually prints, so nothing "+
+				"can check that the parser will believe it", d, suffixes[0])
+		}
+		for _, s := range suffixes {
+			for _, p := range prefixes {
+				found[p+s] = true
+			}
 		}
 		for m := range found {
 			if !runner.DeclaresSkip(m + ": reason") {
