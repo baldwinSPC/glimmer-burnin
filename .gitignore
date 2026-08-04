@@ -1,5 +1,9 @@
 bin/
-manager
+# Anchored to the repo root ON PURPOSE. An unanchored `manager` matches any
+# path component with that name, which silently swallowed config/manager/ -
+# the operator's own deployment manifest - so `git add -A` skipped it for the
+# whole of v0.2.0 and the release shipped with no way to deploy the operator.
+/manager
 *.test
 cover.out
 .DS_Store

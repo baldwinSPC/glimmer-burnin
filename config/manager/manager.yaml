@@ -1,0 +1,148 @@
+# Operator deployment. Applied after config/crd and config/rbac.
+#
+# Scheduling note: the controller must keep reconciling while the nodes it is
+# burning in are cordoned, so it tolerates its own cordons. It does NOT request
+# a GPU — the runner Pods do. Keeping the manager off the accelerator means a
+# node under test never competes with the operator for the device it is testing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: glimmer-burnin-system
+  labels:
+    control-plane: burnin-controller
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: burnin-controller-manager
+  namespace: glimmer-burnin-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: burnin-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: burnin-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: burnin-controller-manager
+    namespace: glimmer-burnin-system
+---
+# Leader election needs its own namespaced Role: the generated ClusterRole
+# covers the burn-in API groups, not the coordination.k8s.io leases the manager
+# uses to elect itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burnin-leader-election
+  namespace: glimmer-burnin-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burnin-leader-election
+  namespace: glimmer-burnin-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burnin-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: burnin-controller-manager
+    namespace: glimmer-burnin-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: burnin-controller-manager
+  namespace: glimmer-burnin-system
+  labels:
+    control-plane: burnin-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: burnin-controller
+  template:
+    metadata:
+      labels:
+        control-plane: burnin-controller
+    spec:
+      serviceAccountName: burnin-controller-manager
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # A two-node cluster where both nodes are control-plane, and where the
+      # nodes under test get cordoned by this very operator. Without these
+      # tolerations the manager is unschedulable exactly when it is needed.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/unschedulable
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: manager
+          image: ghcr.io/baldwinspc/glimmer-burnin:v0.2.0
+          args:
+            - --leader-elect
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      terminationGracePeriodSeconds: 30
+---
+# Scrape target for the Prometheus exposition added in this release. The
+# SinkPrometheus object selects which runs are exported; this Service is how a
+# scraper reaches them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: burnin-controller-metrics
+  namespace: glimmer-burnin-system
+  labels:
+    control-plane: burnin-controller
+spec:
+  selector:
+    control-plane: burnin-controller
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
