@@ -206,6 +206,63 @@ func (o Outcome) NotEvaluatedMessage() string {
 	return "not evaluated: " + strings.Join(parts, "; ")
 }
 
+// maxNamedViolations bounds how many metrics ViolationSummary spells out. The
+// summary rides in a status field and a delivered envelope, so it has to stay
+// readable for a profile that gates forty metrics; the count is always exact
+// even when the names are elided.
+const maxNamedViolations = 4
+
+// causeWord renders a Cause for a one-line human summary. It is deliberately
+// plain English rather than the constant's name: the reader is an engineer
+// deciding whether to walk to a rack, not a consumer of this API.
+func causeWord(c Cause) string {
+	switch c {
+	case CauseMeasurement:
+		return "hardware"
+	case CauseAuthoring:
+		return "profile error"
+	default:
+		return "not measured"
+	}
+}
+
+// ViolationSummary renders the violations BEYOND the first for a human-readable
+// report, or "" when there are fewer than two — in which case Message already
+// says everything there is to say.
+//
+// It exists here rather than in a caller so both dispatchers render the same
+// sentence from the same outcome. It is deliberately NOT "join every reason
+// with a semicolon": each violation contributes its metric and its cause, which
+// is what a reader needs to decide who to send, and the reasons themselves stay
+// in Violations for anyone who wants them.
+//
+// Naming the cause is the point. A profile error and a thermal ceiling arrive
+// as the same Failed test, and only one of them is a reason to touch a node.
+func (o Outcome) ViolationSummary() string {
+	if len(o.Violations) < 2 {
+		return ""
+	}
+	rest := o.Violations[1:]
+
+	named := rest
+	if len(named) > maxNamedViolations {
+		named = named[:maxNamedViolations]
+	}
+	parts := make([]string, 0, len(named))
+	for _, v := range named {
+		parts = append(parts, fmt.Sprintf("%s (%s)", v.Metric, causeWord(v.Cause)))
+	}
+	if elided := len(rest) - len(named); elided > 0 {
+		parts = append(parts, fmt.Sprintf("and %d more", elided))
+	}
+
+	gates := "gates"
+	if len(rest) == 1 {
+		gates = "gate"
+	}
+	return fmt.Sprintf("and %d more %s failed: %s", len(rest), gates, strings.Join(parts, ", "))
+}
+
 // Evaluate applies a test's thresholds to one execution's results.
 //
 // metrics are the values the runner reported; unmeasurable is the set of metric

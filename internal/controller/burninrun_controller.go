@@ -859,7 +859,7 @@ func (r *BurnInRunReconciler) completeAttempt(
 ) {
 	res, _ := r.beginAttempt(run, t, nodes, attempt, pod)
 	now := metav1.NewTime(r.now())
-	phase, message := attemptOutcome(t, parsed)
+	phase, message, violations := attemptOutcome(t, parsed)
 
 	a := &res.Attempts[len(res.Attempts)-1]
 	exit := int32(parsed.ExitCode)
@@ -883,6 +883,12 @@ func (r *BurnInRunReconciler) completeAttempt(
 		res.FinishedAt = &now
 		res.Message = message
 		res.Metrics = parsed.Metrics
+		// Assigned unconditionally, alongside Metrics and from the same attempt,
+		// so the two always explain the same execution. A settle that is not a
+		// threshold failure assigns nil, which CLEARS any violations left by an
+		// earlier errored attempt — a retry that then passes must not keep the
+		// gates its predecessor missed.
+		res.Violations = violations
 		recount(run)
 		// One completion per execution unit: the nodes are part of the event
 		// identity, or a second node's completion would dedupe away against
@@ -937,9 +943,17 @@ const emptyHarvestMessage = "runner exited 0 but reported no metrics at all — 
 //
 // This is the single choke point where a runner.Result becomes a phase, for
 // Node and Pair scope alike, which is why the empty-harvest rule below lives
-// here rather than beside the log-fetch rule in each caller.
-func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhase, string) {
+// here rather than beside the log-fetch rule in each caller. It is also why the
+// returned violations are identical in shape for both scopes: a link measured
+// from one end is not measured, and a link reported from one end is not
+// reported either.
+//
+// The violations are non-empty only when thresholds decided the phase. A
+// runner's own exit-1 is its assertion about the hardware, not a threshold
+// verdict, so it carries none — there is no gate to point at.
+func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhase, string, []burninv1alpha1.Violation) {
 	var phase burninv1alpha1.RunPhase
+	var violations []burninv1alpha1.Violation
 	message := parsed.Message
 
 	switch parsed.Verdict {
@@ -985,6 +999,16 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 			} else {
 				phase = burninv1alpha1.RunFailed
 				message = out.Message
+				violations = violationsFor(out)
+				// Message names the first gate only, and that field is frozen.
+				// Without this tail a node that missed three gates reads as a
+				// node that missed one, and an engineer replaces one part per
+				// burn-in cycle. The summary names the CAUSE of each, because a
+				// broken threshold and a thermal ceiling arrive here as the same
+				// Failed test and only one is a reason to walk to a rack.
+				if more := out.ViolationSummary(); more != "" {
+					message = strings.TrimSpace(message + " [" + more + "]")
+				}
 			}
 			// A RequiredIfMeasurable gate the hardware cannot measure was not
 			// applied, and the report has to say so. Appending it to the message
@@ -1022,7 +1046,30 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 			" [runner emitted %d metric name(s) the contract rejects: %s]",
 			len(parsed.InvalidNames), strings.Join(parsed.InvalidNames, ", ")))
 	}
-	return phase, message
+	return phase, message, violations
+}
+
+// violationsFor maps an evaluated outcome onto the API's own violation shape.
+//
+// The two types are mirrored rather than shared because pkg/verdict imports the
+// API package, so importing it back would be a cycle. This function is the ONE
+// place that crossing happens; keep it that way, or the API and the evaluator
+// will drift and a violation will exist that an operator cannot see.
+func violationsFor(out verdict.Outcome) []burninv1alpha1.Violation {
+	if len(out.Violations) == 0 {
+		return nil
+	}
+	violations := make([]burninv1alpha1.Violation, 0, len(out.Violations))
+	for _, v := range out.Violations {
+		violations = append(violations, burninv1alpha1.Violation{
+			Index:  int32(v.Index),
+			Metric: v.Metric,
+			Cause:  string(v.Cause),
+			Kind:   string(v.Kind),
+			Reason: v.Reason,
+		})
+	}
+	return violations
 }
 
 // triggerFor says why the next execution of an already-open result is

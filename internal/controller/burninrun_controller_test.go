@@ -4227,3 +4227,125 @@ func TestRun_DuplicateHostMountPathIsRefusedAtStart(t *testing.T) {
 	}
 	h.assertNoStrandedCordons()
 }
+
+// A node that misses three gates must report three, not whichever one the
+// profile happened to list first — and each must say WHICH KIND of problem it
+// is. This is the whole point of the taxonomy: the run below mixes a hardware
+// shortfall, a runner that never reported a gated metric, and a threshold whose
+// value is a typo, and only the first is a reason to touch the node.
+func TestRun_EveryViolatedGateIsRecordedWithItsCause(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4",
+			// Measurement: the runner reported 0.00195695, well above this bar.
+			burninv1alpha1.Threshold{Metric: "maxRelError", Comparison: burninv1alpha1.LTE, Value: "0.000001"},
+			// Evidence: compute-smoke never emits this, so nothing was measured.
+			burninv1alpha1.Threshold{Metric: "busBandwidthGBs", Comparison: burninv1alpha1.GTE, Value: "20"},
+			// Authoring: the profile is broken; no hardware is implicated.
+			burninv1alpha1.Threshold{Metric: "throughputTflops", Comparison: burninv1alpha1.GTE, Value: "one hundred"},
+		),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if res.Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("result phase = %q, want Failed", res.Phase)
+	}
+	if len(res.Violations) != 3 {
+		t.Fatalf("Violations = %+v, want all three gates recorded", res.Violations)
+	}
+
+	// Spec order, each classified, each pointing at its own threshold entry.
+	wantCause := []string{"Measurement", "Evidence", "Authoring"}
+	wantMetric := []string{"maxRelError", "busBandwidthGBs", "throughputTflops"}
+	for i, v := range res.Violations {
+		if v.Metric != wantMetric[i] {
+			t.Errorf("Violations[%d].Metric = %q, want %q", i, v.Metric, wantMetric[i])
+		}
+		if v.Cause != wantCause[i] {
+			t.Errorf("Violations[%d] (%s): Cause = %q, want %q", i, v.Metric, v.Cause, wantCause[i])
+		}
+		if v.Index != int32(i) {
+			t.Errorf("Violations[%d].Index = %d, want %d", i, v.Index, i)
+		}
+		if v.Reason == "" {
+			t.Errorf("Violations[%d] (%s) carries no reason", i, v.Metric)
+		}
+	}
+
+	// Exactly one of the three implicates the hardware. An operator who acts on
+	// the other two replaces a healthy part and edits nothing.
+	hardware := 0
+	for _, v := range res.Violations {
+		if v.Cause == "Measurement" {
+			hardware++
+		}
+	}
+	if hardware != 1 {
+		t.Errorf("%d violations implicate the hardware, want exactly 1: %+v", hardware, res.Violations)
+	}
+
+	// Message still leads with the first gate (that field is frozen), and now
+	// carries a tail so the reader knows two more failed and what kind they are.
+	if !strings.HasPrefix(res.Message, "maxRelError") {
+		t.Errorf("message = %q, want it to still lead with the first violated gate", res.Message)
+	}
+	for _, want := range []string{"2 more gates failed", "busBandwidthGBs", "throughputTflops", "profile error"} {
+		if !strings.Contains(res.Message, want) {
+			t.Errorf("message = %q, want it to mention %q", res.Message, want)
+		}
+	}
+}
+
+// Exit 1 is the runner's OWN assertion about the hardware, reached without any
+// threshold being applied. There is no gate to point at, so there is nothing to
+// record — a violation list invented here would name a threshold that did not
+// decide anything.
+func TestRun_RunnerAssertedFailCarriesNoViolations(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "maxRelError", Comparison: burninv1alpha1.LTE, Value: "0.01"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 1, "FP4_GEMM_FAIL\n", "Error")
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if res.Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("result phase = %q, want Failed — the runner said so", res.Phase)
+	}
+	if len(res.Violations) != 0 {
+		t.Errorf("Violations = %+v, want none — no threshold decided this verdict", res.Violations)
+	}
+}
+
+// A passing test carries no violations, so a consumer can treat a non-empty
+// list as "this node missed these gates" without also checking the phase.
+func TestRun_PassingTestCarriesNoViolations(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "maxRelError", Comparison: burninv1alpha1.LTE, Value: "0.01"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if res.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("result phase = %q, want Passed", res.Phase)
+	}
+	if len(res.Violations) != 0 {
+		t.Errorf("Violations = %+v, want none on a passing test", res.Violations)
+	}
+}
