@@ -36,6 +36,7 @@ import (
 const (
 	thermalSoakDir = "."
 	gpuBurnDir     = "../gpu-burn"
+	clockprobeDir  = "../clockprobe"
 )
 
 // sharedSources are byte-identical in both runner directories. They are copies
@@ -67,6 +68,85 @@ func TestSharedSoakSourcesAreIdentical(t *testing.T) {
 				"copy one over the other", name, len(a), len(b))
 		}
 	}
+}
+
+// nvmlConstantPattern finds the NVML ABI constants a runner header declares —
+// the enumerators inside the enum blocks, one per line or several to a line.
+var nvmlConstantPattern = regexp.MustCompile(`\b(k[A-Z][A-Za-z0-9]*)\s*=\s*([^,;}]+?)\s*[,;}]`)
+
+// nvmlConstants extracts those constants as name -> value.
+func nvmlConstants(t *testing.T, path string) map[string]string {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	out := map[string]string{}
+	for _, m := range nvmlConstantPattern.FindAllStringSubmatch(string(src), -1) {
+		out[m[1]] = m[2]
+	}
+	if len(out) == 0 {
+		t.Fatalf("no NVML constants found in %s; the extraction pattern no longer matches the source", path)
+	}
+	return out
+}
+
+// TestClockprobeNvmlHeaderIsASubsetOfTheSoakHeader is the third copy of this
+// header, and the one the byte-comparison above cannot cover.
+//
+// runners/clockprobe carries its own nvml_dynamic.h. It is deliberately SMALLER
+// than the soak runners' — it has no reason to resolve the two ECC entry points
+// — so the two files must not be identical and cannot be compared as bytes. What
+// must hold is that where they overlap they AGREE, because these are ABI
+// constants: a throttle-reason bit or an nvmlReturn_t code that differs between
+// two copies makes one runner mis-read the driver's answer. Nothing at runtime
+// would catch that. The reason bitmask in particular is what separates "slow
+// because it is hot" from "slow because the power contract collapsed", so a
+// shifted bit turns a thermal verdict into a power one against real hardware.
+func TestClockprobeNvmlHeaderIsASubsetOfTheSoakHeader(t *testing.T) {
+	soak := nvmlConstants(t, filepath.Join(thermalSoakDir, "nvml_dynamic.h"))
+	probe := nvmlConstants(t, filepath.Join(clockprobeDir, "nvml_dynamic.h"))
+
+	for _, name := range sortedNames(probe) {
+		want, ok := soak[name]
+		if !ok {
+			t.Errorf("clockprobe/nvml_dynamic.h declares %s, which the soak header does not. "+
+				"These headers describe one ABI; a constant that exists in only one copy is either "+
+				"a name the other should have or a name that no longer means anything.", name)
+			continue
+		}
+		if probe[name] != want {
+			t.Errorf("NVML constant %s is %q in clockprobe/nvml_dynamic.h and %q in the soak header. "+
+				"These are driver ABI values: two copies disagreeing means one runner mis-reads what "+
+				"the driver returned, and no runtime check would notice.", name, probe[name], want)
+		}
+	}
+
+	// The subset claim is stated in the soak header's own comment. If the two
+	// files ever become identical, that comment is wrong and the cheaper
+	// byte-comparison should be used instead.
+	a, err := os.ReadFile(filepath.Join(thermalSoakDir, "nvml_dynamic.h"))
+	if err != nil {
+		t.Fatalf("reading the soak header: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(clockprobeDir, "nvml_dynamic.h"))
+	if err != nil {
+		t.Fatalf("reading the clockprobe header: %v", err)
+	}
+	if string(a) == string(b) {
+		t.Errorf("clockprobe/nvml_dynamic.h is now byte-identical to the soak header; add it to " +
+			"sharedSources so the cheaper comparison covers it, and drop the subset wording from " +
+			"the header comment")
+	}
+}
+
+func sortedNames(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // emittedKeyPattern finds every metric key a runner can print. The '=' is part

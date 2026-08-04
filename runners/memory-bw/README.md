@@ -174,6 +174,7 @@ Build args:
 |---|---|---|
 | `CUDA_IMAGE` | `nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04` | Build stage only; no CUDA layer is shipped. |
 | `NVBANDWIDTH_REF` | `v0.10.0` | Git tag built from source, and the value reported as `nvbandwidth_ref`. |
+| `NVBANDWIDTH_SHA` | `82fc4e8c…` | The commit that tag must resolve to. The build refuses otherwise: `nvbandwidth_ref` is the provenance of every number this runner publishes, so a moved tag would make that line a false statement about which code produced the measurement. Bump it with `NVBANDWIDTH_REF`, resolving it with `git ls-remote https://github.com/NVIDIA/nvbandwidth.git 'refs/tags/<ref>'`. |
 | `CUDA_ARCH` | *(empty)* | Empty uses nvbandwidth's own architecture list. Set e.g. `121` for a native GB10 cubin. |
 | `RUNTIME_IMAGE` | `gcr.io/distroless/cc-debian13` | Final base. Pin by digest for a release build. |
 | `NVBANDWIDTH_PATH` | `/usr/local/bin/nvbandwidth` | Where the tool is installed; the wrapper is compiled against this value. |

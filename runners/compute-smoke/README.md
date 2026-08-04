@@ -116,8 +116,15 @@ could produce a passing result without the FP4 units.
 docker build -t glimmer-burnin-compute-smoke:dev .
 ```
 
-Build args: `CUDA_IMAGE`, `CUTLASS_REF` (default `v4.6.1`), `CUDA_ARCH`
-(default `sm_121a`; use `sm_120f` for one binary covering CC 12.0 + 12.1).
+Build args: `CUDA_IMAGE`, `CUTLASS_REF` (default `v4.6.1`), `CUTLASS_SHA`,
+`CUDA_ARCH` (default `sm_121a`; use `sm_120f` for one binary covering CC 12.0 +
+12.1).
+
+The build **asserts the upstream commit**: a tag can be moved, and here CUTLASS
+is the kernel itself, so a moved tag would change what every node was accepted
+by under an image tag that is meant to be immutable. Bumping `CUTLASS_REF` means
+bumping `CUTLASS_SHA` with it, or the build refuses. Resolve the new value with
+`git ls-remote https://github.com/NVIDIA/cutlass.git 'refs/tags/<ref>'`.
 
 CUTLASS **v4.5.0 is the floor** — it is the first release whose changelog reports
 block-scaled MMA working on Spark. Earlier versions mis-handle SM121.

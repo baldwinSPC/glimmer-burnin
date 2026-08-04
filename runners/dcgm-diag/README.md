@@ -199,13 +199,25 @@ take absolute paths.
 docker build -t glimmer-burnin-dcgm-diag:dev .
 ```
 
-Build args: `DCGM_REF` (default `v4.2.3`), `DCGM_REPO`, `GO_IMAGE`,
+Build args: `DCGM_REF` (default `v4.2.3`), `DCGM_SHA`, `DCGM_REPO`, `GO_IMAGE`,
 `RUNTIME_IMAGE`.
 
 `DCGM_REF` must be a tag that exists **in git**. NVIDIA tags the repository
 `v4.2.3`; the `-1` suffix on package and container versions (`4.2.3-1`) is a
 packaging revision that exists in NGC and apt and has never existed in git.
 Asking git for `v4.2.3-1` fails with `Remote branch not found`.
+
+The build also **asserts the upstream commit**, because the tag decides which
+header the field-id assertion below is checked against — an assertion pointing at
+a moved tag proves nothing. Bumping `DCGM_REF` means bumping `DCGM_SHA` with it.
+NVIDIA uses ANNOTATED tags here, so `DCGM_SHA` is the **peeled** value — what a
+shallow clone leaves at `HEAD` — not the tag object's own id:
+
+```sh
+git ls-remote https://github.com/NVIDIA/DCGM.git 'refs/tags/v4.2.3' 'refs/tags/v4.2.3^{}'
+# 0f3607ae…  refs/tags/v4.2.3        <- the tag object; NOT what to pin
+# 6e947dca…  refs/tags/v4.2.3^{}     <- the commit; this is DCGM_SHA
+```
 
 The build carries two assertions. Neither is decoration, and neither should be
 removed to make a build go green:

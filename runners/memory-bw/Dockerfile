@@ -38,6 +38,13 @@ FROM ${CUDA_IMAGE} AS build
 # Pinned, and pinned deliberately: a runner image is executed by a node's
 # readiness gate, so the tag a gate pins must always mean the same measurement.
 ARG NVBANDWIDTH_REF=v0.10.0
+# And a tag alone does not deliver that, because a tag can be moved. The runner
+# reports NVBANDWIDTH_REF in its own output as the provenance of every number it
+# publishes, so a moved tag would make that line a false statement about which
+# code produced the measurement. Bumping NVBANDWIDTH_REF means bumping
+# NVBANDWIDTH_SHA with it; resolve it with
+# `git ls-remote https://github.com/NVIDIA/nvbandwidth.git refs/tags/<ref>`.
+ARG NVBANDWIDTH_SHA=82fc4e8c6afa0babb8687793678f615b3b8d793e
 
 # Empty means "use nvbandwidth's own architecture list", which is what its
 # CMakeLists picks per CUDA version and which includes PTX for JIT fallback.
@@ -60,6 +67,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN git clone --depth 1 -b ${NVBANDWIDTH_REF} https://github.com/NVIDIA/nvbandwidth.git /nvbandwidth
 
+RUN got="$(git -C /nvbandwidth rev-parse HEAD)"; \
+    if [ "${got}" != "${NVBANDWIDTH_SHA}" ]; then \
+      echo "refusing to build: ${NVBANDWIDTH_REF} is ${got}, expected ${NVBANDWIDTH_SHA}" >&2; \
+      exit 1; \
+    fi; \
+    echo "nvbandwidth ${NVBANDWIDTH_REF} = ${got}: OK"
+
 # Three things in this invocation are load-bearing:
 #
 #   CMAKE_CUDA_RUNTIME_LIBRARY=Static — CMake has defaulted to Static since 3.17,
@@ -76,11 +90,35 @@ RUN git clone --depth 1 -b ${NVBANDWIDTH_REF} https://github.com/NVIDIA/nvbandwi
 #   Neither ships in this image; the toolkit's link-time stubs live off the
 #   default search path, and the SONAME they carry is what makes the binary look
 #   for the real host driver at runtime.
-RUN cmake -S /nvbandwidth -B /nvbandwidth/build \
+#   CUDA_ARCH is an nvcc gencode name (sm_121a, sm_120f) because that is what
+#   publish-runner passes to EVERY runner, and the other runners feed it
+#   straight to nvcc. CMake does not accept that spelling: CMAKE_CUDA_ARCHITECTURES
+#   takes bare numbers, optionally suffixed -real or -virtual, or one of
+#   all/all-major/native. Handing it sm_121a fails the configure step with
+#   "followed by '-real' or '-virtual'", so this translates instead of forwarding.
+#
+#   The trailing architecture-specific letter is dropped deliberately. It selects
+#   arch-exclusive instructions (the block-scaled MMA that compute-smoke exists to
+#   prove); nvbandwidth measures copy-engine and C2C/PCIe bandwidth and uses none
+#   of them, so 121 is the honest translation of sm_121a here. Nothing silently
+#   downgrades: an unrecognised value fails the build rather than falling back.
+RUN set -eu; \
+    cmake_arch=""; \
+    if [ -n "${CUDA_ARCH:-}" ]; then \
+      case "${CUDA_ARCH}" in \
+        sm_[0-9][0-9]|sm_[0-9][0-9][a-z]|sm_[0-9][0-9][0-9]|sm_[0-9][0-9][0-9][a-z]) \
+          cmake_arch="$(printf '%s' "${CUDA_ARCH}" | sed -e 's/^sm_//' -e 's/[a-z]$//')" ;; \
+        [0-9]*) cmake_arch="${CUDA_ARCH}" ;; \
+        all|all-major|native) cmake_arch="${CUDA_ARCH}" ;; \
+        *) echo "memory-bw: cannot translate CUDA_ARCH='${CUDA_ARCH}' into a CMAKE_CUDA_ARCHITECTURES value" >&2; exit 1 ;; \
+      esac; \
+      echo "memory-bw: CUDA_ARCH=${CUDA_ARCH} -> CMAKE_CUDA_ARCHITECTURES=${cmake_arch}"; \
+    fi; \
+    cmake -S /nvbandwidth -B /nvbandwidth/build \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
       -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc -L/usr/local/cuda/lib64/stubs" \
-      ${CUDA_ARCH:+-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH}} \
+      ${cmake_arch:+-DCMAKE_CUDA_ARCHITECTURES=${cmake_arch}} \
     && cmake --build /nvbandwidth/build --parallel "$(nproc)"
 
 RUN mkdir -p /out && install -m 0755 /nvbandwidth/build/nvbandwidth /out/nvbandwidth
