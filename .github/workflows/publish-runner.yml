@@ -123,7 +123,7 @@ jobs:
 
       - name: Build and push (linux/arm64)
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: runners/${{ inputs.runner }}
           platforms: linux/arm64
