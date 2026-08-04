@@ -438,21 +438,39 @@ jobs:
     # time on a change that does not compile.
     needs: [build-test, runner-plan]
     if: needs.runner-plan.outputs.runners != '[]'
-    # Setting the repository variable ARM64_RUNNER to `ubuntu-24.04-arm` (once
-    # this repo is public and the free arm64 hosted runners are available) makes
-    # the arm64 half native and the amd64 half emulated — worth it only while the
-    # arm64 stages are the heavy ones, which they are today. The real fix is the
-    # per-platform split described above.
-    runs-on: ${{ vars.ARM64_RUNNER || 'ubuntu-latest' }}
-    # Matches publish-runner.yml. A CUDA build under QEMU can run for hours, and
-    # the default 360-minute ceiling has been hit before.
-    timeout-minutes: 350
+    # ONE JOB PER (runner, platform), each on a host of its own architecture, so
+    # NOTHING IS EMULATED. This repository is public, which is what makes the
+    # arm64 hosted runners available at no cost, and that is the whole unlock.
+    #
+    # The single-host form this replaces built both platforms in one job, so
+    # whichever architecture the host was, the other ran under QEMU. Measured on
+    # this repo: nccl took 2h38m, and because the matrix gates the merge, one
+    # emulated build set the latency of every `runners/` change. The same build
+    # native is minutes. A one-line Dockerfile fix costing most of an hour to
+    # verify discourages exactly the changes that most need verifying, on images
+    # a node's readiness gate executes.
+    runs-on: ${{ matrix.host }}
+    # Kept well above a native build's needs rather than trimmed to them: this is
+    # a backstop against a hung build, not a target. The old 350 existed because
+    # QEMU could genuinely run for hours; nothing here should now approach it.
+    timeout-minutes: 120
     strategy:
       # One broken runner must not hide the state of the other ten — the whole
       # point of the matrix is to find out which of them build.
       fail-fast: false
       matrix:
         runner: ${{ fromJSON(needs.runner-plan.outputs.runners) }}
+        platform: [linux/amd64, linux/arm64]
+        # `include` entries that match an existing combination ADD fields to it
+        # rather than creating new combinations, which is what maps each platform
+        # onto a host of its own architecture.
+        include:
+          - platform: linux/amd64
+            host: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            host: ubuntu-24.04-arm
+            arch: arm64
     steps:
       # ── FIRST, before anything pulls a layer ──────────────────────────────────
       # A hosted ubuntu-latest runner has roughly 14 GB free and ships 20-30 GB of
@@ -505,25 +523,25 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      # ALWAYS needed now that the matrix is two platforms: whichever
-      # architecture the hosted runner is, the other one is emulated. It used to
-      # be skipped on a native arm64 runner because arm64 was the only target.
-      - uses: docker/setup-qemu-action@v3
+      # NO setup-qemu. Each job builds only its own host's architecture, so there
+      # is nothing to emulate — and leaving QEMU installed would let an
+      # accidentally cross-platform build succeed slowly instead of failing
+      # loudly, which is how the emulation crept back in last time.
       - uses: docker/setup-buildx-action@v4
 
       - id: started
         run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      - name: Build ${{ matrix.runner }} (linux/amd64 + linux/arm64, no push)
+      - name: Build ${{ matrix.runner }} (${{ matrix.platform }}, native, no push)
         uses: docker/build-push-action@v7
         with:
           context: runners/${{ matrix.runner }}
-          # BOTH, because an arm64-only runner image is unusable by every x86
-          # adopter — H100, B200, MI300 — and that was the single largest barrier
-          # to adopting this project. amd64 is the CHEAP half here: it is native
-          # on GitHub's hosted runners, so adding it costs a fraction of what the
-          # existing QEMU arm64 half already costs.
-          platforms: linux/amd64,linux/arm64
+          # ONE platform, matching the host. Both are still covered — by the other
+          # leg of the matrix, on its own native runner. An arm64-only runner image
+          # is unusable by every x86 adopter (H100, B200, MI300), which was the
+          # single largest barrier to adopting this project, so the coverage is not
+          # negotiable; only the emulation is.
+          platforms: ${{ matrix.platform }}
           push: false
           # No CUDA_ARCH build-arg, deliberately. It used to pin sm_121a, which
           # is GB10 — a Grace part with no x86 host in existence — so forcing it
@@ -535,20 +553,20 @@ jobs:
           # "build what gets published": publish-runner.yml's cuda_arch input
           # defaults to `default`, which resolves to exactly the same thing.
           #
-          # Scoped per runner so the eleven caches do not evict each other's
-          # layers on sight. GitHub's Actions cache is 10 GB per REPOSITORY and a
-          # CUDA build stage is multiple GB, so expect the heavy runners to miss
-          # more often than they hit; the cheap ones hit reliably. If the export
-          # cost ever exceeds the saving, dropping cache-to here is a one-line
-          # change — and going native arm64 makes the question moot.
+          # Scoped per runner AND PER PLATFORM. Without the platform in the key
+          # the two legs share one scope and evict each other's layers on sight —
+          # an amd64 CUDA stage and an arm64 one have nothing in common, so every
+          # export would overwrite the other's and both would miss every time.
+          # GitHub's Actions cache is 10 GB per REPOSITORY, so the heavy runners
+          # will still miss more often than they hit; the cheap ones hit reliably.
           #
           # ignore-error=true because the cache is an optimisation and this job is
           # a GATE: a full-cache or cache-service failure must not be reported as
           # "this runner does not build", which is the one thing the job is here
           # to answer.
-          cache-from: type=gha,scope=runner-${{ matrix.runner }}
-          cache-to: type=gha,mode=max,scope=runner-${{ matrix.runner }},ignore-error=true
-          tags: ghcr.io/baldwinspc/glimmer-burnin-${{ matrix.runner }}:ci
+          cache-from: type=gha,scope=runner-${{ matrix.runner }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=runner-${{ matrix.runner }}-${{ matrix.arch }},ignore-error=true
+          tags: ghcr.io/baldwinspc/glimmer-burnin-${{ matrix.runner }}:ci-${{ matrix.arch }}
 
       # Reported so the cost of this matrix is a measurement rather than an
       # estimate, and so the decision above can be revisited from data.
@@ -559,16 +577,18 @@ jobs:
           # and a job-level env cannot override them, so the value silently
           # becomes the Actions runner's own.
           KIND: ${{ matrix.runner }}
+          PLATFORM: ${{ matrix.platform }}
           STARTED: ${{ steps.started.outputs.at }}
         run: |
           set -euo pipefail
           secs=$(( $(date +%s) - STARTED ))
-          # Both platforms are built, so exactly one of them is emulated: name
-          # which, or the number below is not interpretable.
-          if [ "${RUNNER_ARCH}" = ARM64 ]; then
-            how='arm64 native, amd64 QEMU'
-          else
-            how='amd64 native, arm64 QEMU'
-          fi
-          printf '### `%s` — %dm %02ds (linux/amd64 + linux/arm64; %s)\n' \
-            "$KIND" "$((secs / 60))" "$((secs % 60))" "$how" >> "$GITHUB_STEP_SUMMARY"
+          # One platform per job, on a host of its own architecture. If this ever
+          # reports "emulated" the matrix has lost its host mapping and the number
+          # is not comparable with any other — say so rather than printing a
+          # figure that silently means something else.
+          case "${PLATFORM}:${RUNNER_ARCH}" in
+            linux/amd64:X64|linux/arm64:ARM64) how=native ;;
+            *) how="EMULATED (${PLATFORM} on ${RUNNER_ARCH})" ;;
+          esac
+          printf '### `%s` %s — %dm %02ds (%s)\n' \
+            "$KIND" "$PLATFORM" "$((secs / 60))" "$((secs % 60))" "$how" >> "$GITHUB_STEP_SUMMARY"
