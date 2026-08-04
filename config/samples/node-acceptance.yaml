@@ -127,13 +127,35 @@ spec:
   kind: memory-bw
   scope: Node
   durationSeconds: 180
+  # MEASURED on this fleet, not derived. Four samples across both GB10 Sparks,
+  # two runs each:
+  #
+  #   hostToDevice   58.93  59.13  59.16  61.02   GB/s
+  #   deviceToHost   59.32  59.33  59.57  60.77   GB/s
+  #   deviceToDevice 120.93 121.44 121.83 122.34  GB/s
+  #
+  # Pinned at ~90% of the fleet median, which leaves comfortable headroom over
+  # the observed minimum while still catching a degraded link.
+  #
+  # These gates were previously 20, which is the failure mode opposite to the
+  # one this project kept hitting: not a threshold so tight it fails healthy
+  # hardware, but one so loose it ACCEPTS a node running at a third of its
+  # expected bandwidth — exactly the fault memory-bw exists to detect. A
+  # too-permissive gate is worse than none, because it reports a verdict.
+  #
+  # Re-measure before reusing these on any other SKU. On GB10 the host and
+  # device share one physical memory pool over NVLink-C2C, so these numbers
+  # describe unified-memory bandwidth and do not transfer to a discrete part.
   thresholds:
     - metric: hostToDeviceBandwidthGBs
       comparison: GreaterThanOrEqual
-      value: "20"
+      value: "53"
     - metric: deviceToHostBandwidthGBs
       comparison: GreaterThanOrEqual
-      value: "20"
+      value: "53"
+    - metric: deviceToDeviceBandwidthGBs
+      comparison: GreaterThanOrEqual
+      value: "109"
   resources:
     limits:
       nvidia.com/gpu: "1"
