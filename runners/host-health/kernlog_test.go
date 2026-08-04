@@ -3,8 +3,32 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// collect adapts the streaming scan back into a slice so these tests can keep
+// asserting on the messages themselves.
+//
+// It is deliberately test-only. The production path (kernelLogProbe.count)
+// never materialises the scan, because a slice of every record on the host is
+// how this runner could run itself out of memory — see the kernelLog interface
+// comment and issue #112.
+func collect(src kernelLog) ([]string, error) {
+	var out []string
+	err := src.scan(func(m string) { out = append(out, m) })
+	return out, err
+}
+
+// countMessages is the batch spelling of messageCounter, kept for the table
+// test below. The production counter visits; this proves the same rule.
+func countMessages(msgs []string) (xid, hw int64) {
+	var c messageCounter
+	for _, m := range msgs {
+		c.visit(m)
+	}
+	return c.xid, c.hw
+}
 
 func TestParseKmsgRecord(t *testing.T) {
 	cases := []struct {
@@ -77,7 +101,7 @@ func TestFileSourceDifferencesTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openFileLog: %v", err)
 	}
-	first, err := src.scan()
+	first, err := collect(src)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -86,7 +110,7 @@ func TestFileSourceDifferencesTheWindow(t *testing.T) {
 	}
 
 	appendTo(t, path, "NVRM: Xid (PCI:0000:01:00): 63, new\nunrelated\n")
-	second, err := src.scan()
+	second, err := collect(src)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -107,13 +131,13 @@ func TestFileSourceHoldsBackPartialLine(t *testing.T) {
 	mustWrite(t, path, "complete line\nNVRM: Xid (PCI:0000:01:0")
 
 	src, _ := openFileLog(path)
-	first, _ := src.scan()
+	first, _ := collect(src)
 	if len(first) != 1 {
 		t.Fatalf("first scan = %q, want only the complete line", first)
 	}
 
 	appendTo(t, path, "0): 48, split across writes\n")
-	second, _ := src.scan()
+	second, _ := collect(src)
 	if len(second) != 1 {
 		t.Fatalf("second scan = %q, want the completed line", second)
 	}
@@ -129,7 +153,7 @@ func TestFileSourceHandlesRotation(t *testing.T) {
 		mustWrite(t, path, "one\ntwo\nthree\n")
 
 		src, _ := openFileLog(path)
-		if first, _ := src.scan(); len(first) != 3 {
+		if first, _ := collect(src); len(first) != 3 {
 			t.Fatalf("first scan = %d lines, want 3", len(first))
 		}
 		if err := os.Rename(path, path+".1"); err != nil {
@@ -138,7 +162,7 @@ func TestFileSourceHandlesRotation(t *testing.T) {
 		// The replacement is LONGER than the old offset, so only the changed
 		// identity of the file reveals the rotation.
 		mustWrite(t, path, "NVRM: Xid (PCI:0000:01:00): 79, first line after rotation\n")
-		second, _ := src.scan()
+		second, _ := collect(src)
 		if xid, _ := countMessages(second); xid != 1 {
 			t.Errorf("post-rotation xid = %d, want 1", xid)
 		}
@@ -150,11 +174,11 @@ func TestFileSourceHandlesRotation(t *testing.T) {
 		mustWrite(t, path, "one\ntwo\nthree\nfour\nfive\n")
 
 		src, _ := openFileLog(path)
-		if _, err := src.scan(); err != nil {
+		if _, err := collect(src); err != nil {
 			t.Fatal(err)
 		}
 		mustWrite(t, path, "NVRM: Xid: 79\n")
-		second, _ := src.scan()
+		second, _ := collect(src)
 		if xid, _ := countMessages(second); xid != 1 {
 			t.Errorf("post-truncation xid = %d, want 1", xid)
 		}
@@ -174,7 +198,7 @@ func TestKmsgSourceReadsRecords(t *testing.T) {
 	}
 	defer src.close()
 
-	msgs, err := src.scan()
+	msgs, err := collect(src)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -203,7 +227,7 @@ func TestKmsgSourceReadsEveryRecordInOneRead(t *testing.T) {
 	}
 	defer src.close()
 
-	msgs, err := src.scan()
+	msgs, err := collect(src)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -215,8 +239,14 @@ func TestKmsgSourceReadsEveryRecordInOneRead(t *testing.T) {
 	}
 }
 
-func TestSplitKmsgChunkHoldsBackPartialRecord(t *testing.T) {
-	msgs, remainder := splitKmsgChunk("3,1,1,-;NVRM: Xid: 13\n3,2,2,-;NVRM: Xid")
+func TestVisitKmsgChunkHoldsBackPartialRecord(t *testing.T) {
+	visited := func(chunk string) ([]string, string) {
+		var out []string
+		rest := visitKmsgChunk(chunk, func(m string) { out = append(out, m) })
+		return out, rest
+	}
+
+	msgs, remainder := visited("3,1,1,-;NVRM: Xid: 13\n3,2,2,-;NVRM: Xid")
 	if len(msgs) != 1 {
 		t.Fatalf("messages = %q, want only the complete record", msgs)
 	}
@@ -224,7 +254,7 @@ func TestSplitKmsgChunkHoldsBackPartialRecord(t *testing.T) {
 		t.Errorf("remainder = %q, want the partial record carried over", remainder)
 	}
 	// The partial record completes on the next read and is counted once.
-	msgs2, remainder2 := splitKmsgChunk(remainder + ": 48, DBE\n")
+	msgs2, remainder2 := visited(remainder + ": 48, DBE\n")
 	if len(msgs2) != 1 || remainder2 != "" {
 		t.Fatalf("second chunk = %q, remainder %q", msgs2, remainder2)
 	}
@@ -300,4 +330,80 @@ func appendTo(t *testing.T, path, content string) {
 	if _, err := f.WriteString(content); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A scan must cost the same whatever the host's uptime — issue #112.
+//
+// This is the regression test for the mechanism, not for the symptom. Both
+// sources used to accumulate every record into a []string for a caller that
+// wanted two integers, so peak heap tracked the SIZE OF THE LOG: the kernel ring
+// buffer on the kmsg path, and here the whole unread tail of /var/log/syslog,
+// which nothing bounds. An allocation failure inside that is a Go runtime fatal
+// error — unrecoverable, and it exits 2, the undeclared skip code, on the one
+// runner in this repository that claims never to skip.
+//
+// The bound is deliberately loose (a fifth of the log). It is not a memory
+// budget; it is the difference between "retains nothing" and "retains all of
+// it", and only a change back to accumulating can cross it.
+func TestFileSourceScanRetainsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates a multi-megabyte log")
+	}
+	const (
+		records   = 300000
+		sampleGap = 16384
+	)
+	record := "Jun  1 00:00:00 node kernel: [12345.678901] systemd[1]: Started Session of user root, nothing to see here\n"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "syslog")
+	var log []byte
+	for i := 0; i < records; i++ {
+		log = append(log, record...)
+	}
+	logBytes := uint64(len(log))
+	mustWrite(t, path, string(log))
+	log = nil
+
+	src, err := openFileLog(path)
+	if err != nil {
+		t.Fatalf("openFileLog: %v", err)
+	}
+	defer src.close()
+
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+
+	var (
+		seen  int
+		peak  uint64
+		stats runtime.MemStats
+	)
+	// Sampled INSIDE the scan: the retained set is what matters while the scan
+	// is in flight, and by the time it returns the accumulating version would
+	// have handed its slice back and be collectable again.
+	err = src.scan(func(string) {
+		seen++
+		if seen%sampleGap != 0 {
+			return
+		}
+		runtime.ReadMemStats(&stats)
+		if grown := stats.HeapAlloc - min(stats.HeapAlloc, base.HeapAlloc); grown > peak {
+			peak = grown
+		}
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if seen != records {
+		t.Fatalf("visited %d records, want %d — the scan is not reading the whole log", seen, records)
+	}
+
+	limit := logBytes / 5
+	if peak > limit {
+		t.Errorf("peak heap grew %d bytes while streaming a %d byte log (limit %d) — the scan is retaining records",
+			peak, logBytes, limit)
+	}
+	t.Logf("streamed %d bytes with a peak heap growth of %d bytes", logBytes, peak)
 }

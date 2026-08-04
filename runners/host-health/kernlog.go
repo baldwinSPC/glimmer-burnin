@@ -60,9 +60,20 @@ var hwErrorPatterns = []*regexp.Regexp{
 
 // kernelLog is a differenceable source of kernel messages.
 type kernelLog interface {
-	// scan returns the messages that appeared since the previous scan. The
-	// first call returns everything the source can already see.
-	scan() ([]string, error)
+	// scan visits every message that appeared since the previous scan, in
+	// order. The first call visits everything the source can already see.
+	//
+	// IT IS A VISITOR AND NOT A []string, AND THAT IS THE WHOLE POINT (#112).
+	// Both implementations used to accumulate the entire scan into a slice for
+	// a caller that immediately reduced it to two counters, so peak memory was
+	// a function of how much log the host had — the kernel ring buffer on the
+	// kmsg path, and on the file path the whole unread tail of
+	// /var/log/syslog, which is bounded by nothing at all. A Go heap allocation
+	// that fails is a runtime fatal error, no deferred recover can intercept
+	// it, and the process exits 2: the undeclared skip code, on the one runner
+	// in this repository that claims never to skip. Nothing is retained here
+	// now, so the scan costs one buffer regardless of the host's uptime.
+	scan(visit func(string)) error
 	close()
 }
 
@@ -103,11 +114,7 @@ func (k *kernelLogProbe) baseline() {
 	if !k.available {
 		return
 	}
-	msgs, err := k.src.scan()
-	if err != nil {
-		k.dropped = true
-	}
-	k.xidPre, k.hwPre = countMessages(msgs)
+	k.xidPre, k.hwPre = k.count()
 }
 
 // collect closes the window and releases the source.
@@ -115,12 +122,17 @@ func (k *kernelLogProbe) collect() {
 	if !k.available {
 		return
 	}
-	msgs, err := k.src.scan()
-	if err != nil {
+	k.xidNew, k.hwNew = k.count()
+	k.src.close()
+}
+
+// count drains the source and tallies as it goes, retaining nothing.
+func (k *kernelLogProbe) count() (xid, hw int64) {
+	var c messageCounter
+	if err := k.src.scan(c.visit); err != nil {
 		k.dropped = true
 	}
-	k.xidNew, k.hwNew = countMessages(msgs)
-	k.src.close()
+	return c.xid, c.hw
 }
 
 func (k *kernelLogProbe) emit(out *emitter) {
@@ -139,19 +151,21 @@ func (k *kernelLogProbe) emit(out *emitter) {
 	}
 }
 
-func countMessages(msgs []string) (xid, hw int64) {
-	for _, m := range msgs {
-		if xidPattern.MatchString(m) {
-			xid++
-		}
-		for _, p := range hwErrorPatterns {
-			if p.MatchString(m) {
-				hw++
-				break
-			}
+// messageCounter is the entire reason the scan ever produced messages: two
+// tallies. It is a struct with a visit method rather than a closure so the same
+// counting rule is reachable from a test without re-stating it.
+type messageCounter struct{ xid, hw int64 }
+
+func (c *messageCounter) visit(m string) {
+	if xidPattern.MatchString(m) {
+		c.xid++
+	}
+	for _, p := range hwErrorPatterns {
+		if p.MatchString(m) {
+			c.hw++
+			return
 		}
 	}
-	return xid, hw
 }
 
 // ---------------------------------------------------------------------------
@@ -191,12 +205,9 @@ func openKmsg(path string) (*kmsgSource, error) {
 	return &kmsgSource{fd: fd}, nil
 }
 
-func (k *kmsgSource) scan() ([]string, error) {
+func (k *kmsgSource) scan(visit func(string)) error {
 	buf := make([]byte, kmsgBufSize)
-	var (
-		msgs    []string
-		dropped error
-	)
+	var dropped error
 	for i := 0; i < maxRecordsPerScan; i++ {
 		n, err := syscall.Read(k.fd, buf)
 		switch {
@@ -204,7 +215,7 @@ func (k *kmsgSource) scan() ([]string, error) {
 			continue
 		case errors.Is(err, syscall.EAGAIN), errors.Is(err, syscall.EWOULDBLOCK):
 			// Nothing more to read right now: the window is drained.
-			return msgs, dropped
+			return dropped
 		case errors.Is(err, syscall.EPIPE):
 			// Records were overwritten before we read them. The descriptor has
 			// already been repositioned at the next valid record, so keep
@@ -212,32 +223,29 @@ func (k *kmsgSource) scan() ([]string, error) {
 			dropped = err
 			continue
 		case err != nil:
-			return msgs, err
+			return err
 		case n == 0:
 			// EOF. Only a regular file (a test fixture, or an operator pointing
 			// BURNIN_KMSG_PATH at a captured log) can produce this.
-			return msgs, dropped
+			return dropped
 		}
-		records, remainder := splitKmsgChunk(k.pending + string(buf[:n]))
-		k.pending = remainder
-		msgs = append(msgs, records...)
+		k.pending = visitKmsgChunk(k.pending+string(buf[:n]), visit)
 	}
-	return msgs, dropped
+	return dropped
 }
 
-// splitKmsgChunk turns one read into the messages it contains, plus any
-// trailing partial line to carry into the next read.
+// visitKmsgChunk hands one read's messages to visit and returns any trailing
+// partial line to carry into the next read.
 //
 // A read of /dev/kmsg returns exactly one record, so this loop usually runs
 // once — but it must not ASSUME that, because a single read of a regular file
 // returns as many records as fit in the buffer and dropping all but the first
 // would silently lose Xids.
-func splitKmsgChunk(chunk string) ([]string, string) {
-	var out []string
+func visitKmsgChunk(chunk string, visit func(string)) string {
 	for {
 		line, rest, ok := strings.Cut(chunk, "\n")
 		if !ok {
-			return out, chunk
+			return chunk
 		}
 		chunk = rest
 		// Continuation lines carry the record's key=value dictionary
@@ -245,7 +253,7 @@ func splitKmsgChunk(chunk string) ([]string, string) {
 		if line == "" || line[0] == ' ' || line[0] == '\t' {
 			continue
 		}
-		out = append(out, parseKmsgRecord(line))
+		visit(parseKmsgRecord(line))
 	}
 }
 
@@ -290,10 +298,17 @@ func openFileLog(path string) (*fileSource, error) {
 	return &fileSource{path: path}, nil
 }
 
-func (f *fileSource) scan() ([]string, error) {
+// scan streams the unread tail of the file.
+//
+// The tail is bounded by nothing this runner controls — a node that has been up
+// for months and never rotated /var/log/syslog presents the whole of it on the
+// FIRST scan, which is the baseline taken before any output has been produced.
+// Reading it into a slice was the largest unbounded allocation in the runner and
+// the most plausible route to the exit 2 of #112.
+func (f *fileSource) scan(visit func(string)) error {
 	fh, err := os.Open(f.path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = fh.Close() }()
 
@@ -309,13 +324,10 @@ func (f *fileSource) scan() ([]string, error) {
 		f.info = st
 	}
 	if _, err := fh.Seek(f.off, io.SeekStart); err != nil {
-		return nil, err
+		return err
 	}
 
-	var (
-		lines    []string
-		consumed int64
-	)
+	var consumed int64
 	r := bufio.NewReader(fh)
 	for {
 		line, err := r.ReadString('\n')
@@ -325,10 +337,10 @@ func (f *fileSource) scan() ([]string, error) {
 			break
 		}
 		consumed += int64(len(line))
-		lines = append(lines, strings.TrimRight(line, "\n"))
+		visit(strings.TrimRight(line, "\n"))
 	}
 	f.off += consumed
-	return lines, nil
+	return nil
 }
 
 func (f *fileSource) close() {}

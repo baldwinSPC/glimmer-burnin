@@ -7,7 +7,7 @@
 // long before any benchmark notices, so this runner is cheap enough to attach
 // to every profile.
 //
-// Three rules govern everything below.
+// Four rules govern everything below.
 //
 //  1. NEVER emit a zero that was not measured. A counter this runner could not
 //     read is OMITTED, not reported as 0. pkg/verdict fails a threshold whose
@@ -37,16 +37,30 @@
 //     write, stack exhaustion — which no deferred recover can intercept. This
 //     runner is where that was caught (#103), precisely because it is the one
 //     that claims never to skip; on a runner with a legitimate exit 2 the same
-//     crash is indistinguishable from a real one. It is not fixed here and
-//     cannot be: the fix is in pkg/runner, which honours exit 2 as Skip only
-//     when the runner also PRINTS a _SKIP declaration. This runner prints none,
-//     by design, so a crash of it is recorded Error and the hardware is left
-//     unjudged rather than certified out of scope. Do not add a marker here.
+//     crash is indistinguishable from a real one. The VERDICT for it is fixed in
+//     pkg/runner, which honours exit 2 as Skip only when the runner also PRINTS
+//     a _SKIP declaration. This runner prints none, by design, so a crash of it
+//     is recorded Error and the hardware is left unjudged rather than certified
+//     out of scope. Do not add a marker here.
 //
 //  3. Degrade per probe, not as a whole. Every probe is independent and optional;
 //     the runner emits whatever subset of counters this host actually exposes.
 //     That is also what keeps it vendor-neutral — the NVML probe contributing
 //     nothing on a non-NVIDIA node is a normal outcome, not an error.
+//
+//  4. SAY WHERE YOU DIED. #105 made a crash REPORT correctly; #112 is the one
+//     that was never diagnosed, and it could not be, because every metric was
+//     buffered and written in a single block at the end — so a runner that died
+//     produced completely empty stdout. Two things address that and they cover
+//     different failures. A panic is recovered in run(), which converts it into
+//     this runner's own contract (exit 3, a HOST_HEALTH_ERROR line naming the
+//     stage, and a hostHealthPanic metric) and flushes the evidence gathered
+//     before it. A runtime fatal error and the kernel OOM killer cannot be
+//     recovered by anything, so the only thing that survives one is output
+//     ALREADY ON THE WIRE: that is what the stage breadcrumbs are, streamed
+//     straight through as each stage is entered. A new stage in run() gets a
+//     breadcrumb, or the gap it leaves is exactly where the next unexplained
+//     crash will hide.
 //
 // The runner contract is exit code plus key=value lines on stdout. Metrics are
 // printed BEFORE the verdict line, so a failing run still yields its evidence.
@@ -65,6 +79,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -198,10 +213,47 @@ func clampWindowSeconds(requested int) int {
 }
 
 // run performs the whole test and returns the exit code. Output is written to w
-// in contract order: every metric first, then the single verdict line.
-func run(cfg config, w io.Writer) int {
+// in contract order: every stage breadcrumb and metric first, then the single
+// verdict line.
+func run(cfg config, w io.Writer) (code int) {
 	out := newEmitter()
+	st := stager{w: w}
 	start := cfg.now()
+
+	// A crash is recorded as a crash, not as a verdict about the node.
+	//
+	// A Go panic exits 2 — the skip code — and pkg/runner now calls an
+	// undeclared exit 2 an Error, so the phase was already right. What was
+	// missing is the reason: the stored result carried the last line of a stack
+	// trace and nothing saying the runner died. Recovering here makes this
+	// runner say it itself, in its own contract (exit 3, HOST_HEALTH_ERROR),
+	// and — the part that matters most — it FLUSHES the evidence gathered
+	// before the crash, which the old all-at-the-end write threw away.
+	//
+	// It cannot catch a runtime FATAL error (out of memory, concurrent map
+	// write, stack exhaustion); nothing in Go can. Those are what the stage
+	// breadcrumbs below are for.
+	written := false
+	defer func() {
+		v := recover()
+		if v == nil {
+			return
+		}
+		code = exitError
+		out.set(keyPanic, panicSummary(v))
+		if !written {
+			out.writeTo(w)
+		}
+		// The stack goes out BEFORE the marker, deliberately. pkg/runner takes
+		// Result.Message from the LAST line that is not key=value, so a trace
+		// printed afterwards would overwrite the explanation with a bare stack
+		// frame — which is exactly the unreadable record #112 was filed about.
+		fmt.Fprintf(w, "%s\n", debug.Stack())
+		fmt.Fprintf(w, "HOST_HEALTH_ERROR: the runner panicked during stage %q and did not finish (%s) — "+
+			"this node is UNJUDGED for host health, not healthy and not out of scope\n", st.last, panicSummary(v))
+	}()
+
+	st.reached(stageStart)
 	out.set("host_health_version", emissionVersion)
 	// Reserve the position; the value is overwritten below with the window that
 	// was actually observed.
@@ -210,9 +262,11 @@ func run(cfg config, w io.Writer) int {
 	// The kernel log is opened FIRST so the window it observes encloses every
 	// other probe: a Xid logged while nvidia-smi is running must land inside
 	// the window, not in the gap before it.
+	st.reached(stageKernlogBaseline)
 	klog := newKernelLogProbe(cfg)
 	klog.baseline()
 
+	st.reached(stageProbeFirst)
 	gpu0 := probeGPU(cfg)
 	aer0 := probeAER(cfg.sysfsRoot)
 	nic0 := probeNIC(cfg.sysfsRoot)
@@ -220,13 +274,18 @@ func run(cfg config, w io.Writer) int {
 	// The window that was actually observed, which is not always the one that
 	// was asked for: the runner's own deadline can cut it short, and every
 	// windowed counter below is a rate over THIS interval.
+	st.reached(stageWindow)
 	out.setInt("observation_window_s", int64(cfg.sleepWindow().Round(time.Second)/time.Second))
 
+	st.reached(stageProbeSecond)
 	gpu1 := probeGPU(cfg)
 	aer1 := probeAER(cfg.sysfsRoot)
 	nic1 := probeNIC(cfg.sysfsRoot)
+
+	st.reached(stageKernlogCollect)
 	klog.collect()
 
+	st.reached(stageEmit)
 	klog.emit(out)
 	emitGPU(out, gpu0, gpu1)
 	emitAER(out, aer0, aer1)
@@ -240,9 +299,76 @@ func run(cfg config, w io.Writer) int {
 	code, verdict := decide(out)
 	out.set("node_ready", strconv.FormatBool(code == exitPass))
 
+	st.reached(stageDone)
 	out.writeTo(w)
+	written = true
 	fmt.Fprintln(w, verdict)
 	return code
+}
+
+// ---------------------------------------------------------------------------
+// stage breadcrumbs
+// ---------------------------------------------------------------------------
+
+// The stages this runner passes through, streamed to stdout as each is entered.
+//
+// THIS IS THE ONLY THING THAT SURVIVES A HARD KILL. Every other metric is
+// buffered in the emitter and written in one block at the end, so a runner that
+// is OOM-killed, SIGKILLed, or brought down by a Go runtime fatal error produced
+// stdout that was completely EMPTY — no metrics, no verdict line, nothing saying
+// which of a dozen probes it was inside. That is why #112 could not be
+// diagnosed: the evidence was never written.
+//
+// A breadcrumb is a metric rather than a log line because it has to reach the
+// STORED result. pkg/runner is last-occurrence-wins, so the value the operator
+// records is the furthest stage reached, and it lands in TestResult.Metrics and
+// in the delivered envelope where it outlives the pod and its logs. Emitting the
+// same key repeatedly is the same mechanism checkpointing already relies on.
+const (
+	stageStart           = "start"
+	stageKernlogBaseline = "kernlog-baseline"
+	stageProbeFirst      = "probe-first"
+	stageWindow          = "observation-window"
+	stageProbeSecond     = "probe-second"
+	stageKernlogCollect  = "kernlog-collect"
+	stageEmit            = "emit"
+	stageDone            = "done"
+)
+
+// keyStage and keyPanic are runner-side keys; pkg/runner normalises them to
+// hostHealthStage and hostHealthPanic, both registered as Evidence because their
+// values are labels rather than numbers.
+const (
+	keyStage = "host_health_stage"
+	keyPanic = "host_health_panic"
+)
+
+// stager writes a breadcrumb the instant a stage is entered, straight through to
+// w rather than into the emitter. Buffering it would defeat the entire point.
+type stager struct {
+	w    io.Writer
+	last string
+}
+
+func (s *stager) reached(stage string) {
+	s.last = stage
+	fmt.Fprintf(s.w, "%s=%s\n", keyStage, stage)
+}
+
+// panicSummary renders a recovered value as ONE line fit for a metric value.
+//
+// One line because a metric value cannot contain a newline, and a summary rather
+// than the stack because this is the part that has to survive into status where
+// a human will read it next to the node's name.
+func panicSummary(v any) string {
+	s := strings.TrimSpace(fmt.Sprintf("panic: %v", v))
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 180 {
+		s = s[:180] + "…"
+	}
+	return s
 }
 
 // sleepWindow waits out the observation window without ever crossing the

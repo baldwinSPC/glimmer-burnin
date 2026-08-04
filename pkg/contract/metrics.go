@@ -584,6 +584,39 @@ var registry = map[string]Metric{
 		Description:  "which floor the run was judged against, general|thermal, naming the reason clockFloorAppliedPct is what it is; a label recording the runner's own decision",
 		ThresholdUse: ThresholdUseEvidence,
 	},
+
+	// host-health's labels. Same class and same duty as the block above: each of
+	// these is a WORD, host-health is a kind this project owns the runner for,
+	// and an unregistered name is assumed thresholdable — so a gate on any of
+	// them passed every authoring-time check and then failed closed on every node
+	// forever. hostHealthVersion is the sly one here, exactly as computeCap is
+	// above: it is "1", so it parses, and a gate on it silently compares a schema
+	// version as a decimal.
+	"xidSource": {
+		Name: "xidSource", Unit: UnitNone,
+		Description:  "where the Xid scan read from: kmsg|kernlog|none. A label naming the PROVENANCE of xidEvents, and the value that matters most is the one a gate cannot express — \"none\" means the scan did not run, and the counters it would have produced are omitted rather than zeroed, so xidEvents already fails closed on its own",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"nodeReady": {
+		Name: "nodeReady", Unit: UnitNone,
+		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"hostHealthVersion": {
+		Name: "hostHealthVersion", Unit: UnitNone,
+		Description:  "the shape of the metric set this runner emitted, so a consumer charting these counters over months can tell when the set changed. A schema version of the OUTPUT, saying nothing whatever about the hardware; it parses as a number, which is precisely why it has to be registered",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"hostHealthStage": {
+		Name: "hostHealthStage", Unit: UnitNone,
+		Description:  "the furthest stage the runner reached, streamed as it goes so a process that is OOM-killed or brought down by a Go runtime fatal error still says where it died. On a run that completed it is always \"done\", which is why it is worthless as a gate and valuable as evidence: it only carries information when everything else is missing",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"hostHealthPanic": {
+		Name: "hostHealthPanic", Unit: UnitNone,
+		Description:  "the one-line summary of a panic the runner recovered from before exiting 3, present only on a run that crashed. It is recorded as a metric as well as in the message because a metric cannot be overwritten by a later stack frame, and the stored result outlives the pod whose log holds the trace",
+		ThresholdUse: ThresholdUseEvidence,
+	},
 }
 
 // Lookup returns the registered metric, if this is one the project owns.

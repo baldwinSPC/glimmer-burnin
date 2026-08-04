@@ -292,8 +292,16 @@ ECC-capable GPU those lines carry real numbers, and `ecc_corrected_aggregate`,
 `remapped_rows_correctable`, `retired_pages_total` and friends appear alongside.
 
 ```
+host_health_stage=start
 host_health_version=1
 observation_window_s=30
+host_health_stage=kernlog-baseline
+host_health_stage=probe-first
+host_health_stage=observation-window
+host_health_stage=probe-second
+host_health_stage=kernlog-collect
+host_health_stage=emit
+host_health_stage=done
 xid_source=kmsg
 xid_count=0
 xid_preexisting=0
@@ -330,6 +338,44 @@ elapsed_s=30.2
 node_ready=true
 HOST_HEALTH_OK
 ```
+
+`host_health_stage` appears once per stage and is the only line written as the
+run proceeds; everything else is buffered and printed in one block at the end.
+The parser is last-occurrence-wins, so the value the operator stores is the
+**furthest stage reached** — always `done` on a run that finished, and something
+else only when the runner did not finish. See *When the runner dies* below.
+
+## When the runner dies
+
+A crashed runner used to leave nothing at all. Every metric was buffered until
+the end, so a process brought down mid-run printed no metrics, no verdict line,
+and nothing naming the probe it was inside — which is why issue #112 (a
+`host-health` test that settled `Skipped` on a real node) could never be
+diagnosed. Two mechanisms cover the two ways it can die:
+
+| How it died | What you get |
+|---|---|
+| **panic** | exit **3**, the evidence gathered so far, `host_health_panic=<one-line summary>`, the stack, and a final `HOST_HEALTH_ERROR:` line naming the stage |
+| **runtime fatal error** (out of memory, concurrent map write, stack exhaustion) — unrecoverable, exits **2** | every `host_health_stage=` line up to the stage it died in |
+| **SIGKILL** (kernel OOM killer, eviction) — exit **137** | the same breadcrumbs |
+
+A panic is recovered so the runner can report it in its own contract: exit 3 is
+`Error`, the node is **unjudged**, and the operator retries it under
+`retryOnErrorLimit`. The other two cannot be intercepted by any Go program, so
+the only thing that survives them is output already on the wire — which is the
+whole reason the stage marker is streamed rather than buffered.
+
+Note the second row is the shape that caused #112. A runtime fatal error exits
+2, the skip code, and a runner that skips normally prints no metrics either — so
+the crash was perfectly camouflaged as "this test does not apply to this node".
+`pkg/runner` now refuses to read an exit 2 as a skip unless the runner also
+prints a `_SKIP` declaration, and this runner deliberately prints none.
+
+The other half of #112 was the mechanism. Both kernel-log sources used to read
+their whole scan into a slice before counting it, so peak memory tracked the
+size of the host's log — on the text path, the entire unread tail of
+`/var/log/syslog`, bounded by nothing. Both stream now, and
+`TestFileSourceScanRetainsNothing` holds them to it.
 
 ## Source layout
 
