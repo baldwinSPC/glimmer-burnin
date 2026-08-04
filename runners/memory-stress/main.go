@@ -74,8 +74,17 @@ var stressapptestRef = "unknown"
 // can masquerade as a passing one, and it is worth exercising.
 var hardCapGrace = time.Duration(hardCapGraceSeconds) * time.Second
 
+// productionRoot is where the real /proc and /sys are. It is spelled out rather
+// than left empty because filepath.Join("", "proc", "meminfo") is the RELATIVE
+// "proc/meminfo": that resolved correctly only for as long as the image set no
+// WORKDIR and the process therefore happened to start in /. A WORKDIR, a
+// command:/workingDir: in the pod spec, or a wrapper entrypoint would each have
+// turned this runner into exit 3 on every node at once — an unjudged fleet
+// rather than a visible crash. The seam itself stays: tests inject a temp dir.
+const productionRoot = "/"
+
 func main() {
-	code, reason := execute(os.Stdout, os.Stderr, os.LookupEnv, "")
+	code, reason := execute(os.Stdout, os.Stderr, os.LookupEnv, productionRoot)
 	fmt.Fprintln(os.Stdout, marker(code, reason))
 	os.Exit(code)
 }
