@@ -23,6 +23,35 @@
 // declare it unmeasurable, because "we could not look" and "there is nothing
 // here to look at" are different claims about the hardware.
 //
+// # The skip declaration
+//
+// Exit 2 alone does not make a Skip. A runner must also DECLARE the skip on
+// stdout, with a marker line matching SkipMarkerPattern — FP4_GEMM_SKIP,
+// NCCL_SKIP, IB_WRITE_BW_SKIP, and so on. An exit 2 with no such line is an
+// Error, and the hardware is left unjudged.
+//
+// This is the same rule as the sentinel above, applied to the exit code: a
+// runner may only declare what it positively established, and "this test does
+// not apply to this hardware" is a claim ABOUT the hardware. It exists because
+// exit 2 is not a code a runner has sole control of. An unrecovered Go panic
+// exits 2, and so does every Go runtime fatal error — out of memory, concurrent
+// map write, stack exhaustion — none of which a deferred recover can intercept.
+// Without this rule a crashed runner is recorded as a deliberate skip, which is
+// the worst of the phases to land on: Skip is never retried, so the retry
+// budget goes unspent, and it counts towards neither pass nor fail, so the run
+// still settles Passed. Hardware silently unjudged, with a report that reads
+// clean.
+//
+// The camouflage is what makes it dangerous rather than merely wrong. Zero
+// metrics is the NORMAL shape of a skip, so a runner that died before printing
+// anything is byte-for-byte indistinguishable from one that looked and found
+// the test inapplicable — see Result.ReportedNothing, which cannot help here
+// precisely because the empty harvest is legitimate on this path.
+//
+// The rule fails safe in the one direction that matters. A third-party runner
+// that exits 2 without declaring is recorded Error: unjudged and retried, never
+// an acceptance. Every runner this project ships already prints its marker.
+//
 // Like pkg/verdict, this is public and free of Kubernetes types. Glimmer's
 // pre-Kubernetes burn-in path runs the SAME runner images, and if the two
 // dispatchers derived different metrics from identical output they would reach
@@ -30,6 +59,7 @@
 package runner
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -56,19 +86,63 @@ const (
 	VerdictError Verdict = "Error"
 )
 
+// exitCodeSkip is the runner contract's skip code. It is named because two
+// places have to agree about it: the table below, and the declaration rule in
+// Parse that decides whether a runner was entitled to use it.
+const exitCodeSkip = 2
+
 // VerdictFor maps an exit code to its meaning.
+//
+// This is the exit-code table ALONE, and on its own it over-reports Skip: exit
+// 2 is also what the Go runtime uses for an unrecovered panic and for every
+// runtime fatal error. Parse applies the skip-declaration rule on top, and a
+// dispatcher must go through Parse rather than call this directly — see the
+// package comment, and SkipDeclared.
 func VerdictFor(exitCode int) Verdict {
 	switch exitCode {
 	case 0:
 		return VerdictPass
 	case 1:
 		return VerdictFail
-	case 2:
+	case exitCodeSkip:
 		return VerdictSkip
 	default:
 		return VerdictError
 	}
 }
+
+// SkipMarkerPattern matches a runner's skip DECLARATION: an upper-case token
+// ending in _SKIP, at the start of a line, optionally followed by ": reason".
+//
+// The shape is what every runner in this project already prints —
+// FP4_GEMM_SKIP, CLOCKPROBE_SKIP, MEMORY_BW_SKIP, DCGM_DIAG_SKIP, NCCL_SKIP,
+// IB_WRITE_BW_SKIP, GPUDIRECT_RDMA_SKIP, STRESSAPPTEST_SKIP — so the rule
+// codifies existing practice rather than imposing a new spelling. It is
+// anchored so that prose mentioning a marker cannot declare a skip on a
+// runner's behalf.
+var SkipMarkerPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*_SKIP\b`)
+
+// SkipDeclared reports whether a runner's stdout carries the marker line that
+// entitles it to exit 2.
+//
+// It is public and lives here for the reason Result.ReportedNothing does: both
+// dispatchers parse with this package, and a predicate this load-bearing must
+// not be re-derived. Two callers disagreeing about whether a runner declared a
+// skip is two callers disagreeing about whether a node was tested at all.
+func SkipDeclared(stdout string) bool {
+	for _, line := range strings.Split(stdout, "\n") {
+		if SkipMarkerPattern.MatchString(strings.TrimSpace(line)) {
+			return true
+		}
+	}
+	return false
+}
+
+// UndeclaredSkipMessage is what an exit 2 with no declaration is recorded as.
+// It names the mechanism, because the single most likely cause is a crash the
+// runner had no chance to report.
+const UndeclaredSkipMessage = "runner exited 2 (skip) without declaring a skip on stdout — a skip is a claim about the hardware and must be declared with a *_SKIP marker line; " +
+	"an undeclared exit 2 is most often a crashed runner (an unrecovered Go panic and every Go runtime fatal error exit 2), so the hardware is unjudged, not inapplicable"
 
 // Unmeasurable is the reserved metric VALUE with which a runner declares that
 // this hardware cannot produce a measurement at all. Matched
@@ -251,6 +325,10 @@ var aliases = map[string]map[string]string{
 // generic key=value scan — that scan IS the runner contract, and a custom
 // runner honouring it should not be punished — but gets no kind-specific
 // mapping, since only the kind's author knows what its keys mean.
+//
+// The exit code is not taken at face value for exit 2: a Skip must be declared
+// on stdout, and an undeclared one is downgraded to Error. See the package
+// comment for why, and SkipDeclared for the rule.
 func Parse(kind, stdout string, exitCode int) Result {
 	res := Result{
 		Verdict:      VerdictFor(exitCode),
@@ -259,11 +337,18 @@ func Parse(kind, stdout string, exitCode int) Result {
 		Unmeasurable: map[string]bool{},
 	}
 	kindAliases := aliases[kind]
+	skipDeclared := false
 
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
+		}
+		// Tested on the whole line, before the key=value split: a marker's
+		// reason text may itself contain an "=", which would otherwise send
+		// the line down the metric path and lose the declaration.
+		if SkipMarkerPattern.MatchString(line) {
+			skipDeclared = true
 		}
 		// Split on the FIRST "=" so a value may itself contain one.
 		eq := strings.Index(line, "=")
@@ -297,7 +382,43 @@ func Parse(kind, stdout string, exitCode int) Result {
 		delete(res.Unmeasurable, name)
 		res.Metrics[name] = value
 	}
+
+	// An exit 2 nobody declared. Error, never Skip: Skip is not retried and
+	// counts towards neither pass nor fail, so a crash landing there is
+	// hardware silently unjudged under a report that reads clean.
+	//
+	// Whatever the runner did manage to say is kept as context. For the case
+	// this rule exists for that is the tail of a panic trace — a stack frame,
+	// not a diagnosis — which is exactly why the explanation has to lead.
+	if exitCode == exitCodeSkip && !skipDeclared {
+		res.Verdict = VerdictError
+		res.Message = UndeclaredSkipMessage
+		if last := lastNonMetricLine(stdout); last != "" {
+			res.Message += " [runner said: " + last + "]"
+		}
+	}
 	return res
+}
+
+// lastNonMetricLine is the Message the scan above would have settled on. It is
+// recomputed rather than captured because the undeclared-skip path overwrites
+// Message and still owes the caller whatever the runner printed.
+func lastNonMetricLine(stdout string) string {
+	last := ""
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if eq := strings.Index(line, "="); eq > 0 {
+			key := strings.TrimSpace(line[:eq])
+			if key != "" && !strings.ContainsAny(key, " \t") {
+				continue
+			}
+		}
+		last = line
+	}
+	return last
 }
 
 // isUnmeasurable recognises the reserved value. Only this exact spelling counts:

@@ -459,6 +459,31 @@ disagree about the same hardware. One brain, two dispatchers.
   error** (the runner could not measure; the hardware is unjudged). Anything
   else is also an error — `pkg/runner.VerdictFor` maps every unrecognised code
   there — but 3 is the code a runner author writes deliberately.
+- **A skip must be DECLARED, not merely exited.** Exit 2 counts as `Skip` only
+  when stdout also carries a marker line matching `runner.SkipMarkerPattern`
+  (`^[A-Z][A-Z0-9_]*_SKIP\b` — `FP4_GEMM_SKIP`, `NCCL_SKIP`, …); an undeclared
+  exit 2 is an `Error`. This is the unmeasurable sentinel's rule applied to the
+  exit code — a runner may only declare what it positively established, and
+  "this test does not apply to this hardware" is a claim ABOUT the hardware.
+  It exists because **exit 2 is not a code a runner has sole control of**: an
+  unrecovered Go panic exits 2, and so does every Go runtime fatal error (OOM,
+  concurrent map write, stack exhaustion), which no deferred `recover` can
+  intercept — and six runners here ship a Go binary as their entrypoint. Taken
+  at face value that crash lands on the single worst phase available: `Skipped`
+  is never retried, so the budget goes unspent, and it counts towards neither
+  pass nor fail, so `finalize` still settles the run `Passed`. Hardware silently
+  unjudged under a report that reads clean (issue #103). The camouflage is what
+  made it dangerous: zero metrics is the NORMAL shape of a skip, so
+  `ReportedNothing` cannot help — only the missing declaration can. It fails
+  safe in the one direction that matters, since an undeclared exit 2 is
+  `Error`: unjudged and retried, never an acceptance. The mirror-image risk —
+  a runner whose marker the parser does not recognise has every LEGITIMATE skip
+  recorded as an `Error` — is guarded from the filesystem by
+  `runners/pins_test.go`'s `TestEverySkipMarkerIsRecognisedByTheParser`, which
+  resolves the soak family's composed `markerPrefix + "_SKIP"` too. The rule
+  lives in `pkg/runner.Parse` so both dispatchers get it; `VerdictFor` is the
+  exit-code table alone and on its own over-reports `Skip`, so never call it
+  directly.
   **Exit 1 is the expensive one, and it is the one runners get wrong.** It is a
   hardware verdict, and the operator never retries a `Fail`, so it permanently
   indicts a node with the retry budget unspent. It belongs ONLY to something the

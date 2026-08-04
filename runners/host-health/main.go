@@ -31,6 +31,16 @@
 //     UNJUDGED, not "not applicable": that is exit 3 (Error), which the operator
 //     keeps distinct from Fail.
 //
+//     "Unreachable" is a statement about run()'s RETURN, and the process can
+//     still exit 2 without it: that is what the Go runtime does for an
+//     unrecovered panic and for every runtime fatal error. This runner was
+//     where that was caught (issue #103) precisely because it claims never to
+//     skip. It is not fixed here — a runtime fatal error cannot be recovered —
+//     but in pkg/runner, which honours exit 2 as Skip only when the runner also
+//     printed a _SKIP declaration. This runner prints none, by design, so a
+//     crash of it is recorded as Error and the hardware is left unjudged rather
+//     than certified inapplicable.
+//
 //  3. Degrade per probe, not as a whole. Every probe is independent and optional;
 //     the runner emits whatever subset of counters this host actually exposes.
 //     That is also what keeps it vendor-neutral — the NVML probe contributing

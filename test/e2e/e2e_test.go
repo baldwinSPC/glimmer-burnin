@@ -31,7 +31,12 @@ const (
 	failingRunner = `echo miscompares=7; exit 0`
 	// skippingRunner is exit 2 — "this test does not apply to this hardware",
 	// declared after looking. It must never read as a failure.
-	skippingRunner = `echo no accelerator present; exit 2`
+	//
+	// The marker is not decoration. Exit 2 alone is not a skip: it is also what
+	// the Go runtime exits with on an unrecovered panic, so pkg/runner requires
+	// the declaration and records an undeclared exit 2 as Error. Dropping the
+	// marker here would make this test assert the opposite of what it says.
+	skippingRunner = `echo E2E_SMOKE_SKIP: no accelerator present; exit 2`
 	// slowRunner keeps the node occupied long enough for the chaos tests to
 	// interrupt the manager underneath it, and reports progressively so a
 	// checkpoint has something to read.

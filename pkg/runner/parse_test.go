@@ -1097,3 +1097,130 @@ func TestResult_Numeric(t *testing.T) {
 		t.Error("Numeric() invented a value for a metric that was never reported")
 	}
 }
+
+// ─── The skip declaration (issue #103) ────────────────────────────────────────
+
+// goPanicLog is what a container log holds when a Go runner panics: stdout and
+// stderr merged, and — for a runner that prints its metrics at the end, which
+// host-health does — no key=value line at all.
+//
+// This is the shape the rule exists for, and the reason it could not be caught
+// by ReportedNothing: an empty harvest is the LEGITIMATE shape of a skip, so
+// the absence of metrics says nothing here. Only the missing declaration does.
+const goPanicLog = `panic: runtime error: index out of range [3] with length 2
+
+goroutine 1 [running]:
+main.run(...)
+	/src/main.go:190
+main.main()
+	/src/main.go:132 +0x1d
+`
+
+// An unrecovered Go panic exits 2, and so does every Go runtime fatal error
+// (out of memory, concurrent map write, stack exhaustion) — none of which a
+// deferred recover can intercept. Six runners in this repo ship a Go binary.
+// Read as a Skip, that crash is the worst of the phases to land on: never
+// retried, counted towards neither pass nor fail, so the hardware is silently
+// unjudged under a report that reads clean.
+func TestParse_UndeclaredExitTwoIsErrorNotSkip(t *testing.T) {
+	got := Parse("host-health", goPanicLog, 2)
+
+	if got.Verdict == VerdictSkip {
+		t.Fatal("a crashed runner was read as \"this test does not apply to this hardware\"")
+	}
+	if got.Verdict != VerdictError {
+		t.Fatalf("Verdict = %q, want Error — the runner crashed, so the hardware is unjudged", got.Verdict)
+	}
+	if got.ExitCode != 2 {
+		t.Errorf("ExitCode = %d, want the code the runner actually exited with", got.ExitCode)
+	}
+	if !strings.Contains(got.Message, "without declaring a skip") {
+		t.Errorf("Message = %q, want the explanation to lead", got.Message)
+	}
+	// The panic's tail is a stack frame, not a diagnosis. It is kept as
+	// context, which is exactly why it must not be the whole message.
+	if !strings.Contains(got.Message, "main.go:132") {
+		t.Errorf("Message = %q, dropped what the runner printed", got.Message)
+	}
+}
+
+// The declaration is the ONLY thing required. A runner that looked, found the
+// test inapplicable and had nothing to measure is still a Skip.
+func TestParse_DeclaredSkipWithNoMetricsIsStillASkip(t *testing.T) {
+	got := Parse("host-health", "NCCL_SKIP: this node has 1 accelerator and an all-reduce needs 2\n", 2)
+
+	if got.Verdict != VerdictSkip {
+		t.Fatalf("Verdict = %q, want Skip", got.Verdict)
+	}
+	if !got.ReportedNothing() {
+		t.Error("the fixture is meant to carry no metric at all")
+	}
+}
+
+// Every marker this project ships must be recognised, or a runner's legitimate
+// skips all become Errors. Asserted against the real strings; runners/pins_test
+// keeps this list honest against the filesystem.
+func TestParse_ShippedSkipMarkersAreRecognised(t *testing.T) {
+	for _, marker := range []string{
+		"FP4_GEMM_SKIP", "CLOCKPROBE_SKIP", "MEMORY_BW_SKIP", "DCGM_DIAG_SKIP",
+		"NCCL_SKIP", "IB_WRITE_BW_SKIP", "GPUDIRECT_RDMA_SKIP", "STRESSAPPTEST_SKIP",
+	} {
+		for _, line := range []string{marker, marker + ": a reason", marker + ": a reason with an = in it"} {
+			if !SkipDeclared(line + "\n") {
+				t.Errorf("marker %q not recognised in %q", marker, line)
+			}
+			if got := Parse("", line+"\n", 2); got.Verdict != VerdictSkip {
+				t.Errorf("Parse(%q, 2).Verdict = %q, want Skip", line, got.Verdict)
+			}
+		}
+	}
+}
+
+// The marker is a DECLARATION, so it has to be the runner's own and not a word
+// that happened to appear. Anchoring is what keeps a panic trace, a log line
+// quoting a marker, or a metric value from declaring a skip by accident.
+func TestParse_SkipDeclarationIsNotAccidental(t *testing.T) {
+	cases := map[string]bool{
+		"NCCL_SKIP":                             true,
+		"NCCL_SKIP: reason":                     true,
+		"  NCCL_SKIP: leading space is trimmed": true,
+		"the runner printed NCCL_SKIP":          false, // not at the start of a line
+		"NCCL_SKIPPED":                          false, // a longer word, not the marker
+		"nccl_skip: lower case":                 false, // markers are upper case
+		"skipReason=NCCL_SKIP":                  false, // a metric value, not a declaration
+		"GIT_LFS_SKIP_SMUDGE=1":                 false, // _SKIP mid-token
+		"":                                      false,
+	}
+	for line, want := range cases {
+		if got := SkipDeclared(line + "\n"); got != want {
+			t.Errorf("SkipDeclared(%q) = %v, want %v", line, got, want)
+		}
+	}
+}
+
+// A declaration anywhere in the output counts: runners print the marker last
+// (after their metrics), and the rule must not depend on ordering.
+func TestParse_SkipMarkerIsFoundAfterMetrics(t *testing.T) {
+	got := Parse("gpudirect-rdma", "gpudirect_supported=false\nGPUDIRECT_RDMA_SKIP: unified memory\n", 2)
+
+	if got.Verdict != VerdictSkip {
+		t.Fatalf("Verdict = %q, want Skip", got.Verdict)
+	}
+	if got.Metrics["gpudirectSupported"] != "false" {
+		t.Errorf("the runner's evidence was dropped: %v", got.Metrics)
+	}
+}
+
+// The rule is scoped to exit 2 and changes nothing else. A marker printed
+// alongside any other exit code does not turn that code into a skip — the
+// declaration entitles a runner to exit 2, it does not substitute for it.
+func TestParse_SkipRuleTouchesOnlyExitTwo(t *testing.T) {
+	for code, want := range map[int]Verdict{0: VerdictPass, 1: VerdictFail, 3: VerdictError, 137: VerdictError} {
+		if got := Parse("", "NCCL_SKIP: declared\n", code); got.Verdict != want {
+			t.Errorf("Parse(exit %d).Verdict = %q, want %q", code, got.Verdict, want)
+		}
+		if got := Parse("", "miscompares=0\n", code); got.Verdict != want {
+			t.Errorf("Parse(exit %d, undeclared).Verdict = %q, want %q", code, got.Verdict, want)
+		}
+	}
+}

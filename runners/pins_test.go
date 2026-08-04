@@ -39,6 +39,7 @@ import (
 	"testing"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 )
 
 // publishWorkflow is the workflow whose choice list must name every runner.
@@ -542,6 +543,154 @@ func sortedUnique(matches [][]string) []string {
 		}
 		seen[m[1]] = true
 		out = append(out, m[1])
+	}
+	sort.Strings(out)
+	return out
+}
+
+// quotedLiteral finds double-quoted string literals. Every runner in this repo
+// defines its skip marker as one, in Go, C++ and CUDA alike.
+var quotedLiteral = regexp.MustCompile(`"([^"\\\n]|\\.)*"`)
+
+// skipMarkerCandidate decides whether a string literal is MEANT to be a skip
+// marker. It is deliberately looser than runner.SkipMarkerPattern — case
+// insensitive, and indifferent to the separator — because a guard whose
+// selector shares a grammar with its validator can only ever agree with itself.
+// "Host_Health_SKIP" and "HOST-HEALTH_SKIP" are both selected here and both
+// rejected by the parser, which is the whole point.
+//
+// A marker is either the bare token or the head of a "MARKER: reason" line,
+// possibly with a printf format tail, so only the part before the first colon
+// is considered.
+//
+// A leading "_" means the literal is a SUFFIX, not a whole marker: the soak
+// family (thermal-soak, gpu-burn) composes its markers as markerPrefix+"_SKIP"
+// in the shared soak_core.cuh. Those are resolved against the prefixes declared
+// in the same runner directory rather than waved through, because a composed
+// marker is exactly as capable of being unparseable as a literal one.
+func skipMarkerCandidate(literal string) (string, bool) {
+	head, _, _ := strings.Cut(literal, ":")
+	head = strings.TrimSpace(strings.TrimSuffix(head, `\n`))
+	if head == "" || strings.ContainsAny(head, " \t%") {
+		return "", false
+	}
+	if !strings.HasSuffix(strings.ToUpper(head), "_SKIP") {
+		return "", false
+	}
+	return head, true
+}
+
+// TestEverySkipMarkerIsRecognisedByTheParser closes the loop the skip
+// declaration rule opened (issue #103).
+//
+// Exit 2 is not a code a runner has sole control of — an unrecovered Go panic
+// exits 2, and so does every Go runtime fatal error — so pkg/runner honours it
+// as Skip only when the runner also DECLARES the skip with a marker line, and
+// records an undeclared exit 2 as Error. That rule has a failure mode of its
+// own, and it is the mirror image: a runner whose marker the parser does not
+// recognise has every one of its LEGITIMATE skips recorded as an Error
+// instead. Both dispatchers would do it, on every node, silently.
+//
+// The sweep is over the filesystem rather than a hand-written list, because the
+// list that matters is "every marker any runner can print" and only a directory
+// listing knows that. It reads sources, not just Dockerfiles: a marker is a
+// string constant in Go, C++ or CUDA.
+func TestEverySkipMarkerIsRecognisedByTheParser(t *testing.T) {
+	found := 0
+	for _, d := range runnerDirs(t) {
+		sources := runnerSources(t, d)
+		prefixes := markerPrefixes(sources)
+		for path, body := range sources {
+			for _, quoted := range quotedLiteral.FindAllString(body, -1) {
+				candidate, ok := skipMarkerCandidate(strings.Trim(quoted, `"`))
+				if !ok {
+					continue
+				}
+				markers := []string{candidate}
+				if strings.HasPrefix(candidate, "_") {
+					if len(prefixes) == 0 {
+						t.Errorf("%s: composes a skip marker as prefix+%q, but no markerPrefix is declared "+
+							"anywhere in runners/%s, so nothing can say what it prints", path, candidate, d)
+						continue
+					}
+					markers = nil
+					for _, p := range prefixes {
+						markers = append(markers, p+candidate)
+					}
+				}
+				for _, marker := range markers {
+					found++
+					// Proven through Parse, which is what both dispatchers
+					// actually call — not against the pattern alone, so the
+					// anchoring and the line scan are covered too.
+					for _, line := range []string{marker, marker + ": a reason"} {
+						if got := runner.Parse("", line+"\n", 2); got.Verdict != runner.VerdictSkip {
+							t.Errorf("%s: skip marker %q is not honoured by the parser (Parse(%q, exit 2) = %q) — "+
+								"every skip this runner declares would be recorded as an Error instead",
+								path, marker, line, got.Verdict)
+						}
+					}
+				}
+			}
+		}
+	}
+	// A sweep that silently matched nothing is not a guard. Every runner that
+	// can skip prints a marker, so zero means the scan itself broke.
+	if found == 0 {
+		t.Fatal("no skip markers found in any runner source; the sweep is not reading what it thinks it is")
+	}
+}
+
+// runnerSources reads every source file in one runner directory, keyed by path.
+// Markers are string constants, so this covers Go, C++ and CUDA alike.
+func runnerSources(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	sourceExt := map[string]bool{".go": true, ".cu": true, ".cc": true, ".cuh": true, ".h": true, ".sh": true}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading runners/%s: %v", dir, err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() || !sourceExt[strings.ToLower(filepath.Ext(e.Name()))] {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		out[path] = string(body)
+	}
+	return out
+}
+
+// markerPrefixes finds the marker prefixes a runner declares, for the composed
+// case. The line carries the field name and the value is the first quoted
+// literal on it, which covers both the C++ designated-comment idiom
+// (/*markerPrefix=*/"GPU_BURN") and a plain assignment.
+func markerPrefixes(sources map[string]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, body := range sources {
+		for _, line := range strings.Split(body, "\n") {
+			if !strings.Contains(line, "markerPrefix") {
+				continue
+			}
+			for _, quoted := range quotedLiteral.FindAllString(line, -1) {
+				p := strings.Trim(quoted, `"`)
+				// The printf that CONSUMES the prefix sits on a line naming it
+				// too, so its format string has to be excluded. A marker prefix
+				// is a bare token: no verbs, no escapes, no separators. The
+				// filter stays deliberately shy of requiring upper case, so a
+				// mis-cased prefix is still selected and still fails below.
+				if p == "" || seen[p] || strings.ContainsAny(p, "%\\, \t") {
+					continue
+				}
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
 	}
 	sort.Strings(out)
 	return out
