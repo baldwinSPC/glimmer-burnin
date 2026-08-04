@@ -255,7 +255,14 @@ jobs:
             deployment/burnin-controller-manager --timeout=5m
 
       - name: e2e (core)
-        run: go test -tags e2e ./test/e2e/... -count=1 -v -timeout 20m -run 'TestThe|TestA(NodeScope|ThresholdViolation|SkippingRunner|PairScope)'
+        # Spelled out one name per alternative rather than as a TestA(...) group.
+        # The group form silently excluded TestAnUndeclaredExitTwoIsAnErrorNotASkip
+        # — "TestA" followed by "nUndeclared" matches no alternative — so that test
+        # was compiled, reviewed, green, and never executed. test/e2e's
+        # TestEveryE2ETestIsSelectedByTheWorkflow now fails if any test is selected
+        # by neither filter or by both, but a pattern that reads literally is what
+        # keeps the next person out of the same trap.
+        run: go test -tags e2e ./test/e2e/... -count=1 -v -timeout 20m -run 'TestThe|TestANodeScope|TestAThresholdViolation|TestASkippingRunner|TestAPairScope|TestAnUndeclaredExitTwo'
 
       # The chaos tests are the slow half — each one waits out a manager restart
       # and a leader-election lease — so they run on main, on the weekly sweep and
