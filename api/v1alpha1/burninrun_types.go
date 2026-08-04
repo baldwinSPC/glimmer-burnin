@@ -403,6 +403,42 @@ type Violation struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+const (
+	// ConditionThresholdsSound reports what the threshold linter
+	// (verdict.ValidateThresholds) made of the gates this run is about to
+	// apply, evaluated once against the PINNED plan so it describes the
+	// thresholds that actually decided the verdict rather than whatever the
+	// profile says later.
+	//
+	// It is advisory and it is deliberately NOT a phase. False does not stop
+	// the run and does not make it Failed: an unsound gate is one whose verdict
+	// may not mean what its author intended, and refusing to run on suspicion
+	// would let this operator veto profiles it merely does not understand. The
+	// gates it CAN prove unusable — a name the parser drops, a value that is not
+	// a finite number — never reach a condition at all; they refuse the run at
+	// plan time as a config Error, because a threshold nothing can satisfy is a
+	// broken profile and must never be reported as broken hardware.
+	//
+	// It is a condition rather than an Event on purpose. The advisory has to
+	// outlive the run it describes: an Event expires in an hour and the verdict
+	// is kept for as long as anyone might read it, and an acceptance record with
+	// no surviving note that one of its gates was unsound is exactly the
+	// situation this is here to prevent.
+	ConditionThresholdsSound = "ThresholdsSound"
+
+	// ReasonThresholdsReviewed means the linter found nothing to say. It is not
+	// a claim that the thresholds are correctly CALIBRATED — no linter can judge
+	// that, and the gate this project got most wrong was one it would have
+	// passed clean.
+	ReasonThresholdsReviewed = "Reviewed"
+
+	// ReasonUnsoundThresholds means at least one gate evaluates but its verdict
+	// does not mean what its author appears to intend — an exact comparison on a
+	// continuous measurement, a gate on a metric the registry records as
+	// evidence, or a gate on a metric no runner of that kind is known to emit.
+	ReasonUnsoundThresholds = "UnsoundThresholds"
+)
+
 // BurnInRunStatus tracks execution and the exported verdict.
 type BurnInRunStatus struct {
 	// +kubebuilder:default=Pending

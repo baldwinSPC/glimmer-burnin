@@ -66,7 +66,43 @@ func (p Problem) Error() string {
 // It reports every problem it finds rather than the first, including several on
 // one threshold: an author fixing a profile should not have to rediscover them
 // one run at a time.
+//
+// This is the KIND-AGNOSTIC form, and it stays that way: it applies exactly the
+// checks that hold for any runner honouring the contract, so an unregistered
+// metric name passes it clean. Where the caller knows which kind's runner will
+// be asked for the metric, ValidateThresholdsForKind says more.
 func ValidateThresholds(thresholds []burninv1alpha1.Threshold) []Problem {
+	return ValidateThresholdsForKind(burninv1alpha1.KindCustom, thresholds)
+}
+
+// ValidateThresholdsForKind is ValidateThresholds plus the one check that
+// cannot be made without knowing whose runner is about to be asked: whether an
+// UNREGISTERED metric name is expected or is a gap.
+//
+// pkg/contract's registry is an open world on purpose, and this does not close
+// it. An unregistered lowerCamelCase name is legal, it is what lets a runner
+// report a new measurement without a release of this package, and on somebody
+// else's runner it is the normal case — so for KindCustom, and for any kind this
+// project does not ship (TestKind is an open enum), nothing is reported and the
+// result is identical to ValidateThresholds.
+//
+// For a BUILT-IN kind the same silence is a trap. The runner, its parser and its
+// metric names are all owned here, so a name the registry has never heard of is
+// one of two things: a first-party measurement whose registry entry was
+// forgotten, or a metric no runner emits at all — and the second fails closed on
+// every node forever while reporting it in the shape of a hardware verdict. That
+// is the failure #65 found, where a clockprobe gate on a metric whose values are
+// "true"/"false"/"unknown" passed every check this package had.
+//
+// The finding is UNSOUND, never MALFORMED, and the severity is the whole
+// argument. This cannot prove the metric is absent — it has not run the runner,
+// and a first-party runner may legitimately emit an unregistered evidence metric
+// that a stricter profile then gates on perfectly well. Advice is what an
+// unprovable suspicion is worth. What makes it worth saying at all is that
+// writing a THRESHOLD is the moment a name stops being incidental evidence and
+// starts deciding acceptance, and a name this project owns and decides
+// acceptance on belongs in the registry.
+func ValidateThresholdsForKind(kind burninv1alpha1.TestKind, thresholds []burninv1alpha1.Threshold) []Problem {
 	var problems []Problem
 
 	for i, th := range thresholds {
@@ -83,9 +119,10 @@ func ValidateThresholds(thresholds []burninv1alpha1.Threshold) []Problem {
 		// runner's parser drops metrics it cannot validate, so a threshold
 		// naming one waits for a value that can never arrive and fails closed on
 		// every node.
-		if err := contract.ValidateMetricName(th.Metric); err != nil {
+		nameErr := contract.ValidateMetricName(th.Metric)
+		if nameErr != nil {
 			add(SeverityMalformed,
-				"%s; a metric whose name fails the contract grammar is dropped by the runner's parser, so this gate can never be satisfied", err)
+				"%s; a metric whose name fails the contract grammar is dropped by the runner's parser, so this gate can never be satisfied", nameErr)
 		}
 
 		want, valErr := strconv.ParseFloat(th.Value, 64)
@@ -124,6 +161,19 @@ func ValidateThresholds(thresholds []burninv1alpha1.Threshold) []Problem {
 			add(SeverityMalformed,
 				"comparison %q is not one of %s, %s, %s, %s; an unrecognised comparison fails closed, so this gate fails on every node",
 				th.Comparison, burninv1alpha1.GTE, burninv1alpha1.LTE, burninv1alpha1.EQ, burninv1alpha1.NEQ)
+		}
+
+		// A metric this project's own runner is being asked for, that this
+		// project's own registry does not list. See the doc comment for why this
+		// is advice and why it is asked only of a built-in kind.
+		//
+		// Skipped when the name already failed the grammar: "and it is not
+		// registered" adds nothing to "the parser will drop it", and a second
+		// finding on one typo is how a check earns its reputation for noise.
+		if _, registered := contract.Lookup(th.Metric); !registered && nameErr == nil && kind.IsBuiltIn() {
+			add(SeverityUnsound,
+				"%q is not in the metric registry, and %q is a kind whose runner this project ships. Either it is a first-party measurement whose entry in pkg/contract was forgotten — register it, since gating on a name is what promotes it from evidence to acceptance — or no runner emits it, in which case this gate is never satisfied, fails every node forever, and reports it in the shape of a hardware verdict. The registry stays open for runners this project does not ship: on kind %q an unregistered name is expected and nothing is said about it",
+				th.Metric, kind, burninv1alpha1.KindCustom)
 		}
 
 		// The registry's own opinion about what may decide acceptance. An

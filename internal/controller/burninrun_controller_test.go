@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -465,6 +466,26 @@ func cmSink(name, cmName string) *burninv1alpha1.BurnInSink {
 
 func int32p(v int32) *int32 { return &v }
 func boolp(v bool) *bool    { return &v }
+
+// withPinnedPlan pins an execution plan onto a run directly, reproducing a run
+// that STARTED UNDER AN OLDER OPERATOR: Reconcile finds the annotation, skips
+// start() entirely, and never re-derives the plan.
+//
+// It is the only way to reach a path guarded by a plan-time check that did not
+// exist when the plan was pinned — which is a real state, not a contrivance, and
+// one the operator is required to survive: a run in flight across an upgrade
+// must reach a verdict, not be re-validated against rules its author never saw.
+func withPinnedPlan(t *testing.T, run *burninv1alpha1.BurnInRun, tests ...*burninv1alpha1.BurnInTest) *burninv1alpha1.BurnInRun {
+	t.Helper()
+	p := &plan{Version: 1, Targets: run.Spec.Target.NodeNames}
+	for _, bt := range tests {
+		p.Tests = append(p.Tests, plannedTest{Name: bt.Name, Required: true, Spec: bt.Spec})
+	}
+	if err := pinPlan(run, p); err != nil {
+		t.Fatalf("pinPlan: %v", err)
+	}
+	return run
+}
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -4228,24 +4249,307 @@ func TestRun_DuplicateHostMountPathIsRefusedAtStart(t *testing.T) {
 	h.assertNoStrandedCordons()
 }
 
+// ─── The threshold linter's surface ───────────────────────────────────────────
+
+// A gate that can never be satisfied is a broken PROFILE, and it must be refused
+// as one. Run it and every node fails it, forever, in the same shape as a
+// hardware verdict — a whole fleet condemned by a typo, with nothing in the
+// report suggesting the file rather than the parts.
+//
+// So: Error, not Failed; before any pod, and before any cordon.
+func TestRun_UnsatisfiableThresholdIsRefusedAtStartAsAConfigError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		threshold burninv1alpha1.Threshold
+		wantIn    string
+	}{
+		{
+			name:      "value is not a number",
+			threshold: burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.LTE, Value: "twenty"},
+			wantIn:    "not numeric",
+		},
+		{
+			name:      "value is not finite",
+			threshold: burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.LTE, Value: "NaN"},
+			wantIn:    "not a finite number",
+		},
+		{
+			name:      "name the parser drops",
+			threshold: burninv1alpha1.Threshold{Metric: "nonfinite_count", Comparison: burninv1alpha1.EQ, Value: "0"},
+			wantIn:    "can never be satisfied",
+		},
+		{
+			name:      "comparison nothing implements",
+			threshold: burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.Comparison("EqualIsh"), Value: "0"},
+			wantIn:    "fails closed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t,
+				gb10Node("spark-a"),
+				smokeTest("fp4", tc.threshold),
+				profile("acceptance", nil, false, testRef("fp4")),
+				newRun("run1", "acceptance", "spark-a"),
+			)
+			h.reconcileUntilSettled("run1")
+
+			run := h.run("run1")
+			if run.Status.Phase != burninv1alpha1.RunError {
+				t.Fatalf("phase = %q, want Error — a threshold nobody can satisfy is a broken profile, not a bad part", run.Status.Phase)
+			}
+			msg := run.Status.Results[0].Message
+			if !strings.Contains(msg, tc.wantIn) {
+				t.Errorf("message = %q, want it to explain %q", msg, tc.wantIn)
+			}
+			if !strings.Contains(msg, tc.threshold.Metric) {
+				t.Errorf("message = %q, want it to name the offending metric", msg)
+			}
+			if len(h.allPods("run1")) != 0 {
+				t.Error("a pod was scheduled for a gate that could never have been satisfied")
+			}
+			h.assertNoStrandedCordons()
+		})
+	}
+}
+
+// Every unsatisfiable gate in the profile, in one message. The author is being
+// sent to fix a file; rediscovering the second typo on the next run costs
+// another cordon, another schedule, and another wait.
+func TestRun_EveryUnsatisfiableThresholdIsNamedAtOnce(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4",
+			burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}, // fine
+			burninv1alpha1.Threshold{Metric: "maxRelError", Comparison: burninv1alpha1.LTE, Value: "tiny"},
+		),
+		healthTest("health",
+			burninv1alpha1.Threshold{Metric: "xidEvents", Comparison: burninv1alpha1.EQ, Value: "Inf"},
+		),
+		profile("acceptance", nil, false, testRef("fp4"), testRef("health")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error", run.Status.Phase)
+	}
+	msg := run.Status.Results[0].Message
+	for _, want := range []string{"fp4", "maxRelError", "health", "xidEvents"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message = %q, want it to name %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "nonfiniteCount") {
+		t.Errorf("message = %q, want it to leave the sound gate alone", msg)
+	}
+}
+
+// An UNSOUND gate is a suspicion, not a proof: it evaluates, and it may well be
+// doing what its author wanted. It must therefore be recorded and NOT enforced —
+// refusing on suspicion would let this operator veto profiles it merely does not
+// understand, which is worse than a note nobody reads.
+//
+// The note is a condition rather than an Event because it has to outlive the run
+// it describes. An acceptance record kept for years, beside an advisory that
+// expired in an hour, is the situation this exists to prevent.
+func TestRun_UnsoundThresholdIsRecordedAsAConditionAndTheRunProceeds(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4",
+			burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"},
+			// Unsound: an exact comparison against a continuous measurement.
+			burninv1alpha1.Threshold{Metric: "maxRelError", Comparison: burninv1alpha1.EQ, Value: "0.5"},
+		),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunRunning {
+		t.Fatalf("phase = %q, want Running — an advisory must not stop a run", run.Status.Phase)
+	}
+	if len(h.allPods("run1")) != 1 {
+		t.Fatalf("got %d pods, want 1: the run did not proceed", len(h.allPods("run1")))
+	}
+
+	cond := meta.FindStatusCondition(run.Status.Conditions, burninv1alpha1.ConditionThresholdsSound)
+	if cond == nil {
+		t.Fatalf("no %s condition — the linter has no surface again", burninv1alpha1.ConditionThresholdsSound)
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("condition status = %q, want False", cond.Status)
+	}
+	if cond.Reason != burninv1alpha1.ReasonUnsoundThresholds {
+		t.Errorf("condition reason = %q, want %q", cond.Reason, burninv1alpha1.ReasonUnsoundThresholds)
+	}
+	for _, want := range []string{"fp4", "maxRelError", "whole number"} {
+		if !strings.Contains(cond.Message, want) {
+			t.Errorf("condition message = %q, want it to mention %q", cond.Message, want)
+		}
+	}
+	// The sound gate is not mentioned: a check that fires on everything gets
+	// switched off, and then it is not watching when something really is wrong.
+	if strings.Contains(cond.Message, "nonfiniteCount") {
+		t.Errorf("condition message = %q, want it to say nothing about the sound gate", cond.Message)
+	}
+
+	// And it survives to the verdict, which is the whole reason it is a
+	// condition: the advisory has to still be there when someone reads the
+	// result it qualifies.
+	h.finishPod(h.pods("run1")["spark-a"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+	final := h.run("run1")
+	if !final.Status.Phase.IsTerminal() {
+		t.Fatalf("phase = %q, want terminal", final.Status.Phase)
+	}
+	if c := meta.FindStatusCondition(final.Status.Conditions, burninv1alpha1.ConditionThresholdsSound); c == nil || c.Status != metav1.ConditionFalse {
+		t.Errorf("the advisory did not survive to the verdict it qualifies: %+v", final.Status.Conditions)
+	}
+}
+
+// #65's shape, at the surface that can now say so: clockprobe emits
+// pdWedgeSuspected as "true"/"false"/"unknown", so a gate on it fails closed on
+// every node forever — and nothing this project had would have said a word.
+//
+// It is advice, not a refusal, because the operator has not run the runner and
+// cannot prove the metric is absent.
+func TestRun_GateOnAnUnregisteredFirstPartyMetricIsAdvised(t *testing.T) {
+	probe := &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "clocks"},
+		Spec: burninv1alpha1.BurnInTestSpec{
+			Kind:  burninv1alpha1.KindClockProbe,
+			Scope: burninv1alpha1.ScopeNode,
+			Thresholds: []burninv1alpha1.Threshold{
+				{Metric: "sustainedClockPct", Comparison: burninv1alpha1.GTE, Value: "70"},
+				{Metric: "pdWedgeSuspected", Comparison: burninv1alpha1.EQ, Value: "0"},
+			},
+		},
+	}
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		probe,
+		profile("acceptance", nil, false, testRef("clocks")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	run := h.run("run1")
+	cond := meta.FindStatusCondition(run.Status.Conditions, burninv1alpha1.ConditionThresholdsSound)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("condition = %+v, want False: a gate on an unregistered metric of a kind we ship must be advised", cond)
+	}
+	if !strings.Contains(cond.Message, "pdWedgeSuspected") {
+		t.Errorf("condition message = %q, want it to name the unregistered metric", cond.Message)
+	}
+	if strings.Contains(cond.Message, "sustainedClockPct") {
+		t.Errorf("condition message = %q, want it to leave the registered gate alone", cond.Message)
+	}
+	if len(h.allPods("run1")) != 1 {
+		t.Error("advice stopped the run; it must not")
+	}
+}
+
+// The positive statement matters too: a clean run records that the thresholds
+// were reviewed, so "no condition" and "nothing wrong" are distinguishable — the
+// difference between a profile that was checked and an operator too old to have
+// checked it.
+func TestRun_SoundThresholdsRecordThatTheyWereReviewed(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	cond := meta.FindStatusCondition(h.run("run1").Status.Conditions, burninv1alpha1.ConditionThresholdsSound)
+	if cond == nil {
+		t.Fatal("a clean profile recorded no condition at all")
+	}
+	if cond.Status != metav1.ConditionTrue || cond.Reason != burninv1alpha1.ReasonThresholdsReviewed {
+		t.Errorf("condition = %+v, want True/%s", cond, burninv1alpha1.ReasonThresholdsReviewed)
+	}
+}
+
+// Both threshold reports ride in an object the apiserver has to accept, so a
+// profile gating forty metrics must not produce a write it refuses — losing the
+// very explanation the operator needs. They elide the details and never the
+// COUNT: a list that lied about how much it left out would be worse than none.
+func TestThresholdReportsElideDetailButNeverTheCount(t *testing.T) {
+	const gates = maxAdvisedThresholds + 7
+
+	var broken, unsound []burninv1alpha1.Threshold
+	for i := 0; i < gates; i++ {
+		metric := fmt.Sprintf("vendorCounter%d", i)
+		broken = append(broken, burninv1alpha1.Threshold{Metric: metric, Comparison: burninv1alpha1.EQ, Value: "NaN"})
+		unsound = append(unsound, burninv1alpha1.Threshold{Metric: metric, Comparison: burninv1alpha1.EQ, Value: "0"})
+	}
+
+	// Malformed: refused, with the full count and a bounded list.
+	err := refuseUnsatisfiableThresholds([]resolvedTest{{
+		name: "many", spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindCustom, Thresholds: broken},
+	}})
+	if err == nil {
+		t.Fatal("a profile of unsatisfiable gates was accepted")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d threshold(s)", gates)) {
+		t.Errorf("refusal = %q, want the exact count of %d", err.Error(), gates)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("and %d more", gates-maxAdvisedThresholds)) {
+		t.Errorf("refusal = %q, want it to say how many it left out", err.Error())
+	}
+
+	// Unsound: advised, same bound. These are unregistered names on a kind this
+	// project ships, which is the #65 shape.
+	p := &plan{Version: 1, Tests: []plannedTest{{
+		Name: "many", Spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindHostHealth, Thresholds: unsound},
+	}}}
+	advice := p.unsoundThresholds()
+	if len(advice) != gates {
+		t.Fatalf("got %d advisories, want one per gate (%d)", len(advice), gates)
+	}
+	msg := summariseThresholdAdvice(advice)
+	if !strings.Contains(msg, fmt.Sprintf("%d gates", gates)) {
+		t.Errorf("advice = %q, want the exact count of %d", msg, gates)
+	}
+	if !strings.Contains(msg, fmt.Sprintf("and %d more", gates-maxAdvisedThresholds)) {
+		t.Errorf("advice = %q, want it to say how many it left out", msg)
+	}
+}
+
 // A node that misses three gates must report three, not whichever one the
 // profile happened to list first — and each must say WHICH KIND of problem it
 // is. This is the whole point of the taxonomy: the run below mixes a hardware
 // shortfall, a runner that never reported a gated metric, and a threshold whose
 // value is a typo, and only the first is a reason to touch the node.
+//
+// The plan is pinned DIRECTLY, which is the only honest way to reach the
+// Authoring route now that the threshold linter runs at plan time: a value of
+// "one hundred" is refused before a node is touched, so a fresh run can no
+// longer carry one. What it reproduces is a run pinned by an OLDER operator —
+// or by anything that reached the apiserver before the field's pattern existed
+// — and the point of CauseAuthoring is exactly that case: a broken threshold
+// that slipped through must still be reported as a broken profile rather than
+// as broken hardware.
 func TestRun_EveryViolatedGateIsRecordedWithItsCause(t *testing.T) {
+	fp4 := smokeTest("fp4",
+		// Measurement: the runner reported 0.00195695, well above this bar.
+		burninv1alpha1.Threshold{Metric: "maxRelError", Comparison: burninv1alpha1.LTE, Value: "0.000001"},
+		// Evidence: compute-smoke never emits this, so nothing was measured.
+		burninv1alpha1.Threshold{Metric: "busBandwidthGBs", Comparison: burninv1alpha1.GTE, Value: "20"},
+		// Authoring: the profile is broken; no hardware is implicated.
+		burninv1alpha1.Threshold{Metric: "throughputTflops", Comparison: burninv1alpha1.GTE, Value: "one hundred"},
+	)
 	h := newHarness(t,
 		gb10Node("spark-a"),
-		smokeTest("fp4",
-			// Measurement: the runner reported 0.00195695, well above this bar.
-			burninv1alpha1.Threshold{Metric: "maxRelError", Comparison: burninv1alpha1.LTE, Value: "0.000001"},
-			// Evidence: compute-smoke never emits this, so nothing was measured.
-			burninv1alpha1.Threshold{Metric: "busBandwidthGBs", Comparison: burninv1alpha1.GTE, Value: "20"},
-			// Authoring: the profile is broken; no hardware is implicated.
-			burninv1alpha1.Threshold{Metric: "throughputTflops", Comparison: burninv1alpha1.GTE, Value: "one hundred"},
-		),
+		fp4,
 		profile("acceptance", nil, false, testRef("fp4")),
-		newRun("run1", "acceptance", "spark-a"),
+		withPinnedPlan(t, newRun("run1", "acceptance", "spark-a"), fp4),
 	)
 	h.reconcile("run1")
 	h.reconcile("run1")

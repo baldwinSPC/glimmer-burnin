@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -266,6 +267,7 @@ func (r *BurnInRunReconciler) markRunning(ctx context.Context, run *burninv1alph
 	run.Status.StartedAt = &started
 	run.Status.Fingerprint = r.captureFingerprint(ctx, p.Targets)
 	run.Status.ObservedGeneration = run.Generation
+	r.applyThresholdsSoundCondition(ctx, run, p)
 
 	// Deliver before writing: a crash in between redelivers with the same
 	// derived DeliveryID, which receivers dedupe. The reverse order would
@@ -275,6 +277,40 @@ func (r *BurnInRunReconciler) markRunning(ctx context.Context, run *burninv1alph
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{Requeue: true}, nil
+}
+
+// applyThresholdsSoundCondition records what the threshold linter made of the
+// gates this run is about to apply.
+//
+// This is the surface `pkg/verdict.ValidateThresholds` was written for and never
+// had. It runs once, at the transition into Running, against the PINNED plan —
+// early enough that an operator watching the run sees the note before any
+// verdict exists, and late enough that it describes exactly the thresholds that
+// will decide it.
+//
+// It never changes the phase, and it never fails the write it rides on: an
+// advisory that could wedge a run would be a worse bug than the one it warns
+// about. Malformed thresholds are not here at all — they refused the run at plan
+// time, before this point is reachable.
+func (r *BurnInRunReconciler) applyThresholdsSoundCondition(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan) {
+	advice := p.unsoundThresholds()
+
+	cond := metav1.Condition{
+		Type:               burninv1alpha1.ConditionThresholdsSound,
+		Status:             metav1.ConditionTrue,
+		Reason:             burninv1alpha1.ReasonThresholdsReviewed,
+		ObservedGeneration: run.Generation,
+		LastTransitionTime: metav1.NewTime(r.now()),
+		Message: "every threshold in this run's pinned plan is a gate this operator can vouch for as a form of comparison. " +
+			"That is not a claim about its NUMBER: whether a bound is calibrated for the hardware is measured, not linted.",
+	}
+	if len(advice) > 0 {
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = burninv1alpha1.ReasonUnsoundThresholds
+		cond.Message = clampConditionMessage(summariseThresholdAdvice(advice))
+		log.FromContext(ctx).Info("unsound thresholds in pinned plan", "run", run.Name, "count", len(advice), "detail", cond.Message)
+	}
+	meta.SetStatusCondition(&run.Status.Conditions, cond)
 }
 
 // isConfigError reports whether a resolution failure is the spec's fault
