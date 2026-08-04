@@ -102,6 +102,18 @@ func (s pairSide) summary() string {
 		return fmt.Sprintf("%s %s did not report", s.role, s.node)
 	}
 	out := fmt.Sprintf("%s %s %s (exit %d)", s.role, s.node, strings.ToLower(string(s.result.Verdict)), s.result.ExitCode)
+	// An undeclared exit 2 is explained rather than quoted. Without this the
+	// line reads "server spark-a error (exit 2): /src/main.go:132 +0x1d" — a
+	// stack frame standing in for the reason a link went unmeasured, in the one
+	// record that outlives every Event about it. The runner's own last line is
+	// kept as context because for a panic it is the only clue to what died.
+	if s.result.UndeclaredSkip {
+		out += ": " + undeclaredSkipBrief
+		if m := strings.TrimSpace(s.result.Message); m != "" {
+			out += " [runner said: " + m + "]"
+		}
+		return out
+	}
 	if m := strings.TrimSpace(s.result.Message); m != "" {
 		out += ": " + m
 	}

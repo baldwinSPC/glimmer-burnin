@@ -1025,6 +1025,46 @@ func (r *BurnInRunReconciler) completeAttempt(
 // all is recorded as. It says what actually happened — the runner measured
 // nothing — rather than naming whichever threshold happened to be evaluated
 // first, which is what made this failure mode so misleading to read.
+// undeclaredSkipMessage explains an Error that arrived wearing the skip code.
+//
+// pkg/runner sets Result.UndeclaredSkip when a runner exits 2 without printing a
+// skip declaration. The phase is already right — Error, hardware unjudged,
+// retryable — and this is only about the record, which is kept for years after
+// the Event that accompanied it has expired.
+//
+// Without it the stored message is the runner's last non-key=value line, and for
+// a Go panic that is a stack frame: "/src/main.go:132 +0x1d". Someone reading the
+// status a month later sees an Error explained by a file path and an instruction
+// offset, with nothing saying the runner exited 2, never declared a skip, or
+// most likely crashed. The flag was added for exactly this and nothing read it.
+const undeclaredSkipMessage = "runner exited 2 (the skip code) without declaring a skip — it never " +
+	"reported that this test does not apply to this hardware. An unrecovered Go panic exits 2, as does " +
+	"every Go runtime fatal error (out of memory, concurrent map writes, stack exhaustion), so the " +
+	"likeliest cause is a crashed runner: the hardware is UNJUDGED, not out of scope"
+
+// undeclaredSkipBrief is the same statement compressed for a Pair summary.
+//
+// The Pair path does NOT go through attemptOutcome — pairSide.summary() builds
+// its own line and pairMessage composes TWO of them into one verdict about the
+// link — so the explanation has to be applied there separately, and at a length
+// that survives being said twice in one message. It already carries the role,
+// node, verdict and exit code, so this states only what those cannot.
+const undeclaredSkipBrief = "exited 2 without declaring a skip — likely a crashed runner, hardware unjudged"
+
+// explainUndeclaredSkip leads with the explanation and DEMOTES the runner's own
+// last line to context rather than dropping it.
+//
+// For a panic that line is the tail of the trace, which is the only clue to what
+// actually died and is worth keeping — it is simply not an explanation on its
+// own. The bracketed form matches how this function already reports contract-
+// rejected metric names, so a reader meets one shape rather than two.
+func explainUndeclaredSkip(runnerSaid string) string {
+	if s := strings.TrimSpace(runnerSaid); s != "" {
+		return undeclaredSkipMessage + " [runner said: " + s + "]"
+	}
+	return undeclaredSkipMessage
+}
+
 const emptyHarvestMessage = "runner exited 0 but reported no metrics at all — it measured nothing, so the test's %d threshold(s) could not be evaluated; no verdict (a runner killed or evicted before it printed looks like this)"
 
 // attemptOutcome converts one runner execution into a phase.
@@ -1131,6 +1171,9 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 		phase = burninv1alpha1.RunSkipped
 	default:
 		phase = burninv1alpha1.RunError
+		if parsed.UndeclaredSkip {
+			message = explainUndeclaredSkip(message)
+		}
 	}
 
 	if len(parsed.InvalidNames) > 0 {
