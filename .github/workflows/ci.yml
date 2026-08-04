@@ -71,12 +71,29 @@ jobs:
           fi
           echo "Dockerfile golang:$have matches go.mod $want"
 
+      # The envtest control plane — a real kube-apiserver and etcd. test/envtest
+      # is part of `go test ./...` and SKIPS ITSELF when these binaries are
+      # absent, which is what keeps a laptop's `go test ./...` green. That skip
+      # must never happen here, so the assets are installed and
+      # BURNIN_ENVTEST=required below turns a missing control plane into a
+      # failure rather than a silent pass.
+      - name: Install envtest control plane
+        run: |
+          set -euo pipefail
+          assets=$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.24 use 1.36.2 -p path)
+          echo "KUBEBUILDER_ASSETS=${assets}" >> "$GITHUB_ENV"
+          echo "envtest assets: ${assets}"
+
       # This also runs the checks that have no Go code of their own to attach to:
       # runners/pins_test.go (every upstream pinned to a commit, every runner
       # publishable), runners/ib-write-bw/fabric_contract_test.go and
       # runners/thermal-soak/soak_contract_test.go (the duplicated runner sources
-      # have not drifted).
+      # have not drifted), and test/envtest (RBAC, CRD schema, status
+      # subresource, and the destroy-after-durable-status invariant, against a
+      # real apiserver).
       - name: Test
+        env:
+          BURNIN_ENVTEST: required
         run: go test ./... -count=1
 
       # The standalone invariant: this OSS operator must never depend on the
@@ -99,6 +116,149 @@ jobs:
           go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 object:headerFile=hack/boilerplate.go.txt paths=./api/...
           go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd rbac:roleName=burnin-manager-role webhook paths=./... output:crd:artifacts:config=config/crd output:rbac:artifacts:config=config/rbac
           git diff --exit-code api/ config/ || { echo "::error::generated code/manifests are stale — run 'make generate manifests' and commit"; exit 1; }
+
+  # ── e2e: the shipped manifests on a real cluster ──────────────────────────────
+  #
+  # THE MOST VALUABLE STEP IN THIS JOB IS NOT A TEST. It is "Apply config/ to the
+  # cluster", and it runs first, before the image is even built. A release once
+  # shipped with NO DEPLOYMENT MANIFEST AT ALL — an unanchored `manager` line in
+  # .gitignore swallowed config/manager/ so `git add -A` skipped it for the whole
+  # of v0.2.0 — and no Go test could have caught that, because the Go code was
+  # fine. A job that simply applies config/ to a cluster would have.
+  #
+  # What the tests after it add is the other thing no unit test can have: a
+  # SCHEDULER and a KUBELET. The operator once cordoned the node it was about to
+  # test and then created a runner pod that did not tolerate that cordon —
+  # deadlocking every test on every node — and neither the fake client (which
+  # assigns pods) nor envtest (which never places them) can see it.
+  #
+  # CPU only, deliberately. Hosted runners have no GPU, and every bug this job
+  # exists for is orchestration rather than compute: the runners here are `sh -c`
+  # one-liners honouring the exit-code + key=value contract on a plain busybox.
+  e2e:
+    runs-on: ubuntu-latest
+    # A cluster is minutes and build-test is one; there is no sense standing one
+    # up for code that does not compile.
+    needs: build-test
+    timeout-minutes: 40
+    env:
+      # Bump alongside the node image kind ships with; kind picks its own default
+      # node image, so nothing else here has to know the Kubernetes version.
+      KIND_VERSION: v0.30.0
+      KIND_CLUSTER: glimmer-burnin-e2e
+      E2E_IMG: glimmer-burnin:e2e
+      E2E_RUNNER_IMAGE: busybox:1.37.0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Hosted runners ship ~14 GB free on /, and a kind node image plus a Go
+      # toolchain layer plus the operator image is enough to matter. Two runner
+      # image builds have already hit ENOSPC in this repository, and a job that
+      # dies out of disk cannot even write its own logs.
+      - name: Reclaim disk
+        run: |
+          set -euo pipefail
+          echo "== df before"; df -h /
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup; do
+            [ -e "$d" ] || continue
+            if sudo rm -rf "$d"; then echo "  removed  $d"; else echo "  FAILED   $d"; fi
+          done
+          echo "== df after"; df -h /
+
+      - name: Install kind
+        run: |
+          set -euo pipefail
+          go install "sigs.k8s.io/kind@${KIND_VERSION}"
+          # setup-go does not reliably put GOPATH/bin on PATH for later steps.
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          command -v kubectl >/dev/null || {
+            echo "::error::kubectl is not on PATH; the e2e job applies config/ with it"
+            exit 1
+          }
+
+      - name: Create the cluster
+        run: kind create cluster --name "$KIND_CLUSTER" --config test/e2e/kind.yaml --wait 3m
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # THE GATE. Nothing below runs if the shipped manifests do not apply.
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Apply config/ to the cluster
+        run: |
+          set -euo pipefail
+          kubectl apply -f config/crd -f config/rbac -f config/manager
+          kubectl wait --for=condition=Established --timeout=120s \
+            crd/burninruns.burnin.glimmer.ai \
+            crd/burnintests.burnin.glimmer.ai \
+            crd/burninprofiles.burnin.glimmer.ai \
+            crd/burninsinks.burnin.glimmer.ai \
+            crd/burninschedules.burnin.glimmer.ai \
+            crd/nodefingerprints.burnin.glimmer.ai
+          # config/samples is deliberately NOT applied here. It contains
+          # BurnInRuns and a BurnInSchedule, so a live operator would start
+          # executing them — cordoning this cluster's nodes and pulling images
+          # that do not exist — and the e2e's own runs would be sharing the fleet
+          # with them. The samples are validated against a real apiserver in
+          # test/envtest, where no controller is watching.
+
+      - name: Build and load the operator image
+        run: |
+          set -euo pipefail
+          docker build -t "$E2E_IMG" .
+          kind load docker-image "$E2E_IMG" --name "$KIND_CLUSTER"
+
+      - name: Load the CPU runner image
+        run: |
+          set -euo pipefail
+          # Loaded rather than pulled from inside the cluster: podForTest sets no
+          # imagePullPolicy, so a tagged image defaults to IfNotPresent and the
+          # runners never need registry access from a kind node.
+          docker pull "$E2E_RUNNER_IMAGE"
+          kind load docker-image "$E2E_RUNNER_IMAGE" --name "$KIND_CLUSTER"
+
+      - name: Run the operator
+        run: |
+          set -euo pipefail
+          # config/manager pins a published tag this cluster cannot pull; point
+          # it at the image just built from this commit.
+          kubectl -n glimmer-burnin-system set image \
+            deployment/burnin-controller-manager manager="$E2E_IMG"
+          kubectl -n glimmer-burnin-system rollout status \
+            deployment/burnin-controller-manager --timeout=5m
+
+      - name: e2e (core)
+        run: go test -tags e2e ./test/e2e/... -count=1 -v -timeout 20m -run 'TestThe|TestA(NodeScope|ThresholdViolation|SkippingRunner|PairScope)'
+
+      # The chaos tests are the slow half — each one waits out a manager restart
+      # and a leader-election lease — so they run on main, on the weekly sweep and
+      # on demand, not on every PR.
+      #
+      # WHAT THAT LEAVES UNGUARDED, stated rather than glossed: between merges,
+      # a change can break CLUSTER-LEVEL recovery (a cordon stranded by a manager
+      # that died holding it, a run that restarts a test it was already running)
+      # and this workflow will not say so until the merge to main. It is a
+      # narrower gap than it sounds, because the same properties are asserted
+      # deterministically on every PR by test/envtest, which injects the
+      # resourceVersion conflict instead of racing a rollout for it. What is
+      # genuinely PR-unguarded is the interaction with a real kubelet: a pod
+      # SIGTERMed by a departing manager, and the lease handover itself.
+      - name: e2e (chaos — manager restart and rolling-update overlap)
+        if: github.event_name != 'pull_request'
+        run: go test -tags e2e ./test/e2e/... -count=1 -v -timeout 20m -run 'TestKillingTheManager|TestARollingUpdate|TestDeletingARunMidFlight'
+
+      - name: Operator logs
+        if: failure()
+        run: |
+          kubectl -n glimmer-burnin-system logs -l control-plane=burnin-controller --tail=400 --prefix || true
+          kubectl get burninruns -A -o yaml || true
+          kubectl get nodes -o wide || true
+
+      - name: Delete the cluster
+        if: always()
+        run: kind delete cluster --name "$KIND_CLUSTER" || true
 
   docker:
     runs-on: ubuntu-latest
