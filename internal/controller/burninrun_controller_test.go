@@ -1177,6 +1177,47 @@ func TestRun_ControllerSpecialCasesNoVendor(t *testing.T) {
 	}
 }
 
+// TestRun_ExitTwoWithoutADeclarationIsAnErrorNotASkip is the reconciler half of
+// the panic-reads-as-skip bug (#103).
+//
+// A Go runner that panics exits 2, and so does every Go runtime fatal error —
+// out of memory, concurrent map writes, stack exhaustion — which no runner can
+// recover from however carefully it is written. Landing that on Skipped is the
+// worst available outcome: Skipped is never retried, leaves the retry budget
+// unspent, does not contribute to the run's verdict, and reports the node as one
+// the test did not APPLY to. A crashed runner therefore certified hardware
+// nobody measured, inside a run that settled Passed.
+//
+// It must be an Error instead: hardware unjudged, retry budget available, and a
+// run that does not claim a verdict it never earned.
+func TestRun_ExitTwoWithoutADeclarationIsAnErrorNotASkip(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4", burninv1alpha1.Threshold{Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	// A merged stdout/stderr stream holding a panic trace and not one key=value
+	// line — which is also precisely the shape of an honest skip, and why the
+	// exit code alone cannot separate them.
+	h.finishPod(h.pods("run1")["spark-a"], 2,
+		"panic: runtime error: index out of range [3] with length 2\n\ngoroutine 1 [running]:\nmain.main()\n\t/src/main.go:132 +0x1d\n", "Error")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if got := run.Status.Results[0].Phase; got != burninv1alpha1.RunError {
+		t.Fatalf("undeclared exit 2 = %q, want Error — a crash is not a statement that the test does not apply", got)
+	}
+	if run.Status.Skipped != 0 {
+		t.Errorf("a crash was counted as %d skipped; the report would read as 'not applicable to this hardware'", run.Status.Skipped)
+	}
+	if run.Status.Phase == burninv1alpha1.RunPassed {
+		t.Error("run settled Passed around a node whose runner died before measuring anything")
+	}
+}
+
 // The corollary: a test that genuinely does not apply says so with exit 2, and
 // THAT is what produces Skipped — after the pod ran on the real hardware.
 func TestRun_RunnerExitTwoIsTheOnlySkip(t *testing.T) {
@@ -1196,7 +1237,7 @@ func TestRun_RunnerExitTwoIsTheOnlySkip(t *testing.T) {
 	)
 	h.reconcile("run1")
 	h.reconcile("run1")
-	h.finishPod(h.pods("run1")["spark-a"], 2, "unified memory does not support GPUDirect RDMA\n", "Error")
+	h.finishPod(h.pods("run1")["spark-a"], 2, "GPUDIRECT_RDMA_SKIP: unified memory does not support GPUDirect RDMA\n", "Error")
 	h.reconcileUntilSettled("run1")
 
 	run := h.run("run1")
@@ -3112,7 +3153,9 @@ func TestRun_SkipWithNoMetricsIsStillASkipNotAnError(t *testing.T) {
 	)
 	h.reconcile("run1")
 	h.reconcile("run1")
-	h.finishPod(h.pods("run1")["spark-a"], 2, "", "Error")
+	// The marker is the whole output: a declared skip, and still not one
+	// key=value line, which is the shape this test exists to accept.
+	h.finishPod(h.pods("run1")["spark-a"], 2, "FP4_GEMM_SKIP: this part is not compute capability 12.0/12.1\n", "Error")
 	h.reconcileUntilSettled("run1")
 
 	run := h.run("run1")
@@ -3664,7 +3707,7 @@ func TestPair_ServerSkipSettlesThePairAsSkipped(t *testing.T) {
 	h.reconcile("run1")
 	h.reconcile("run1")
 	server := h.pairPod("run1", pairRoleServer)
-	h.finishPod(server, 2, "no RDMA device on this host\n", "Completed")
+	h.finishPod(server, 2, "IB_WRITE_BW_SKIP: no RDMA device on this host\n", "Completed")
 	h.reconcileUntilSettled("run1")
 
 	run := h.run("run1")

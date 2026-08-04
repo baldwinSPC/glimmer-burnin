@@ -39,6 +39,7 @@ import (
 	"testing"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 )
 
 // publishWorkflow is the workflow whose choice list must name every runner.
@@ -526,6 +527,85 @@ func TestNoRunnerCompilesAgainstAnUnresolvedArch(t *testing.T) {
 				"`ARG CUDA_ARCH=` with no default, so that expands to the empty string on every "+
 				"build that does not override it. Read the value the build resolved "+
 				"(/out/cuda_arch) instead.", path, line)
+		}
+	}
+}
+
+// skipMarkerLiteral finds anything SHAPED like a skip marker in a runner's
+// source, CASE-INSENSITIVELY.
+//
+// The case-insensitivity is the entire point and the first version of this test
+// lacked it. Matching only the correct spelling meant that renaming
+// FP4_GEMM_SKIP to Fp4_gemm_skip made the pattern find nothing at all, the loop
+// below iterate over nothing, and the test pass — blind in precisely the case it
+// exists to catch. A guard that only recognises the correct form cannot report
+// the incorrect one.
+//
+// The trailing [a-z]* catches a rename to _SKIPPED, which DeclaresSkip's \b also
+// rejects, and which would otherwise slip past a pattern anchored at _SKIP.
+//
+// Tokens with no upper-case letter at all are then discarded, because that is
+// what separates a marker from a metric: dcgm-diag legitimately reports
+// tests_skipped, which is a measurement and not a declaration. Every real marker
+// is upper-case, and every mis-spelling worth catching (Fp4_gemm_skip,
+// FP4_GEMM_SKIPPED) keeps at least one capital.
+var skipMarkerLiteral = regexp.MustCompile(`(?i)[A-Za-z][A-Za-z0-9_]*_skip[a-z]*`)
+
+// looksLikeAMarker discards the all-lower-case matches, which are metric names
+// rather than skip declarations.
+func looksLikeAMarker(tok string) bool { return tok != strings.ToLower(tok) }
+
+// TestEverySkipMarkerIsOneTheParserRecognises ties each runner's skip
+// declaration to the parser that has to believe it.
+//
+// Exit 2 alone is no longer enough to be recorded as Skip, because a Go panic —
+// and every Go runtime fatal error, which no runner can recover from — also
+// exits 2, and Skip is the one phase that is never retried and never affects the
+// run's verdict (#103). A skip must now be DECLARED, and pkg/runner.DeclaresSkip
+// is what reads the declaration.
+//
+// That makes a marker's exact spelling load-bearing in a way it never was
+// before. Renaming FP4_GEMM_SKIP to FP4_GEMM_SKIPPED, or lower-casing one,
+// would not fail any test the runner has: it would quietly turn every legitimate
+// skip that runner reports into an Error. This is the check that notices, and it
+// runs from the filesystem so a twelfth runner is covered the day it is added.
+func TestEverySkipMarkerIsOneTheParserRecognises(t *testing.T) {
+	for _, d := range runnerDirs(t) {
+		found := map[string]bool{}
+		err := filepath.WalkDir(d, func(path string, e os.DirEntry, err error) error {
+			if err != nil || e.IsDir() {
+				return err
+			}
+			switch filepath.Ext(path) {
+			case ".go", ".cu", ".cuh", ".cc", ".h":
+			default:
+				return nil
+			}
+			if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, "_test.cc") {
+				return nil
+			}
+			src, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			for _, m := range skipMarkerLiteral.FindAllString(string(src), -1) {
+				if looksLikeAMarker(m) {
+					found[m] = true
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Errorf("walking runners/%s: %v", d, err)
+			continue
+		}
+		for m := range found {
+			if !runner.DeclaresSkip(m + ": reason") {
+				t.Errorf("runners/%s prints %q, which pkg/runner.DeclaresSkip does not recognise as a skip "+
+					"declaration. Every skip this runner reports would be recorded as an Error instead — "+
+					"hardware unjudged rather than out of scope. Keep the marker upper-case, ending in _SKIP, "+
+					"and at the start of its line", d, m)
+			}
 		}
 	}
 }

@@ -468,6 +468,25 @@ disagree about the same hardware. One brain, two dispatchers.
   `compute-smoke` shipped `v0.1.0` reporting all three of those as exit 1; that
   is the shape of the bug to look for. The skip path matters for the same
   reason: a node that cannot run a test must skip cleanly, not report a failure.
+- **A SKIP MUST BE DECLARED, NOT MERELY EXITED.** Exit 2 is honoured as `Skip`
+  only when stdout also carries a marker — an upper-case token ending in `_SKIP`
+  at the start of a line (`FP4_GEMM_SKIP:`, `NCCL_SKIP:`, `IB_WRITE_BW_SKIP:`).
+  Exit 2 with no marker is an **`Error`**. The reason is that an unrecovered Go
+  panic exits 2, as does every Go runtime fatal error — out of memory, concurrent
+  map writes, stack exhaustion — which no runner can recover from however
+  carefully it is written. The camouflage was otherwise perfect: a container log
+  merges stdout and stderr, so a crashed runner produces a stack trace with no
+  `key=value` line at all, and "no metrics" is the NORMAL shape of a skip. That
+  landed a crash on the one phase that is never retried, never affects the run's
+  verdict, and reports the node as one the test did not apply to — so a run
+  settled `Passed` around hardware nobody measured. This is the same rule as the
+  `n/a` sentinel and it is the same sentence: a runner may only declare what it
+  positively established, and ABSENCE IS NOT A DECLARATION. It fails towards
+  `Error` deliberately — a runner that skips honestly but forgets the marker is
+  reported unjudged and retried, which is visible and cheap, while the opposite
+  mistake certifies a fleet nobody looked at. Every runner here that can skip
+  already prints a marker, and `runners/pins_test.go` fails if one is renamed
+  into a form `pkg/runner.DeclaresSkip` no longer recognises.
 - **A branch no available hardware can reach still gets exercised — three ways,
   and the strongest one is on real silicon.** `compute-smoke`'s exit 2 fires only
   on a part that is not CC 12.0/12.1, this project has none, and the assumed

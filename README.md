@@ -214,6 +214,25 @@ never folded into a failure. Parsing is last-occurrence-wins, so a runner may
 report progressively. That is the whole contract, in any language, which is what
 keeps the vendor seam at the image boundary rather than in the reconciler.
 
+**A skip must be declared, not merely exited.** Exit 2 counts as `Skip` only if
+stdout also carries a marker — an upper-case token ending in `_SKIP` at the start
+of a line, like `IB_WRITE_BW_SKIP: this node has no RDMA device`. Exit 2 without
+one is an `Error`.
+
+That is not pedantry. An unrecovered Go panic exits **2**, and so does every Go
+runtime fatal error — out of memory, concurrent map writes, stack exhaustion —
+none of which a runner can recover from. A container log merges stdout and
+stderr, so a crashed runner emits a stack trace and no `key=value` line at all —
+which is exactly the shape of an honest skip, whose normal form is "nothing to
+measure, nothing reported". Landing that on `Skip` is the worst available
+outcome: `Skip` is never retried, leaves the retry budget unspent, and does not
+affect the run's verdict, so a crashed runner reported a node as *out of scope*
+inside a run that settled **Passed**.
+
+It fails towards `Error` on purpose. A runner that skips honestly but forgets the
+marker is reported unjudged and retried — visible and cheap. The opposite mistake
+certifies a fleet nobody looked at.
+
 Metric names are governed by [`pkg/contract`](./pkg/contract/metrics.go):
 lowerCamelCase, and a dimensional metric ends in a registered unit suffix
 (`busBandwidthGBs`, `latencyUs`, `gpuTempC`). A threshold naming a metric the

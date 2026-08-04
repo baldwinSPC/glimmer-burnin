@@ -31,7 +31,15 @@ const (
 	failingRunner = `echo miscompares=7; exit 0`
 	// skippingRunner is exit 2 — "this test does not apply to this hardware",
 	// declared after looking. It must never read as a failure.
-	skippingRunner = `echo no accelerator present; exit 2`
+	// The marker is required, not decoration: exit 2 without one is an Error,
+	// because a Go panic and every Go runtime fatal error also exit 2 and a
+	// crash must not be recorded as "does not apply to this hardware".
+	skippingRunner = `echo E2E_INAPPLICABLE_SKIP: no accelerator present; exit 2`
+	// crashingRunner is the other side of that rule: exit 2 with no declaration,
+	// emitting the merged stdout/stderr shape a panicking Go runner produces —
+	// a trace and not one key=value line, which is also exactly the shape of an
+	// honest skip. This must settle Error, never Skipped.
+	crashingRunner = `echo 'panic: runtime error: index out of range [3] with length 2'; echo 'main.main()'; echo '	/src/main.go:132 +0x1d'; exit 2`
 	// slowRunner keeps the node occupied long enough for the chaos tests to
 	// interrupt the manager underneath it, and reports progressively so a
 	// checkpoint has something to read.
@@ -217,6 +225,40 @@ func TestAThresholdViolationIsAHardwareFailAndNotAnError(t *testing.T) {
 			t.Errorf("violation on %q has cause %q, want Measurement — the hardware fell short and "+
 				"the report has to say so", v.Metric, v.Cause)
 		}
+	}
+	assertNoStrandedCordon(t, ns, "run", node)
+}
+
+// TestAnUndeclaredExitTwoIsAnErrorNotASkip is the cluster-level proof for #103.
+//
+// A Go panic exits 2, as does every Go runtime fatal error, and exit 2 is the
+// skip code — so a crashed runner used to be recorded as a node the test did not
+// APPLY to. Skip is never retried, leaves the retry budget unspent and does not
+// affect the run's verdict, so the run settled Passed around hardware nobody
+// measured.
+//
+// The unit tests assert the parse. This asserts the whole path on a real
+// cluster: a real pod, a real exit status, a real container log with stdout and
+// stderr merged, and the phase the operator actually stores.
+func TestAnUndeclaredExitTwoIsAnErrorNotASkip(t *testing.T) {
+	ns := newNamespace(t)
+	node := workerNodes(t)[0]
+
+	create(t,
+		shellTest(ns, "crashed", crashingRunner, func(bt *burninv1alpha1.BurnInTest) {
+			bt.Spec.DurationSeconds = 10
+		}),
+		profileFor(ns, "acceptance", nil, "crashed"),
+		runFor(ns, "run", "acceptance", []string{node}, nil),
+	)
+
+	run := awaitTerminal(t, ns, "run", 5*time.Minute)
+	if run.Status.Skipped != 0 {
+		t.Errorf("a crash was counted as %d skipped — the report would read as 'not applicable to this hardware': %s",
+			run.Status.Skipped, summarise(run))
+	}
+	if run.Status.Phase == burninv1alpha1.RunPassed {
+		t.Errorf("run settled Passed around a runner that died before measuring anything: %s", summarise(run))
 	}
 	assertNoStrandedCordon(t, ns, "run", node)
 }

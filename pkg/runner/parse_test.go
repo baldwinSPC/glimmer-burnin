@@ -1097,3 +1097,106 @@ func TestResult_Numeric(t *testing.T) {
 		t.Error("Numeric() invented a value for a metric that was never reported")
 	}
 }
+
+// panicLog is what a container holds when a Go runner panics: stdout and stderr
+// are MERGED by the container runtime, and a runner that prints its metrics at
+// the end (host-health does) has printed none. So there is no key=value line at
+// all — which is byte-for-byte the shape of a legitimate skip, whose normal form
+// is exactly "nothing to measure, nothing reported".
+const panicLog = `probing kernel ring buffer
+panic: runtime error: index out of range [3] with length 2
+
+goroutine 1 [running]:
+main.run(...)
+	/src/main.go:190
+main.main()
+	/src/main.go:132 +0x1d
+`
+
+// TestExitTwoWithoutADeclarationIsAnErrorNotASkip is the regression guard for the
+// worst-shaped bug this parser can have.
+//
+// An unrecovered Go panic exits 2. So does every Go RUNTIME fatal error —
+// out-of-memory, concurrent map writes, stack exhaustion — none of which can be
+// recovered even by a runner that wants to. Exit 2 is the skip code, and Skip is
+// the single worst landing place for a crash: it is never retried, it does not
+// affect the run's verdict, and it reports the node as one the test did not
+// apply to. A crashed runner therefore used to certify a fleet nobody measured,
+// inside a run that settled Passed.
+func TestExitTwoWithoutADeclarationIsAnErrorNotASkip(t *testing.T) {
+	got := Parse("host-health", panicLog, 2)
+	if got.Verdict != VerdictError {
+		t.Errorf("a panic exiting 2 is %q, want %q — the hardware was never judged",
+			got.Verdict, VerdictError)
+	}
+	if !got.UndeclaredSkip {
+		t.Error("UndeclaredSkip is false, so a consumer cannot tell this from any other Error")
+	}
+	// The evidence must survive: the tail of the trace is the only clue to what
+	// actually died, and overwriting it with a tidier message would cost the
+	// person debugging it the one thing they need.
+	if !strings.Contains(got.Message, "main.go") {
+		t.Errorf("Message = %q, want the tail of the panic retained", got.Message)
+	}
+}
+
+// TestADeclaredSkipIsStillASkip is the other half, and it is what stops the
+// guard above from being a blanket refusal of exit 2. A runner that says it
+// skipped is believed.
+func TestADeclaredSkipIsStillASkip(t *testing.T) {
+	// Every marker a runner in this repository actually prints. If one is ever
+	// renamed, this fails rather than silently reclassifying that runner's
+	// skips as crashes.
+	for _, out := range []string{
+		"FP4_GEMM_SKIP: this part is not compute capability 12.0/12.1",
+		"NCCL_SKIP: fewer than two ranks",
+		"IB_WRITE_BW_SKIP: this node has no RDMA device",
+		"GPUDIRECT_RDMA_SKIP: no peer-memory provider",
+		"STRESSAPPTEST_SKIP: not enough free memory to size a run",
+		"DCGM_DIAG_SKIP: no DCGM at /usr/local/dcgm",
+		"MEMORY_BW_SKIP: fewer than two devices",
+		"CLOCKPROBE_SKIP: no NVML on this host",
+	} {
+		got := Parse("custom", out+"\n", 2)
+		if got.Verdict != VerdictSkip {
+			t.Errorf("Parse(%q, exit 2) = %q, want %q", out, got.Verdict, VerdictSkip)
+		}
+		if got.UndeclaredSkip {
+			t.Errorf("%q set UndeclaredSkip on a declared skip", out)
+		}
+	}
+}
+
+// TestOnlyExitTwoNeedsADeclaration keeps the new rule where it belongs. A pass,
+// a fail and an error say what they mean by their exit code alone; only the skip
+// code collides with a crash, so only the skip code asks for corroboration.
+func TestOnlyExitTwoNeedsADeclaration(t *testing.T) {
+	for code, want := range map[int]Verdict{0: VerdictPass, 1: VerdictFail, 3: VerdictError, 137: VerdictError} {
+		got := Parse("host-health", panicLog, code)
+		if got.Verdict != want {
+			t.Errorf("exit %d = %q, want %q", code, got.Verdict, want)
+		}
+		if got.UndeclaredSkip {
+			t.Errorf("exit %d set UndeclaredSkip, which is only about exit 2", code)
+		}
+	}
+}
+
+// TestDeclaresSkipIsNotFooledByProse guards the marker itself. It has to be
+// recognisable in a merged stdout/stderr stream full of arbitrary text, without
+// matching text that merely talks about skipping.
+func TestDeclaresSkipIsNotFooledByProse(t *testing.T) {
+	for _, out := range []string{
+		"we will skip this if the device is absent",
+		"SKIPPING: not a marker",
+		"the runner printed skip_reason=none",
+		"nested_SKIP is not at the start of a line",
+	} {
+		if DeclaresSkip(out) {
+			t.Errorf("DeclaresSkip(%q) = true, want false", out)
+		}
+	}
+	if !DeclaresSkip("first line\nHOST_HEALTH_SKIP: reason\nlast line") {
+		t.Error("a marker on a middle line was not found; stdout and stderr are merged, so it can be anywhere")
+	}
+}
