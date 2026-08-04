@@ -31,9 +31,12 @@ or health, and none of them asserts speed:
 **`thermal-soak` is the exception, and this runner does not claim otherwise.**
 It applies its own sustained-clock floor — `THERMAL_SOAK_MIN_CLOCK_PCT`, default
 **60 %** of rated boost — and returns `THERMAL_SOAK_FAIL` below it
-([`thermal_soak.cu`](../thermal-soak/thermal_soak.cu)). Its floor was calibrated
-against exactly this failure mode: a PD wedge on GB10 lands in the 30–50 % range,
-which is well under 60. A wedged part put through a soak should fail the soak.
+([`thermal_soak.cu`](../thermal-soak/thermal_soak.cu)). That floor is set ten
+points under the **measured** 69.9 % sustained-clock asymptote of a healthy
+Spark, not against a wedge — but this project's **estimate** of where a wedge
+lands, near **20 %** of rated boost, is far enough under 60 that a wedged part
+put through a soak should fail the soak. Estimate, not measurement; see
+[what is not verified](#what-is-not-verified) below.
 
 So `clockprobe` earns its place on **cost and attribution**, not on exclusive
 coverage:
@@ -55,21 +58,32 @@ coverage:
 ### What is not verified
 
 That `thermal-soak` actually fires on a genuinely wedged part is **inferred from
-reading its source**, not observed. Its floor logic, its default, and its own
-30–50 % estimate of where a wedge lands were all read out of `thermal_soak.cu`;
-no wedged Spark was available to run either test against. Two things follow that
-a reader should not have to guess at:
+reading its source**, not observed. Its floor logic and its default were read out
+of `thermal_soak.cu`; no wedged Spark was available to run either test against.
+Three things follow that a reader should not have to guess at:
 
 - The soak's floor is only applied when the clock could be read at all
   (`m.clockKnown`). A part whose clock NVML will not report is not judged against
   the floor by that runner.
-- The 30–50 % figure for a wedge is this project's own estimate on GB10, and the
-  60 % floor is calibrated per hardware class **and per soak duration**. On other
-  parts, or at a duration the floor was not calibrated for, the margin between a
-  wedge and a healthy soak is not established.
+- **Where a wedge actually lands has never been measured by this project.** The
+  20 % figure is an ESTIMATE: a researched pin point of ~611 MHz over the 3003 MHz
+  rated boost this fleet reports (611/3003 = 20.3 %), corroborated only in order
+  of magnitude by GEP-0178's independent "~4× slow while reporting 96 %
+  utilization". Neither this runner nor `thermal-soak` has produced a number from
+  wedged silicon. A 30–50 % figure appeared in earlier revisions of this file and
+  of `thermal_soak.cu`, each citing the other and neither citing a measurement;
+  it has been dropped rather than reconciled, because it had no derivation to
+  reconcile.
+- The 60 % floor is calibrated per hardware class **and per soak duration**, and
+  from healthy parts only. On other parts, or at a duration the floor was not
+  calibrated for, the margin between a wedge and a healthy soak is not
+  established.
 
 Confirming both runners against a deliberately under-powered Spark is the
-outstanding piece of work here.
+outstanding piece of work here, and is tracked as
+[#61](https://github.com/baldwinSPC/glimmer-burnin/issues/61). Until that lands,
+no threshold in this repository should be tightened on the strength of the 20 %
+estimate.
 
 ## Workload
 
