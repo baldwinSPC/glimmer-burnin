@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -407,3 +408,171 @@ func TestFileSourceScanRetainsNothing(t *testing.T) {
 	}
 	t.Logf("streamed %d bytes with a peak heap growth of %d bytes", logBytes, peak)
 }
+
+// A scan that FAILED is not a sample — issue #112.
+//
+// Both of these were reachable on a shipped runner and each produced one of the
+// two verdicts this project forbids most: a Fail against healthy hardware, and a
+// Pass certified by a number nobody measured. They are the same root cause seen
+// from two sides — count() returned (0, 0) for a failed scan, indistinguishably
+// from a clean empty one, and emit() published that zero as a measurement.
+//
+// The fix is the rule already stated in this runner's package comment: "we could
+// not look" is not a measurement, so the counter is OMITTED and fails closed
+// upstream. It is deliberately NOT the `n/a` sentinel — that declares the
+// hardware cannot produce the value, which is a claim about the part, and this
+// is a claim about the probe.
+
+func TestBaselineScanFailureDoesNotChargeHistoryToTheWindow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kern.log")
+	mustWrite(t, path,
+		"boot\nNVRM: Xid (PCI:0000:01:00): 48, months ago\nNVRM: Xid (PCI:0000:02:00): 63, also old\n")
+
+	p := newKernelLogProbe(config{kernLogPaths: []string{path}})
+	if p.source != "kernlog" {
+		t.Fatalf("source = %q, want kernlog", p.source)
+	}
+
+	// The baseline scan's os.Open fails and then the file comes back. On a real
+	// node that is a transient EMFILE under the fd pressure #112 was reported
+	// under, or logrotate renaming the path in exactly that instant.
+	away := path + ".1"
+	if err := os.Rename(path, away); err != nil {
+		t.Fatal(err)
+	}
+	p.baseline()
+	if err := os.Rename(away, path); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing whatsoever happens during the observation window.
+	p.collect()
+
+	out := newEmitter()
+	p.emit(out)
+
+	// The window count is not a measurement: the baseline it would be measured
+	// against was never taken, and the source's own read position never moved,
+	// so the "window" would be the whole file.
+	if v, ok := out.get(keyXidCount); ok {
+		t.Errorf("%s=%q was emitted after the baseline scan failed — that is the node's whole "+
+			"Xid history reported as events during the burn-in", keyXidCount, v)
+	}
+	if v, ok := out.get("xid_preexisting"); ok {
+		t.Errorf("xid_preexisting=%q was emitted from a scan that failed", v)
+	}
+	if code, verdict := decide(out); code == exitFail {
+		t.Errorf("a healthy node was FAILED for historical Xids: exit %d %q", code, verdict)
+	}
+}
+
+func TestWindowScanFailureOmitsTheCounterRatherThanZeroingIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kern.log")
+	mustWrite(t, path, "boot\n")
+
+	p := newKernelLogProbe(config{kernLogPaths: []string{path}})
+	p.baseline()
+
+	// A real Xid lands DURING the burn-in, and then the log rotates away before
+	// the closing scan can read it.
+	appendTo(t, path, "NVRM: Xid (PCI:0000:01:00): 48, double-bit ECC during the soak\n")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	p.collect()
+
+	out := newEmitter()
+	p.emit(out)
+
+	if v, ok := out.get(keyXidCount); ok {
+		t.Errorf("%s=%q was emitted for a window that was never read — a zero nobody measured "+
+			"satisfies an `xidEvents Equal 0` gate and certifies a node that logged an Xid",
+			keyXidCount, v)
+	}
+	// The evidence that something went wrong still has to be on the record.
+	if _, ok := out.get("xid_log_dropped"); !ok {
+		t.Error("xid_log_dropped was not emitted, so nothing records that the scan failed")
+	}
+}
+
+// A clean run is untouched: both samples were taken, so both are published.
+func TestSuccessfulScansStillPublishTheCounters(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kern.log")
+	mustWrite(t, path, "NVRM: Xid (PCI:0000:01:00): 31, before the window\n")
+
+	p := newKernelLogProbe(config{kernLogPaths: []string{path}})
+	p.baseline()
+	appendTo(t, path, "NVRM: Xid (PCI:0000:02:00): 48, during the window\n")
+	p.collect()
+
+	out := newEmitter()
+	p.emit(out)
+	if v, _ := out.get(keyXidCount); v != "1" {
+		t.Errorf("%s = %q, want 1", keyXidCount, v)
+	}
+	if v, _ := out.get("xid_preexisting"); v != "1" {
+		t.Errorf("xid_preexisting = %q, want 1", v)
+	}
+	if _, dropped := out.get("xid_log_dropped"); dropped {
+		t.Error("a clean pair of scans must not report a drop")
+	}
+}
+
+// Exhausting the per-scan read bound is a TRUNCATED scan, not a complete one.
+//
+// The bound exists so a source that never returns EAGAIN cannot spin forever,
+// and falling out of it used to return nil — success — with the drain cut off
+// partway. The baseline is then short, the source is positioned somewhere
+// arbitrary in the log, and everything past the cut is counted as a window event
+// on the next scan. Same wrong verdict as a failed baseline, reached by a
+// different route and without even xid_log_dropped to show for it.
+//
+// The bound is lowered here because it cannot otherwise be reached: with a
+// 16 KiB buffer a regular file hits EOF in a handful of reads, and 200000 reads
+// of real /dev/kmsg is not a state a test can construct. A guard nobody can
+// execute is a guard nobody has checked.
+func TestExhaustingTheReadBoundIsReportedAsAFailedScan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kmsg")
+
+	var log []byte
+	for i := 0; i < 64; i++ {
+		log = append(log, "6,1,1,-;systemd[1]: a message\n"...)
+	}
+	mustWrite(t, path, string(log))
+
+	src, err := openKmsg(path)
+	if err != nil {
+		t.Fatalf("openKmsg: %v", err)
+	}
+	defer src.close()
+	src.maxReads = 1 // one read cannot drain the file
+
+	seen := 0
+	err = src.scan(func(string) { seen++ })
+	if err == nil {
+		t.Fatalf("a scan cut off at the read bound reported success after visiting %d records — "+
+			"the caller cannot tell it from a complete drain", seen)
+	}
+	if seen == 0 {
+		t.Error("the bounded scan visited nothing, so it is not exercising the truncation path")
+	}
+
+	// And the probe must treat it as an unmeasured sample rather than a zero.
+	p := &kernelLogProbe{src: &boundedOnce{inner: src}, source: "kmsg", available: true}
+	p.baseline()
+	if p.baselineOK {
+		t.Error("a truncated drain was recorded as a completed baseline sample")
+	}
+}
+
+// boundedOnce hands the probe a source whose scan always reports truncation.
+type boundedOnce struct{ inner *kmsgSource }
+
+func (b *boundedOnce) scan(func(string)) error { return errTruncated }
+func (b *boundedOnce) close()                  { b.inner.close() }
+
+var errTruncated = errors.New("truncated")
