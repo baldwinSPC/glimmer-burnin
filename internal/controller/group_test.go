@@ -697,33 +697,32 @@ func TestNodeAndPairDeadlinesAreUnchanged(t *testing.T) {
 	}
 }
 
-// A Group test must not fall back to a default runner image — issue #118.
+// A Group test must not fall back to a runner image that cannot do Group — #118.
 //
-// This is the one that would have shipped a false negative. Every fabric runner
-// this project publishes branches on BURNIN_ROLE and reads its absence as "this
-// is a Node-scope run, and a link test with one node has no meaning": exit 2,
-// with a declared _SKIP marker. At Group scope the operator sets BURNIN_RANK and
-// BURNIN_NRANKS and deliberately NOT BURNIN_ROLE — so all three take that
-// branch, the result is recorded Skip, and the run settles Passed around a
-// collective that never ran.
+// This is the one that would have shipped a false negative. A fabric runner
+// branches on BURNIN_ROLE and reads its absence as "this is a Node-scope run,
+// and a link test with one node has no meaning": exit 2, with a declared _SKIP
+// marker. At Group scope the operator sets BURNIN_RANK and BURNIN_NRANKS and
+// deliberately NOT BURNIN_ROLE — so the result is recorded Skip, and the run
+// settles Passed around a collective that never ran.
 //
-// Newer images refuse honestly, and it does not help: published tags are
-// immutable, so every v0.3.0 image already in the field behaves this way
-// forever. The operator declining to dispatch them is the only thing that
-// protects a fleet running those.
-func TestGroup_RefusedWhenItWouldUseADefaultRunnerImage(t *testing.T) {
+// The refusal is per KIND, because whether the shipped image speaks the Group
+// contract is a property of that image. nccl's does; ib-write-bw's and
+// gpudirect-rdma's do not and never will, because a point-to-point RDMA write
+// has no N-rank form.
+func TestGroup_RefusedWhenTheDefaultImageCannotDoGroup(t *testing.T) {
 	bare := &burninv1alpha1.BurnInTest{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "nccl-group"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "fabric-group"},
 		Spec: burninv1alpha1.BurnInTestSpec{
-			Kind:  burninv1alpha1.KindNCCL,
+			// A link runner. Its image will never speak the Group rendezvous.
+			Kind:  burninv1alpha1.KindIBWriteBW,
 			Scope: burninv1alpha1.ScopeGroup,
-			// No Runner at all: this resolves to defaultRunnerImages[nccl].
 		},
 	}
 	h := newHarness(t,
 		gb10Node("spark-a"), gb10Node("spark-b"), gb10Node("spark-c"),
 		bare,
-		profile("acceptance", nil, false, testRef("nccl-group")),
+		profile("acceptance", nil, false, testRef("fabric-group")),
 		groupRun("run1", "acceptance", "spark-a", "spark-b", "spark-c"),
 	)
 	h.reconcile("run1")
@@ -731,8 +730,8 @@ func TestGroup_RefusedWhenItWouldUseADefaultRunnerImage(t *testing.T) {
 
 	run := h.run("run1")
 	if run.Status.Phase != burninv1alpha1.RunError {
-		t.Fatalf("phase = %q, want Error — a Group test on a default image would SKIP, and a "+
-			"skipped run settles Passed around hardware nobody measured", run.Status.Phase)
+		t.Fatalf("phase = %q, want Error — that image would SKIP, and a skipped run settles "+
+			"Passed around hardware nobody measured", run.Status.Phase)
 	}
 	msg := run.Status.Results[0].Message
 	for _, want := range []string{"spec.runner.image", "BURNIN_RANK", "#118"} {
@@ -744,6 +743,35 @@ func TestGroup_RefusedWhenItWouldUseADefaultRunnerImage(t *testing.T) {
 		t.Errorf("a pod was scheduled for a Group test whose image cannot do Group")
 	}
 	h.assertNoStrandedCordons()
+}
+
+// nccl's shipped runner DOES speak the contract, so it needs no explicit image.
+// This is the half that would rot silently if the allow-list and the runner ever
+// drifted apart: the operator would refuse a test the image can run.
+func TestGroup_TheNCCLDefaultImageIsAllowed(t *testing.T) {
+	bare := &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "nccl-group"},
+		Spec: burninv1alpha1.BurnInTestSpec{
+			Kind:  burninv1alpha1.KindNCCL,
+			Scope: burninv1alpha1.ScopeGroup,
+		},
+	}
+	nodes := []string{"spark-a", "spark-b", "spark-c"}
+	h := newHarness(t,
+		gb10Node(nodes[0]), gb10Node(nodes[1]), gb10Node(nodes[2]),
+		bare,
+		profile("acceptance", nil, false, testRef("nccl-group")),
+		groupRun("run1", "acceptance", nodes...),
+	)
+	h.startGroup("run1", len(nodes))
+
+	if got := len(h.allPods("run1")); got != len(nodes) {
+		t.Fatalf("group launched %d pods, want %d — the shipped nccl image speaks the Group "+
+			"rendezvous and must not be refused", got, len(nodes))
+	}
+	if img := h.rankPod("run1", 0).Spec.Containers[0].Image; !strings.Contains(img, "nccl") {
+		t.Errorf("rank 0 image = %q, want the nccl default", img)
+	}
 }
 
 // An explicit image is the author saying they have a runner that speaks the

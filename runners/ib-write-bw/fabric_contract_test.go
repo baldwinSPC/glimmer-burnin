@@ -67,13 +67,17 @@ type fabricFile struct {
 var fabricFiles = []fabricFile{
 	{
 		name:     "groupscope_test.go",
-		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir},
-		reason: "the guard for issue #118, and it is one rule so it is one file. All three runners " +
-			"branch on BURNIN_ROLE and read its absence as a Node-scope run; at Group scope the " +
-			"operator sets BURNIN_RANK/BURNIN_NRANKS and deliberately NOT BURNIN_ROLE, so all three " +
-			"would have declared a SKIP for a collective that never ran. A fork here would let one " +
-			"runner quietly go back to certifying a fleet nobody measured, which is precisely the " +
-			"outcome the test exists to prevent.",
+		sharedBy: []string{ibWriteBWDir, gpudirectDir},
+		reason: "the Group-scope guard, and nccl is a DELIBERATE FORK of it. All three runners once " +
+			"read an absent BURNIN_ROLE as a Node-scope run and declared a SKIP for a collective " +
+			"that never executed (#118); ib-write-bw and gpudirect-rdma still refuse Group scope " +
+			"outright, because a point-to-point RDMA write and a GPUDirect peer-memory check are " +
+			"measurements of a LINK and have no N-rank form — so their guard is one rule and stays " +
+			"one file. nccl now speaks the Group rendezvous, so its copy asserts the opposite: that " +
+			"a well-formed BURNIN_RANK/BURNIN_NRANKS/BURNIN_ROOT_HOST contract is ACCEPTED and a " +
+			"malformed one is an Error. The two files must not be resynced — doing so would either " +
+			"make nccl refuse a collective it can run, or make the link runners claim one they " +
+			"cannot.",
 	},
 	{
 		name:     "rdma.go",
