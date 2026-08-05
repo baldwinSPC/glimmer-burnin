@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -983,20 +984,120 @@ func TestGroup_AThresholdFailureKeepsTheCollectiveContext(t *testing.T) {
 	}
 }
 
-// The whole message is bounded, not merely its parts.
-func TestGroup_TheWholeMessageIsBounded(t *testing.T) {
-	long := strings.Repeat("CUDA error: an extremely verbose device-side failure. ", 300)
+// A long message must lose the RANK SPEW, never the clauses this operator wrote.
+//
+// The previous revision clamped the whole message from the end, and the
+// disagreement note was appended last — so on exactly the long messages the
+// clamp exists for, the note went and the runner spew stayed. Since the merge
+// deliberately leaves out.Unmeasurable empty when another rank measured the key,
+// that note is the ONLY record that a rank declared the metric unmeasurable, and
+// truncating it restored the certification it was written to prevent.
+//
+// The old guard asserted only length, so it stayed green throughout. This one
+// asserts what the message is FOR.
+func TestGroup_ClampingKeepsWhatTheOperatorChoseToSay(t *testing.T) {
+	spew := strings.Repeat("spark:1:1 [0] NCCL WARN Cuda failure 'unhandled cuda error' net_ib.cc:1043 ", 40)
+
+	// The verdicts are spread across all four classes DELIBERATELY. groupMessage
+	// collapses ranks that agree, so a uniform group produces one short exemplar
+	// and never reaches the clamp at all — an earlier version of this test made
+	// that mistake and passed against the broken ordering. Four classes, each
+	// naming up to groupMaxNamedRanks ranks with their own clamped line, is what
+	// actually pushes the summaries past maxGroupMessage.
+	verdicts := []runner.Verdict{runner.VerdictPass, runner.VerdictFail, runner.VerdictSkip, runner.VerdictError}
 	var members []groupMember
-	for rank := 0; rank < 64; rank++ {
-		members = append(members, groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
-			result: &runner.Result{Verdict: runner.VerdictError, ExitCode: 3, Message: long,
-				Metrics:      map[string]string{"gpuTempC": fmt.Sprintf("%d", rank)},
-				Unmeasurable: map[string]bool{}}})
+	for rank := 0; rank < 20; rank++ {
+		m := map[string]string{"eccErrors": "0", "gpuTempC": "70"}
+		u := map[string]bool{}
+		switch rank {
+		case 2:
+			m["gpuTempC"] = "95" // the node that ran hot
+		case 3:
+			delete(m, "eccErrors") // a GB10: it cannot produce the measurement
+			u["eccErrors"] = true
+		}
+		members = append(members, groupMember{rank: rank, node: fmt.Sprintf("spark-%02d", rank),
+			result: &runner.Result{Verdict: verdicts[rank%len(verdicts)], ExitCode: rank % 4,
+				Message: spew, Metrics: m, Unmeasurable: u}})
 	}
 	out := combineGroup(members, nil, &burninv1alpha1.BurnInTestSpec{})
-	if len(out.Message) > maxGroupMessage+256 {
-		t.Errorf("a 64-rank group with long runner messages produced %d characters; a BurnInRun's "+
-			"status grows per attempt and an unwritable status loses the verdict entirely",
-			len(out.Message))
+	if len(out.Message) < maxGroupMessage/2 {
+		t.Fatalf("the fixture produced a %d-character message and never approaches the clamp, so "+
+			"it proves nothing about ordering", len(out.Message))
+	}
+
+	if len(out.Message) > maxGroupMessage+512 {
+		t.Errorf("message is %d characters; a status grows per attempt and an unwritable one "+
+			"loses the verdict entirely", len(out.Message))
+	}
+	// The whole point: the deliberate clauses survive the truncation.
+	for _, want := range []string{"DISAGREED", "eccErrors", "rank 3=n/a", "gpuTempC", "rank 2=95"} {
+		if !strings.Contains(out.Message, want) {
+			t.Errorf("truncation removed %q — the note is the ONLY record that rank 3's gate never "+
+				"ran, and the only thing naming the node that ran hot:\n%s", want, out.Message)
+		}
+	}
+	if !strings.Contains(out.Message, "COLLECTIVE") {
+		t.Errorf("truncation removed the clause saying the verdict is about the collective")
+	}
+	// And a rune boundary was respected: these messages carry em dashes.
+	if !utf8.ValidString(out.Message) {
+		t.Error("clamping cut a multi-byte sequence in half")
+	}
+}
+
+// One loud rank must not crowd the DISSENTING ranks out of the summary.
+//
+// Ranks sharing a verdict are collapsed to an exemplar on purpose, so this uses
+// ranks that differ: rank 0 errors verbosely and the rest pass. The ones that
+// differ are the ones worth reading, and a whole-message cap alone would have
+// let rank 0's spew consume the budget before they were named.
+func TestGroup_OneLoudRankDoesNotHideTheDissenters(t *testing.T) {
+	var members []groupMember
+	for rank := 0; rank < 4; rank++ {
+		m := groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictPass, ExitCode: 0, Message: "clean",
+				Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}}
+		if rank == 0 {
+			m.result.Verdict, m.result.ExitCode = runner.VerdictError, 3
+			m.result.Message = strings.Repeat("an extremely verbose rank-0 failure. ", 400)
+		}
+		members = append(members, m)
+	}
+	out := combineGroup(members, nil, &burninv1alpha1.BurnInTestSpec{})
+
+	// Rank 0's own words are clamped, not omitted.
+	if !strings.Contains(out.Message, "verbose rank-0 failure") {
+		t.Errorf("rank 0's explanation was dropped entirely: %s", out.Message)
+	}
+	if len(out.Message) > maxGroupMessage+512 {
+		t.Errorf("message is %d characters", len(out.Message))
+	}
+	// And the ranks that disagreed with it are still there.
+	for rank := 1; rank < 4; rank++ {
+		if !strings.Contains(out.Message, fmt.Sprintf("spark-%d", rank)) {
+			t.Errorf("rank %d is missing because rank 0 was loud:\n%s", rank, out.Message)
+		}
+	}
+}
+
+// The rejected-name list is deduped and bounded, with the count kept exact.
+func TestGroup_InvalidNamesAreDedupedAndBounded(t *testing.T) {
+	var members []groupMember
+	for rank := 0; rank < 40; rank++ {
+		// pkg/runner appends one entry per offending LINE, and progressive
+		// reporting is expected — so one bad key becomes ranks x samples entries.
+		var names []string
+		for sample := 0; sample < 20; sample++ {
+			names = append(names, "nccl.busbw")
+		}
+		members = append(members, groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictPass, InvalidNames: names,
+				Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}})
+	}
+	out := combineGroup(members, nil, &burninv1alpha1.BurnInTestSpec{})
+	if len(out.InvalidNames) != 1 {
+		t.Errorf("InvalidNames has %d entries for ONE distinct rejected name; the set is the "+
+			"finding, the number of times it was printed is not", len(out.InvalidNames))
 	}
 }
