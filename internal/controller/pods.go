@@ -63,8 +63,10 @@ const (
 //
 // That is the HOST axis and it is not the GPU axis. A tag resolving on a host
 // says nothing about whether the image contains code for the accelerator in it —
-// compute-smoke is CC 12.x only and skips a B200 cleanly, and nccl ships one
-// gencode that an unlisted fleet must rebuild. Each runner's README states its
+// compute-smoke carries only the CC 12.x kernel and reports a B200 as an ERROR,
+// hardware unjudged — not a Skip, because a B200 does do NVFP4 and the test
+// applies to it — and nccl ships one gencode that an unlisted fleet must
+// rebuild. Each runner's README states its
 // GPU coverage; conflating the two is how an operator ends up reporting Error on
 // hardware it simply was not built for.
 //
@@ -110,6 +112,44 @@ const defaultDurationSeconds int32 = 600
 // kubelet kills the pod: image pull and container start are not the test's
 // fault and must not eat its budget.
 const deadlineGraceSeconds int32 = 120
+
+// rendezvousGraceSeconds is the extra kubelet deadline a pod gets for time it
+// spends waiting for peers THIS OPERATOR has not created yet.
+//
+// EVERY rank of a group waits, which is why this is not scoped to the root. A
+// collective makes no progress until the last rank joins, so rank 1 sits idle
+// while ranks 2..N-1 are scheduled and pull their image, exactly as the root
+// sits idle while all of them do. The root simply waits longest, because it is
+// created first and the workers are not created until it reports Ready.
+//
+// Every second of that was charged against an activeDeadlineSeconds sized for
+// ONE pod's start. On a cold 8-node cluster the root is killed part-way through
+// a test that had barely begun, reported as "test exceeded its deadline and was
+// killed" — a finding about hardware that was fine (issue #122).
+//
+// THE NUMBER IS NOT INVENTED, and that matters here more than its size: it is
+// schedulingGracePeriod, which is already how long this operator waits for a pod
+// to start before it gives up on it (podOverdue). The argument is exactly that
+// symmetry — the kubelet must not kill the root for waiting out a window the
+// operator itself considers a reasonable wait. Anything larger would be a
+// tolerance nobody measured, which is the mistake #54 and #61 are about.
+//
+// The ordering it produces is deliberate. activeDeadlineSeconds runs from the
+// pod's StartTime and podOverdue from its CreationTimestamp, and StartTime is
+// never earlier, so with equal windows the OPERATOR gives up first — and its
+// message names the ranks that did not finish, where the kubelet's says only
+// that a deadline passed.
+//
+// A Pair server has the same shape with ONE peer, and is deliberately left
+// alone: 120 s has been sufficient for it on real hardware (the Pair suite
+// passed on two Sparks), so there is evidence it does not need this and none
+// that it does. Widen it when that evidence exists, not by symmetry.
+func rendezvousGraceSeconds(rv *rendezvous) int32 {
+	if rv == nil || rv.scope != burninv1alpha1.ScopeGroup {
+		return 0
+	}
+	return int32(schedulingGracePeriod / time.Second)
+}
 
 // podName derives the deterministic name for one ATTEMPT of a test on a node.
 //
@@ -424,7 +464,7 @@ func podForTest(
 	if duration <= 0 {
 		duration = defaultDurationSeconds
 	}
-	deadline := int64(duration + deadlineGraceSeconds)
+	deadline := int64(duration + deadlineGraceSeconds + rendezvousGraceSeconds(rv))
 
 	container := corev1.Container{
 		Name:      "runner",

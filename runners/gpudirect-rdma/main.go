@@ -115,6 +115,26 @@ func run() int {
 	logf("perftest %s (--enable-cuda); role=%s peer=%s (node %s) duration=%ds",
 		perftestRef, role, peerHost, peerNode, duration)
 
+	// GROUP SCOPE IS NOT A NODE-SCOPE RUN, and mistaking it for one is the worst
+	// outcome this runner has. The operator sets BURNIN_RANK and BURNIN_NRANKS
+	// for a Group execution and deliberately does NOT set BURNIN_ROLE, so the
+	// empty-role branch below would read a collective as a single node and
+	// declare a SKIP — "acceptance does not apply to this hardware" — for a test
+	// that applies and was never run, letting the run settle Passed. This runner
+	// cannot do Group scope, and saying so is an Error: the hardware is UNJUDGED.
+	//
+	// It is answered BEFORE any hardware inspection on purpose. "This runner does
+	// not speak the Group rendezvous" is a fact about the IMAGE and is true
+	// whatever is in the box, so letting a "no accelerator visible" skip answer
+	// first would reply to a question nobody asked — and reply with the one
+	// verdict that certifies. See issue #118.
+	if os.Getenv("BURNIN_RANK") != "" || os.Getenv("BURNIN_NRANKS") != "" {
+		return fin(exitError, "BURNIN_RANK/BURNIN_NRANKS are set, so this is a Group-scope run, and "+
+			"this runner speaks only the Pair rendezvous (BURNIN_ROLE/BURNIN_PEER_HOST). It has NOT "+
+			"measured this hardware and must not be read as having found the test inapplicable; "+
+			"see issue #118")
+	}
+
 	if role == "" {
 		return fin(exitSkip, "BURNIN_ROLE is not set, so this pod is not half of a Pair — "+
 			"GPUDirect RDMA is a property of a LINK and cannot be measured from one node; "+

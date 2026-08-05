@@ -118,7 +118,7 @@ matters more here than anywhere else in this runner.
 
 Exit 2 is the contract's load-bearing distinction — *a node that cannot run a
 test has not failed it* — and until 2026-08-03 it had **never executed**
-(issue #9). It fires only on a part that is not CC 12.0/12.1, this project has
+(issue #9). It fires only on a part that is not Blackwell at all, this project has
 no such accelerator, and the route everyone expected is gone: `dcgm-diag` was
 supposed to be the first real-silicon exerciser on the theory that DCGM does not
 support GB10, and DCGM works on GB10.
@@ -155,6 +155,16 @@ It is now covered three ways, in ascending order of how much they prove:
    FP4_GEMM_SKIP: NVFP4 block-scaled GEMM requires compute capability 12.0/12.1, and this part reports 9.0 — the test does not apply to this hardware and the part is NOT failed; run a kind whose runner covers this architecture
    EXIT=2
    ```
+
+   > The capture above is from the build that produced it and is left byte for
+   > byte as it was run. The wording of the skip line has since changed — the
+   > scope gate now names "compute capability 10.x or 12.x" rather than
+   > "12.0/12.1", because both Blackwell families do NVFP4 and it is the kernel
+   > and gencode gates, not the scope gate, that stop the ones this image cannot
+   > serve. Everything the capture is evidence FOR is unchanged:
+   > `forced_compute_cap=9.0`, the `FP4_GEMM_SKIP` marker, and `EXIT=2` on real
+   > GB10 silicon. CC 9.0 is not Blackwell and is still out of scope, so the same
+   > command still takes the same branch.
 
    The switches are compile-time so no environment variable can reach them, no
    Dockerfile in the repository may define them (`runners/pins_test.go` fails the

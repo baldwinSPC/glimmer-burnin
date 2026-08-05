@@ -186,7 +186,7 @@ The GPU axis is per runner and is documented in each runner's README:
 |---|---|
 | `clockprobe`, `thermal-soak`, `gpu-burn` | cubins for sm_80 / sm_90 / sm_100 / sm_120 / sm_121 + PTX — covers A100 through GB300 out of the box |
 | `memory-bw` | nvbandwidth's own arch list; copy-engine testcases launch no kernel, so the gencode does not affect any reported number |
-| `compute-smoke` | **CC 12.x only** — the NVFP4 kernel is CUTLASS `arch::Sm120`. Defaults `sm_121a` on arm64, `sm_120a` on amd64. An H100 or B200 gets a clean `Skip`, never a `Fail`; SM10x needs its own runner |
+| `compute-smoke` | **CC 12.x kernel only** — the NVFP4 kernel is CUTLASS `arch::Sm120`. Defaults `sm_121a` on arm64, `sm_120a` on amd64. Never a `Fail`, and the two ways it declines are **not** the same: an H100/A100/L40S `Skip`s (exit 2 — no block-scaled FP4 on those parts at all), while a **B200/GB200/B300/GB300 is an `Error`** (exit 3, hardware **unjudged**) — those parts *do* have NVFP4, by the `tcgen05.mma` path this image does not implement, so the test applies and was not run. SM10x needs its own runner (#10) |
 | `nccl` | **one gencode, and you may need to change it.** Defaults `sm_121` on arm64, `sm_90` on amd64; a B200 or L40S fleet must rebuild with `--build-arg NCCL_GENCODE=…` |
 | `ib-write-bw`, `gpudirect-rdma`, `memory-stress`, `host-health`, `dcgm-diag` | no gencode — nothing to choose |
 

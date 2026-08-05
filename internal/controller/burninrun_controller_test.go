@@ -45,6 +45,11 @@ FP4_GEMM_PASS
 // The `forced_compute_cap=9.0` line is kept verbatim. It is what such a build
 // prints, and printing it is what keeps a fault-injected verdict distinguishable
 // from a real one for as long as the result is stored.
+//
+// The wording of the skip line in this capture predates the scope gate being
+// widened to both Blackwell families; the live message now names "10.x or 12.x".
+// The capture is left exactly as it was produced — it is evidence, and what it is
+// evidence FOR is the marker, the exit code and the parse, none of which moved.
 const fp4SkipStdout = `built_cuda_arch=sm_121a
 forced_compute_cap=9.0
 gpu_name=NVIDIA GB10

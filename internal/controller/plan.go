@@ -142,6 +142,39 @@ func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error 
 				"that contention instead of the fabric",
 			t.name, dup)
 	}
+	// NO SHIPPED RUNNER IMAGE SPEAKS THE GROUP CONTRACT YET (#118), and a Group
+	// test that falls back to a default image does not fail — it SKIPS, which is
+	// the worst available outcome.
+	//
+	// Every fabric runner this project publishes branches on BURNIN_ROLE and
+	// treats its absence as "this is a Node-scope run, and a link test with one
+	// node has no meaning": exit 2, with a declared _SKIP marker. At Group scope
+	// the operator sets BURNIN_RANK/BURNIN_NRANKS and deliberately NOT
+	// BURNIN_ROLE, so all three runners take that branch. The result is recorded
+	// as Skip — "acceptance does not apply to this hardware" — and the run
+	// settles Passed around a collective that never ran.
+	//
+	// Newer images can and will refuse honestly, but they cannot help here:
+	// published tags are IMMUTABLE, so every v0.3.0 image already in the field
+	// will behave this way forever. The only thing that protects a fleet running
+	// those is the operator declining to dispatch them, which is what this does.
+	//
+	// It refuses ONLY the default. An explicit spec.runner.image is the author
+	// saying they have a runner that speaks the contract, and this operator has
+	// no business second-guessing that — it is also the documented way to run
+	// Group scope today.
+	if t.spec.Runner == nil || t.spec.Runner.Image == "" {
+		return fmt.Errorf(
+			"test %q is Group scope and names no spec.runner.image, so it would fall back to the "+
+				"default image for kind %q — and no runner image this project has published speaks the "+
+				"Group rendezvous contract (issue #118). Every published fabric runner branches on "+
+				"BURNIN_ROLE, which is deliberately unset at Group scope, and treats its absence as a "+
+				"Node-scope run: it would exit 2 with a skip marker, this run would record "+
+				"\"acceptance does not apply to this hardware\", and it would settle Passed around a "+
+				"collective that never executed. Set spec.runner.image to a runner that reads "+
+				"BURNIN_RANK, BURNIN_NRANKS and BURNIN_ROOT_HOST",
+			t.name, t.spec.Kind)
+	}
 	if nodeCap < len(targets) {
 		return fmt.Errorf(
 			"test %q is Group scope across %d nodes but spec.maxConcurrentNodes is %d — a group is one indivisible "+

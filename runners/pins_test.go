@@ -742,3 +742,64 @@ func TestNoRunnerBinaryCanBeCommittedAtTheRepositoryRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestDriverInjectionIsDeclaredWhereItIsNeeded makes the fleet's most load-bearing
+// accident visible in the repository.
+//
+// Issue #52: the GB10 cluster's CDI spec declares a hook its host toolkit is too
+// old to implement, so every pod that gets its GPU through CDI dies at
+// createContainer. The burn-in runners work anyway — and the reason is a property
+// of THESE IMAGES, not of the host: containerd's default_runtime_name is the
+// legacy nvidia-container-runtime, which injects from NVIDIA_VISIBLE_DEVICES and
+// NVIDIA_DRIVER_CAPABILITIES in the image environment and never consults the CDI
+// spec at all.
+//
+// So the fleet is one Dockerfile away from a cluster-wide outage, with nothing in
+// the cluster recording why. A new GPU runner that omits those two variables
+// would be caught by nothing here: it builds, it passes every test in this
+// package, and it fails on a real node as a StartError naming a hook rather than
+// the runner.
+//
+// The rule is a CORRESPONDENCE and not "every runner must set them". Two runners
+// legitimately need no accelerator — ib-write-bw measures the wire through RDMA
+// verbs and memory-stress exercises host RAM — and declaring GPU access they do
+// not use would be a privilege grant nobody reviewed. What must not happen is a
+// runner needing the driver and not saying so, so the list of exemptions is
+// written down here and a new runner has to join it deliberately.
+func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
+	// Runners that touch no accelerator. Adding a name here is a claim that the
+	// runner never opens a CUDA context and never executes nvidia-smi; check the
+	// source before making it.
+	noAccelerator := map[string]string{
+		"ib-write-bw":   "measures the wire through RDMA verbs; the CUDA variant is gpudirect-rdma",
+		"memory-stress": "exercises HOST memory through stressapptest",
+	}
+
+	for _, d := range runnerDirs(t) {
+		raw, err := os.ReadFile(filepath.Join(d, "Dockerfile"))
+		if err != nil {
+			t.Fatalf("reading %s/Dockerfile: %v", d, err)
+		}
+		body := string(raw)
+		visible := strings.Contains(body, "NVIDIA_VISIBLE_DEVICES")
+		caps := strings.Contains(body, "NVIDIA_DRIVER_CAPABILITIES")
+
+		if why, exempt := noAccelerator[d]; exempt {
+			if visible || caps {
+				t.Errorf("%s is listed as needing no accelerator (%s) but its Dockerfile declares "+
+					"NVIDIA driver injection — either the exemption is stale or the image is asking "+
+					"for access it does not use", d, why)
+			}
+			continue
+		}
+
+		if !visible || !caps {
+			t.Errorf("%s/Dockerfile does not declare BOTH NVIDIA_VISIBLE_DEVICES and "+
+				"NVIDIA_DRIVER_CAPABILITIES (visible=%v capabilities=%v). On a host where the "+
+				"legacy nvidia-container-runtime is the injection path — which is the GB10 "+
+				"cluster today, see issue #52 — this runner gets no driver at all. If it really "+
+				"needs no accelerator, add it to noAccelerator above with the reason.",
+				d, visible, caps)
+		}
+	}
+}

@@ -387,11 +387,21 @@ func (r *BurnInRunReconciler) harvestGroup(
 	var none advanceEffect
 	root := pods[groupRootRank]
 
+	// A rank that never STARTED and a rank that started and hung are different
+	// findings and send an engineer to different places: the first is scheduling
+	// — an unschedulable node, a stuck image pull — and the second is the node
+	// under test. Reporting both as "never finished" buries the distinction in
+	// the one message somebody reads off a failed collective.
 	var stillRunning []string
 	for rank, pod := range pods {
-		if _, done, _ := podOutcome(pod); !done {
-			stillRunning = append(stillRunning, fmt.Sprintf("rank %d (%s)", rank, nodes[rank]))
+		if _, done, _ := podOutcome(pod); done {
+			continue
 		}
+		what := "never finished"
+		if pod == nil || !podStarted(pod) {
+			what = "never started"
+		}
+		stillRunning = append(stillRunning, fmt.Sprintf("rank %d (%s) %s", rank, nodes[rank], what))
 	}
 
 	if len(stillRunning) > 0 {
@@ -406,7 +416,7 @@ func (r *BurnInRunReconciler) harvestGroup(
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, root.Name, root, runner.Result{
 				Verdict: runner.VerdictError,
 				Message: fmt.Sprintf(
-					"the collective did not complete within its window — %d of %d rank(s) never finished (%s); "+
+					"the collective did not complete within its window — %d of %d rank(s) did not report (%s); "+
 						"every other rank blocks on a rank that never arrives, so this names the ones that did not; no verdict",
 					len(stillRunning), len(nodes), strings.Join(stillRunning, ", ")),
 			})

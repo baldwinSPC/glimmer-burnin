@@ -620,3 +620,145 @@ func TestGroup_ThresholdsEvaluateAgainstTheMergedMetrics(t *testing.T) {
 		t.Errorf("violations = %+v, want one naming busBandwidthGBs", res.Violations)
 	}
 }
+
+// No rank is killed for waiting out the rendezvous — issue #122.
+//
+// A collective makes no progress until the LAST rank joins, so every rank sits
+// idle while the others are scheduled and pull their image. The root waits
+// longest — it is created first and the workers are not created until it reports
+// Ready — but it is a difference of degree, not of kind, and every second of it
+// used to be charged against an activeDeadlineSeconds sized for ONE pod's start.
+func TestGroup_EveryRanksDeadlineCoversTheRendezvous(t *testing.T) {
+	nodes := []string{"spark-a", "spark-b", "spark-c"}
+	h := newHarness(t,
+		gb10Node(nodes[0]), gb10Node(nodes[1]), gb10Node(nodes[2]),
+		groupTest("nccl-group"),
+		profile("acceptance", nil, false, testRef("nccl-group")),
+		groupRun("run1", "acceptance", nodes...),
+	)
+	h.startGroup("run1", len(nodes))
+
+	// The extra is schedulingGracePeriod and nothing invented: it is already how
+	// long this operator waits for a pod to start before giving up on it.
+	want := int64(defaultDurationSeconds+deadlineGraceSeconds) + int64(schedulingGracePeriod/time.Second)
+	for rank := 0; rank < len(nodes); rank++ {
+		pod := h.rankPod("run1", rank)
+		if pod.Spec.ActiveDeadlineSeconds == nil {
+			t.Fatalf("rank %d has no deadline", rank)
+		}
+		if got := *pod.Spec.ActiveDeadlineSeconds; got != want {
+			t.Errorf("rank %d deadline = %ds, want %ds — it pays for the rendezvous out of its own "+
+				"test budget", rank, got, want)
+		}
+	}
+
+	// The ordering that makes the extra useful: the OPERATOR must give up at or
+	// before the kubelet, so the recorded message names the ranks that did not
+	// report rather than saying only that a deadline passed. podOverdue measures
+	// from CreationTimestamp and activeDeadlineSeconds from StartTime, which is
+	// never earlier, so equal windows put the operator first.
+	operatorWindow := int64(defaultDurationSeconds+deadlineGraceSeconds) + int64(schedulingGracePeriod/time.Second)
+	if want > operatorWindow {
+		t.Errorf("a rank's deadline %ds outlives the operator's own patience %ds — the kubelet would "+
+			"never be the one to kill it, and a wedged rank would linger", want, operatorWindow)
+	}
+}
+
+// Node and Pair pods are untouched. A Pair server has the same shape with ONE
+// peer and 120s has been sufficient for it on real hardware, so there is
+// evidence it does not need this and none that it does.
+func TestNodeAndPairDeadlinesAreUnchanged(t *testing.T) {
+	spec := &burninv1alpha1.BurnInTestSpec{
+		Kind:            burninv1alpha1.KindComputeSmoke,
+		DurationSeconds: 300,
+		Runner:          &burninv1alpha1.RunnerSpec{Image: "example.invalid/x:v1"},
+	}
+	run := newRun("run1", "p", "spark-a")
+	want := int64(300 + deadlineGraceSeconds)
+
+	node, err := podForTest(run, 0, 1, "t", spec, "spark-a", run.Spec.Target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *node.Spec.ActiveDeadlineSeconds; got != want {
+		t.Errorf("Node-scope deadline = %d, want %d", got, want)
+	}
+
+	for _, role := range []string{pairRoleServer, pairRoleClient} {
+		pair, err := podForTest(run, 0, 1, "t", spec, "spark-a", run.Spec.Target, &rendezvous{
+			scope: burninv1alpha1.ScopePair, role: role, service: "svc", peerRole: "other",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := *pair.Spec.ActiveDeadlineSeconds; got != want {
+			t.Errorf("Pair %s deadline = %d, want %d", role, got, want)
+		}
+	}
+}
+
+// A Group test must not fall back to a default runner image — issue #118.
+//
+// This is the one that would have shipped a false negative. Every fabric runner
+// this project publishes branches on BURNIN_ROLE and reads its absence as "this
+// is a Node-scope run, and a link test with one node has no meaning": exit 2,
+// with a declared _SKIP marker. At Group scope the operator sets BURNIN_RANK and
+// BURNIN_NRANKS and deliberately NOT BURNIN_ROLE — so all three take that
+// branch, the result is recorded Skip, and the run settles Passed around a
+// collective that never ran.
+//
+// Newer images refuse honestly, and it does not help: published tags are
+// immutable, so every v0.3.0 image already in the field behaves this way
+// forever. The operator declining to dispatch them is the only thing that
+// protects a fleet running those.
+func TestGroup_RefusedWhenItWouldUseADefaultRunnerImage(t *testing.T) {
+	bare := &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "nccl-group"},
+		Spec: burninv1alpha1.BurnInTestSpec{
+			Kind:  burninv1alpha1.KindNCCL,
+			Scope: burninv1alpha1.ScopeGroup,
+			// No Runner at all: this resolves to defaultRunnerImages[nccl].
+		},
+	}
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"), gb10Node("spark-c"),
+		bare,
+		profile("acceptance", nil, false, testRef("nccl-group")),
+		groupRun("run1", "acceptance", "spark-a", "spark-b", "spark-c"),
+	)
+	h.reconcile("run1")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error — a Group test on a default image would SKIP, and a "+
+			"skipped run settles Passed around hardware nobody measured", run.Status.Phase)
+	}
+	msg := run.Status.Results[0].Message
+	for _, want := range []string{"spec.runner.image", "BURNIN_RANK", "#118"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal does not mention %q: %q", want, msg)
+		}
+	}
+	if len(h.allPods("run1")) != 0 {
+		t.Errorf("a pod was scheduled for a Group test whose image cannot do Group")
+	}
+	h.assertNoStrandedCordons()
+}
+
+// An explicit image is the author saying they have a runner that speaks the
+// contract, and the operator has no business second-guessing that. It is also
+// the documented way to run Group scope today.
+func TestGroup_AnExplicitRunnerImageIsAccepted(t *testing.T) {
+	nodes := []string{"spark-a", "spark-b", "spark-c"}
+	h := newHarness(t,
+		gb10Node(nodes[0]), gb10Node(nodes[1]), gb10Node(nodes[2]),
+		groupTest("nccl-group"), // groupTest sets Runner.Image explicitly
+		profile("acceptance", nil, false, testRef("nccl-group")),
+		groupRun("run1", "acceptance", nodes...),
+	)
+	h.startGroup("run1", len(nodes))
+	if got := len(h.allPods("run1")); got != len(nodes) {
+		t.Fatalf("group launched %d pods, want %d — an explicit image must be honoured", got, len(nodes))
+	}
+}

@@ -124,13 +124,26 @@ constexpr int kExitError = 3;
 //                   this image does NOT implement — kernelCovers stops it as an
 //                   Error naming issue #10, never as a Skip.
 //
-// CC 10.x is admitted as a whole MAJOR family rather than an enumerated list of
-// minors, because a new datacenter Blackwell minor is far likelier to have NVFP4
-// than not, and the cost of being wrong runs the safe way: an in-scope part this
-// image cannot serve reports Error and is retried, while an out-of-scope verdict
-// would certify it. The SM12x arm stays an exact pair for the opposite reason —
-// a future 12.x minor is a part we have no reason to believe anything about, and
-// it will be caught by kernelCovers or archMatch either way.
+// BOTH arms are whole MAJOR families, and the SM12x one became a family after
+// #116 made the argument that requires it. A new Blackwell minor is far likelier
+// to have NVFP4 than not, and — the part that actually decides it — the cost of
+// being wrong runs the safe way in one direction only:
+//
+//   wrong towards InScope     an Error. Hardware UNJUDGED, retried under
+//                             retryOnErrorLimit, and the run does not pass.
+//   wrong towards OutOfScope  a Skip. Acceptance certified as inapplicable to
+//                             hardware nobody looked at, on the one phase this
+//                             operator never retries, and the run settles Passed.
+//
+// The SM12x arm used to be the exact pair 12.0/12.1, on the reasoning that "a
+// hypothetical 12.2 has not been established, and quietly admitting it would
+// launch an untested path". The first half is true and the second does not
+// follow: admitting a part HERE launches nothing, because kernelCovers and
+// archMatch still stand between it and a launch. A CC 12.2 part with this
+// image's sm_121a cubin is now stopped by archMatch as an Error naming the
+// rebuild, which is the same finding the old comment wanted — reached through
+// the gate that says "we did not measure this" instead of the one that says "it
+// does not apply to you".
 //
 // Tri-state, for the same reason ArchMatch is. A Skip is a DECLARATION about the
 // hardware — "acceptance does not apply to this part" — and a runner may only
@@ -149,8 +162,8 @@ enum class Scope {
 
 inline Scope scopeOf(int devMajor, int devMinor) {
   if (devMajor < 0 || devMinor < 0) return Scope::Unknown;
-  if (devMajor == 12 && (devMinor == 0 || devMinor == 1)) return Scope::InScope;
-  if (devMajor == 10) return Scope::InScope;  // datacenter Blackwell; see above
+  if (devMajor == 12) return Scope::InScope;  // consumer/workstation Blackwell
+  if (devMajor == 10) return Scope::InScope;  // datacenter Blackwell
   return Scope::OutOfScope;
 }
 
@@ -216,9 +229,9 @@ inline int describeWrongKernelFamily(char *buf, std::size_t n, int devMajor, int
 // actually has, and a Skip that nobody can attribute is a Skip nobody trusts.
 inline int describeOutOfScope(char *buf, std::size_t n, int devMajor, int devMinor) {
   std::snprintf(buf, n,
-                "NVFP4 block-scaled GEMM requires compute capability 12.0/12.1, and this part "
-                "reports %d.%d — the test does not apply to this hardware and the part is NOT "
-                "failed; run a kind whose runner covers this architecture",
+                "NVFP4 block-scaled GEMM requires a Blackwell part (compute capability 10.x or "
+                "12.x), and this part reports %d.%d — the test does not apply to this hardware and "
+                "the part is NOT failed; run a kind whose runner covers this architecture",
                 devMajor, devMinor);
   return kExitSkip;
 }
