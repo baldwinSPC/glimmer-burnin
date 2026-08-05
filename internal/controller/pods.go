@@ -659,11 +659,21 @@ func podReady(pod *corev1.Pod) bool {
 
 // podOutcome reads a terminated pod's exit code. The second return is false
 // while the pod is still running or pending.
-func podOutcome(pod *corev1.Pod) (exitCode int, terminated bool, reason string) {
+// The fourth return is the kubelet's own DETAIL, and dropping it is what made a
+// cluster-wide outage unreadable (#52). For a StartError the kubelet puts the
+// whole createContainer hook failure in Terminated.Message — the literal string
+// "No help topic for 'disable-device-node-modification'", which names the broken
+// CDI hook and therefore the fix. Discarding it left the stored result saying
+// only `runner terminated abnormally (exit 128, reason "StartError")`, which is
+// true of every unstartable container and identifies nothing.
+//
+// It is DETAIL and not a reason: the reason stays the short machine token the
+// phase logic keys off, and the message is appended where a human reads it.
+func podOutcome(pod *corev1.Pod) (exitCode int, terminated bool, reason, detail string) {
 	switch pod.Status.Phase {
 	case corev1.PodSucceeded, corev1.PodFailed:
 	default:
-		return 0, false, ""
+		return 0, false, "", ""
 	}
 	// A pod-level failure reason outranks the container's own: when the
 	// kubelet kills a pod at its activeDeadlineSeconds it sets
@@ -681,30 +691,37 @@ func podOutcome(pod *corev1.Pod) (exitCode int, terminated bool, reason string) 
 		}
 		if term := cs.State.Terminated; term != nil {
 			if podReason != "" {
-				return int(term.ExitCode), true, podReason
+				return int(term.ExitCode), true, podReason, term.Message
 			}
-			return int(term.ExitCode), true, term.Reason
+			return int(term.ExitCode), true, term.Reason, term.Message
 		}
 	}
 	// PodFailed with no terminated runner container: the pod never started
 	// (unpullable image, deadline before start, evicted). The machinery
 	// failed, not the hardware — surface whatever reason the pod carries.
 	if pod.Status.Phase == corev1.PodFailed {
-		return -1, true, firstPodFailureReason(pod)
+		reason, detail := firstPodFailure(pod)
+		return -1, true, reason, detail
 	}
-	return 0, false, ""
+	return 0, false, "", ""
 }
 
-func firstPodFailureReason(pod *corev1.Pod) string {
-	if pod.Status.Reason != "" {
-		return pod.Status.Reason
-	}
+func firstPodFailure(pod *corev1.Pod) (reason, detail string) {
+	// A waiting container's Message is where an ImagePullBackOff records WHICH
+	// image and WHY — "failed to resolve reference ...: not found" — which is the
+	// difference between a typo in spec.runner.image and a registry outage.
 	for _, cs := range pod.Status.ContainerStatuses {
 		if w := cs.State.Waiting; w != nil && w.Reason != "" {
-			return w.Reason
+			if pod.Status.Reason != "" {
+				return pod.Status.Reason, w.Message
+			}
+			return w.Reason, w.Message
 		}
 	}
-	return "pod failed before the runner container terminated"
+	if pod.Status.Reason != "" {
+		return pod.Status.Reason, pod.Status.Message
+	}
+	return "pod failed before the runner container terminated", pod.Status.Message
 }
 
 // podLive reports whether a pod is still occupying its node.

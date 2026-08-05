@@ -302,7 +302,7 @@ func (r *BurnInRunReconciler) gateWorkersOnRoot(
 	var none advanceEffect
 	root := pods[groupRootRank]
 
-	if _, terminated, _ := podOutcome(root); terminated {
+	if _, terminated, _, _ := podOutcome(root); terminated {
 		// The root finished before the collective existed, so nothing was
 		// measured. Settle from the reports there are; combineGroup knows that a
 		// clean root exit with no workers is not a pass.
@@ -394,7 +394,7 @@ func (r *BurnInRunReconciler) harvestGroup(
 	// the one message somebody reads off a failed collective.
 	var stillRunning []string
 	for rank, pod := range pods {
-		if _, done, _ := podOutcome(pod); done {
+		if _, done, _, _ := podOutcome(pod); done {
 			continue
 		}
 		what := "never finished"
@@ -471,7 +471,7 @@ func (r *BurnInRunReconciler) harvestMembers(
 		m := groupMember{rank: rank, node: nodes[rank]}
 		if pod != nil {
 			m.pod = pod.Name
-			if _, done, _ := podOutcome(pod); done {
+			if _, done, _, _ := podOutcome(pod); done {
 				parsed, logErr := r.harvestPod(ctx, t, pod)
 				m.result = &parsed
 				if out.logErr == nil {

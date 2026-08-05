@@ -747,7 +747,7 @@ func (r *BurnInRunReconciler) advance(
 		busy[node] = true
 	}
 
-	_, terminated, _ := podOutcome(&pod)
+	_, terminated, _, _ := podOutcome(&pod)
 	if !terminated {
 		// activeDeadlineSeconds only starts once the pod is bound to a node;
 		// an unschedulable pod (typo'd node name, missing toleration) has no
@@ -798,11 +798,22 @@ func (r *BurnInRunReconciler) advance(
 // reported every number a threshold asks for merely because the server's log
 // was unreadable. The callers apply it once, to the unit.
 func (r *BurnInRunReconciler) harvestPod(ctx context.Context, t plannedTest, pod *corev1.Pod) (runner.Result, error) {
-	exitCode, _, reason := podOutcome(pod)
+	exitCode, _, reason, detail := podOutcome(pod)
 	stdout, logErr := r.fetchLogs(ctx, pod)
 	parsed := runner.Parse(string(t.Spec.Kind), stdout, exitCode)
 	if parsed.Verdict == runner.VerdictError && parsed.Message == "" {
+		// THE KUBELET'S OWN DETAIL, and it is the whole point of carrying it
+		// (#52). A container that never started produces no stdout at all, so
+		// this is the ONLY thing that can say why: for a StartError the message
+		// is the createContainer hook failure, and for an ImagePullBackOff it
+		// names the image and the registry error. Without it every unstartable
+		// container recorded the same sentence, and a fleet-wide outage caused
+		// by a broken CDI hook was indistinguishable from a typo in
+		// spec.runner.image.
 		parsed.Message = fmt.Sprintf("runner terminated abnormally (exit %d, reason %q)", exitCode, reason)
+		if d := strings.TrimSpace(detail); d != "" {
+			parsed.Message += ": " + clampPodDetail(d)
+		}
 	}
 	if reason == "DeadlineExceeded" {
 		// The kubelet killed the pod at its deadline. Whatever the container
@@ -1918,4 +1929,18 @@ func (r *BurnInRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}).
 		Named("burninrun").
 		Complete(r)
+}
+
+// maxPodDetail bounds the kubelet message this operator copies into a
+// TestResult. The kubelet does not bound Terminated.Message, and a status write
+// the apiserver refuses would lose the whole verdict rather than the tail of one
+// sentence — so it is truncated visibly rather than trusted.
+const maxPodDetail = 512
+
+func clampPodDetail(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= maxPodDetail {
+		return s
+	}
+	return s[:maxPodDetail] + "… (truncated)"
 }
