@@ -1967,9 +1967,8 @@ const maxPodDetail = 512
 const maxNamedInvalidMetrics = 8
 
 func clampPodDetail(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= maxPodDetail {
-		return s
-	}
-	return s[:maxPodDetail] + "… (truncated)"
+	// truncateAtRune, not a byte slice: the kubelet's message is whatever the
+	// runtime produced and may be any encoding at all, and this value goes
+	// straight into a stored status and a delivered envelope.
+	return truncateAtRune(strings.Join(strings.Fields(s), " "), maxPodDetail, "… (truncated)")
 }
