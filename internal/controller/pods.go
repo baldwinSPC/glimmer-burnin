@@ -56,8 +56,11 @@ const (
 // real hardware") requires. The GPU fleet was unavailable and the release was
 // cut anyway, deliberately and with the trade understood. What DOES stand behind
 // them: the unit, envtest and kind-based e2e tiers, including a real three-node
-// rendezvous for Group scope, and every runner image building on both platforms.
-// What does not: no GB10 has run these exact tags.
+// rendezvous for Group scope. What does not: no GB10 has run these exact tags,
+// and CI built only the FIVE runner images whose sources changed
+// (compute-smoke, gpudirect-rdma, host-health, ib-write-bw, nccl) plus the
+// standing smoke set — it builds by changed directory, so the other six are
+// republished from sources CI did not rebuild for this release.
 //
 // The v0.3.0 tags remain published and immutable, and the measurements behind
 // THEM were taken on a two-node DGX Spark cluster with the v0.2.0 build of the
