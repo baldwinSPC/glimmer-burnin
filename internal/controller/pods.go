@@ -48,14 +48,26 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// All eleven images are v0.3.0, published to GHCR, public, and anonymously
+// All eleven images are v0.4.0, published to GHCR, public, and anonymously
 // pullable.
 //
-// The measurements behind them were taken on a two-node DGX Spark cluster with
-// the v0.2.0 build of the same sources: the Node-scope suite passed 10/10 across
-// both nodes, and the Pair-scope fabric suite passed with ib-write-bw at
-// 99.61 Gb/s, nccl at 12.02 GB/s bus bandwidth, and gpudirect-rdma correctly
-// reporting exit 2 on hardware whose unified memory has no peer-memory provider.
+// THESE TAGS WERE NOT VERIFIED ON REAL HARDWARE BEFORE PUBLICATION, which this
+// file's own rule below ("publish only after the kernel has been verified on
+// real hardware") requires. The GPU fleet was unavailable and the release was
+// cut anyway, deliberately and with the trade understood. What DOES stand behind
+// them: the unit, envtest and kind-based e2e tiers, including a real three-node
+// rendezvous for Group scope, and every runner image building on both platforms.
+// What does not: no GB10 has run these exact tags.
+//
+// The v0.3.0 tags remain published and immutable, and the measurements behind
+// THEM were taken on a two-node DGX Spark cluster with the v0.2.0 build of the
+// same sources: the Node-scope suite passed 10/10 across both nodes, and the
+// Pair-scope fabric suite passed with ib-write-bw at 99.61 Gb/s, nccl at
+// 12.02 GB/s bus bandwidth, and gpudirect-rdma correctly reporting exit 2 on
+// hardware whose unified memory has no peer-memory provider. Pin v0.3.0 if
+// hardware-verified images matter more to you than the v0.4.0 fixes — but read
+// the release notes first: two of those fixes are false negatives that were
+// certifying hardware nobody measured.
 //
 // ARCHITECTURE: linux/amd64 AND linux/arm64. A node pulls only its own
 // platform's layers, so one tag serves an x86 rack and a Grace rack alike, and
@@ -87,18 +99,18 @@ var defaultRunnerImages = map[burninv1alpha1.TestKind]string{
 	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
 	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
 	// repushed ones.
-	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.3.0",
+	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.4.0",
 
-	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.3.0",
-	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.3.0",
-	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.3.0",
-	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.3.0",
-	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.3.0",
-	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.3.0",
-	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.3.0",
-	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.3.0",
-	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.3.0",
-	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.3.0",
+	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.4.0",
+	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.4.0",
+	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.4.0",
+	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.4.0",
+	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.4.0",
+	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.4.0",
+	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.4.0",
+	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.4.0",
+	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.4.0",
+	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.4.0",
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
