@@ -879,3 +879,124 @@ func TestGroup_DisagreementNoteIsBounded(t *testing.T) {
 		t.Errorf("the exact count was lost when the detail was elided: %q", out.Message)
 	}
 }
+
+// A rank declaring a metric unmeasurable must not be erased by another rank's
+// number — audit round 3.
+//
+// The Pair rule is "if either end measured the quantity, it was measurable on
+// this link", and at Pair scope that is right: two ends, one link, one quantity.
+// At Group scope it certifies. CLAUDE.md's own worked example is the trigger:
+// ranks 0 and 1 have ECC and report 0, rank 2 is a GB10 whose runner correctly
+// emits eccErrors=n/a — and the group stored eccErrors=0 with an EMPTY
+// Unmeasurable set, so an `eccErrors Equal 0` gate passed and all three nodes
+// were certified including the one whose gate never ran. The same node under
+// Node scope fails that threshold closed.
+func TestGroup_AnUnmeasurableDeclarationIsNotSilentlyErased(t *testing.T) {
+	measured := func(rank int) groupMember {
+		return groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictPass,
+				Metrics: map[string]string{"eccErrors": "0"}, Unmeasurable: map[string]bool{}}}
+	}
+	gb10 := groupMember{rank: 2, node: "spark-2",
+		result: &runner.Result{Verdict: runner.VerdictPass,
+			Metrics: map[string]string{}, Unmeasurable: map[string]bool{"eccErrors": true}}}
+
+	out := combineGroup([]groupMember{measured(0), measured(1), gb10}, nil,
+		&burninv1alpha1.BurnInTestSpec{})
+
+	if !strings.Contains(out.Message, "eccErrors") {
+		t.Errorf("rank 2 declared eccErrors unmeasurable and the group message does not mention "+
+			"it at all — the node is certified on the other ranks' zeros: %q", out.Message)
+	}
+	if !strings.Contains(out.Message, "rank 2=") {
+		t.Errorf("the declaration is not attributed to the rank that made it: %q", out.Message)
+	}
+}
+
+// The note must name the rank that produced the STORED value, and rank 0 is not
+// always that rank.
+//
+// An earlier version said "the value stored is rank 0's" unconditionally, which
+// is false whenever rank 0 omitted the metric — and it then sent an engineer to
+// the one node that had nothing to do with the reading.
+func TestGroup_DisagreementNamesTheRankThatProducedTheStoredValue(t *testing.T) {
+	// Rank 0 does not report gpuTempC at all.
+	root := groupMember{rank: 0, node: "spark-0",
+		result: &runner.Result{Verdict: runner.VerdictPass,
+			Metrics: map[string]string{"busBandwidthGBs": "15.97"}, Unmeasurable: map[string]bool{}}}
+	warm := groupMember{rank: 1, node: "spark-1",
+		result: &runner.Result{Verdict: runner.VerdictPass,
+			Metrics: map[string]string{"gpuTempC": "72"}, Unmeasurable: map[string]bool{}}}
+	hot := groupMember{rank: 2, node: "spark-2",
+		result: &runner.Result{Verdict: runner.VerdictPass,
+			Metrics: map[string]string{"gpuTempC": "95"}, Unmeasurable: map[string]bool{}}}
+
+	out := combineGroup([]groupMember{root, warm, hot}, nil, &burninv1alpha1.BurnInTestSpec{})
+
+	if out.Metrics["gpuTempC"] != "72" {
+		t.Fatalf("gpuTempC = %q, want rank 1's 72 (the lowest rank that reported it)",
+			out.Metrics["gpuTempC"])
+	}
+	if strings.Contains(out.Message, "rank 0's") {
+		t.Errorf("the note credits rank 0 for a value rank 0 never produced: %q", out.Message)
+	}
+	if !strings.Contains(out.Message, "(rank 1)") {
+		t.Errorf("the note does not name the rank that produced the stored value: %q", out.Message)
+	}
+}
+
+// A threshold failure must not erase the constructed group message.
+//
+// At Node scope parsed.Message is one runner's last line and replacing it costs
+// nothing. A Group message is built by this operator and carries the clause
+// saying the verdict is about the COLLECTIVE, each rank's own report, and the
+// disagreement note — an 8-rank group failing a bandwidth gate stored a bare
+// threshold line beside eight node names, which is the misattribution that lead
+// clause exists to prevent.
+func TestGroup_AThresholdFailureKeepsTheCollectiveContext(t *testing.T) {
+	nodes := []string{"spark-a", "spark-b", "spark-c"}
+	h := newHarness(t,
+		gb10Node(nodes[0]), gb10Node(nodes[1]), gb10Node(nodes[2]),
+		groupTest("nccl-group", burninv1alpha1.Threshold{
+			Metric: "busBandwidthGBs", Comparison: burninv1alpha1.GTE, Value: "40",
+		}),
+		profile("acceptance", nil, false, testRef("nccl-group")),
+		groupRun("run1", "acceptance", nodes...),
+	)
+	h.startGroup("run1", len(nodes))
+	h.finishPod(h.rankPod("run1", 0), 0, ncclRootStdout, "Completed")
+	for rank := 1; rank < len(nodes); rank++ {
+		h.finishPod(h.rankPod("run1", rank), 0, ncclWorkerStdout, "Completed")
+	}
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if res.Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("phase = %q, want Failed", res.Phase)
+	}
+	if !strings.Contains(res.Message, "busBandwidthGBs") {
+		t.Errorf("the threshold that decided the verdict is missing: %q", res.Message)
+	}
+	if !strings.Contains(res.Message, "COLLECTIVE") {
+		t.Errorf("a Failed group lost the clause saying the verdict is about the collective, so a "+
+			"reader with three node names in front of them will pick one: %q", res.Message)
+	}
+}
+
+// The whole message is bounded, not merely its parts.
+func TestGroup_TheWholeMessageIsBounded(t *testing.T) {
+	long := strings.Repeat("CUDA error: an extremely verbose device-side failure. ", 300)
+	var members []groupMember
+	for rank := 0; rank < 64; rank++ {
+		members = append(members, groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictError, ExitCode: 3, Message: long,
+				Metrics:      map[string]string{"gpuTempC": fmt.Sprintf("%d", rank)},
+				Unmeasurable: map[string]bool{}}})
+	}
+	out := combineGroup(members, nil, &burninv1alpha1.BurnInTestSpec{})
+	if len(out.Message) > maxGroupMessage+256 {
+		t.Errorf("a 64-rank group with long runner messages produced %d characters; a BurnInRun's "+
+			"status grows per attempt and an unwritable status loses the verdict entirely",
+			len(out.Message))
+	}
+}

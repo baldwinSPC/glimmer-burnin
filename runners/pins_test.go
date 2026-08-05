@@ -842,6 +842,17 @@ func TestGroupCapableRunnersReallyReadTheGroupContract(t *testing.T) {
 			if err != nil || e.IsDir() || strings.HasSuffix(path, "_test.go") {
 				return err
 			}
+			// SOURCE ONLY. Scanning every file meant runners/nccl/README.md
+			// documenting the variable satisfied this on its own — so ripping the
+			// Group path out of main.go while leaving the docs behind would keep
+			// the test green and leave groupCapableKinds asserting something false
+			// about the shipped image, which is the direction this test's own
+			// error message calls a failure with teeth.
+			switch filepath.Ext(path) {
+			case ".go", ".c", ".cc", ".cu", ".h", ".cuh":
+			default:
+				return nil
+			}
 			body, rerr := os.ReadFile(path)
 			if rerr != nil {
 				return rerr

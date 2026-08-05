@@ -576,8 +576,24 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 		}
 		out.InvalidNames = append(out.InvalidNames, m.result.InvalidNames...)
 	}
-	// A declaration of unmeasurability never overwrites a real measurement: if
-	// any rank measured the quantity, it was measurable on this hardware.
+	// A declaration of unmeasurability never overwrites a real measurement, which
+	// is the Pair rule and is right there: two ends of ONE link measuring one
+	// quantity, so if either produced a number the quantity was measurable.
+	//
+	// AT GROUP SCOPE THAT REASONING DOES NOT CARRY, and swallowing the
+	// declaration is a certification. Ranks 0 and 1 emit `eccErrors=0` and rank 2
+	// is a GB10 whose runner correctly emits `eccErrors=n/a` — the worked example
+	// in CLAUDE.md — and the group stored eccErrors=0 with an empty Unmeasurable
+	// set. An `eccErrors Equal 0` gate then passed and all three nodes were
+	// certified, including the one whose gate never ran. The SAME node under Node
+	// scope fails closed on that threshold.
+	//
+	// The merge is still the Pair one, because changing it means deciding what a
+	// group's verdict should be when its ranks disagree about measurability — the
+	// same open question as the value disagreement below, and it wants the same
+	// measurement (#121). What changes is that the declaration is no longer
+	// SILENT: a rank saying "my hardware cannot produce this" while others report
+	// a number is recorded as the disagreement it is.
 	for _, m := range members {
 		if m.result == nil {
 			continue
@@ -585,7 +601,9 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 		for k := range m.result.Unmeasurable {
 			if _, measured := out.Metrics[k]; !measured {
 				out.Unmeasurable[k] = true
+				continue
 			}
+			reported[k] = append(reported[k], rankValue{rank: m.rank, value: runner.Unmeasurable})
 		}
 	}
 
@@ -596,6 +614,16 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 	if note := disagreementNote(reported, out.Metrics); note != "" {
 		out.Message = strings.TrimSpace(out.Message + " [" + note + "]")
 	}
+	// THE WHOLE MESSAGE IS BOUNDED, not merely its parts. groupMessage caps how
+	// many RANKS it names and disagreementNote caps how many METRICS it names,
+	// and neither caps the length of what a rank actually said — so 64 ranks each
+	// ending on a long CUDA or NCCL error line produced a 199 KB message, written
+	// to TestAttempt.Message and TestResult.Message for every attempt of every
+	// retry. A BurnInRun's status then grows until the apiserver refuses the
+	// update outright, at which point the run can record no verdict at all: the
+	// failure the per-part caps were added to prevent, reached by the one route
+	// they do not cover.
+	out.Message = clampGroupMessage(out.Message)
 
 	// The log-fetch rule, applied ONCE to the combined result rather than per
 	// rank. A fetch failure only invalidates the verdict if it actually cost a
@@ -783,12 +811,40 @@ func disagreementNote(reported map[string][]rankValue, kept map[string]string) s
 			others = append(append([]string{}, others[:groupMaxNamedRanks]...),
 				fmt.Sprintf("and %d more", total-groupMaxNamedRanks))
 		}
-		parts = append(parts, fmt.Sprintf("%s recorded as %s but %s", k, kept[k], strings.Join(others, ", ")))
+		// Naming the rank that produced the stored value matters as much as naming
+		// the ones that did not: an earlier version said "the value stored is
+		// rank 0's" unconditionally, which is FALSE whenever rank 0 omitted the
+		// metric or declared it unmeasurable — and it then sent an engineer to
+		// the one node that had nothing to do with the reading.
+		keptBy := -1
+		for _, rv := range reported[k] {
+			if rv.value == kept[k] && (keptBy < 0 || rv.rank < keptBy) {
+				keptBy = rv.rank
+			}
+		}
+		parts = append(parts, fmt.Sprintf("%s recorded as %s (rank %d) but %s",
+			k, kept[k], keptBy, strings.Join(others, ", ")))
 	}
 	if elided := len(keys) - len(shown); elided > 0 {
 		parts = append(parts, fmt.Sprintf("and %d more metric(s)", elided))
 	}
-	return fmt.Sprintf("ranks DISAGREED about %d metric(s), and the value stored is rank %d's: %s. "+
-		"A per-node reading cannot be attributed to a group — see issue #121",
-		len(keys), groupRootRank, strings.Join(parts, "; "))
+	return fmt.Sprintf("ranks DISAGREED about %d metric(s), and the value stored is the LOWEST "+
+		"reporting rank's: %s. A per-node reading cannot be attributed to a group — see issue #121",
+		len(keys), strings.Join(parts, "; "))
+}
+
+// maxGroupMessage bounds the constructed message for one group execution.
+//
+// Generous, because every clause in it is there to stop a misattribution and
+// truncating early would trade one failure for another — but finite, because an
+// unwritable status loses the verdict entirely rather than the tail of a
+// sentence. The truncation says so, so a reader never trusts a sentence that was
+// cut.
+const maxGroupMessage = 4096
+
+func clampGroupMessage(s string) string {
+	if len(s) <= maxGroupMessage {
+		return s
+	}
+	return s[:maxGroupMessage] + "… (message truncated; see the pods' logs while the run's TTL holds them)"
 }
