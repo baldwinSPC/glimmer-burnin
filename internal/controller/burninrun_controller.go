@@ -1151,7 +1151,21 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 				phase = burninv1alpha1.RunPassed
 			} else {
 				phase = burninv1alpha1.RunFailed
+				// THE RUNNER'S OWN MESSAGE IS KEPT, not replaced. Overwriting it
+				// was invisible at Node scope, where parsed.Message is one
+				// runner's last line — but a Pair or Group result's message is
+				// CONSTRUCTED by this operator and carries things nothing else
+				// says: the clause stating that the verdict is about the LINK or
+				// the COLLECTIVE rather than about any one node, each end's or
+				// each rank's own report, and the note that ranks disagreed about
+				// a metric. An 8-rank group failing a bandwidth gate lost all of
+				// it and stored a bare threshold line beside eight node names,
+				// which is exactly the misattribution the lead clause exists to
+				// prevent.
 				message = out.Message
+				if prior := strings.TrimSpace(parsed.Message); prior != "" {
+					message = strings.TrimSpace(message + " [" + prior + "]")
+				}
 				violations = violationsFor(out)
 				// Message names the first gate only, and that field is frozen.
 				// Without this tail a node that missed three gates reads as a
