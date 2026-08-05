@@ -143,11 +143,7 @@ func (m groupMember) summary() string {
 const maxRankLine = 300
 
 func clampRunnerLine(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= maxRankLine {
-		return s
-	}
-	return s[:maxRankLine] + "…"
+	return truncateAtRune(strings.Join(strings.Fields(s), " "), maxRankLine, "…")
 }
 
 // advanceGroup moves one Group-scope execution forward by exactly one step. It
@@ -880,14 +876,38 @@ func clampRankSummaries(s string) string {
 	if len(s) <= maxGroupMessage {
 		return s
 	}
-	// Cut on a rune boundary: these messages contain em dashes, and a status
-	// carrying a half-written UTF-8 sequence is not something to hand an
-	// apiserver or a JSON envelope.
-	cut := maxGroupMessage
-	for cut > 0 && !utf8.ValidString(s[:cut]) {
+	return truncateAtRune(s, maxGroupMessage,
+		"… (rank detail truncated; see the pods' logs while the run's TTL holds them)")
+}
+
+// truncateAtRune cuts s to at most max BYTES, never mid-rune, and is the ONE
+// place this package truncates anything.
+//
+// It exists because the same mistake was made twice in one commit and once
+// before that. Three functions each sliced at a raw byte offset — and these
+// messages are full of em dashes, because this project's own runners join their
+// prose with them — so a status could carry a half-written UTF-8 sequence into
+// an apiserver and a JSON envelope, where it becomes U+FFFD and stops being what
+// the runner said.
+//
+// THE BACK-OFF SCANS THE TAIL, NOT THE PREFIX, and that distinction is the whole
+// of the second bug. An earlier version looped on `!utf8.ValidString(s[:cut])`,
+// which inspects the ENTIRE prefix — so it is false for every cut at or beyond
+// the first invalid byte anywhere in the string, and the loop walked all the way
+// back to just before that byte instead of at most three. One em dash near the
+// start of a 20-rank summary cost 3,673 bytes of a 4,096-byte budget and left
+// the stored result naming ONE rank out of twenty. utf8.RuneStart moves the cut
+// by at most 3, which is the property wanted; it is also the idiom already in
+// runners/dcgm-diag/report.go, written for this exact reason.
+func truncateAtRune(s string, max int, suffix string) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + "… (rank detail truncated; see the pods' logs while the run's TTL holds them)"
+	return s[:cut] + suffix
 }
 
 // dedupeStrings keeps first-seen order and drops repeats.

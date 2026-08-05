@@ -1101,3 +1101,88 @@ func TestGroup_InvalidNamesAreDedupedAndBounded(t *testing.T) {
 			"finding, the number of times it was printed is not", len(out.InvalidNames))
 	}
 }
+
+// Truncation must never cut a rune in half, and must never back off more than a
+// rune to avoid doing so — audit round 5.
+//
+// Both halves were wrong, in the same commit that claimed to have fixed the
+// first. clampRunnerLine sliced at a raw byte offset, and it is the function
+// that cuts RUNNER text — the text least under this project's control, and full
+// of em dashes because this project's own runners join their prose with them.
+// clampRankSummaries did back off, but looped on utf8.ValidString(s[:cut]),
+// which inspects the ENTIRE prefix: it is false for every cut at or beyond the
+// first invalid byte anywhere, so the loop walked back to just before that byte
+// instead of at most three.
+//
+// The previous guard asserted utf8.ValidString on a fixture built from
+// strings.Repeat of pure ASCII, so it could not have failed.
+func TestTruncateAtRuneNeverSplitsARune(t *testing.T) {
+	// An em dash is three bytes. Sweeping the pad walks it across the boundary.
+	for pad := maxRankLine - 4; pad <= maxRankLine+1; pad++ {
+		in := strings.Repeat("a", pad) + "—" + strings.Repeat("b", 100)
+		got := clampRunnerLine(in)
+		if !utf8.ValidString(got) {
+			t.Errorf("pad=%d produced invalid UTF-8: %q", pad, got[len(got)-12:])
+		}
+		// And it backed off at most a rune: the result must still be near the cap.
+		if len(got) < maxRankLine-4 {
+			t.Errorf("pad=%d backed off to %d bytes, far short of the %d cap", pad, len(got), maxRankLine)
+		}
+	}
+}
+
+// The back-off must be bounded by a rune, not by where the first invalid byte
+// happens to be. One bad byte early in a long message used to cost thousands of
+// bytes of budget and nineteen ranks out of twenty.
+func TestTruncationDoesNotCollapseOnAnEarlyBadByte(t *testing.T) {
+	// A lone 0xff early on: a runner's raw container-log bytes can be anything.
+	in := "HEAD-CLAUSE " + strings.Repeat("a", 100) + "\xff" + strings.Repeat("b", 8000)
+	got := clampRankSummaries(in)
+
+	if len(got) < maxGroupMessage-4 {
+		t.Errorf("an invalid byte at offset ~112 collapsed the result to %d bytes of a %d budget — "+
+			"the back-off is scanning the prefix instead of the tail", len(got), maxGroupMessage)
+	}
+	if !strings.HasPrefix(got, "HEAD-CLAUSE") {
+		t.Error("the head clause was lost")
+	}
+}
+
+// End to end: one em dash in one rank's line must not cost the other ranks their
+// place in the stored result.
+func TestGroup_AnEmDashDoesNotCostTheOtherRanks(t *testing.T) {
+	build := func(dash string) string {
+		verdicts := []runner.Verdict{runner.VerdictPass, runner.VerdictFail, runner.VerdictSkip, runner.VerdictError}
+		var members []groupMember
+		for rank := 0; rank < 20; rank++ {
+			// 299, not 297. At 297 the em dash's three bytes sit ENTIRELY inside a
+			// 300-byte cut and nothing invalid is produced — which is how the
+			// first version of this test passed against the very code it was
+			// written to catch. The rune must STRADDLE the boundary.
+			msg := strings.Repeat("x", maxRankLine-1) + dash +
+				strings.Repeat(" NCCL WARN cuda failure net_ib.cc:1043", 30)
+			members = append(members, groupMember{rank: rank, node: fmt.Sprintf("spark-%02d", rank),
+				result: &runner.Result{Verdict: verdicts[rank%4], ExitCode: rank % 4, Message: msg,
+					Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}})
+		}
+		return combineGroup(members, nil, &burninv1alpha1.BurnInTestSpec{}).Message
+	}
+	named := func(msg string) int {
+		n := 0
+		for rank := 0; rank < 20; rank++ {
+			if strings.Contains(msg, fmt.Sprintf("spark-%02d", rank)) {
+				n++
+			}
+		}
+		return n
+	}
+
+	withDash, withHyphen := build("—"), build("-")
+	if !utf8.ValidString(withDash) {
+		t.Error("the stored message carries a half-written UTF-8 sequence")
+	}
+	if d, h := named(withDash), named(withHyphen); d < h {
+		t.Errorf("one em dash cost the message %d of the %d ranks the byte-identical ASCII version "+
+			"names — the stored result is the only durable account once the pods' TTL expires", h-d, h)
+	}
+}
