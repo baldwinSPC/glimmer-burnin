@@ -340,7 +340,29 @@ disagree about the same hardware. One brain, two dispatchers.
   because "this image does not speak the Group rendezvous" is true whatever is in
   the box. The operator refuses the same case at plan time, which is the half
   that protects a fleet running already-published tags: those are immutable and
-  will skip forever.
+  will skip forever. `nccl` NOW SPEAKS the contract — rank 0 serves the
+  ncclUniqueId to the other N-1 — so it is on `groupCapableKinds` in
+  `internal/controller/plan.go` and a Group test may use its default image.
+  `ib-write-bw` and `gpudirect-rdma` refuse and always will, because a
+  point-to-point RDMA write and a GPUDirect peer-memory check have no N-rank
+  form. `runners/pins_test.go` fails if that list and the runner sources drift
+  EITHER way, keyed on `BURNIN_ROOT_HOST` — a first attempt keyed on
+  `BURNIN_RANK`/`BURNIN_NRANKS` failed immediately, because the refusing runners
+  read exactly those in order to say no. READING A VARIABLE TO REFUSE IS NOT
+  IMPLEMENTING THE CONTRACT.
+- **A container that never started has no stdout, so the KUBELET'S message is
+  the only evidence there is.** `podOutcome` returns it as `detail` alongside the
+  reason and `harvestPod` appends it to the stored message. Dropping it made a
+  cluster-wide outage undiagnosable (#52): every GPU pod on the fleet was dying
+  at `createContainer` because the device plugin's CDI spec declared a hook the
+  host toolkit could not implement, the kubelet put `No help topic for
+  'disable-device-node-modification'` in `Terminated.Message` — naming the broken
+  hook and therefore the fix — and the operator recorded `runner terminated
+  abnormally (exit 128, reason "StartError")`, which is equally true of a typo in
+  `spec.runner.image`. It is DETAIL and not a reason: the short machine token
+  stays, because that is what the phase logic keys off and what a reader scans
+  for. It is clamped and newline-flattened, because the kubelet bounds neither
+  and `pkg/runner` takes `Message` from the LAST non-`key=value` line.
 - **A kind that ignores `BURNIN_DURATION_SECONDS` says so, in code.** Every
   runner here reads it except `compute-smoke`, whose GEMM finishes in
   milliseconds however long it is asked for — while a shipped sample requested
