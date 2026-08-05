@@ -79,6 +79,16 @@ Three things follow that a reader should not have to guess at:
   calibrated for, the margin between a wedge and a healthy soak is not
   established.
 
+**What IS established, so a reader does not treat everything here as unknown.**
+The healthy-hardware side is measured, on two GB10 Sparks: a healthy part holds
+83.22 % of its 3003 MHz rated boost at 25 s and decays to 69.90 % by 600 s, on a
+discrete P-state, with **zero throttle reasons latched** — which is why
+`throttleEvents` is the thermal verdict and the clock floor is a backstop rather
+than a performance gate. The 60 % default is derived from that number and from
+nothing else: ten points of headroom under the 69.9 % asymptote this fleet
+produced. What is missing is only the other end of the scale — where a wedged
+part lands — and that is what issue #61 exists to measure.
+
 Confirming both runners against a deliberately under-powered Spark is the
 outstanding piece of work here, and is tracked as
 [#61](https://github.com/baldwinSPC/glimmer-burnin/issues/61). Until that lands,
@@ -233,8 +243,22 @@ written against.
 | `power_draw_w` (peak), `mean_power_w` | `powerDrawW`, `meanPowerW` |
 | `enforced_power_limit_w`, `default_power_limit_w`, `power_limit_ratio_pct` | `enforcedPowerLimitW`, `defaultPowerLimitW`, `powerLimitRatioPct` |
 
-`powerLimitRatioPct` is the PD contract made visible: on a wedged GB10 the
-enforced limit sits well below the board's default.
+`powerLimitRatioPct` is the PD contract made visible where the driver exposes
+it: an enforced limit well below the board's default is the wedge signature.
+
+> **It is not available on GB10**, which is the part this project actually has.
+> The driver reports `power.limit` as `[N/A]` there — a MEASURED fact, recorded
+> in `pkg/contract`'s registry entry and by this runner in `nvmlUnsupported` —
+> so both limits are missing and the ratio is omitted rather than computed. An
+> omitted metric fails its threshold closed, so a gate on this must be scoped to
+> parts known to answer.
+>
+> An earlier revision of this line said flatly that "on a wedged GB10 the
+> enforced limit sits well below the board's default". That promised a reading
+> the part cannot produce, on the one signal a reader would reach for first when
+> hunting a wedge. On GB10 the evidence is `sustainedClockPct` with
+> `throttleClassification` and `pdWedgeSuspected` beside it — which is why those
+> exist.
 
 ### Throttle evidence
 
