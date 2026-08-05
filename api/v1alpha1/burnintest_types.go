@@ -11,9 +11,10 @@ import (
 // is only meaningful across at least two nodes, so the operator schedules and
 // correlates multi-node tests, not just per-node ones.
 //
-// Node and Pair execute. Group does not yet, and a Group test is recorded as a
-// terminal Error rather than skipped: a required acceptance test the operator
-// cannot run must never let hardware pass by omission.
+// Node, Pair and Group all execute. A scope this operator version does not
+// recognise is recorded as a terminal Error rather than skipped: a required
+// acceptance test the operator cannot run must never let hardware pass by
+// omission.
 // +kubebuilder:validation:Enum=Node;Pair;Group
 type TestScope string
 
@@ -36,8 +37,31 @@ const (
 	// Exactly two target nodes are required, and they must be distinct.
 	ScopePair TestScope = "Pair"
 
-	// ScopeGroup runs across N>=2 nodes (collective NCCL at cluster scale).
-	// Not executed by this operator version.
+	// ScopeGroup runs a collective across EVERY target node (NCCL at cluster
+	// scale), one rank per node.
+	//
+	// A Group test is ONE execution over N nodes. Target i is rank i, all of
+	// them rendezvous'd through a single headless Service, and the result is a
+	// SINGLE TestResult naming every node — for the same reason a Pair produces
+	// one: a collective is a property of the GROUP, and splitting it per node
+	// would produce N claims no single node can support. On a collective that is
+	// even more misleading than on a link, because every healthy rank blocks
+	// waiting for the faulty one and would report the same timeout.
+	//
+	// Rank 0 is the root: it starts first, publishes whatever bootstrap handle
+	// the collective needs, and the other ranks are not created until it reports
+	// Ready. The runner is told BURNIN_RANK, BURNIN_NRANKS, BURNIN_ROOT_HOST and
+	// BURNIN_ROOT_NODE, and nothing else — no rank list and no topology.
+	//
+	// At least two distinct target nodes are required, and spec.maxConcurrentNodes
+	// must be at least the number of them: a group holds every one of its nodes
+	// for the whole test, so it costs one slot per rank and at any smaller cap it
+	// could never start. All three are refused at run start rather than mid-flight.
+	//
+	// It is executed WITHOUT JobSet and without OpenMPI. Every rank is pinned by
+	// hostname to a node this operator has already admitted and cordoned, so
+	// there is no placement decision left for a gang scheduler to make; see the
+	// package comment in internal/controller/group.go for the full reasoning.
 	ScopeGroup TestScope = "Group"
 )
 

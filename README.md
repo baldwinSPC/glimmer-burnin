@@ -12,11 +12,11 @@ verdict you can gate provisioning on.
 
 ## Scope: what runs today
 
-`BurnInTest.spec.scope` is `Node`, `Pair` or `Group`. **`Node` and `Pair` are
-executed; `Group` is not.** A `Group` test is recorded as **`Error`** —
-explicitly *not run*, hardware *not judged* — rather than skipped. That is the
-fail-closed rule at work: a required acceptance test the operator cannot run
-must never let hardware pass by omission.
+`BurnInTest.spec.scope` is `Node`, `Pair` or `Group`, and **all three are
+executed**. A scope this operator version does not recognise is recorded as
+**`Error`** — explicitly *not run*, hardware *not judged* — rather than skipped.
+That is the fail-closed rule at work: a required acceptance test the operator
+cannot run must never let hardware pass by omission.
 
 Interconnect acceptance is the design's reason for existing. Single-node burn-in
 (gpu-burn, DCGM, thermal soak) is table stakes; the value most fleets are missing
@@ -40,8 +40,37 @@ either endpoint. Two consequences worth knowing before you run one:
 - **Exactly two distinct target nodes are required**, and a run whose target
   resolves to anything else is refused at start naming the count it got.
 
-`Group` (N≥2 collectives) needs gang scheduling and rank assignment and is not
-implemented.
+**Group scope** runs a collective across **every** target node, one rank per
+node. Target *i* is rank *i*; rank 0 is the **root**, it starts first, and no
+other rank is created until it reports **Ready** — the same gate Pair uses, for
+the same reason. Runners receive `BURNIN_RANK`, `BURNIN_NRANKS`,
+`BURNIN_ROOT_HOST` (the root's DNS name) and `BURNIN_ROOT_NODE`. There is
+deliberately no rank list: every collective bootstrap in practice has one rank
+publish a handle the rest fetch, and a list would be a topology the operator has
+to keep correct rather than a name the runner resolves.
+
+A group produces **one** `TestResult` naming **every** node. That matters more
+here than at Pair scope, not less: when one rank is faulty, every healthy rank
+blocks waiting for it and reports the same timeout, so a per-node verdict would
+indict the whole group for one node's fault. The report names the ranks that
+**dissent** and summarises the rest by count.
+
+- **`maxConcurrentNodes` must be at least the number of target nodes.** A group
+  holds every one of its nodes for the whole test, so it costs one slot per rank.
+  At any smaller cap the run is refused at start with that explanation.
+- **At least two distinct target nodes are required.**
+- Every rank is waited for, unlike a Pair — a collective is synchronous, so its
+  ranks finish together, and a rank that has not finished is one the collective
+  is still waiting on. A genuine hang becomes an `Error` naming the ranks that
+  did not finish.
+
+**No JobSet and no OpenMPI**, deliberately. Gang scheduling solves partial
+placement under contention; this operator has already pinned every rank by
+hostname to a node it admitted and cordoned, so there is no placement decision
+left to make — and JobSet would be a controller every cluster must install plus a
+second owner of pod lifecycle. OpenMPI would mean shipping an `sshd` and a key on
+every accelerator node in the fleet to run a bandwidth test. The reasoning is in
+`internal/controller/group.go`.
 
 ## Custom Resources
 
@@ -287,8 +316,11 @@ gate is made of.
 
 ### Known limitations
 
-- **Group scope is not implemented** and settles as an honest `Error` — never a
-  silent pass. See [Scope](#scope-what-runs-today).
+- **No shipped runner image speaks the Group rendezvous yet.** Group *scope* is
+  executed and covered end to end on a kind cluster, but the `nccl` runner still
+  reads `BURNIN_ROLE=server|client` rather than `BURNIN_RANK`, so a Group test
+  today needs a custom runner image. Verifying an N-rank collective needs three
+  or more GPU nodes; tracked separately.
 - **The `v0.2.0` runner tags are `linux/arm64` only.** Published tags are
   immutable, so multi-arch begins at the next tag; until then an x86 fleet must
   build its own and set `spec.runner.image`.

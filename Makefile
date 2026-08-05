@@ -70,7 +70,7 @@ test-envtest: ## Run the envtest suite (real apiserver + etcd).
 e2e: e2e-cluster e2e-deploy test-e2e ## Create a kind cluster, deploy the operator, run the e2e suite.
 
 .PHONY: e2e-cluster
-e2e-cluster: ## Create the e2e kind cluster (1 control-plane + 2 workers).
+e2e-cluster: ## Create the e2e kind cluster (1 control-plane + 3 workers).
 	kind create cluster --name $(KIND_CLUSTER) --config test/e2e/kind.yaml
 	docker pull $(E2E_RUNNER_IMAGE)
 	kind load docker-image $(E2E_RUNNER_IMAGE) --name $(KIND_CLUSTER)

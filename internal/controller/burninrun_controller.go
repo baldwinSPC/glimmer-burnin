@@ -566,7 +566,8 @@ func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.B
 			}
 		}
 
-		if t.Spec.Scope == burninv1alpha1.ScopePair {
+		switch t.Spec.Scope {
+		case burninv1alpha1.ScopePair:
 			// One execution over two nodes, not two executions. advancePair
 			// owns the whole unit — both pods, the rendezvous Service, the
 			// ready gate and the single combined verdict.
@@ -575,7 +576,16 @@ func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.B
 				return out, err
 			}
 			apply(state, effect)
-		} else {
+		case burninv1alpha1.ScopeGroup:
+			// One execution over EVERY target node. advanceGroup owns the whole
+			// unit — every rank's pod, the rendezvous Service, the root ready
+			// gate and the single combined verdict.
+			state, effect, err := r.advanceGroup(ctx, run, p, i, t, launch, busy, capNodes)
+			if err != nil {
+				return out, err
+			}
+			apply(state, effect)
+		default:
 			for _, node := range p.Targets {
 				state, effect, err := r.advance(ctx, run, p, i, t, node, launch, busy, capNodes)
 				if err != nil {
@@ -811,14 +821,14 @@ func (r *BurnInRunReconciler) harvestPod(ctx context.Context, t plannedTest, pod
 // does not apply to this part" is the runner's judgement, returned as exit 2,
 // and it is made after looking at the device rather than at a label.
 //
-// Node and Pair execute. Group does not: gang scheduling and rank assignment
-// across N nodes are a real design problem, and until they are solved a Group
-// test must land as Error rather than be quietly dropped — a required
-// acceptance test the operator cannot run must never let hardware pass by
-// omission.
+// Node, Pair and Group all execute. What is left here is an UNRECOGNISED scope,
+// which is reachable because TestScope is an open string on the API: a run
+// created against a newer CRD, or simply a typo, must land as Error rather than
+// be quietly dropped — a required acceptance test the operator cannot run must
+// never let hardware pass by omission.
 func (r *BurnInRunReconciler) settleWithoutPod(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, t plannedTest) bool {
 	switch t.Spec.Scope {
-	case "", burninv1alpha1.ScopeNode, burninv1alpha1.ScopePair:
+	case "", burninv1alpha1.ScopeNode, burninv1alpha1.ScopePair, burninv1alpha1.ScopeGroup:
 		return false
 	}
 	if resultFor(run, t.Name, "") == nil {
@@ -829,7 +839,7 @@ func (r *BurnInRunReconciler) settleWithoutPod(ctx context.Context, run *burninv
 			Scope:      t.Spec.Scope,
 			Phase:      burninv1alpha1.RunError,
 			FinishedAt: &now,
-			Message: fmt.Sprintf("scope %q is not executed by this operator version (it runs Node and Pair scope) — "+
+			Message: fmt.Sprintf("scope %q is not a scope this operator version recognises (it runs Node, Pair and Group scope) — "+
 				"the test was NOT run; treat this hardware as unjudged for it", t.Spec.Scope),
 		})
 	}
@@ -1781,12 +1791,17 @@ func resultFor(run *burninv1alpha1.BurnInRun, testName, node string) *burninv1al
 //
 // At Node scope that is one per target node. At Pair scope it is exactly ONE
 // unit covering both nodes, because a point-to-point measurement is a property
-// of the link between them and cannot be attributed to either end. Everything
-// that walks a test's work — the pass sweep, the deadline settle, the cancel
-// settle — goes through here so none of them can disagree about how many
+// of the link between them and cannot be attributed to either end. At Group
+// scope it is likewise ONE unit, covering every target: a collective is a
+// property of the whole group, and splitting it per node would produce N claims
+// no single node can support.
+//
+// Everything that walks a test's work — the pass sweep, the deadline settle, the
+// cancel settle — goes through here so none of them can disagree about how many
 // verdicts a test owes.
 func executionUnits(p *plan, t plannedTest) [][]string {
-	if t.Spec.Scope == burninv1alpha1.ScopePair {
+	switch t.Spec.Scope {
+	case burninv1alpha1.ScopePair, burninv1alpha1.ScopeGroup:
 		return [][]string{append([]string(nil), p.Targets...)}
 	}
 	out := make([][]string, 0, len(p.Targets))

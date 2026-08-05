@@ -262,7 +262,7 @@ jobs:
         # TestEveryE2ETestIsSelectedByTheWorkflow now fails if any test is selected
         # by neither filter or by both, but a pattern that reads literally is what
         # keeps the next person out of the same trap.
-        run: go test -tags e2e ./test/e2e/... -count=1 -v -timeout 20m -run 'TestThe|TestANodeScope|TestAThresholdViolation|TestASkippingRunner|TestAPairScope|TestAnUndeclaredExitTwo'
+        run: go test -tags e2e ./test/e2e/... -count=1 -v -timeout 20m -run 'TestThe|TestANodeScope|TestAThresholdViolation|TestASkippingRunner|TestAPairScope|TestAGroupScope|TestAnUndeclaredExitTwo'
 
       # The chaos tests are the slow half — each one waits out a manager restart
       # and a leader-election lease — so they run on main, on the weekly sweep and

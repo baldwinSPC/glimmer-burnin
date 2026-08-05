@@ -30,6 +30,12 @@ const (
 	// execution, and is absent at Node scope. It is also the headless Service's
 	// selector discriminator, so it is what makes the rendezvous addressable.
 	labelPairRole = "burnin.glimmer.ai/pair-role"
+	// labelRank carries the 0-based rank on the pods of a Group-scope execution,
+	// and is absent at every other scope. It is not a selector — the rendezvous
+	// Service matches on (run, test, attempt) and addresses individual pods by
+	// hostname — it exists so that `kubectl get pods -l burnin.glimmer.ai/rank=0`
+	// finds the root of a collective without anybody decoding a name hash.
+	labelRank = "burnin.glimmer.ai/rank"
 )
 
 // defaultRunnerImages maps a TestKind to its default runner image. A kind
@@ -152,49 +158,126 @@ func podNameForRole(run *burninv1alpha1.BurnInRun, testIndex int, node string, a
 	return fmt.Sprintf("%s-t%d-a%d%s-%s", truncate(run.Name, 36), testIndex, attempt, readable, hex.EncodeToString(h[:4]))
 }
 
-// pairServiceName is the headless Service one Pair attempt rendezvous through,
-// and therefore also the DNS subdomain of both its pods.
+// rendezvousServiceName is the headless Service one multi-pod attempt
+// rendezvous through, and therefore also the DNS subdomain of all its pods.
 //
 // It is per (run, test, attempt), not per test: a retry mints new pods, and a
 // Service whose selector could still match the previous attempt's pod would let
-// a client resolve a server that is already dead. It carries the run UID in its
+// a member resolve a peer that is already dead. It carries the run UID in its
 // hash for the same reason pod names do — a deleted-and-recreated run of the
 // same name must not adopt the previous incarnation's rendezvous.
+//
+// The "pair" literal in the seed is HISTORICAL and must not be tidied: changing
+// it changes every name this function produces, and a Pair run in flight across
+// an operator upgrade would stop finding the Service its two pods are already
+// rendezvousing through. Group scope reuses it unchanged — the test index is
+// part of the seed, so a Pair test and a Group test in one profile cannot
+// collide.
 //
 // The "bp-" prefix is not decoration: a Service name must be a DNS-1035 LABEL,
 // which has to start with a letter, and a BurnInRun name is a DNS-1123 subdomain
 // that may legally start with a digit.
-func pairServiceName(run *burninv1alpha1.BurnInRun, testIndex int, attempt int32) string {
+func rendezvousServiceName(run *burninv1alpha1.BurnInRun, testIndex int, attempt int32) string {
 	h := sha256.Sum256([]byte(
 		string(run.UID) + "\x00" + run.Name + "\x00" +
 			strconv.Itoa(testIndex) + "\x00" + strconv.Itoa(int(attempt)) + "\x00pair"))
 	return fmt.Sprintf("bp-%s-t%d-a%d-%s", truncate(run.Name, 26), testIndex, attempt, hex.EncodeToString(h[:4]))
 }
 
-// pairPeerHost is the DNS name one endpoint of a pair uses to reach the other.
+// peerHost is the DNS name one member of a multi-pod execution uses to reach
+// another: the pair's opposite endpoint, or the collective's root.
 //
 // It is deliberately NOT fully qualified to cluster.local. A cluster's DNS
 // domain is configurable, and hard-coding the default would break the
 // rendezvous — silently, as a connection error that looks like a bad link — on
 // every cluster that changed it. "<pod>.<service>.<namespace>.svc" resolves
 // through the pod's own search path under any cluster domain.
-func pairPeerHost(service, namespace, peerRole string) string {
-	return peerRole + "." + service + "." + namespace + ".svc"
+func peerHost(service, namespace, role string) string {
+	return role + "." + service + "." + namespace + ".svc"
 }
 
-// pairing carries the rendezvous facts one Pair-scope pod needs. Nil at Node
-// scope, which is what keeps a Node pod's shape exactly what it was.
-type pairing struct {
-	// role is this pod's own role: pairRoleServer or pairRoleClient. It becomes
-	// BURNIN_ROLE and the pod's hostname.
+// rendezvous carries the facts one pod of a MULTI-POD execution needs in order
+// to find the others. Nil at Node scope, which is what keeps a Node pod's shape
+// exactly what it was.
+//
+// One struct serves Pair and Group because the topology they need is the same
+// shape — "which member am I, and where do the others answer" — and because
+// podForTest must stay the single place a runner pod is built. Two constructors
+// would be two chances for the two scopes to drift in host mounts, tolerations
+// or deadlines, and a link or a collective measured under different pod shapes
+// at each end is not measured.
+//
+// The env it produces is scope-specific and deliberately minimal: everything
+// topological stays in the operator, so one image is a server on one node and a
+// client on another, or rank 4 of eleven, without the image learning anything
+// about Kubernetes.
+type rendezvous struct {
+	// scope selects which environment contract this pod gets.
+	scope burninv1alpha1.TestScope
+	// role is this pod's own identity within the unit, and it is load-bearing
+	// twice over: it becomes the pod's HOSTNAME, which is what gives it its own
+	// A record under the headless Service, and at Pair scope it is also
+	// BURNIN_ROLE. "server"/"client" at Pair scope, "rank-N" at Group scope.
 	role string
 	// service is the headless Service, and therefore the pod's subdomain.
 	service string
+
+	// ── Pair only ──
 	// peerRole is the OTHER endpoint's role, used to build BURNIN_PEER_HOST.
 	peerRole string
 	// peerNode is the node the other endpoint runs on. It is recorded for the
 	// message a human reads, never used for addressing.
 	peerNode string
+
+	// ── Group only ──
+	// rank is this pod's 0-based rank, and rootRole names rank 0.
+	rank   int
+	nranks int
+	// rootNode is the node rank 0 runs on: for messages, never for addressing.
+	rootNode string
+}
+
+// Group rendezvous role names. Rank 0 is the root — the rank that publishes
+// whatever bootstrap handle the collective needs, and the one every other rank
+// is gated on.
+const (
+	groupRootRank = 0
+	groupRolePfx  = "rank-"
+)
+
+func groupRole(rank int) string { return groupRolePfx + strconv.Itoa(rank) }
+
+// env is the rendezvous contract as the runner sees it.
+//
+// Pair gets BURNIN_ROLE / BURNIN_PEER_HOST / BURNIN_PEER_NODE, byte for byte
+// what it always got — the fabric runners are published, immutable images and
+// this must not move under them.
+//
+// Group gets BURNIN_RANK / BURNIN_NRANKS / BURNIN_ROOT_HOST / BURNIN_ROOT_NODE.
+// That is the whole contract: which member of the collective this is, how many
+// there are, and where the root answers. It is deliberately NOT a peer list —
+// every collective bootstrap in practice has one rank publish a handle that the
+// rest fetch, which is what our own nccl runner already does over one TCP
+// connection, and an N-entry list would be a topology the operator has to keep
+// correct rather than a name the runner resolves.
+//
+// BURNIN_ROLE is deliberately ABSENT at Group scope. A runner that keys off
+// "server"/"client" must not silently treat rank 4 of eleven as a client; making
+// it read an unset variable is what turns a wrong assumption into a loud one.
+func (r *rendezvous) env(namespace string) []corev1.EnvVar {
+	if r.scope == burninv1alpha1.ScopeGroup {
+		return []corev1.EnvVar{
+			{Name: "BURNIN_RANK", Value: strconv.Itoa(r.rank)},
+			{Name: "BURNIN_NRANKS", Value: strconv.Itoa(r.nranks)},
+			{Name: "BURNIN_ROOT_HOST", Value: peerHost(r.service, namespace, groupRole(groupRootRank))},
+			{Name: "BURNIN_ROOT_NODE", Value: r.rootNode},
+		}
+	}
+	return []corev1.EnvVar{
+		{Name: "BURNIN_ROLE", Value: r.role},
+		{Name: "BURNIN_PEER_HOST", Value: peerHost(r.service, namespace, r.peerRole)},
+		{Name: "BURNIN_PEER_NODE", Value: r.peerNode},
+	}
 }
 
 func truncate(s string, n int) string {
@@ -320,8 +403,8 @@ func runnerImage(spec *burninv1alpha1.BurnInTestSpec) (string, error) {
 
 // podForTest builds the pod that executes one attempt of one test on one node.
 //
-// pair is nil for a Node-scope execution and names this pod's end of the
-// rendezvous for a Pair-scope one.
+// rv is nil for a Node-scope execution and names this pod's place in the
+// rendezvous for a Pair- or Group-scope one.
 func podForTest(
 	run *burninv1alpha1.BurnInRun,
 	testIndex int,
@@ -330,7 +413,7 @@ func podForTest(
 	spec *burninv1alpha1.BurnInTestSpec,
 	node string,
 	target burninv1alpha1.TargetSelector,
-	pair *pairing,
+	rv *rendezvous,
 ) (*corev1.Pod, error) {
 	image, err := runnerImage(spec)
 	if err != nil {
@@ -362,18 +445,12 @@ func podForTest(
 	}
 
 	role := ""
-	if pair != nil {
-		role = pair.role
-		// The Pair rendezvous contract. Two variables, and a runner needs
-		// nothing else to find its peer: which end of the link it is, and where
-		// the other end answers. Everything topological stays in the operator,
-		// so the same image is a server on one node and a client on the other
-		// without the image knowing anything about Kubernetes.
-		container.Env = append(container.Env,
-			corev1.EnvVar{Name: "BURNIN_ROLE", Value: pair.role},
-			corev1.EnvVar{Name: "BURNIN_PEER_HOST", Value: pairPeerHost(pair.service, run.Namespace, pair.peerRole)},
-			corev1.EnvVar{Name: "BURNIN_PEER_NODE", Value: pair.peerNode},
-		)
+	if rv != nil {
+		role = rv.role
+		// The rendezvous contract, built in one place for both multi-pod scopes.
+		// See rendezvous.env for what each scope gets and why Group does not get
+		// BURNIN_ROLE.
+		container.Env = append(container.Env, rv.env(run.Namespace)...)
 	}
 
 	var volumes []corev1.Volume
@@ -407,8 +484,13 @@ func podForTest(
 		labelNode:    node,
 		labelAttempt: strconv.Itoa(int(attempt)),
 	}
-	if role != "" {
-		labels[labelPairRole] = role
+	if rv != nil {
+		switch rv.scope {
+		case burninv1alpha1.ScopeGroup:
+			labels[labelRank] = strconv.Itoa(rv.rank)
+		default:
+			labels[labelPairRole] = rv.role
+		}
 	}
 
 	pod := &corev1.Pod{
@@ -438,13 +520,13 @@ func podForTest(
 		},
 	}
 
-	if pair != nil {
+	if rv != nil {
 		// hostname + subdomain are what give this pod its own A record under
-		// the headless Service, which is how the peer addresses it. Without
-		// both, the Service resolves to the set of endpoints and neither end
-		// can name the other.
-		pod.Spec.Hostname = pair.role
-		pod.Spec.Subdomain = pair.service
+		// the headless Service, which is how the other members address it.
+		// Without both, the Service resolves to the set of endpoints and no
+		// member can name another.
+		pod.Spec.Hostname = rv.role
+		pod.Spec.Subdomain = rv.service
 		if spec.HostNetwork {
 			// A host-network pod defaults to the node's resolv.conf, which
 			// knows nothing about cluster DNS — the rendezvous name would not
@@ -452,15 +534,15 @@ func podForTest(
 			// the RDMA device is reached), so the two have to be reconciled,
 			// and this is the supported way to do it.
 			//
-			// Only Pair pods get this. A Node-scope host-network runner has no
-			// rendezvous to perform and may well depend on host DNS.
+			// Only rendezvous pods get this. A Node-scope host-network runner
+			// has no rendezvous to perform and may well depend on host DNS.
 			pod.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 		}
 	}
 	return pod, nil
 }
 
-// headlessServiceForPair is the rendezvous.
+// headlessServiceForRendezvous is the rendezvous, for Pair and Group alike.
 //
 // It is headless (ClusterIP None) because nothing here wants load balancing:
 // the point is per-pod DNS, so that "server" and "client" are names the two
@@ -470,16 +552,16 @@ func podForTest(
 // listens on. Ports are the runner's business; naming is the operator's.
 //
 // PublishNotReadyAddresses is deliberately true. Readiness is enforced by the
-// CONTROLLER, which does not create the client pod until the server pod is
-// Ready; leaving it to DNS instead would add an endpoint-propagation race to the
-// client's very first lookup, and a failed lookup on a fabric test is precisely
-// the failure that gets misread as a bad link. Publishing both addresses
-// unconditionally also lets the server name its peer before the client is up,
-// which a runner that wants to whitelist its peer needs.
-func headlessServiceForPair(run *burninv1alpha1.BurnInRun, testIndex int, attempt int32, testName string) *corev1.Service {
+// CONTROLLER, which does not create the client (or the worker ranks) until the
+// server (or the root) is Ready; leaving it to DNS instead would add an
+// endpoint-propagation race to their very first lookup, and a failed lookup on a
+// fabric test is precisely the failure that gets misread as a bad link.
+// Publishing every address unconditionally also lets the first pod name its
+// peers before they are up, which a runner that wants to whitelist them needs.
+func headlessServiceForRendezvous(run *burninv1alpha1.BurnInRun, testIndex int, attempt int32, testName string) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      pairServiceName(run, testIndex, attempt),
+			Name:      rendezvousServiceName(run, testIndex, attempt),
 			Namespace: run.Namespace,
 			Labels: map[string]string{
 				labelRun:     run.Name,

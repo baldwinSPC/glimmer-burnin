@@ -6,13 +6,20 @@
 #     target — the manager must keep reconciling while the nodes under test are
 #     cordoned, and config/manager/manager.yaml tolerates both the control-plane
 #     taint and the operator's own cordon so that stays true;
-#   * TWO workers, because Pair scope is one execution across two DISTINCT
-#     nodes. A single-worker cluster cannot express a link test at all, and the
-#     Pair rendezvous — a headless Service, per-pod DNS, and the ready gate
-#     between server and client — is the path that shipped broken against a
-#     ClusterRole with no `services` rule.
+#   * THREE workers. Two is the floor for Pair scope — one execution across two
+#     DISTINCT nodes — and the Pair rendezvous (a headless Service, per-pod DNS,
+#     and the ready gate between server and client) is the path that shipped
+#     broken against a ClusterRole with no `services` rule.
 #
-# Both workers are real kind nodes, so the scheduler places pods on them for
+#     The third exists for Group scope, and two would not do. At n=2 a Group is
+#     indistinguishable from a Pair in every way that could go wrong: the root
+#     has exactly one worker to gate, "all ranks" and "the other rank" are the
+#     same set, and a message that names the wrong rank still names the only
+#     other one. Three ranks is the smallest group where the root, a healthy
+#     worker and a faulty worker are three different pods — which is what the
+#     verdict precedence and the deadline attribution are actually for.
+#
+# Every worker is a real kind node, so the scheduler places pods on them for
 # real. That is the whole point: the cordon deadlock (a cordoned node plus a pod
 # that does not tolerate the cordon) is invisible to anything that does not run
 # a scheduler.
@@ -20,5 +27,6 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
+  - role: worker
   - role: worker
   - role: worker

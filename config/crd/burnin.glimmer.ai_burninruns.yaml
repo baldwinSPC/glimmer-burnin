@@ -624,9 +624,10 @@ spec:
                         is only meaningful across at least two nodes, so the operator schedules and
                         correlates multi-node tests, not just per-node ones.
 
-                        Node and Pair execute. Group does not yet, and a Group test is recorded as a
-                        terminal Error rather than skipped: a required acceptance test the operator
-                        cannot run must never let hardware pass by omission.
+                        Node, Pair and Group all execute. A scope this operator version does not
+                        recognise is recorded as a terminal Error rather than skipped: a required
+                        acceptance test the operator cannot run must never let hardware pass by
+                        omission.
                       enum:
                       - Node
                       - Pair
