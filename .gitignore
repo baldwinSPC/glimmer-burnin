@@ -7,3 +7,26 @@ bin/
 *.test
 cover.out
 .DS_Store
+
+# Every runner directory is `package main`, so `go build ./runners/<name>/` — and
+# `go build ./...` — drops an executable called <name> HERE, at the repository
+# root, not beside its source. Untracked and unignored, the next `git add -A`
+# commits it: that is how a 4.2 MB `ib-write-bw` and a 3.4 MB `host-health` got
+# into a public repository.
+#
+# Anchored for the same reason `/manager` is, and it matters more here: an
+# unanchored `nccl` would match runners/nccl/ and make the runner's own source
+# invisible to git. runners/pins_test.go derives this list from the filesystem
+# and fails if a runner directory has no entry, so a new runner cannot land
+# without one.
+/clockprobe
+/compute-smoke
+/dcgm-diag
+/gpu-burn
+/gpudirect-rdma
+/host-health
+/ib-write-bw
+/memory-bw
+/memory-stress
+/nccl
+/thermal-soak
