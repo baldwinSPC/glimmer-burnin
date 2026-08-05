@@ -161,7 +161,11 @@ spec:
   # veth and nicLinkDownEvents is omitted (and any threshold on it fails).
   hostNetwork: true
   runner:
-    image: ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.2.0
+    # No image: the operator's default for this kind is the right one, and it
+    # moves with each release. Pinning v0.2.0 here — as this example used to —
+    # gave a reader a config whose PROSE describes the omit-instead-of-fabricate
+    # behaviour while the IMAGE still published a fabricated zero, so the
+    # `xidEvents Equal 0` gate below failed OPEN rather than closed.
     # Both of these are for the /dev/kmsg Xid scan and nothing else; see
     # "What the pod needs". Drop them and xidEvents is omitted, not zeroed.
     privileged: true
