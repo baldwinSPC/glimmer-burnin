@@ -129,11 +129,16 @@ void testScopeGate() {
   expectScope(10, 3, burnin::Scope::InScope, "B300 / GB300 (sm_103), same family");
   expectScope(10, 7, burnin::Scope::InScope, "an unreleased SM10x minor errs towards unjudged, not certified");
 
-  // A newer minor in the same major is NOT admitted. The gate names the two
-  // capabilities the kernel is known to run on; a hypothetical 12.2 has not been
-  // established, and quietly admitting it would launch an untested path.
-  expectScope(12, 2, burnin::Scope::OutOfScope, "a future SM12x minor is not assumed to work");
-  expectScope(12, 9, burnin::Scope::OutOfScope, "nor any later one");
+  // A newer minor in the same major IS admitted, and admitting it launches
+  // nothing: kernelCovers and archMatch still stand between it and the kernel.
+  // A CC 12.2 part carrying this image's sm_121a cubin is stopped by archMatch
+  // as an Error naming the rebuild — the same finding the old exact-pair gate
+  // wanted, reached through the verdict that says "we did not measure this"
+  // rather than the one that certifies acceptance as inapplicable.
+  expectScope(12, 2, burnin::Scope::InScope, "a future SM12x minor is unjudged, not out of scope");
+  expectScope(12, 9, burnin::Scope::InScope, "nor is any later one certified away");
+  expectMatch("sm_121a", 12, 2, burnin::ArchMatch::Mismatch,
+              "...and the IMAGE gate is what actually stops it");
 
   // A future major is likewise out of scope rather than in.
   expectScope(13, 0, burnin::Scope::OutOfScope, "a future architecture");
@@ -247,7 +252,7 @@ void testOutOfScopeMessage() {
   check(code != burnin::kExitFail, "an out-of-scope part is NEVER a hardware verdict");
   check(code != burnin::kExitError, "an out-of-scope part is not an infrastructure error either");
   expectContains(buf, "9.0", "the skip message names the capability that was found");
-  expectContains(buf, "12.0/12.1", "the skip message names the capability that is required");
+  expectContains(buf, "10.x or 12.x", "the skip message names the capability that is required");
   expectContains(buf, "NOT failed", "the skip message says plainly that the part is not failed");
 
   // Swept: whatever the part reports, a Skip is a Skip and the message is never

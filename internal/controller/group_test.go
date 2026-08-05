@@ -620,3 +620,82 @@ func TestGroup_ThresholdsEvaluateAgainstTheMergedMetrics(t *testing.T) {
 		t.Errorf("violations = %+v, want one naming busBandwidthGBs", res.Violations)
 	}
 }
+
+// The root must not be killed for waiting out the rendezvous it is gated ahead
+// of — issue #122.
+//
+// The root is created first and the workers are not created until it is Ready.
+// It then sits inside the collective while N-1 pods are scheduled and pull their
+// image on N-1 other nodes, and every second of that used to be charged against
+// an activeDeadlineSeconds sized for ONE pod's start. On a cold cluster the
+// kubelet killed the root part-way through a test that had barely begun, and the
+// operator reported "test exceeded its deadline" about hardware that was fine.
+func TestGroup_TheRootsDeadlineCoversTheRendezvous(t *testing.T) {
+	nodes := []string{"spark-a", "spark-b", "spark-c"}
+	h := newHarness(t,
+		gb10Node(nodes[0]), gb10Node(nodes[1]), gb10Node(nodes[2]),
+		groupTest("nccl-group"),
+		profile("acceptance", nil, false, testRef("nccl-group")),
+		groupRun("run1", "acceptance", nodes...),
+	)
+	h.startGroup("run1", len(nodes))
+
+	root := h.rankPod("run1", groupRootRank)
+	worker := h.rankPod("run1", 1)
+	if root.Spec.ActiveDeadlineSeconds == nil || worker.Spec.ActiveDeadlineSeconds == nil {
+		t.Fatal("a runner pod must always carry a deadline")
+	}
+	rootDL, workerDL := *root.Spec.ActiveDeadlineSeconds, *worker.Spec.ActiveDeadlineSeconds
+
+	if rootDL <= workerDL {
+		t.Errorf("root deadline %ds is not longer than a worker's %ds — the root pays for the "+
+			"whole rendezvous out of its own test budget", rootDL, workerDL)
+	}
+	// The extra is schedulingGracePeriod and nothing invented: it is already how
+	// long this operator waits for a pod to start before giving up on it.
+	if want := workerDL + int64(schedulingGracePeriod/time.Second); rootDL != want {
+		t.Errorf("root deadline = %ds, want %ds (a worker's plus schedulingGracePeriod)", rootDL, want)
+	}
+
+	// The ordering that makes the extra useful: the OPERATOR must give up at or
+	// before the kubelet, so the recorded message names the ranks that did not
+	// finish rather than saying only that a deadline passed.
+	operatorWindow := int64(defaultDurationSeconds+deadlineGraceSeconds) + int64(schedulingGracePeriod/time.Second)
+	if rootDL > operatorWindow {
+		t.Errorf("root deadline %ds outlives the operator's own patience %ds — the kubelet would "+
+			"never be the one to kill it, and a wedged root would linger", rootDL, operatorWindow)
+	}
+}
+
+// Node and Pair pods are untouched. A Pair server has the same shape with ONE
+// peer and 120s has been sufficient for it on real hardware, so there is
+// evidence it does not need this and none that it does.
+func TestNodeAndPairDeadlinesAreUnchanged(t *testing.T) {
+	spec := &burninv1alpha1.BurnInTestSpec{
+		Kind:            burninv1alpha1.KindComputeSmoke,
+		DurationSeconds: 300,
+		Runner:          &burninv1alpha1.RunnerSpec{Image: "example.invalid/x:v1"},
+	}
+	run := newRun("run1", "p", "spark-a")
+	want := int64(300 + deadlineGraceSeconds)
+
+	node, err := podForTest(run, 0, 1, "t", spec, "spark-a", run.Spec.Target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *node.Spec.ActiveDeadlineSeconds; got != want {
+		t.Errorf("Node-scope deadline = %d, want %d", got, want)
+	}
+
+	for _, role := range []string{pairRoleServer, pairRoleClient} {
+		pair, err := podForTest(run, 0, 1, "t", spec, "spark-a", run.Spec.Target, &rendezvous{
+			scope: burninv1alpha1.ScopePair, role: role, service: "svc", peerRole: "other",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := *pair.Spec.ActiveDeadlineSeconds; got != want {
+			t.Errorf("Pair %s deadline = %d, want %d", role, got, want)
+		}
+	}
+}

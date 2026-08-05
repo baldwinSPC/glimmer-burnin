@@ -111,6 +111,41 @@ const defaultDurationSeconds int32 = 600
 // fault and must not eat its budget.
 const deadlineGraceSeconds int32 = 120
 
+// rendezvousGraceSeconds is the extra kubelet deadline a pod gets for time it
+// spends waiting for peers THIS OPERATOR has not created yet.
+//
+// A Group root is created first and the workers are not created until it reports
+// Ready. It then sits inside the collective while N-1 pods are scheduled and
+// pull their image on N-1 other nodes — and every second of that is charged
+// against its own activeDeadlineSeconds, which was sized for one pod's start.
+// On a cold 8-node cluster the root is killed part-way through a test that had
+// barely begun, reported as "test exceeded its deadline and was killed", which
+// is a finding about hardware that was fine (issue #122).
+//
+// THE NUMBER IS NOT INVENTED, and that matters here more than its size: it is
+// schedulingGracePeriod, which is already how long this operator waits for a pod
+// to start before it gives up on it (podOverdue). The argument is exactly that
+// symmetry — the kubelet must not kill the root for waiting out a window the
+// operator itself considers a reasonable wait. Anything larger would be a
+// tolerance nobody measured, which is the mistake #54 and #61 are about.
+//
+// The ordering it produces is deliberate. activeDeadlineSeconds runs from the
+// pod's StartTime and podOverdue from its CreationTimestamp, and StartTime is
+// never earlier, so with equal windows the OPERATOR gives up first — and its
+// message names the ranks that did not finish, where the kubelet's says only
+// that a deadline passed.
+//
+// A Pair server has the same shape with ONE peer, and is deliberately left
+// alone: 120 s has been sufficient for it on real hardware (the Pair suite
+// passed on two Sparks), so there is evidence it does not need this and none
+// that it does. Widen it when that evidence exists, not by symmetry.
+func rendezvousGraceSeconds(rv *rendezvous) int32 {
+	if rv == nil || rv.scope != burninv1alpha1.ScopeGroup || rv.rank != groupRootRank {
+		return 0
+	}
+	return int32(schedulingGracePeriod / time.Second)
+}
+
 // podName derives the deterministic name for one ATTEMPT of a test on a node.
 //
 // Determinism is what makes reconciliation idempotent: a crashed controller
@@ -424,7 +459,7 @@ func podForTest(
 	if duration <= 0 {
 		duration = defaultDurationSeconds
 	}
-	deadline := int64(duration + deadlineGraceSeconds)
+	deadline := int64(duration + deadlineGraceSeconds + rendezvousGraceSeconds(rv))
 
 	container := corev1.Container{
 		Name:      "runner",
