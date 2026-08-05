@@ -258,6 +258,14 @@ type BurnInTestSpec struct {
 	Scope TestScope `json:"scope,omitempty"`
 
 	// DurationSeconds bounds a single execution (0 = the kind's default).
+	//
+	// At Group scope it also buys margin for the RENDEZVOUS. Every rank's pod
+	// deadline is this plus a fixed grace, and a rank spends part of that window
+	// waiting for the rest of the cohort to be scheduled and to pull the runner
+	// image — so on a cold image cache a large group can lose real test time to
+	// the wait. Raising this, or pre-pulling the runner image onto the target
+	// nodes, are the two things that help; see issue #122 and the note in
+	// internal/controller/group.go.
 	// +kubebuilder:validation:Minimum=0
 	DurationSeconds int32 `json:"durationSeconds,omitempty"`
 

@@ -4812,3 +4812,78 @@ func TestRun_PassingTestCarriesNoViolations(t *testing.T) {
 		t.Errorf("Violations = %+v, want none on a passing test", res.Violations)
 	}
 }
+
+// The kubelet's own message reaches the stored result — issue #52.
+//
+// A container that never started produces NO stdout, so the kubelet's
+// Terminated.Message is the only thing that can say why. Discarding it left
+// every unstartable container recording the same sentence — "runner terminated
+// abnormally (exit 128, reason \"StartError\")" — which is true of a broken CDI
+// hook, a typo'd image, an OOM at start, and a missing device alike.
+//
+// The case that motivated it: on the GB10 cluster every GPU pod died at
+// createContainer because the device plugin's CDI spec declared a hook the host
+// toolkit was too old to implement. The kubelet put the whole hook failure in
+// that field. It named the broken hook, and therefore the fix, and the operator
+// threw it away.
+func TestPodDetailReachesTheStoredResult(t *testing.T) {
+	const hookErr = `failed to createContainer: exit status 3: No help topic for 'disable-device-node-modification'`
+
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("smoke"),
+		profile("acceptance", nil, false, testRef("smoke")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	pod := h.pods("run1")["spark-a"]
+	h.startPod(pod)
+	// A StartError: the container never ran, so there is no stdout at all.
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "runner",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 128, Reason: "StartError", Message: hookErr,
+		}},
+	}}
+	if err := h.c.Status().Update(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if res.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error — a container that never started is machinery, not "+
+			"hardware: %s", res.Phase, res.Message)
+	}
+	if !strings.Contains(res.Message, "disable-device-node-modification") {
+		t.Errorf("the kubelet's own explanation did not reach the stored result, so a fleet-wide "+
+			"outage is indistinguishable from a typo in spec.runner.image:\n  %s", res.Message)
+	}
+	// The short machine token is still there: it is what a reader scans for and
+	// what the phase logic keys off.
+	if !strings.Contains(res.Message, "StartError") {
+		t.Errorf("the reason was lost: %q", res.Message)
+	}
+}
+
+// The kubelet does not bound that field, and a status write the apiserver
+// refuses loses the whole verdict rather than the tail of one sentence.
+func TestPodDetailIsBounded(t *testing.T) {
+	long := strings.Repeat("a very long hook failure ", 200)
+	got := clampPodDetail(long)
+	if len(got) > maxPodDetail+32 {
+		t.Errorf("clamped detail is %d characters, want at most about %d", len(got), maxPodDetail)
+	}
+	if !strings.HasSuffix(got, "(truncated)") {
+		t.Error("a truncated message must say so, or a reader trusts a sentence that was cut")
+	}
+	// Newlines are collapsed: pkg/runner takes Message from the LAST non-key=value
+	// line, and a multi-line detail pasted into it would strand the explanation
+	// above whatever came last.
+	if strings.ContainsAny(clampPodDetail("one\ntwo\nthree"), "\n\r") {
+		t.Error("the detail was copied with newlines intact")
+	}
+}

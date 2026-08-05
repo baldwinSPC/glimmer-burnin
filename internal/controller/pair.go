@@ -287,7 +287,7 @@ func (r *BurnInRunReconciler) gateClientOnServer(
 	var none advanceEffect
 	serverNode, clientNode := nodes[0], nodes[1]
 
-	if _, terminated, _ := podOutcome(serverPod); terminated {
+	if _, terminated, _, _ := podOutcome(serverPod); terminated {
 		// The server finished before the client existed, so the link was never
 		// exercised. Settle from the one report there is; combinePair knows
 		// that a clean server exit with no client is not a pass.
@@ -377,7 +377,7 @@ func (r *BurnInRunReconciler) harvestPair(
 	var none advanceEffect
 	serverNode, clientNode := nodes[0], nodes[1]
 
-	_, clientDone, _ := podOutcome(clientPod)
+	_, clientDone, _, _ := podOutcome(clientPod)
 	if !clientDone {
 		if r.podOverdue(clientPod, &t.Spec) {
 			if err := r.deletePairPods(ctx, serverPod, clientPod); err != nil {
@@ -408,7 +408,7 @@ func (r *BurnInRunReconciler) harvestPair(
 	server := pairSide{role: pairRoleServer, node: serverNode, pod: serverPod.Name}
 
 	logErr := clientLogErr
-	if _, serverDone, _ := podOutcome(serverPod); serverDone {
+	if _, serverDone, _, _ := podOutcome(serverPod); serverDone {
 		serverParsed, serverLogErr := r.harvestPod(ctx, t, serverPod)
 		server.result = &serverParsed
 		if logErr == nil {
