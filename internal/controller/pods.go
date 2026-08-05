@@ -48,7 +48,7 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// All eleven images are v0.4.0, published to GHCR, public, and anonymously
+// All eleven images are v0.5.0, published to GHCR, public, and anonymously
 // pullable.
 //
 // THESE TAGS WERE NOT VERIFIED ON REAL HARDWARE BEFORE PUBLICATION, which this
@@ -56,11 +56,12 @@ const (
 // real hardware") requires. The GPU fleet was unavailable and the release was
 // cut anyway, deliberately and with the trade understood. What DOES stand behind
 // them: the unit, envtest and kind-based e2e tiers, including a real three-node
-// rendezvous for Group scope. What does not: no GB10 has run these exact tags,
-// and CI built only the FIVE runner images whose sources changed
-// (compute-smoke, gpudirect-rdma, host-health, ib-write-bw, nccl) plus the
-// standing smoke set — it builds by changed directory, so the other six are
-// republished from sources CI did not rebuild for this release.
+// rendezvous for Group scope, and four rounds of adversarial review that found
+// twenty defects in this release's own code. What does not: no GB10 has run
+// these exact tags, NO 3-RANK COLLECTIVE HAS EVER EXECUTED through the N-rank
+// path on any hardware, and CI builds runner images by CHANGED DIRECTORY — so
+// the runners whose sources did not move are republished from sources CI did not
+// rebuild for this release.
 //
 // The v0.3.0 tags remain published and immutable, and the measurements behind
 // THEM were taken on a two-node DGX Spark cluster with the v0.2.0 build of the
@@ -102,18 +103,18 @@ var defaultRunnerImages = map[burninv1alpha1.TestKind]string{
 	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
 	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
 	// repushed ones.
-	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.4.0",
+	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.5.0",
 
-	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.4.0",
-	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.4.0",
-	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.4.0",
-	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.4.0",
-	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.4.0",
-	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.4.0",
-	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.4.0",
-	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.4.0",
-	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.4.0",
-	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.4.0",
+	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.5.0",
+	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.5.0",
+	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.5.0",
+	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.5.0",
+	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.5.0",
+	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.5.0",
+	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.5.0",
+	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.5.0",
+	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.5.0",
+	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.5.0",
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
