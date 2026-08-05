@@ -126,3 +126,31 @@ func TestResolveHost(t *testing.T) {
 		t.Error("an unresolvable name was accepted")
 	}
 }
+
+// The readiness port must be SEPARATE from the bootstrap port, and both must be
+// bound by a Group rank.
+//
+// A tcpSocket probe proves a listener is up the only way TCP allows: by
+// connecting to it. serveUniqueId accepts exactly nranks-1 connections, so a
+// probe pointed at the bootstrap port consumes a rank's slot and strands a real
+// worker at a closed port — and at Group scope that stalls the whole collective
+// rather than one link. The two ports must therefore never collide, and the
+// defaults must not make them collide by accident.
+func TestReadinessAndBootstrapPortsAreDistinct(t *testing.T) {
+	if defaultHealthPort == defaultBootstrapPort {
+		t.Fatalf("the readiness port and the bootstrap port are both %d — a probe would be "+
+			"accepted as a rank and strand a real one", defaultHealthPort)
+	}
+
+	// And an operator overriding one must not be able to collide them silently.
+	// Without a refusal the failure is still loud — whichever listener binds
+	// second gets EADDRINUSE — but it arrives as an unexplained bind error from
+	// inside the CUDA harness rather than as the configuration mistake it is.
+	if err := checkPorts(plan{healthPort: 19000, bootstrapPort: 19000}); err == nil {
+		t.Error("a configuration whose probe port IS the bootstrap port was accepted; the probe " +
+			"would be served as a rank and a real rank would find a closed port")
+	}
+	if err := checkPorts(plan{healthPort: 19000, bootstrapPort: 18535}); err != nil {
+		t.Errorf("distinct ports were refused: %v", err)
+	}
+}

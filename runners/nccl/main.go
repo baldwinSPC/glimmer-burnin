@@ -186,6 +186,9 @@ func run() int {
 	if cfg.peerWait < 2*time.Minute {
 		cfg.peerWait = 2 * time.Minute
 	}
+	if err := checkPorts(cfg); err != nil {
+		return fin(exitError, "%v", err)
+	}
 
 	// RDMA discovery is advisory here, not a gate: NCCL can fall back to a
 	// socket transport, and a collective over sockets is a slow result rather
@@ -540,6 +543,29 @@ func envInt(name string, def int) int {
 	return n
 }
 
+// checkPorts refuses a configuration in which the readiness port and the
+// bootstrap port are the same.
+//
+// TCP admits no way to prove a listener is up other than connecting to it, so a
+// tcpSocket probe is a real connection. nccl_pair's bootstrap listener accepts
+// exactly nranks-1 of them; a probe sharing that port therefore CONSUMES A
+// RANK'S SLOT and strands a real one at a closed port. At Pair scope that breaks
+// one link. At Group scope it stalls the entire collective, because every
+// remaining rank blocks waiting for the one that never joined.
+//
+// Without this the failure is still loud — whichever listener binds second gets
+// EADDRINUSE — but it arrives as an unexplained bind error from inside the CUDA
+// harness rather than as the configuration mistake it is.
+func checkPorts(cfg plan) error {
+	if cfg.healthPort == cfg.bootstrapPort {
+		return fmt.Errorf("BURNIN_HEALTH_PORT and BURNIN_BOOTSTRAP_PORT are both %d — the readiness "+
+			"probe would be accepted as a rank and strand a real one, because the bootstrap "+
+			"listener accepts exactly the number of peers it expects. Give the probe a port the "+
+			"measurement does not use", cfg.healthPort)
+	}
+	return nil
+}
+
 // ─── Group scope ──────────────────────────────────────────────────────────────
 //
 // N ranks, one per node, bootstrapped by rank 0 serving the ncclUniqueId to the
@@ -643,6 +669,45 @@ func runGroupRank(rank, nranks int, rootHost string, duration int) int {
 		warmup:        envInt("BURNIN_NCCL_WARMUP_ITERS", defaultWarmupIters),
 		iters:         envInt("BURNIN_NCCL_ITERS", defaultTimedIters),
 		sizes:         strings.TrimSpace(os.Getenv("BURNIN_NCCL_SIZES")),
+	}
+
+	if err := checkPorts(cfg); err != nil {
+		return fin(exitError, "%v", err)
+	}
+
+	// A SAFE TARGET FOR A readinessProbe, and every rank binds one.
+	//
+	// The operator will not create the workers until the ROOT pod is Ready, and
+	// without a probe "Ready" only means the container started — which is not the
+	// same claim as "the bootstrap socket is bound". So a Group nccl test wants a
+	// tcpSocket probe, and it must not point at the bootstrap port: TCP admits no
+	// way to prove a listener is up other than connecting to it, serveUniqueId
+	// accepts exactly nranks-1 connections, and a probe would therefore CONSUME A
+	// RANK'S SLOT and strand a real worker at a closed port. That is the trap
+	// documented in CLAUDE.md, and at Group scope it is worse than at Pair: the
+	// stranded rank blocks the whole collective rather than one link.
+	//
+	// This listener re-accepts forever and reads nothing, so a probe against it
+	// is free. Every rank binds it, not just the root, because the probe is part
+	// of the shared pod spec and lands on all of them.
+	if ln, lerr := net.Listen("tcp", fmt.Sprintf(":%d", cfg.healthPort)); lerr != nil {
+		// Not fatal: the collective does not need it, and a port already in use
+		// is a configuration problem rather than a hardware one.
+		logf("could not bind the readiness port %d (%v); a tcpSocket probe against it will fail, "+
+			"and a probe against the bootstrap port would consume a rank's slot", cfg.healthPort, lerr)
+	} else {
+		defer ln.Close()
+		logf("listening on :%d for readiness probes (NOT the bootstrap port %d)",
+			cfg.healthPort, cfg.bootstrapPort)
+		go func() {
+			for {
+				c, aerr := ln.Accept()
+				if aerr != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
 	}
 
 	// EVERY rank resolves the ROOT, including rank 0 resolving itself. That is
