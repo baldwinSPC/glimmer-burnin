@@ -59,6 +59,14 @@ indict the whole group for one node's fault. The report names the ranks that
   holds every one of its nodes for the whole test, so it costs one slot per rank.
   At any smaller cap the run is refused at start with that explanation.
 - **At least two distinct target nodes are required.**
+- **A `Skip` needs every rank to have reported**, as `Pass` does. `Error` and
+  `Fail` are honoured from any rank, but neither `Skip` nor `Pass` may be
+  concluded from a subset — both of them let the run settle `Passed`, so
+  concluding either from one rank would certify nodes that never had a pod.
+- **A `Skip` needs every rank to have reported**, as `Pass` does. `Error` and
+  `Fail` are honoured from any rank, but neither `Skip` nor `Pass` may be
+  concluded from a subset — both let the run settle `Passed`, so concluding
+  either from one rank would certify nodes that never had a pod.
 - Every rank is waited for, unlike a Pair — a collective is synchronous, so its
   ranks finish together, and a rank that has not finished is one the collective
   is still waiting on. A genuine hang becomes an `Error` naming the ranks that

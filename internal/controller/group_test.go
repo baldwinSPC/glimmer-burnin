@@ -329,6 +329,75 @@ func TestGroup_SilentRankIsNotAPass(t *testing.T) {
 	}
 }
 
+// A Skip from one rank is not a Skip for the group unless every rank reported.
+//
+// Reachable, and the shape matters: if the root's runner declares the test
+// inapplicable (exit 2 with a _SKIP marker) BEFORE the workers are created —
+// which is exactly what gateWorkersOnRoot does when the root terminates early —
+// then N-1 nodes never had a pod at all. Honouring the root's declaration for
+// the whole group would record "acceptance does not apply to this hardware" for
+// nodes nothing looked at, and a run settles Passed around a Skip.
+//
+// This is the same rule the all-Pass case already has, applied to the verdict
+// that is just as capable of certifying unmeasured hardware. A runner may only
+// declare what it positively established, and rank 0's declaration is about
+// rank 0.
+func TestGroup_SkipNeedsEveryRankToHaveReported(t *testing.T) {
+	skip := func() *runner.Result {
+		return &runner.Result{Verdict: runner.VerdictSkip, ExitCode: 2,
+			Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}
+	}
+
+	t.Run("the root skips before the workers exist", func(t *testing.T) {
+		out := combineGroup([]groupMember{
+			{rank: 0, node: "spark-a", result: skip()},
+			{rank: 1, node: "spark-b"},
+			{rank: 2, node: "spark-c"},
+		}, nil, &burninv1alpha1.BurnInTestSpec{})
+
+		if out.Verdict == runner.VerdictSkip {
+			t.Fatalf("a group where 2 of 3 ranks never ran was recorded Skipped — " +
+				"that certifies hardware nothing looked at as out of scope")
+		}
+		if out.Verdict != runner.VerdictError {
+			t.Fatalf("verdict = %q, want Error: the group was not measured", out.Verdict)
+		}
+	})
+
+	t.Run("every rank declares the skip", func(t *testing.T) {
+		// The legitimate case is unaffected: when every rank looked at its own
+		// hardware and said the test does not apply, the group really is out of
+		// scope, and reporting Error would send someone to investigate a fleet
+		// that answered the question correctly.
+		out := combineGroup([]groupMember{
+			{rank: 0, node: "spark-a", result: skip()},
+			{rank: 1, node: "spark-b", result: skip()},
+			{rank: 2, node: "spark-c", result: skip()},
+		}, nil, &burninv1alpha1.BurnInTestSpec{})
+
+		if out.Verdict != runner.VerdictSkip {
+			t.Errorf("verdict = %q, want Skip: every rank positively declared it", out.Verdict)
+		}
+	})
+
+	t.Run("a Fail still outranks a missing rank", func(t *testing.T) {
+		// The guard must not swallow a measured fault. Fail outranks Skip, and a
+		// rank that positively failed has established something about the
+		// hardware whatever the others did.
+		fail := &runner.Result{Verdict: runner.VerdictFail, ExitCode: 1,
+			Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}
+		out := combineGroup([]groupMember{
+			{rank: 0, node: "spark-a", result: fail},
+			{rank: 1, node: "spark-b"},
+			{rank: 2, node: "spark-c"},
+		}, nil, &burninv1alpha1.BurnInTestSpec{})
+
+		if out.Verdict != runner.VerdictFail {
+			t.Errorf("verdict = %q, want Fail: a measured fault is not erased by a silent peer", out.Verdict)
+		}
+	})
+}
+
 // A hang is attributed to the ranks that actually hung. On a collective every
 // OTHER rank blocks waiting for the one that never arrived, so a message naming
 // all of them equally sends an engineer to N racks instead of one.

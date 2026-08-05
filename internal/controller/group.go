@@ -586,9 +586,11 @@ func groupVerdict(members []groupMember) (runner.Verdict, int) {
 		return runner.VerdictError, -1
 	}
 
-	// Error > Fail > Skip, taken from the LOWEST rank holding the winning
-	// verdict so the exit code and the verdict describe the same pod.
-	for _, want := range []runner.Verdict{runner.VerdictError, runner.VerdictFail, runner.VerdictSkip} {
+	// Error and Fail are taken from the LOWEST rank holding them, so the exit
+	// code and the verdict describe the same pod. Both are honoured however many
+	// ranks reported: a rank that positively erred or positively failed has
+	// established something, and a silent peer does not erase it.
+	for _, want := range []runner.Verdict{runner.VerdictError, runner.VerdictFail} {
 		for _, m := range members {
 			if m.result != nil && m.result.Verdict == want {
 				return want, m.result.ExitCode
@@ -596,13 +598,36 @@ func groupVerdict(members []groupMember) (runner.Verdict, int) {
 		}
 	}
 
-	// Everything that reported passed. THAT IS NOT ENOUGH: a collective is only
-	// measured if every rank took part, and a rank that never reported is a rank
-	// whose participation nobody can vouch for. Passing here would certify a
-	// collective across N nodes on evidence from fewer, which is the same class
-	// of false negative as an empty harvest satisfying a threshold.
+	// EVERY REMAINING VERDICT REQUIRES A FULL TURNOUT, and Skip needs it for
+	// exactly the same reason Pass does.
+	//
+	// A collective is only measured if every rank took part, so a rank that never
+	// reported is a rank whose participation nobody can vouch for. That is
+	// obvious for Pass. It is just as true for Skip, and Skip is the more
+	// dangerous of the two to get wrong, because a Skip does not fail the RUN —
+	// it records "acceptance does not apply to this hardware" and the run settles
+	// Passed around it.
+	//
+	// The reachable case is not hypothetical. If the root's runner declares the
+	// test inapplicable before the workers are created — which is what
+	// gateWorkersOnRoot does the moment the root terminates early — then N-1
+	// nodes never had a pod at all, and honouring rank 0's declaration for the
+	// group would certify every one of them on evidence from one. A runner may
+	// only declare what it positively established, and rank 0 established
+	// something about rank 0.
+	//
+	// Pair scope does NOT have this guard and must not grow one by symmetry: at
+	// n=2 the server terminating before the client is already an Error when it
+	// exits 0 (no traffic crossed the link), and its Skip is a statement about
+	// the only other participant in a link it is one half of. The asymmetry is
+	// the point — a group has members whose hardware nobody consulted.
 	if reported != len(members) {
 		return runner.VerdictError, members[groupRootRank].result.ExitCode
+	}
+	for _, m := range members {
+		if m.result.Verdict == runner.VerdictSkip {
+			return runner.VerdictSkip, m.result.ExitCode
+		}
 	}
 	return runner.VerdictPass, members[groupRootRank].result.ExitCode
 }
