@@ -762,3 +762,92 @@ func TestGroup_AnExplicitRunnerImageIsAccepted(t *testing.T) {
 		t.Fatalf("group launched %d pods, want %d — an explicit image must be honoured", got, len(nodes))
 	}
 }
+
+// Ranks disagreeing about a metric is recorded, not silently resolved — #121.
+//
+// combineGroup merges with rank 0 winning any shared key. That is right for a
+// collective measurand (busBandwidthGBs is a property of the group) and wrong
+// for a per-node one (gpuTempC belongs to whichever node emitted it), and
+// nothing in the metric distinguishes them. Choosing a winner differently needs
+// a metric's polarity, which pkg/contract does not carry, or a
+// refuse-on-disagreement rule, which would fail closed on every healthy
+// collective whose ranks each report their own figure. Both need a measurement
+// of what a real N-rank runner emits.
+//
+// So the value is unchanged and the disagreement is on the record — which is
+// the difference between a result an engineer can act on and one they cannot.
+func TestGroup_RankDisagreementIsRecorded(t *testing.T) {
+	mk := func(rank int, temp string) groupMember {
+		return groupMember{
+			rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{
+				Verdict: runner.VerdictPass, ExitCode: 0,
+				Metrics:      map[string]string{"gpuTempC": temp, "busBandwidthGBs": "15.97"},
+				Unmeasurable: map[string]bool{},
+			},
+		}
+	}
+	out := combineGroup([]groupMember{mk(0, "70"), mk(1, "72"), mk(2, "95")},
+		nil, &burninv1alpha1.BurnInTestSpec{})
+
+	// The stored value is still rank 0's — the merge rule did not change.
+	if got := out.Metrics["gpuTempC"]; got != "70" {
+		t.Errorf("gpuTempC = %q, want rank 0's 70", got)
+	}
+	// But the fact that it was contested is now visible.
+	if !strings.Contains(out.Message, "DISAGREED") {
+		t.Errorf("the message does not record the disagreement: %q", out.Message)
+	}
+	for _, want := range []string{"gpuTempC", "rank 2=95", "#121"} {
+		if !strings.Contains(out.Message, want) {
+			t.Errorf("the message does not mention %q: %q", want, out.Message)
+		}
+	}
+	// A key every rank agreed on must NOT be reported as contested — otherwise
+	// the note fires on every healthy collective and gets ignored.
+	if strings.Contains(out.Message, "busBandwidthGBs recorded as") {
+		t.Errorf("an agreed metric was reported as a disagreement: %q", out.Message)
+	}
+}
+
+// A group whose ranks agree says nothing, which is what keeps the note worth
+// reading when it does appear.
+func TestGroup_AgreementIsSilent(t *testing.T) {
+	mk := func(rank int) groupMember {
+		return groupMember{
+			rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{
+				Verdict: runner.VerdictPass,
+				Metrics: map[string]string{"busBandwidthGBs": "15.97"}, Unmeasurable: map[string]bool{},
+			},
+		}
+	}
+	out := combineGroup([]groupMember{mk(0), mk(1), mk(2)}, nil, &burninv1alpha1.BurnInTestSpec{})
+	if strings.Contains(out.Message, "DISAGREED") {
+		t.Errorf("a unanimous group reported a disagreement: %q", out.Message)
+	}
+}
+
+// Bounded: a large group disagreeing about many keys must not write a status the
+// apiserver refuses, and the counts stay exact even where the detail is elided.
+func TestGroup_DisagreementNoteIsBounded(t *testing.T) {
+	var members []groupMember
+	for rank := 0; rank < 40; rank++ {
+		m := map[string]string{}
+		for k := 0; k < 12; k++ {
+			m[fmt.Sprintf("metric%dPct", k)] = fmt.Sprintf("%d", rank)
+		}
+		members = append(members, groupMember{
+			rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictPass, Metrics: m, Unmeasurable: map[string]bool{}},
+		})
+	}
+	out := combineGroup(members, nil, &burninv1alpha1.BurnInTestSpec{})
+	if len(out.Message) > 2048 {
+		t.Errorf("a 40-rank group disagreeing about 12 metrics produced a %d-character message",
+			len(out.Message))
+	}
+	if !strings.Contains(out.Message, "12 metric(s)") {
+		t.Errorf("the exact count was lost when the detail was elided: %q", out.Message)
+	}
+}

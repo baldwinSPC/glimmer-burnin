@@ -541,12 +541,37 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 	out := runner.Result{Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}
 
 	// Highest rank first, so a LOWER rank overwrites it and rank 0 wins outright.
+	//
+	// RANK 0 WINNING IS RIGHT FOR A COLLECTIVE MEASURAND AND WRONG FOR A PER-NODE
+	// ONE, and nothing in the metric itself distinguishes them (#121). busBandwidthGBs
+	// is a property of the group and rank 0 is its reporting rank; gpuTempC is a
+	// property of whichever node emitted it, and taking rank 0's would certify
+	// every other node on one node's evidence.
+	//
+	// Choosing a winner differently needs something this operator does not have:
+	// a metric's POLARITY (is higher worse?) is not in pkg/contract, and refusing
+	// to merge on any disagreement would fail closed on every healthy collective
+	// whose ranks each report their own slightly different figure. Both need a
+	// measurement of what a real N-rank runner emits, and none exists yet.
+	//
+	// So the merge is unchanged and the disagreement is RECORDED. That is worth
+	// doing on its own: a stored result which says "ranks disagreed about
+	// gpuTempC" is one an engineer can act on, where a silent 70 next to eight
+	// node names is one they cannot. It changes no verdict, which is the point —
+	// the verdict rule is the part that needs the measurement.
+	// Every rank's answer is kept as it is read, PAIRED WITH THE RANK THAT GAVE
+	// IT. Attributing the discarded value to whichever rank happened to overwrite
+	// it — the obvious shortcut, and my first attempt — produces a note that
+	// names the wrong node, which on a per-node metric is the entire cost of the
+	// bug it exists to report.
+	reported := map[string][]rankValue{}
 	for i := len(members) - 1; i >= 0; i-- {
 		m := members[i]
 		if m.result == nil {
 			continue
 		}
 		for k, v := range m.result.Metrics {
+			reported[k] = append(reported[k], rankValue{rank: m.rank, value: v})
 			out.Metrics[k] = v
 		}
 		out.InvalidNames = append(out.InvalidNames, m.result.InvalidNames...)
@@ -568,6 +593,9 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 	out.Verdict = verdict
 	out.ExitCode = exit
 	out.Message = groupMessage(members)
+	if note := disagreementNote(reported, out.Metrics); note != "" {
+		out.Message = strings.TrimSpace(out.Message + " [" + note + "]")
+	}
 
 	// The log-fetch rule, applied ONCE to the combined result rather than per
 	// rank. A fetch failure only invalidates the verdict if it actually cost a
@@ -704,3 +732,63 @@ func groupMessage(members []groupMember) string {
 // apiserver refuses would lose the verdict entirely, which is a worse outcome
 // than a summarised one.
 const groupMaxNamedRanks = 4
+
+// rankValue is one rank's answer for one metric key.
+type rankValue struct {
+	rank  int
+	value string
+}
+
+// disagreementNote reports the metric keys several ranks answered differently.
+//
+// It is appended to the result's message rather than emitted as a metric,
+// because a metric would need a registered name and a value, and the value here
+// is "these ranks said other things" — which is prose. The message is what a
+// human reads next to the node list, and what the delivered envelope carries, so
+// it outlives the pods.
+//
+// Sorted and bounded: a group of sixty-four disagreeing about a dozen keys must
+// not write a status the apiserver refuses, and the counts stay exact even where
+// the detail is elided.
+func disagreementNote(reported map[string][]rankValue, kept map[string]string) string {
+	var keys []string
+	for k, vals := range reported {
+		for _, rv := range vals {
+			if rv.value != kept[k] {
+				keys = append(keys, k)
+				break
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+
+	shown := keys
+	if len(shown) > groupMaxNamedRanks {
+		shown = shown[:groupMaxNamedRanks]
+	}
+	parts := make([]string, 0, len(shown)+1)
+	for _, k := range shown {
+		var others []string
+		for _, rv := range reported[k] {
+			if rv.value != kept[k] {
+				others = append(others, fmt.Sprintf("rank %d=%s", rv.rank, rv.value))
+			}
+		}
+		sort.Strings(others)
+		total := len(others)
+		if total > groupMaxNamedRanks {
+			others = append(append([]string{}, others[:groupMaxNamedRanks]...),
+				fmt.Sprintf("and %d more", total-groupMaxNamedRanks))
+		}
+		parts = append(parts, fmt.Sprintf("%s recorded as %s but %s", k, kept[k], strings.Join(others, ", ")))
+	}
+	if elided := len(keys) - len(shown); elided > 0 {
+		parts = append(parts, fmt.Sprintf("and %d more metric(s)", elided))
+	}
+	return fmt.Sprintf("ranks DISAGREED about %d metric(s), and the value stored is rank %d's: %s. "+
+		"A per-node reading cannot be attributed to a group — see issue #121",
+		len(keys), groupRootRank, strings.Join(parts, "; "))
+}
