@@ -66,6 +66,16 @@ type fabricFile struct {
 // fabricRunnerDirs. TestFabricFileTableIsComplete enforces that.
 var fabricFiles = []fabricFile{
 	{
+		name:     "groupscope_test.go",
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir},
+		reason: "the guard for issue #118, and it is one rule so it is one file. All three runners " +
+			"branch on BURNIN_ROLE and read its absence as a Node-scope run; at Group scope the " +
+			"operator sets BURNIN_RANK/BURNIN_NRANKS and deliberately NOT BURNIN_ROLE, so all three " +
+			"would have declared a SKIP for a collective that never ran. A fork here would let one " +
+			"runner quietly go back to certifying a fleet nobody measured, which is precisely the " +
+			"outcome the test exists to prevent.",
+	},
+	{
 		name:     "rdma.go",
 		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir},
 		reason: "device discovery, port selection and GID resolution are one implementation. " +

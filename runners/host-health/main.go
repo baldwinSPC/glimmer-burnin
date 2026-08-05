@@ -99,7 +99,15 @@ const (
 // emissionVersion identifies the shape of the metric set below. A consumer
 // charting these counters over months needs to know when the set changed;
 // bump it whenever a metric's MEANING changes (adding a new key does not).
-const emissionVersion = "1"
+//
+// "2" is the first emission in which xid_count and kernel_hw_errors are OMITTED
+// when the scan that would have measured them failed, rather than published as a
+// zero (#112). That is a change of MEANING and not an added key: a consumer
+// charting xidEvents across the boundary sees gaps appear where it previously
+// saw zeroes, and the gaps are the honest reading. It is also what makes this
+// metric worth registering at all — hostHealthVersion is how a stored result
+// says which behaviour produced it, and it can only do that if it moves.
+const emissionVersion = "2"
 
 // Defaults. The window is the interval over which event counters are differenced.
 const (

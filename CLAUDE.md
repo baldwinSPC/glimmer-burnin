@@ -322,6 +322,25 @@ disagree about the same hardware. One brain, two dispatchers.
   real captured runner output in
   `pkg/runner.TestParse_RealClockProbeOutputIsRegistered`, because an audit of
   the source missed nine metrics and a capture cannot.
+- **A runner that needs the host driver DECLARES it, and a runner that speaks
+  only Pair REFUSES Group.** Two rules, one class of failure: a runner answering
+  a question it was not asked, with the one verdict that certifies. (a) The GB10
+  cluster's CDI spec declares a hook its host toolkit cannot implement, so every
+  pod injected through CDI dies at createContainer — and the burn-in runners
+  survive only because containerd falls back to the legacy runtime, which injects
+  from `NVIDIA_VISIBLE_DEVICES`/`NVIDIA_DRIVER_CAPABILITIES` in the IMAGE
+  environment. That is a property of these images, not of the host, so the fleet
+  is one Dockerfile away from a cluster-wide outage; `runners/pins_test.go`
+  asserts the correspondence, and the two runners that touch no accelerator
+  (`ib-write-bw` verbs, `memory-stress` host RAM) are exempt BY NAME with their
+  reason. (b) Every fabric runner branches on `BURNIN_ROLE` and reads its absence
+  as Node scope — but Group scope sets `BURNIN_RANK`/`BURNIN_NRANKS` and
+  deliberately NOT `BURNIN_ROLE`, so all three would have declared a `_SKIP` for
+  a collective that never ran. They now exit 3, BEFORE any hardware inspection,
+  because "this image does not speak the Group rendezvous" is true whatever is in
+  the box. The operator refuses the same case at plan time, which is the half
+  that protects a fleet running already-published tags: those are immutable and
+  will skip forever.
 - **A kind that ignores `BURNIN_DURATION_SECONDS` says so, in code.** Every
   runner here reads it except `compute-smoke`, whose GEMM finishes in
   milliseconds however long it is asked for — while a shipped sample requested

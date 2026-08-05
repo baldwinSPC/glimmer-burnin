@@ -151,3 +151,40 @@ func TestStageAndPanicAreEvidenceOnly(t *testing.T) {
 		}
 	}
 }
+
+// This runner must never DECLARE a skip, and run() must never return exit 2.
+//
+// It is the invariant the whole of #112 is about and it was unguarded. The
+// package comment states it ("NEVER skip. Host health applies to every node, so
+// exit 2 is unreachable here") and nothing checked it, so a future edit adding a
+// `return exitNotApplicable` — or a _SKIP marker to the output — would break the
+// one runner whose inability to skip is what makes a crash diagnosable.
+//
+// pkg/runner honours exit 2 as Skip ONLY alongside a declared marker. This runner
+// prints none, deliberately, which is why an undeclared exit 2 from it is read as
+// the crash it almost certainly is.
+func TestHostHealthNeverSkips(t *testing.T) {
+	cases := map[string]func(*testing.T) *e2eFixture{
+		"healthy":            func(t *testing.T) *e2eFixture { return newE2EFixture(t, healthyGPU(), "0") },
+		"GB10 (no ECC)":      func(t *testing.T) *e2eFixture { return newE2EFixture(t, sparkGPU(), "0") },
+		"no NVIDIA driver":   func(t *testing.T) *e2eFixture { return newE2EFixture(t, nil, "0") },
+		"a NIC link is down": func(t *testing.T) *e2eFixture { return newE2EFixture(t, healthyGPU(), "1") },
+	}
+	for name, mk := range cases {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			code := run(mk(t).cfg, &buf)
+			if code == exitNotApplicable {
+				t.Errorf("run() returned exit %d — host health applies to EVERY node, and a skip "+
+					"here certifies hardware as out of scope for a test that always applies",
+					exitNotApplicable)
+			}
+			// The other half: pkg/runner only reads an exit 2 as a Skip when the
+			// output declares one. This runner must never print such a marker,
+			// or a crash of it becomes indistinguishable from a real skip.
+			if runner.DeclaresSkip(buf.String()) {
+				t.Errorf("output declares a _SKIP marker:\n%s", buf.String())
+			}
+		})
+	}
+}

@@ -116,13 +116,16 @@ const deadlineGraceSeconds int32 = 120
 // rendezvousGraceSeconds is the extra kubelet deadline a pod gets for time it
 // spends waiting for peers THIS OPERATOR has not created yet.
 //
-// A Group root is created first and the workers are not created until it reports
-// Ready. It then sits inside the collective while N-1 pods are scheduled and
-// pull their image on N-1 other nodes — and every second of that is charged
-// against its own activeDeadlineSeconds, which was sized for one pod's start.
-// On a cold 8-node cluster the root is killed part-way through a test that had
-// barely begun, reported as "test exceeded its deadline and was killed", which
-// is a finding about hardware that was fine (issue #122).
+// EVERY rank of a group waits, which is why this is not scoped to the root. A
+// collective makes no progress until the last rank joins, so rank 1 sits idle
+// while ranks 2..N-1 are scheduled and pull their image, exactly as the root
+// sits idle while all of them do. The root simply waits longest, because it is
+// created first and the workers are not created until it reports Ready.
+//
+// Every second of that was charged against an activeDeadlineSeconds sized for
+// ONE pod's start. On a cold 8-node cluster the root is killed part-way through
+// a test that had barely begun, reported as "test exceeded its deadline and was
+// killed" — a finding about hardware that was fine (issue #122).
 //
 // THE NUMBER IS NOT INVENTED, and that matters here more than its size: it is
 // schedulingGracePeriod, which is already how long this operator waits for a pod
@@ -142,7 +145,7 @@ const deadlineGraceSeconds int32 = 120
 // passed on two Sparks), so there is evidence it does not need this and none
 // that it does. Widen it when that evidence exists, not by symmetry.
 func rendezvousGraceSeconds(rv *rendezvous) int32 {
-	if rv == nil || rv.scope != burninv1alpha1.ScopeGroup || rv.rank != groupRootRank {
+	if rv == nil || rv.scope != burninv1alpha1.ScopeGroup {
 		return 0
 	}
 	return int32(schedulingGracePeriod / time.Second)
