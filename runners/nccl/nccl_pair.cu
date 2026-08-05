@@ -1,4 +1,4 @@
-// nccl_pair: a two-rank NCCL all-reduce benchmark, one process per node.
+// nccl_pair: an N-rank NCCL all-reduce benchmark, one process per node.
 //
 // SPDX-License-Identifier: Apache-2.0
 // Copyright the Glimmer authors.
@@ -15,13 +15,18 @@
 // every accelerator node in the fleet, to run a bandwidth test.
 //
 // The operator already provides exactly the rendezvous that is missing: it
-// starts a server on one node and a client on the other and tells each where the
-// other is. So this program takes its rank from the wrapper, exchanges NCCL's
-// bootstrap handle over one TCP connection, and runs the same collective
-// nccl-tests runs, computing algorithm and bus bandwidth WITH THE SAME FORMULAS
-// (see busBandwidth below). What is lost relative to nccl-tests is its breadth
-// of collectives and its multi-node topology reporting; what is gained is that
-// two pods are enough.
+// starts one pod per node and tells each of them which rank it is and where rank
+// 0 answers. So this program takes its rank from the wrapper, exchanges NCCL's
+// bootstrap handle over TCP — rank 0 serves it to the other nranks-1 — and runs
+// the same collective nccl-tests runs, computing algorithm and bus bandwidth
+// WITH THE SAME FORMULAS (see busBandwidth below). What is lost relative to
+// nccl-tests is its breadth of collectives and its multi-node topology
+// reporting; what is gained is that no launcher is needed at any rank count.
+//
+// It serves BOTH scopes the operator executes. At Pair scope the wrapper passes
+// --nranks 2 and the roles come from BURNIN_ROLE; at Group scope they come from
+// BURNIN_RANK/BURNIN_NRANKS and there may be any number of them. The only thing
+// that changes inside this file is how many peers rank 0 serves the handle to.
 //
 // ── WHY THE UNIQUE ID IS EXCHANGED HERE AND NOT BY THE WRAPPER ───────────────
 //
@@ -109,13 +114,19 @@ bool recvAll(int fd, void *buf, size_t n) {
 	return true;
 }
 
-// serveUniqueId: rank 0 publishes the bootstrap handle.
+// serveUniqueId: rank 0 publishes the bootstrap handle to every other rank.
 //
-// The listen backlog is 1 and the socket is closed as soon as the ID is
-// delivered, because this port exists for exactly one connection. It is NOT the
-// pod's readiness port — the wrapper owns that one, and it must stay separate so
-// that a kubelet probe cannot be mistaken for rank 1.
-int serveUniqueId(int port, const ncclUniqueId &id) {
+// It serves EXACTLY nranks-1 connections and then closes, which is the whole
+// difference between two ranks and N. The count is load-bearing in both
+// directions: serving fewer leaves a rank that can never join, and the collective
+// then blocks until something kills it; serving more would keep a socket open for
+// a peer that does not exist.
+//
+// It is NOT the pod's readiness port — the wrapper owns that one, and it must
+// stay separate so that a kubelet probe cannot be mistaken for a rank. That
+// separation matters more at Group scope than it did at Pair: a probe accepted
+// here would consume one of the N-1 slots and strand a real rank.
+int serveUniqueId(int port, int nranks, const ncclUniqueId &id) {
 	int ln = ::socket(AF_INET, SOCK_STREAM, 0);
 	if (ln < 0) return -1;
 	int one = 1;
@@ -128,23 +139,42 @@ int serveUniqueId(int port, const ncclUniqueId &id) {
 		::close(ln);
 		return -1;
 	}
-	if (::listen(ln, 1) != 0) {
+	// The backlog holds every peer that connects before we accept it. Sized to
+	// the whole cohort because at Group scope the wrapper releases all of them at
+	// once, so they arrive together rather than in turn.
+	const int waiting = nranks > 1 ? nranks - 1 : 1;
+	if (::listen(ln, waiting) != 0) {
 		::close(ln);
 		return -1;
 	}
-	std::fprintf(stderr, "nccl_pair: rank 0 publishing the NCCL bootstrap handle on port %d\n", port);
-	int fd = ::accept(ln, nullptr, nullptr);
+	std::fprintf(stderr, "nccl_pair: rank 0 publishing the NCCL bootstrap handle on port %d to %d peer(s)\n",
+	             port, waiting);
+	for (int served = 0; served < waiting; ++served) {
+		int fd = ::accept(ln, nullptr, nullptr);
+		if (fd < 0) {
+			::close(ln);
+			return -1;
+		}
+		bool ok = sendAll(fd, &id, sizeof(id));
+		::close(fd);
+		if (!ok) {
+			::close(ln);
+			return -1;
+		}
+		std::fprintf(stderr, "nccl_pair: served the bootstrap handle to %d of %d peer(s)\n",
+		             served + 1, waiting);
+	}
 	::close(ln);
-	if (fd < 0) return -1;
-	bool ok = sendAll(fd, &id, sizeof(id));
-	::close(fd);
-	return ok ? 0 : -1;
+	return 0;
 }
 
 int fetchUniqueId(const std::string &peer, int port, ncclUniqueId *id) {
-	// Retry: rank 1 is released by the wrapper only after rank 0 has been
-	// started, but "started" and "bound" are a few milliseconds apart and a
-	// single refused connect here would be reported as a fabric fault.
+	// Retry: a non-root rank is released by the wrapper only after rank 0 has
+	// been started, but "started" and "bound" are a few milliseconds apart and a
+	// single refused connect here would be reported as a fabric fault. At Group
+	// scope the whole cohort is released at once, so several ranks may retry
+	// against the same listener simultaneously — the backlog in serveUniqueId is
+	// what absorbs that.
 	for (int attempt = 0; attempt < 120; ++attempt) {
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 		if (fd < 0) return -1;
@@ -224,7 +254,11 @@ bool parseArgs(int argc, char **argv, Options *o) {
 		}
 	}
 	if (o->sizes.empty()) o->sizes = {8, 1u << 20, 1u << 23, 1u << 26, 1u << 28};
-	return o->rank == 0 || o->rank == 1;
+	// Any rank in [0, nranks), and at least two of them: an all-reduce over one
+	// rank measures nothing. The upper bound is what stops a wrapper bug from
+	// launching a rank the communicator has no room for, which NCCL would report
+	// as a hang rather than as the argument error it is.
+	return o->nranks >= 2 && o->rank >= 0 && o->rank < o->nranks;
 }
 
 int runBenchmark(const Options &o) {
@@ -250,7 +284,7 @@ int runBenchmark(const Options &o) {
 	ncclUniqueId id;
 	if (o.rank == 0) {
 		NCCL_CHECK(ncclGetUniqueId(&id));
-		if (serveUniqueId(o.port, id) != 0) {
+		if (serveUniqueId(o.port, o.nranks, id) != 0) {
 			std::fprintf(stderr, "nccl_pair: could not publish the bootstrap handle on port %d\n", o.port);
 			return kError;
 		}
@@ -336,12 +370,12 @@ int main(int argc, char **argv) {
 	Options o;
 	if (!parseArgs(argc, argv, &o)) {
 		std::fprintf(stderr,
-		             "usage: nccl_pair --rank <0|1> [--nranks 2] [--peer <ipv4>] [--port N]\n"
+		             "usage: nccl_pair --rank <0..nranks-1> --nranks <N, at least 2> [--peer <ipv4>] [--port N]\n"
 		             "                 [--warmup N] [--iters N] [--sizes b1,b2,...]\n");
 		return kError;
 	}
-	if (o.rank == 1 && o.peer.empty()) {
-		std::fprintf(stderr, "nccl_pair: rank 1 needs --peer\n");
+	if (o.rank != 0 && o.peer.empty()) {
+		std::fprintf(stderr, "nccl_pair: rank %d needs --peer (the address rank 0 answers on)\n", o.rank);
 		return kError;
 	}
 	return runBenchmark(o);

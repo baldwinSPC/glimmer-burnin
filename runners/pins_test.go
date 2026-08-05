@@ -803,3 +803,69 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 		}
 	}
 }
+
+// TestGroupCapableRunnersReallyReadTheGroupContract keeps the operator's
+// allow-list and the runner sources from drifting apart.
+//
+// internal/controller/plan.go carries groupCapableKinds: the kinds whose SHIPPED
+// image speaks BURNIN_RANK/BURNIN_NRANKS/BURNIN_ROOT_HOST rather than branching
+// on BURNIN_ROLE. It decides whether the operator will dispatch a Group test to
+// a default image, and it is a claim about a runner's SOURCE that lives in a
+// different package from that source.
+//
+// Both directions are failures with teeth. A kind on the list whose runner does
+// not read the variables means the operator dispatches an image that will exit 2
+// with a skip marker — a collective certified as inapplicable, the exact false
+// negative of #118. A kind off the list whose runner does read them means the
+// operator refuses a test it could have run, and an author is sent to pin an
+// image by hand for no reason.
+func TestGroupCapableRunnersReallyReadTheGroupContract(t *testing.T) {
+	// Mirrors internal/controller/plan.go's groupCapableKinds. It is restated
+	// rather than imported because runners/ is deliberately not coupled to the
+	// controller — and a restatement that drifts is what this test catches.
+	groupCapable := map[string]bool{"nccl": true}
+
+	// BURNIN_ROOT_HOST is the discriminator, and picking the right one mattered:
+	// a first attempt keyed on BURNIN_RANK/BURNIN_NRANKS and failed, because
+	// ib-write-bw and gpudirect-rdma read exactly those in order to REFUSE Group
+	// scope. Reading a variable to say no is not implementing the contract.
+	//
+	// The root host is the address a rank fetches the bootstrap handle FROM. A
+	// runner that only refuses has no use for it and never will, so its presence
+	// in a non-test source is the narrowest available evidence that this image
+	// actually joins a collective.
+	const rootVar = "BURNIN_ROOT_HOST"
+
+	for _, d := range runnerDirs(t) {
+		var reads bool
+		err := filepath.WalkDir(d, func(path string, e os.DirEntry, err error) error {
+			if err != nil || e.IsDir() || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			body, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			if strings.Contains(string(body), rootVar) {
+				reads = true
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking %s: %v", d, err)
+		}
+
+		switch {
+		case groupCapable[d] && !reads:
+			t.Errorf("%s is on the operator's groupCapableKinds list, but no non-test source in "+
+				"runners/%s reads %s. The operator will dispatch this image for a Group test and "+
+				"it will read the absent BURNIN_ROLE as Node scope: exit 2 with a skip marker, "+
+				"and a collective certified as inapplicable (#118).", d, d, rootVar)
+		case !groupCapable[d] && reads:
+			t.Errorf("runners/%s reads %s but is NOT on the operator's groupCapableKinds list, so "+
+				"a Group test naming this kind is refused at plan time even though the image "+
+				"could run it. Add it to groupCapableKinds in internal/controller/plan.go and to "+
+				"the mirror in this test.", d, rootVar)
+		}
+	}
+}

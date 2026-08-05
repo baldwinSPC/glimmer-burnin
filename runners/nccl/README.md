@@ -9,7 +9,42 @@ and algorithm choices, and the copies it needs on a node without GPUDirect RDMA.
 A link can be perfect and the collective still slow because NCCL fell back to a
 socket transport; that is exactly the failure this test exists to catch.
 
-Pair scope. See *Node scope* below for what happens on a one-GPU part.
+**Pair and Group scope.** See *Node scope* below for what happens on a one-GPU
+part.
+
+## Group scope (N ranks)
+
+One rank per target node. Rank 0 mints the `ncclUniqueId` and serves it to the
+other N-1 over TCP; every rank then joins the same communicator. The operator
+supplies the whole rendezvous:
+
+| Variable | Meaning |
+|---|---|
+| `BURNIN_RANK` | this pod's 0-based rank |
+| `BURNIN_NRANKS` | how many ranks the collective has |
+| `BURNIN_ROOT_HOST` | rank 0's DNS name, `rank-0.<service>.<ns>.svc` |
+| `BURNIN_ROOT_NODE` | rank 0's node name (messages only) |
+
+`BURNIN_ROLE` is **absent** at Group scope, and this runner does not look for it
+there. That is deliberate on both sides: a runner keying off `server`/`client`
+must fail loudly rather than treat rank 4 of eleven as a client.
+
+**Only rank 0 reports numbers.** The others exit 0 having taken part. The
+operator merges a group's metrics with rank 0 winning any shared key, and
+`pkg/runner` is last-occurrence-wins — so N ranks printing the same keys would
+record whichever pod happened to be harvested last, which is a number nobody
+chose.
+
+`busBandwidthGBs` and `algBandwidthGBs` **diverge** above two ranks. The factor
+is `2(n-1)/n`, which is exactly 1 at n=2 and 1.33 at n=3 — so a Pair run's two
+figures coincide and a Group run's do not. That is arithmetic, not a fault.
+
+> **NOT VERIFIED ON HARDWARE.** Every line of the N-rank path compiles and its
+> argument construction, contract parsing and host resolution are unit-tested,
+> but **no 3-rank collective has ever run through it** — this fleet has two GPU
+> nodes. The acceptance is a real ≥3-node run whose reported bus bandwidth is
+> checked by hand against the algorithm bandwidth and the rank count, once. See
+> issue #118.
 
 ## Output contract
 

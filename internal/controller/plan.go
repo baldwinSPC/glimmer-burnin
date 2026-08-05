@@ -163,17 +163,17 @@ func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error 
 	// saying they have a runner that speaks the contract, and this operator has
 	// no business second-guessing that — it is also the documented way to run
 	// Group scope today.
-	if t.spec.Runner == nil || t.spec.Runner.Image == "" {
+	if (t.spec.Runner == nil || t.spec.Runner.Image == "") && !groupCapableKinds[t.spec.Kind] {
 		return fmt.Errorf(
 			"test %q is Group scope and names no spec.runner.image, so it would fall back to the "+
-				"default image for kind %q — and no runner image this project has published speaks the "+
-				"Group rendezvous contract (issue #118). Every published fabric runner branches on "+
-				"BURNIN_ROLE, which is deliberately unset at Group scope, and treats its absence as a "+
-				"Node-scope run: it would exit 2 with a skip marker, this run would record "+
-				"\"acceptance does not apply to this hardware\", and it would settle Passed around a "+
-				"collective that never executed. Set spec.runner.image to a runner that reads "+
-				"BURNIN_RANK, BURNIN_NRANKS and BURNIN_ROOT_HOST",
-			t.name, t.spec.Kind)
+				"default image for kind %q — and that image does not speak the Group rendezvous "+
+				"contract (issue #118). It branches on BURNIN_ROLE, which is deliberately unset at "+
+				"Group scope, and reads its absence as a Node-scope run: it would exit 2 with a skip "+
+				"marker, this run would record \"acceptance does not apply to this hardware\", and it "+
+				"would settle Passed around a collective that never executed. Set spec.runner.image "+
+				"to a runner that reads BURNIN_RANK, BURNIN_NRANKS and BURNIN_ROOT_HOST — or use "+
+				"kind %q, whose shipped runner does",
+			t.name, t.spec.Kind, burninv1alpha1.KindNCCL)
 	}
 	if nodeCap < len(targets) {
 		return fmt.Errorf(
@@ -184,6 +184,26 @@ func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error 
 			t.name, len(targets), nodeCap, len(targets), nodeCap, len(targets), len(targets))
 	}
 	return nil
+}
+
+// groupCapableKinds are the kinds whose SHIPPED runner image speaks the Group
+// rendezvous — BURNIN_RANK, BURNIN_NRANKS, BURNIN_ROOT_HOST — rather than
+// branching on BURNIN_ROLE and reading its absence as a Node-scope run.
+//
+// It is a property of the IMAGE and not of the kind, which is why this list is
+// short and why adding to it is a claim rather than bookkeeping. Every other
+// published fabric runner refuses Group scope outright, and correctly: a
+// point-to-point RDMA write and a GPUDirect peer-memory check are measurements
+// of a LINK, and have no N-rank form to implement.
+//
+// THE ENTRY IS ONLY TRUE FROM THE RELEASE THAT SHIPS IT. Published tags are
+// immutable, so a profile pinning an older nccl image gets the old behaviour —
+// exit 2 with a skip marker, a collective certified as inapplicable. That is the
+// case an explicit spec.runner.image exists for, and the reason this check
+// refuses the DEFAULT rather than every unpinned test: the default moves with
+// the operator, and the operator and its default images ship together.
+var groupCapableKinds = map[burninv1alpha1.TestKind]bool{
+	burninv1alpha1.KindNCCL: true,
 }
 
 // firstDuplicate returns the first node name that appears twice, or "".
