@@ -691,3 +691,54 @@ func sortedUnique(matches [][]string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestNoRunnerBinaryCanBeCommittedAtTheRepositoryRoot closes the hole that put a
+// 3.4 MB compiled binary into a public repository twice.
+//
+// Every runner directory is `package main`, so `go build ./runners/<name>/` —
+// and `go build ./...` — drops an executable called <name> at the REPOSITORY
+// ROOT, not in the runner's directory. It is then untracked, unignored, and
+// swept up by the next `git add -A`. That is how `ib-write-bw` (4.2 MB) got
+// committed, and then `host-health` (3.4 MB) on top of it while fixing an
+// unrelated bug.
+//
+// .gitignore already carries the shape of the answer and the reason it has to be
+// anchored:
+//
+//	# Anchored to the repo root ON PURPOSE. An unanchored `manager` matches any
+//	# path component with that name, which silently swallowed config/manager/ ...
+//	/manager
+//
+// The same reasoning applies to every runner and to nothing else — an unanchored
+// `nccl` would swallow runners/nccl/ entirely and the images would stop being
+// built. So the entries must exist, and they must be anchored, and the list has
+// to come from the FILESYSTEM rather than from anyone remembering to extend it:
+// a new runner directory is a new binary name on the very first `go build ./...`
+// after it lands.
+func TestNoRunnerBinaryCanBeCommittedAtTheRepositoryRoot(t *testing.T) {
+	raw, err := os.ReadFile("../.gitignore")
+	if err != nil {
+		t.Fatalf("reading .gitignore: %v", err)
+	}
+	ignored := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "/") {
+			ignored[strings.TrimPrefix(line, "/")] = true
+		}
+	}
+
+	for _, d := range runnerDirs(t) {
+		if !ignored[d] {
+			t.Errorf("`go build ./runners/%s/` writes an executable named %q at the repository "+
+				"root, and .gitignore has no anchored `/%s` entry — the next `git add -A` commits "+
+				"a multi-megabyte binary into a public repo", d, d, d)
+		}
+		// On disk is fine and expected; TRACKED is the failure. The binary is
+		// only ever produced by a local build, so its presence in the worktree
+		// says nothing, but a checkout that materialises it has it committed.
+		if info, err := os.Stat(filepath.Join("..", d)); err == nil && !info.IsDir() {
+			t.Logf("note: %s exists at the repository root (a local build artefact); "+
+				"the /%s ignore rule is what keeps it out of a commit", d, d)
+		}
+	}
+}
