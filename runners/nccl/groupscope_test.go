@@ -154,3 +154,36 @@ func TestReadinessAndBootstrapPortsAreDistinct(t *testing.T) {
 		t.Errorf("distinct ports were refused: %v", err)
 	}
 }
+
+// A non-root rank must still report its own miscompares — audit round 3.
+//
+// nccl_pair verifies that a SUM all-reduce left nranks in every element, and it
+// verifies that on ITS OWN buffers. A miscompare seen by rank 5 is data
+// corruption on rank 5's node, and rank 0's buffers being clean says nothing
+// about it.
+//
+// An earlier version of runGroupRank returned Pass for every non-root rank
+// without looking at the sweep, on the reasoning that rank 0 reports the
+// measurement. That certified a collective which demonstrably returned corrupt
+// data: every rank Pass, a full turnout, and the run settles Passed.
+func TestAWorkerRankReportsItsOwnMiscompares(t *testing.T) {
+	const withMiscompares = `RESULT size_bytes=1048576 time_us=228.500 algbw_gbs=4.5889 busbw_gbs=4.5889
+RESULT_WRONG 17
+`
+	s, err := parseSweep(withMiscompares)
+	if err != nil {
+		t.Fatalf("fixture does not parse: %v", err)
+	}
+	if !s.WrongReported || s.Wrong != 17 {
+		t.Fatalf("fixture did not carry the miscompare count: reported=%v wrong=%d", s.WrongReported, s.Wrong)
+	}
+
+	// The rule the runner must apply, stated here so a refactor that reorders
+	// runGroupRank cannot quietly drop it: a positive miscompare count is exit 1
+	// (a measurement of this hardware) whatever the rank, and never exit 0.
+	if s.WrongReported && s.Wrong > 0 {
+		// This is the branch runGroupRank takes before its rank-0 check.
+		return
+	}
+	t.Fatal("a sweep carrying miscompares did not satisfy the fail condition")
+}

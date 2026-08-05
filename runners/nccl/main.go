@@ -717,12 +717,37 @@ func runGroupRank(rank, nranks int, rootHost string, duration int) int {
 	// nothing, ncclEnv logs it and leaves NCCL to choose — RDMA discovery is
 	// advisory here exactly as it is at Pair scope, because a collective over
 	// sockets is a slow result rather than an inapplicable test.
-	rootIP, err := resolveHost(rootHost)
+	// RESOLUTION RETRIES, for the reason rendezvous.go already gives for the Pair
+	// path: "DNS for the peer's name is populated by the endpoint controller and
+	// can lag the pod by a moment, and a client that resolved once and gave up
+	// would report a fabric fault about a name that was simply not published
+	// yet." dialPeer retries for at least two minutes on exactly that argument.
+	//
+	// A single-shot lookup here was worse than at Pair scope, because the ROOT
+	// races that lag from a standing start: startGroup creates the headless
+	// Service and the root pod in the same reconcile, so the root can reach this
+	// line before the EndpointSlice controller has observed its own IP.
+	rootIP, err := resolveHostWithin(rootHost, resolveBudget)
 	if err != nil {
-		return fin(exitError, "could not resolve BURNIN_ROOT_HOST=%q: %v — the rendezvous Service or "+
-			"its per-pod DNS is missing, so no rank can find rank %d", rootHost, err, groupRootRankIndex)
+		// AND IT IS NOT FATAL FOR RANK 0, which does not use this as an address.
+		// Its only consumers are a log line and ncclEnv's RDMA pin, whose own
+		// failure path is already advisory ("leaving NCCL to choose its own
+		// transport"). Erroring the root here would lose an entire Group run —
+		// the workers are never created — over a name that was published a moment
+		// later, on hardware nothing had touched.
+		if rank == groupRootRankIndex {
+			logf("could not resolve BURNIN_ROOT_HOST=%q within %s (%v); continuing, because rank 0 "+
+				"serves the bootstrap handle rather than fetching it and uses this only to pin an "+
+				"RDMA device", rootHost, resolveBudget, err)
+		} else {
+			return fin(exitError, "could not resolve BURNIN_ROOT_HOST=%q within %s: %v — the "+
+				"rendezvous Service or its per-pod DNS is missing, so rank %d cannot find rank %d",
+				rootHost, resolveBudget, err, rank, groupRootRankIndex)
+		}
 	}
-	logf("rank 0 answers at %s (%s)", rootIP, rootHost)
+	if rootIP != nil {
+		logf("rank 0 answers at %s (%s)", rootIP, rootHost)
+	}
 
 	ports, derr := discoverPorts()
 	if derr != nil && !errors.Is(derr, errNoRDMA) {
@@ -755,20 +780,42 @@ func runGroupRank(rank, nranks int, rootHost string, duration int) int {
 			rank, nranks, runErr)
 	}
 
-	// ONLY RANK 0 REPORTS NUMBERS, and the other ranks deliberately publish none.
-	// The operator merges a group's metrics with rank 0 winning any shared key
-	// (see combineGroup), and the parser is last-occurrence-wins — so N ranks
-	// printing the same keys would record whichever pod happened to be harvested
-	// last, which is a number nobody chose. A rank that took part and has nothing
-	// to add says exactly that.
-	if rank != groupRootRankIndex {
-		return fin(exitPass, "rank %d of %d completed the collective; rank %d reports the "+
-			"measurement", rank, nranks, groupRootRankIndex)
-	}
-
 	parsed, err := parseSweep(out)
 	if err != nil {
 		return fin(exitError, "reading the harness output: %v", err)
+	}
+
+	// A NON-ROOT RANK STILL JUDGES ITS OWN CORRECTNESS, and only the BANDWIDTH
+	// reporting is rank 0's alone.
+	//
+	// An earlier version returned Pass here without looking at the sweep at all,
+	// on the reasoning that rank 0 reports the measurement. That threw away the
+	// one thing a worker establishes that nobody else can: nccl_pair verifies
+	// that a SUM all-reduce left nranks in every element, and it verifies that on
+	// ITS OWN buffers. A miscompare seen by rank 5 is data corruption on rank 5's
+	// node, and rank 0's buffers being clean says nothing about it — so
+	// discarding it certified a collective that demonstrably returned corrupt
+	// data as a clean Pass, with every rank reporting Pass and the run settling
+	// Passed. That is the exact class of false negative this project exists to
+	// prevent, reached through a reporting convention.
+	//
+	// Exit 1 and not 3: a miscompare is a MEASUREMENT of this hardware, not a
+	// failure to measure it.
+	if parsed.WrongReported && parsed.Wrong > 0 {
+		metric("wrong_count", strconv.FormatInt(parsed.Wrong, 10))
+		return fin(exitFail, "rank %d of %d: the all-reduce returned %d incorrect element(s) on "+
+			"THIS node across the sweep — the collective completed and the data is wrong",
+			rank, nranks, parsed.Wrong)
+	}
+
+	// Bandwidth is reported by rank 0 alone. The operator merges a group's
+	// metrics with rank 0 winning any shared key, and the parser is
+	// last-occurrence-wins — so N ranks printing the same keys would record
+	// whichever pod happened to be harvested last, which is a number nobody
+	// chose. A rank that took part and measured nothing wrong says exactly that.
+	if rank != groupRootRankIndex {
+		return fin(exitPass, "rank %d of %d completed the collective with no miscompares; rank %d "+
+			"reports the bandwidth", rank, nranks, groupRootRankIndex)
 	}
 	return reportCollective(parsed, nranks, fmt.Sprintf("%d peer(s)", nranks-1))
 }
@@ -796,6 +843,30 @@ func groupHarnessArgs(rank, nranks int, peer string, cfg plan) []string {
 		a = append(a, "--peer", peer)
 	}
 	return a
+}
+
+// resolveBudget bounds the wait for the rendezvous name to appear. It matches
+// the floor the Pair path gives dialPeer for the same propagation lag.
+const resolveBudget = 2 * time.Minute
+
+// resolveHostWithin is resolveHost with the retry the Pair path already has.
+func resolveHostWithin(host string, within time.Duration) (net.IP, error) {
+	deadline := time.Now().Add(within)
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		ip, err := resolveHost(host)
+		if err == nil {
+			return ip, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		if attempt == 1 || attempt%10 == 0 {
+			logf("waiting for %s to resolve (attempt %d): %v", host, attempt, err)
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // resolveHost turns the operator's DNS name into the IPv4 address the harness

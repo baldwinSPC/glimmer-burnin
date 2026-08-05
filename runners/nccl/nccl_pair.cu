@@ -50,6 +50,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -114,6 +115,12 @@ bool recvAll(int fd, void *buf, size_t n) {
 	return true;
 }
 
+// kRankHello is the four bytes a fetching rank sends before it is counted, and
+// kHelloTimeoutSec is how long rank 0 waits for them. The value is arbitrary and
+// only has to be something a probe will not send, which is anything at all.
+constexpr uint32_t kRankHello = 0x4E43434CU;  // "NCCL"
+constexpr int kHelloTimeoutSec = 5;
+
 // serveUniqueId: rank 0 publishes the bootstrap handle to every other rank.
 //
 // It serves EXACTLY nranks-1 connections and then closes, which is the whole
@@ -149,11 +156,47 @@ int serveUniqueId(int port, int nranks, const ncclUniqueId &id) {
 	}
 	std::fprintf(stderr, "nccl_pair: rank 0 publishing the NCCL bootstrap handle on port %d to %d peer(s)\n",
 	             port, waiting);
-	for (int served = 0; served < waiting; ++served) {
+
+	// A CONNECTION IS NOT A RANK, and counting accepts instead of ranks strands
+	// one.
+	//
+	// A kubelet tcpSocket probe is exactly connect-then-close. sendAll writes 128
+	// bytes into the send buffer, which SUCCEEDS even when the peer has already
+	// sent FIN — so a probe was indistinguishable from a rank that received the
+	// handle. After nranks-1 such accepts this function closed the listener and
+	// returned 0, logging that it had served every peer, while a real rank got
+	// ECONNREFUSED for its whole fetch budget and the collective blocked until
+	// something killed it. Reproduced by compiling this function verbatim and
+	// driving it with one probe plus two real fetchers.
+	//
+	// So a peer must IDENTIFY ITSELF before it is counted. This is the same rule
+	// rendezvous.go's acceptPeer already applies to the wrapper's own readiness
+	// listener, for the same reason and in the same words: connections that are
+	// not the peer are expected and are not errors, they are read with a short
+	// deadline and dropped, and the loop keeps waiting for a real one.
+	int served = 0;
+	int strangers = 0;
+	while (served < waiting) {
 		int fd = ::accept(ln, nullptr, nullptr);
 		if (fd < 0) {
 			::close(ln);
 			return -1;
+		}
+		// A short receive deadline: a real rank sends its hello immediately, and a
+		// probe sends nothing at all and must not hold the listener.
+		timeval tv{};
+		tv.tv_sec = kHelloTimeoutSec;
+		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+		uint32_t hello = 0;
+		if (!recvAll(fd, &hello, sizeof(hello)) || ntohl(hello) != kRankHello) {
+			::close(fd);
+			if (++strangers % 10 == 1) {
+				std::fprintf(stderr, "nccl_pair: ignored %d connection(s) that did not identify as a "
+				                     "rank (a readiness probe looks like this); still waiting for %d\n",
+				             strangers, waiting - served);
+			}
+			continue;
 		}
 		bool ok = sendAll(fd, &id, sizeof(id));
 		::close(fd);
@@ -161,8 +204,9 @@ int serveUniqueId(int port, int nranks, const ncclUniqueId &id) {
 			::close(ln);
 			return -1;
 		}
+		++served;
 		std::fprintf(stderr, "nccl_pair: served the bootstrap handle to %d of %d peer(s)\n",
-		             served + 1, waiting);
+		             served, waiting);
 	}
 	::close(ln);
 	return 0;
@@ -187,7 +231,10 @@ int fetchUniqueId(const std::string &peer, int port, ncclUniqueId *id) {
 			return -1;
 		}
 		if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
-			bool ok = recvAll(fd, id, sizeof(*id));
+			// Identify as a rank before reading. Rank 0 counts only peers that do
+			// this, so that a readiness probe cannot consume a rank's slot.
+			const uint32_t hello = htonl(kRankHello);
+			bool ok = sendAll(fd, &hello, sizeof(hello)) && recvAll(fd, id, sizeof(*id));
 			::close(fd);
 			if (ok) return 0;
 		} else {
