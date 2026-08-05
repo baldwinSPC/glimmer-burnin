@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"regexp"
@@ -83,8 +84,15 @@ type kernelLogProbe struct {
 
 	xidPre, hwPre int64
 	xidNew, hwNew int64
-	dropped       bool
-	available     bool
+	// baselineOK and windowOK say whether each SAMPLE was actually taken. They
+	// are not the same statement as `dropped`, and conflating them is what
+	// produced both halves of issue #112's second round: a scan that returned an
+	// error yielded (0, 0), which is indistinguishable from a clean scan of a
+	// quiet log, and that zero was then published as a measurement.
+	baselineOK bool
+	windowOK   bool
+	dropped    bool
+	available  bool
 }
 
 func newKernelLogProbe(cfg config) *kernelLogProbe {
@@ -114,7 +122,7 @@ func (k *kernelLogProbe) baseline() {
 	if !k.available {
 		return
 	}
-	k.xidPre, k.hwPre = k.count()
+	k.xidPre, k.hwPre, k.baselineOK = k.count()
 }
 
 // collect closes the window and releases the source.
@@ -122,31 +130,64 @@ func (k *kernelLogProbe) collect() {
 	if !k.available {
 		return
 	}
-	k.xidNew, k.hwNew = k.count()
+	k.xidNew, k.hwNew, k.windowOK = k.count()
 	k.src.close()
 }
 
 // count drains the source and tallies as it goes, retaining nothing.
-func (k *kernelLogProbe) count() (xid, hw int64) {
+//
+// The third return is whether the scan COMPLETED, and it is separate from the
+// tallies on purpose. A failed scan yields zero messages, which is exactly what
+// a clean scan of a quiet log yields, so a caller that reads only the counts
+// cannot tell "nothing happened" from "we could not look" — and this runner's
+// first rule is that those are different claims.
+func (k *kernelLogProbe) count() (xid, hw int64, ok bool) {
 	var c messageCounter
 	if err := k.src.scan(c.visit); err != nil {
 		k.dropped = true
+		// The partial tally is discarded rather than returned. It is a floor on
+		// an interval whose start we do not know, which is not a measurement of
+		// anything a threshold could be written against.
+		return 0, 0, false
 	}
-	return c.xid, c.hw
+	return c.xid, c.hw, true
 }
 
+// emit publishes only the counters that were actually measured.
+//
+// THE WINDOW COUNT NEEDS BOTH SAMPLES, and that is the part that was wrong. It
+// is a difference: the source is positioned by the baseline scan, so the closing
+// scan returns what arrived since. If the BASELINE failed, the source was never
+// positioned — a file source still sits at byte 0 — so the "window" is the whole
+// log, and every Xid the node has ever logged is reported as having happened
+// during the burn-in. That is exit 1, a hardware verdict, against healthy
+// hardware, on the one phase this operator never retries. If the CLOSING scan
+// failed, the window was never read at all, and publishing 0 hands a profile's
+// `xidEvents Equal 0` gate a number nobody measured.
+//
+// So each counter is emitted only when the samples it is made of were taken, and
+// omitted otherwise. Omission is the fails-closed outcome this runner already
+// documents for an unreadable source, and it is deliberately NOT the `n/a`
+// sentinel: `n/a` declares that the HARDWARE cannot produce the value, which is
+// a claim about the part, and this is a claim about the probe.
 func (k *kernelLogProbe) emit(out *emitter) {
 	out.set("xid_source", k.source)
 	if !k.available {
 		return
 	}
-	out.setInt(keyXidCount, k.xidNew)
-	out.setInt("xid_preexisting", k.xidPre)
-	out.setInt("kernel_hw_errors", k.hwNew)
-	out.setInt("kernel_hw_errors_preexisting", k.hwPre)
+	if k.baselineOK && k.windowOK {
+		out.setInt(keyXidCount, k.xidNew)
+		out.setInt("kernel_hw_errors", k.hwNew)
+	}
+	if k.baselineOK {
+		out.setInt("xid_preexisting", k.xidPre)
+		out.setInt("kernel_hw_errors_preexisting", k.hwPre)
+	}
 	if k.dropped {
-		// The ring buffer wrapped or the reader fell behind, so the counts
-		// above are a floor. Worth knowing before trusting a clean scan.
+		// The ring buffer wrapped, the reader fell behind, or a scan failed
+		// outright. Worth knowing before trusting anything above it — and on the
+		// record even when every counter was omitted, because otherwise the only
+		// trace of a failed probe is an absence.
 		out.setInt("xid_log_dropped", 1)
 	}
 }
@@ -181,6 +222,11 @@ func (c *messageCounter) visit(m string) {
 // descriptor the runtime never adopted returns EAGAIN as the kernel intended.
 type kmsgSource struct {
 	fd int
+	// maxReads bounds one drain. It is a field rather than a bare use of the
+	// constant so a test can lower it: with a 16 KiB buffer a regular file
+	// reaches EOF long before 200000 reads, so the exhaustion path is otherwise
+	// unreachable from a test and would be a guard nobody had ever executed.
+	maxReads int
 	// pending holds a trailing partial line. A read of the real /dev/kmsg
 	// always returns whole records, but BURNIN_KMSG_PATH may point at a
 	// captured log, where one read returns many records and can stop
@@ -202,13 +248,13 @@ func openKmsg(path string) (*kmsgSource, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &kmsgSource{fd: fd}, nil
+	return &kmsgSource{fd: fd, maxReads: maxRecordsPerScan}, nil
 }
 
 func (k *kmsgSource) scan(visit func(string)) error {
 	buf := make([]byte, kmsgBufSize)
 	var dropped error
-	for i := 0; i < maxRecordsPerScan; i++ {
+	for i := 0; i < k.maxReads; i++ {
 		n, err := syscall.Read(k.fd, buf)
 		switch {
 		case errors.Is(err, syscall.EINTR):
@@ -231,7 +277,12 @@ func (k *kmsgSource) scan(visit func(string)) error {
 		}
 		k.pending = visitKmsgChunk(k.pending+string(buf[:n]), visit)
 	}
-	return dropped
+	// The bound was exhausted, so the drain did NOT complete. Reporting success
+	// here would hand the caller a truncated baseline that looks like a whole
+	// one: the source is left positioned somewhere arbitrary, and everything past
+	// the cut is counted as a window event by the next scan. Same wrong verdict
+	// as a failed baseline, reached by a different route.
+	return fmt.Errorf("kmsg drain stopped after %d reads without reaching the end of the log", k.maxReads)
 }
 
 // visitKmsgChunk hands one read's messages to visit and returns any trailing

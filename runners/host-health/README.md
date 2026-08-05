@@ -206,6 +206,17 @@ Xid or ECC error provoked by that load is still in the log.
 | NVML | NVIDIA Container Toolkit; the image requests `NVIDIA_DRIVER_CAPABILITIES=utility` | `nvml_status=absent`, all NVML counters omitted |
 | Xid scan | a readable `/dev/kmsg`, mounted with `spec.runner.hostPaths` — see below | `xid_source=none`, `xidEvents` omitted (never a false zero) |
 
+A source that is readable at start and then fails **mid-run** is treated the same
+way. `xidEvents` is a difference between two samples, so it is emitted only when
+**both** were taken: if the opening scan failed the source was never positioned
+and the "window" would be the node's whole log, and if the closing scan failed
+the window was never read at all. Either way the counter is **omitted** and
+`xid_log_dropped=1` records that something went wrong. Omission fails closed
+upstream — a profile gating `xidEvents` fails the node rather than certifying it.
+
+It is deliberately not the `n/a` sentinel: `n/a` declares that the *hardware*
+cannot produce the value, and this is a statement about the *probe*.
+
 **The Xid scan is the awkward one.** `/dev/kmsg` is not in a container's default
 `/dev`, and reading it needs `CAP_SYSLOG` (or root) on any host with
 `kernel.dmesg_restrict=1`, which is the default on most distributions. The image
