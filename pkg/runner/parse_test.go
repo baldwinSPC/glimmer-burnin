@@ -225,6 +225,11 @@ func TestParse_RealClockProbeOutputIsRegistered(t *testing.T) {
 // it is exactly what such a build prints, and it is what makes any verdict from
 // one self-identifying. A fixture that hid it would be claiming an H100
 // produced this.
+//
+// The wording of the skip line in this capture predates the scope gate being
+// widened to both Blackwell families; the live message now names "10.x or 12.x".
+// The capture is left exactly as it was produced — it is evidence, and what it is
+// evidence FOR is the marker, the exit code and the parse, none of which moved.
 const computeSmokeSkipStdout = `built_cuda_arch=sm_121a
 forced_compute_cap=9.0
 gpu_name=NVIDIA GB10

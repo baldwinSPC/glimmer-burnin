@@ -63,8 +63,10 @@ const (
 //
 // That is the HOST axis and it is not the GPU axis. A tag resolving on a host
 // says nothing about whether the image contains code for the accelerator in it —
-// compute-smoke is CC 12.x only and skips a B200 cleanly, and nccl ships one
-// gencode that an unlisted fleet must rebuild. Each runner's README states its
+// compute-smoke carries only the CC 12.x kernel and reports a B200 as an ERROR,
+// hardware unjudged — not a Skip, because a B200 does do NVFP4 and the test
+// applies to it — and nccl ships one gencode that an unlisted fleet must
+// rebuild. Each runner's README states its
 // GPU coverage; conflating the two is how an operator ends up reporting Error on
 // hardware it simply was not built for.
 //
