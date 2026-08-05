@@ -664,9 +664,19 @@ func groupMessage(members []groupMember) string {
 	parts := make([]string, 0, len(order))
 	for _, key := range order {
 		lines := byVerdict[key]
-		// The whole group agreeing is one clause; anything smaller is named.
+		// The whole group agreeing is one clause — but it still carries ONE
+		// rank's words as the exemplar, and that is not decoration.
+		//
+		// A bare "all 12 ranks error" is the shape every real infrastructure
+		// fault takes (a missing host mount, an unpullable image, a driver
+		// skew), so collapsing it to a count discarded the runner's own
+		// explanation in precisely the case where every rank had the same one.
+		// The stored result then explained nothing, and the pod logs that did
+		// are gone at the run's TTL. Keeping one line costs a bounded amount and
+		// is the difference between a record somebody can act on and a record
+		// somebody has to reproduce.
 		if len(lines) == len(members) && len(members) > groupMaxNamedRanks {
-			parts = append(parts, fmt.Sprintf("all %d ranks %s", len(members), key))
+			parts = append(parts, fmt.Sprintf("all %d ranks %s, e.g. %s", len(members), key, lines[0]))
 			continue
 		}
 		if len(lines) > groupMaxNamedRanks {

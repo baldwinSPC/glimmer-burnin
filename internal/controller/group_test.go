@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -434,6 +435,43 @@ func TestGroup_DeadlineNamesTheRanksThatHung(t *testing.T) {
 		t.Errorf("a hung rank's pod was left running on cordoned hardware")
 	}
 	h.assertNoStrandedCordons()
+}
+
+// A group that fails uniformly must still say WHY.
+//
+// The summariser collapses ranks that share a verdict so a large group cannot
+// produce a status message the apiserver refuses. Collapsing them to a bare
+// count discarded the runner's own words in the one case where every rank had
+// the same thing to say — which is the shape of every real infrastructure
+// fault: a missing host mount, an unpullable image, a driver skew. The stored
+// record then explained nothing, and the pod logs that did explain it are gone
+// at the run's TTL. That is the defect #114 fixed for a single runner, arriving
+// again through the group summariser.
+func TestGroup_UniformFailureStillCarriesTheReason(t *testing.T) {
+	const reason = "NCCL_ERROR: could not open device /dev/infiniband/uverbs0"
+
+	for _, nranks := range []int{3, 5, 12} {
+		members := make([]groupMember, 0, nranks)
+		for i := 0; i < nranks; i++ {
+			members = append(members, groupMember{
+				rank: i, node: fmt.Sprintf("spark-%d", i),
+				result: &runner.Result{Verdict: runner.VerdictError, ExitCode: 3, Message: reason,
+					Metrics: map[string]string{}, Unmeasurable: map[string]bool{}},
+			})
+		}
+		out := combineGroup(members, nil, &burninv1alpha1.BurnInTestSpec{})
+
+		if !strings.Contains(out.Message, reason) {
+			t.Errorf("a %d-rank group where every rank reported %q recorded a message that does not contain it:\n  %s",
+				nranks, reason, out.Message)
+		}
+		// Still bounded: the whole point of collapsing is that a large group
+		// cannot write a status the apiserver refuses.
+		if len(out.Message) > 1024 {
+			t.Errorf("a %d-rank group produced a %d-character message; the summariser is not bounding it",
+				nranks, len(out.Message))
+		}
+	}
 }
 
 // ── the interlock ────────────────────────────────────────────────────────────
