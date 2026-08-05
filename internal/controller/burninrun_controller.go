@@ -1212,9 +1212,20 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 	}
 
 	if len(parsed.InvalidNames) > 0 {
+		// The COUNT is exact and the LIST is bounded. A Group execution
+		// concatenates every rank's names, and pkg/runner adds one per offending
+		// line — so an unbounded join grows as ranks x samples and lands in a
+		// status written once per attempt per retry. Naming a handful is enough
+		// to go and fix the runner; naming two thousand loses the verdict.
+		shown := parsed.InvalidNames
+		suffix := ""
+		if len(shown) > maxNamedInvalidMetrics {
+			shown = shown[:maxNamedInvalidMetrics]
+			suffix = fmt.Sprintf(", and %d more", len(parsed.InvalidNames)-maxNamedInvalidMetrics)
+		}
 		message = strings.TrimSpace(message + fmt.Sprintf(
-			" [runner emitted %d metric name(s) the contract rejects: %s]",
-			len(parsed.InvalidNames), strings.Join(parsed.InvalidNames, ", ")))
+			" [runner emitted %d metric name(s) the contract rejects: %s%s]",
+			len(parsed.InvalidNames), strings.Join(shown, ", "), suffix))
 	}
 	return phase, message, violations
 }
@@ -1950,6 +1961,10 @@ func (r *BurnInRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // the apiserver refuses would lose the whole verdict rather than the tail of one
 // sentence — so it is truncated visibly rather than trusted.
 const maxPodDetail = 512
+
+// maxNamedInvalidMetrics bounds how many rejected metric names a message spells
+// out. The count is always exact.
+const maxNamedInvalidMetrics = 8
 
 func clampPodDetail(s string) string {
 	s = strings.Join(strings.Fields(s), " ")

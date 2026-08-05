@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -126,9 +127,27 @@ func (m groupMember) summary() string {
 		return out
 	}
 	if s := strings.TrimSpace(m.result.Message); s != "" {
-		out += ": " + s
+		out += ": " + clampRunnerLine(s)
 	}
 	return out
+}
+
+// maxRankLine bounds ONE rank's own words inside a group summary.
+//
+// A rank's message is its last non-key=value stdout line, which nothing caps —
+// an NCCL or CUTLASS failure runs to kilobytes. Clamping per rank rather than
+// only in total is what stops one loud rank from crowding every other rank out
+// of the summary: with a whole-message cap alone, rank 0 spewing 8 KB means
+// ranks 1..N are never named at all, and on a collective the ranks that DIFFER
+// are the ones worth reading.
+const maxRankLine = 300
+
+func clampRunnerLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= maxRankLine {
+		return s
+	}
+	return s[:maxRankLine] + "…"
 }
 
 // advanceGroup moves one Group-scope execution forward by exactly one step. It
@@ -565,6 +584,7 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 	// names the wrong node, which on a per-node metric is the entire cost of the
 	// bug it exists to report.
 	reported := map[string][]rankValue{}
+	var invalid []string
 	for i := len(members) - 1; i >= 0; i-- {
 		m := members[i]
 		if m.result == nil {
@@ -574,7 +594,7 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 			reported[k] = append(reported[k], rankValue{rank: m.rank, value: v})
 			out.Metrics[k] = v
 		}
-		out.InvalidNames = append(out.InvalidNames, m.result.InvalidNames...)
+		invalid = append(invalid, m.result.InvalidNames...)
 	}
 	// A declaration of unmeasurability never overwrites a real measurement, which
 	// is the Pair rule and is right there: two ends of ONE link measuring one
@@ -607,23 +627,36 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 		}
 	}
 
+	// DEDUPED, because attemptOutcome joins the WHOLE list into the message and
+	// that append happens after everything this function bounds. pkg/runner adds
+	// an entry per OFFENDING LINE and progressive reporting is expected there, so
+	// a runner emitting one bad key per sample gives ranks x samples entries —
+	// 64 ranks x 40 samples is 2560 copies of the same name in one status. The
+	// SET is the finding; the count of times it was printed is not.
+	out.InvalidNames = dedupeStrings(invalid)
+
 	verdict, exit := groupVerdict(members)
 	out.Verdict = verdict
 	out.ExitCode = exit
-	out.Message = groupMessage(members)
+	// THE ORDER HERE IS THE POINT. groupMessage is the unbounded half — it embeds
+	// each rank's own last stdout line, which nothing caps — so IT is clamped,
+	// and the operator-constructed note is appended AFTER and never truncated.
+	//
+	// The reverse order is what the previous revision did, and it defeated the
+	// fix it shipped alongside: the note was appended to the tail and the clamp
+	// cut the tail, so on exactly the long messages the clamp exists for, the
+	// note went and the runner spew stayed. Since the merge deliberately leaves
+	// out.Unmeasurable empty when another rank measured the key, that note is the
+	// ONLY record that a rank declared the metric unmeasurable — so truncating it
+	// restored the certification it was written to prevent, silently, in the case
+	// hardest to notice.
+	//
+	// Deliberate clauses outlive verbose ones. Everything appended below this
+	// line is something this operator chose to say.
+	out.Message = clampRankSummaries(groupMessage(members))
 	if note := disagreementNote(reported, out.Metrics); note != "" {
 		out.Message = strings.TrimSpace(out.Message + " [" + note + "]")
 	}
-	// THE WHOLE MESSAGE IS BOUNDED, not merely its parts. groupMessage caps how
-	// many RANKS it names and disagreementNote caps how many METRICS it names,
-	// and neither caps the length of what a rank actually said — so 64 ranks each
-	// ending on a long CUDA or NCCL error line produced a 199 KB message, written
-	// to TestAttempt.Message and TestResult.Message for every attempt of every
-	// retry. A BurnInRun's status then grows until the apiserver refuses the
-	// update outright, at which point the run can record no verdict at all: the
-	// failure the per-part caps were added to prevent, reached by the one route
-	// they do not cover.
-	out.Message = clampGroupMessage(out.Message)
 
 	// The log-fetch rule, applied ONCE to the combined result rather than per
 	// rank. A fetch failure only invalidates the verdict if it actually cost a
@@ -833,7 +866,8 @@ func disagreementNote(reported map[string][]rankValue, kept map[string]string) s
 		len(keys), strings.Join(parts, "; "))
 }
 
-// maxGroupMessage bounds the constructed message for one group execution.
+// maxGroupMessage bounds the per-rank SUMMARIES of one group execution — the
+// half that carries text this operator did not write.
 //
 // Generous, because every clause in it is there to stop a misattribution and
 // truncating early would trade one failure for another — but finite, because an
@@ -842,9 +876,33 @@ func disagreementNote(reported map[string][]rankValue, kept map[string]string) s
 // cut.
 const maxGroupMessage = 4096
 
-func clampGroupMessage(s string) string {
+func clampRankSummaries(s string) string {
 	if len(s) <= maxGroupMessage {
 		return s
 	}
-	return s[:maxGroupMessage] + "… (message truncated; see the pods' logs while the run's TTL holds them)"
+	// Cut on a rune boundary: these messages contain em dashes, and a status
+	// carrying a half-written UTF-8 sequence is not something to hand an
+	// apiserver or a JSON envelope.
+	cut := maxGroupMessage
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut] + "… (rank detail truncated; see the pods' logs while the run's TTL holds them)"
+}
+
+// dedupeStrings keeps first-seen order and drops repeats.
+func dedupeStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
