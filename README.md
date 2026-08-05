@@ -118,7 +118,9 @@ different run — so a live run's node is never released out from under it.
 ## Test kinds
 
 **All eleven kinds ship a runner image, and every one is published and public**
-under `ghcr.io/baldwinspc/glimmer-burnin-<kind>:v0.2.0`. A test that names no
+under `ghcr.io/baldwinspc/glimmer-burnin-<kind>:<version>`; the tags the operator
+defaults to live in `internal/controller/pods.go`, which is the source of truth
+and states what each release was and was not verified against. A test that names no
 `spec.runner.image` gets the built-in default for its kind; `spec.runner.image`
 overrides it, which is the seam new hardware arrives through.
 
@@ -305,13 +307,20 @@ error-retry, checkpointing, two-pod Pair rendezvous), schedule and fingerprint
 reconcilers, threshold evaluation, and sink delivery over webhook / ConfigMap /
 Prometheus. All eleven runner images are published and public.
 
-### Qualified on hardware, not only in CI
+### Qualified on hardware — and which tags that covers
 
 Two NVIDIA DGX Sparks (GB10, `sm_121`), Kubernetes v1.32.0, ConnectX-7 over
 200G RoCE. Node-scope: **10/10 passed** across both nodes. Pair-scope:
 `ib-write-bw` 99.61 Gb/s at 1.56 µs, `nccl` 12.02 GB/s bus bandwidth with zero
 miscompares, `gpudirect-rdma` correctly **Skipped** (GB10 exposes no
 peer-memory provider).
+
+> **That exercise measured the `v0.2.0` build of these sources, published as the
+> `v0.3.0` tags.** Later tags are not covered by it. What stands behind a tag is
+> recorded next to the pins in `internal/controller/pods.go` rather than here,
+> because the pins are what a fleet actually runs — and a release cut without a
+> GPU available says so there in as many words. Do not read this section as a
+> claim about whichever tag is newest.
 
 That exercise is also where most of this design's sharp edges came from. **Every
 acceptance threshold that had been derived from a spec sheet rather than
@@ -329,9 +338,10 @@ gate is made of.
   reads `BURNIN_ROLE=server|client` rather than `BURNIN_RANK`, so a Group test
   today needs a custom runner image. Verifying an N-rank collective needs three
   or more GPU nodes; tracked separately.
-- **The `v0.2.0` runner tags are `linux/arm64` only.** Published tags are
-  immutable, so multi-arch begins at the next tag; until then an x86 fleet must
-  build its own and set `spec.runner.image`.
+- **The `v0.1.0` and `v0.2.x` runner tags are `linux/arm64` only.** Published
+  tags are immutable, so multi-arch begins at `v0.3.0`. An x86 fleet pinning an
+  older tag must repin or build its own; from `v0.3.0` onward one tag serves both
+  architectures and no `spec.runner.image` is needed.
 - **Fabric tests need a node-level `RLIMIT_MEMLOCK` raise.** containerd ships an
   8 MiB limit that RDMA registration lands exactly on. See
   [the prerequisite section](#cluster-prerequisite-for-the-fabric-tests) — the
