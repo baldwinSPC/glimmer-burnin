@@ -21,6 +21,7 @@ func EnvelopeFor(
 	reason contract.Reason,
 	eventKey string,
 	now time.Time,
+	cluster *contract.ClusterRef,
 ) *contract.Envelope {
 	env := &contract.Envelope{
 		Version:    contract.Version,
@@ -35,10 +36,26 @@ func EnvelopeFor(
 		},
 		Phase:       string(run.Status.Phase),
 		Fingerprint: run.Status.Fingerprint,
+		Cluster:     cluster,
 		Summary: contract.Summary{
-			Passed: run.Status.Passed,
-			Failed: run.Status.Failed,
+			Passed:  run.Status.Passed,
+			Failed:  run.Status.Failed,
+			Errored: run.Status.Errored,
+			Skipped: run.Status.Skipped,
 		},
+	}
+	// Present only where they mean something, so a consumer can read their
+	// presence as a signal rather than checking a sentinel.
+	if run.Status.Phase == burninv1alpha1.RunCancelled {
+		env.CancelReason = run.Spec.CancelReason
+	}
+	if reason == contract.ReasonCheckpoint {
+		// The sequence is already the event key — it is what makes DeliveryID
+		// stable across retries — so it is derived here rather than threaded
+		// through another parameter that could disagree with it.
+		if n, err := strconv.Atoi(eventKey); err == nil {
+			env.CheckpointSequence = n
+		}
 	}
 	for _, r := range run.Status.Results {
 		env.Results = append(env.Results, testResult(r))

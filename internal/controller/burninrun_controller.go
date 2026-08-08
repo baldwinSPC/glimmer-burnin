@@ -21,6 +21,7 @@ import (
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/internal/metrics"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
@@ -86,6 +87,12 @@ type BurnInRunReconciler struct {
 
 	// Now is the clock, swappable in tests. Nil means time.Now.
 	Now func() time.Time
+
+	// Cluster identifies the cluster in every delivered envelope. Nil emits no
+	// cluster fields at all, which is a valid envelope: an operator that has not
+	// been told its cluster's name must not guess one, because a verdict
+	// attributed to the wrong fleet is worse than one attributed to none.
+	Cluster *contract.ClusterRef
 
 	// ForgetMetrics drops a run's exported Prometheus series. Nil uses the
 	// package-level exporter. The series are a view of a live object, so they
@@ -164,6 +171,11 @@ const terminalDeliveryRetryInterval = 5 * time.Minute
 // Nodes are updated, not just read: a run holds its targets out of the
 // scheduler for its duration and restores them afterwards. See cordon.go.
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
+// The kube-system namespace UID is the closest thing Kubernetes has to a stable
+// cluster identity, and it rides in every envelope so a stored verdict is
+// portable evidence. Read once at manager start; an RBAC that does not grant it
+// is a legitimate deployment and the envelope simply carries less.
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 

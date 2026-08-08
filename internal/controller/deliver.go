@@ -83,7 +83,7 @@ func (r *BurnInRunReconciler) deliver(
 		return true
 	}
 	logger := log.FromContext(ctx)
-	env := sink.EnvelopeFor(run, run.Spec.ProfileRef, reason, eventKey, r.now())
+	env := sink.EnvelopeFor(run, run.Spec.ProfileRef, reason, eventKey, r.now(), r.Cluster)
 
 	ctx, cancel := context.WithTimeout(ctx, deliveryTimeout)
 	defer cancel()
