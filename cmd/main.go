@@ -21,9 +21,11 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/internal/controller"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
 var (
@@ -80,10 +82,14 @@ func managerOptions(metricsAddr, probeAddr string, enableLeaderElection bool, po
 }
 
 func main() {
-	var metricsAddr, probeAddr string
+	var metricsAddr, probeAddr, clusterName string
 	var enableLeaderElection bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&clusterName, "cluster-name", "",
+		"Name of this cluster, echoed into every delivered envelope so a stored verdict is "+
+			"portable evidence on its own. NEVER guessed: unset emits no cluster name, because "+
+			"a verdict attributed to the wrong fleet is worse than one attributed to none.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. Ensures only one active manager.")
 	opts := zap.Options{Development: true}
@@ -113,8 +119,9 @@ func main() {
 	}
 
 	if err := (&controller.BurnInRunReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Cluster: clusterRef(context.Background(), mgr.GetAPIReader(), clusterName),
 		// The uncached reader, for the two node reads whose staleness costs the
 		// fleet a node rather than a reconcile. See BurnInRunReconciler.APIReader.
 		APIReader: mgr.GetAPIReader(),
@@ -193,4 +200,40 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// clusterRef assembles the cluster identity carried in every envelope.
+//
+// The NAME comes from a flag and is never inferred. There is no reliable way to
+// learn what an operator calls a cluster from inside it, and a guess that is
+// wrong attributes a hardware verdict to the wrong fleet — which is worse than
+// carrying no name at all, because a consumer cannot tell a guess from a fact.
+//
+// The UID is the kube-system namespace UID, the closest thing Kubernetes has to
+// a stable cluster identity: it survives renames and node replacement, and it
+// differs between two clusters an operator happened to give the same name. It is
+// read ONCE, here, through the uncached reader — the manager's cache is not
+// started yet at this point, and a value that cannot change is not worth a watch.
+//
+// Either half may be absent and the envelope stays valid. An operator with
+// neither configured emits no cluster block at all.
+func clusterRef(ctx context.Context, reader client.Reader, name string) *contract.ClusterRef {
+	ref := &contract.ClusterRef{Name: name}
+
+	var ns corev1.Namespace
+	if err := reader.Get(ctx, types.NamespacedName{Name: "kube-system"}, &ns); err != nil {
+		// Not fatal, and deliberately quiet at info level: an RBAC that does not
+		// grant this read is a legitimate deployment, and the envelope simply
+		// carries less. Failing to start over an optional identity field would
+		// trade hardware acceptance for provenance.
+		setupLog.Info("could not read the kube-system namespace UID; envelopes will carry no cluster UID",
+			"error", err.Error())
+	} else {
+		ref.UID = string(ns.UID)
+	}
+
+	if ref.Name == "" && ref.UID == "" {
+		return nil
+	}
+	return ref
 }

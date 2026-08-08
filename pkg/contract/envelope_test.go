@@ -111,7 +111,7 @@ func TestJSONWireFormat(t *testing.T) {
 		`"sentAt":`,
 		`"run":{"namespace":"burnin","name":"run-1","uid":"uid-1","profile":"spark-acceptance"}`,
 		`"phase":"Passed"`,
-		`"summary":{"passed":2,"failed":0}`,
+		`"summary":{"passed":2,"failed":0,"errored":0,"skipped":0}`,
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("wire format missing %s\ngot: %s", want, b)
@@ -143,5 +143,84 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if err := out.Validate(); err != nil {
 		t.Errorf("decoded envelope failed validation: %v", err)
+	}
+}
+
+// A consumer built against the PREVIOUS envelope must decode a current one —
+// issue #140's acceptance criterion, and the whole reason this schema is
+// additive rather than versioned per change.
+//
+// The struct below is the shape of Envelope before cluster, cancelReason,
+// checkpointSequence and the two summary counters existed. It is written out
+// literally rather than derived, because the point is to be a consumer that has
+// not been recompiled.
+func TestAPreChangeConsumerDecodesACurrentEnvelope(t *testing.T) {
+	type oldSummary struct {
+		Passed int32 `json:"passed"`
+		Failed int32 `json:"failed"`
+	}
+	type oldRunRef struct {
+		Namespace string `json:"namespace"`
+		Name      string `json:"name"`
+		UID       string `json:"uid"`
+		Profile   string `json:"profile,omitempty"`
+	}
+	type oldEnvelope struct {
+		Version     string            `json:"version"`
+		DeliveryID  string            `json:"deliveryId"`
+		Reason      Reason            `json:"reason"`
+		SentAt      time.Time         `json:"sentAt"`
+		Run         oldRunRef         `json:"run"`
+		Phase       string            `json:"phase"`
+		Fingerprint map[string]string `json:"fingerprint,omitempty"`
+		Summary     oldSummary        `json:"summary"`
+	}
+
+	current := Envelope{
+		Version:    Version,
+		DeliveryID: "abc123",
+		Reason:     ReasonCheckpoint,
+		SentAt:     time.Unix(1750000000, 0).UTC(),
+		Run:        RunRef{Namespace: "burnin", Name: "run1", UID: "uid-1", Profile: "acceptance"},
+		Cluster:    &ClusterRef{Name: "spark-lab", UID: "kube-system-uid"},
+		Phase:      "Running",
+		// Everything the old consumer has never heard of.
+		CancelReason:       "",
+		CheckpointSequence: 7,
+		Summary:            Summary{Passed: 2, Failed: 1, Errored: 3, Skipped: 4},
+	}
+	raw, err := json.Marshal(current)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var old oldEnvelope
+	if err := json.Unmarshal(raw, &old); err != nil {
+		t.Fatalf("a pre-change consumer could not decode a current envelope: %v", err)
+	}
+	// Everything it knew about is intact and unmoved.
+	if old.Version != Version || old.DeliveryID != "abc123" || old.Phase != "Running" {
+		t.Errorf("the fields an old consumer reads changed: %+v", old)
+	}
+	if old.Run.UID != "uid-1" || old.Run.Profile != "acceptance" {
+		t.Errorf("RunRef moved: %+v", old.Run)
+	}
+	if old.Summary.Passed != 2 || old.Summary.Failed != 1 {
+		t.Errorf("the summary counters an old consumer reads changed: %+v", old.Summary)
+	}
+}
+
+// The summary must account for every execution, which is the one thing a
+// summary is for. Before errored and skipped existed it counted two of the four
+// phases and told the consumer to walk Results instead.
+func TestSummaryAccountsForEveryExecution(t *testing.T) {
+	env := Envelope{
+		Summary: Summary{Passed: 2, Failed: 1, Errored: 3, Skipped: 4},
+		Results: make([]TestResult, 10),
+	}
+	total := env.Summary.Passed + env.Summary.Failed + env.Summary.Errored + env.Summary.Skipped
+	if int(total) != len(env.Results) {
+		t.Errorf("summary totals %d across %d results — a consumer asking 'how many did not "+
+			"pass' cannot answer it from the summary", total, len(env.Results))
 	}
 }

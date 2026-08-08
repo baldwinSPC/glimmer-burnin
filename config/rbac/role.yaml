@@ -25,6 +25,14 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - namespaces
+  - pods/log
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - nodes
   verbs:
   - get
@@ -43,13 +51,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/log
-  - secrets
-  verbs:
-  - get
 - apiGroups:
   - burnin.glimmer.ai
   resources:

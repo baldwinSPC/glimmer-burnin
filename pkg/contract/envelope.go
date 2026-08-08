@@ -125,6 +125,39 @@ type NotEvaluated struct {
 type Summary struct {
 	Passed int32 `json:"passed"`
 	Failed int32 `json:"failed"`
+	// Errored and Skipped complete the tally.
+	//
+	// Without them the summary counted two of the four phases and the doc
+	// comment told the consumer to walk Results instead — which is correct and
+	// means the summary could not be used for the one thing a summary is for.
+	// "How many executions did not pass" is the question every consumer asks
+	// first, and it was the one question this struct could not answer.
+	//
+	// They are kept as separate counters rather than folded into Failed for the
+	// reason recount() keeps them separate in the status: an Errored execution
+	// measured nothing and a Skipped one did not apply, and neither is a
+	// hardware verdict. A summary reading "0 failed" beside eight executions
+	// that never ran would be a clean sweep of hardware nobody measured.
+	Errored int32 `json:"errored"`
+	Skipped int32 `json:"skipped"`
+}
+
+// ClusterRef identifies the cluster a delivery came from.
+//
+// Ingest is per-cluster and authenticated per-cluster, so a receiver can infer
+// origin from the credential — which works right up until anyone aggregates,
+// replays or archives envelopes, at which point the document is not
+// self-describing. A stored envelope should be portable evidence on its own.
+//
+// Both fields are optional and an operator with neither configured emits
+// neither. Name is NEVER guessed: it comes from an explicit --cluster-name flag,
+// because a guessed cluster identity that is wrong is worse than an absent one —
+// it attributes a verdict to the wrong fleet.
+type ClusterRef struct {
+	Name string `json:"name,omitempty"`
+	// UID is the kube-system namespace UID, which is the closest thing
+	// Kubernetes has to a stable cluster identity. Read once at manager start.
+	UID string `json:"uid,omitempty"`
 }
 
 // Envelope is the delivered document.
@@ -137,8 +170,27 @@ type Envelope struct {
 	Reason     Reason    `json:"reason"`
 	SentAt     time.Time `json:"sentAt"`
 
-	Run   RunRef `json:"run"`
-	Phase string `json:"phase"`
+	Run RunRef `json:"run"`
+	// Cluster identifies where this delivery came from. Optional; see ClusterRef.
+	Cluster *ClusterRef `json:"cluster,omitempty"`
+	Phase   string      `json:"phase"`
+
+	// CancelReason is the reason recorded on a cancelled run.
+	//
+	// Present only when Phase is Cancelled. Without it a cancelled delivery gives
+	// a consumer no way to tell an operator-requested stop from a deadline
+	// expiry, and those mean opposite things about the hardware: one is a human
+	// deciding to stop, the other is a test that ran out of time and measured
+	// nothing.
+	CancelReason string `json:"cancelReason,omitempty"`
+
+	// CheckpointSequence orders checkpoints within one run.
+	//
+	// Present only when Reason is Checkpoint. The value already exists — it is
+	// what makes DeliveryID stable across retries — and without it a consumer
+	// receiving checkpoints out of order cannot put them back in order, which is
+	// exactly what a long soak's progress record is for.
+	CheckpointSequence int `json:"checkpointSequence,omitempty"`
 	// Fingerprint is the hardware this verdict applies to, captured at run
 	// start. A verdict without it is not portable evidence.
 	Fingerprint map[string]string `json:"fingerprint,omitempty"`
