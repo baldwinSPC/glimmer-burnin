@@ -93,20 +93,93 @@ type kernelLogProbe struct {
 	windowOK   bool
 	dropped    bool
 	available  bool
+	// tried records every candidate source that did not open, so that
+	// xid_source=none can say which and why. See why().
+	tried []sourceAttempt
 }
 
+// newKernelLogProbe picks a source and, when it cannot, RECORDS WHY.
+//
+// "xid_source=none" on its own is the same dead end as "runner terminated
+// abnormally" was before #52: it says a probe did not run and nothing about what
+// to change. Issue #134 is that dead end met on real hardware — /dev/kmsg
+// mounted exactly as the CRD documents, and still none, with no way to tell a
+// missing mount from a permission problem from a path that was never tried.
+//
+// So every candidate's failure is kept and reported. The reasons are the ones a
+// reader can act on:
+//
+//	ENOENT  the path is not in the container — the hostPaths mount is missing
+//	        or names a different path
+//	EACCES  it is there and this process may not read it. On /dev/kmsg that is
+//	        almost always kernel.dmesg_restrict=1, which requires CAP_SYSLOG,
+//	        which a container running as a NON-ROOT uid does not have in its
+//	        effective set even when the pod is privileged. On a text kern.log it
+//	        is the file's own mode — Debian ships -rw-r----- syslog:adm.
+//
+// Both are configuration, both are fixable, and neither is visible from
+// "xid_source=none".
 func newKernelLogProbe(cfg config) *kernelLogProbe {
+	p := &kernelLogProbe{source: "none"}
+
 	if cfg.kmsgPath != "" {
-		if src, err := openKmsg(cfg.kmsgPath); err == nil {
+		src, err := openKmsg(cfg.kmsgPath)
+		if err == nil {
 			return &kernelLogProbe{src: src, source: "kmsg", available: true}
 		}
+		p.tried = append(p.tried, sourceAttempt{path: cfg.kmsgPath, err: err})
 	}
-	for _, p := range cfg.kernLogPaths {
-		if src, err := openFileLog(p); err == nil {
+	for _, path := range cfg.kernLogPaths {
+		src, err := openFileLog(path)
+		if err == nil {
 			return &kernelLogProbe{src: src, source: "kernlog", available: true}
 		}
+		p.tried = append(p.tried, sourceAttempt{path: path, err: err})
 	}
-	return &kernelLogProbe{source: "none"}
+	return p
+}
+
+// sourceAttempt is one candidate that did not work out.
+type sourceAttempt struct {
+	path string
+	err  error
+}
+
+// why renders the attempts as one line an operator can act on.
+//
+// It names the ERRNO rather than the Go error text, because the errno is what
+// distinguishes the two configurations that produce this, and it appends the
+// remedy for the one that is otherwise invisible.
+func (k *kernelLogProbe) why() string {
+	if len(k.tried) == 0 {
+		return "no kernel-log source was configured (BURNIN_KMSG_PATH and BURNIN_KERN_LOG_PATHS are both empty)"
+	}
+	parts := make([]string, 0, len(k.tried))
+	permission := false
+	for _, a := range k.tried {
+		reason := "cannot open"
+		switch {
+		case errors.Is(a.err, os.ErrNotExist), errors.Is(a.err, syscall.ENOENT):
+			reason = "not present in this container (mount it with spec.runner.hostPaths)"
+		case errors.Is(a.err, os.ErrPermission), errors.Is(a.err, syscall.EACCES), errors.Is(a.err, syscall.EPERM):
+			reason = "present but not readable by this process"
+			permission = true
+		}
+		parts = append(parts, a.path+": "+reason)
+	}
+	out := strings.Join(parts, "; ")
+	if permission {
+		// The remedy nobody can guess from an errno. A privileged pod does NOT
+		// supply CAP_SYSLOG to a container running as a non-root uid, because
+		// the effective set is dropped on the switch away from root — so
+		// "privileged: true" looks like it should be enough and is not.
+		out += ". This image runs as uid 65532 by design. /dev/kmsg needs CAP_SYSLOG " +
+			"wherever kernel.dmesg_restrict=1, and a privileged pod does NOT grant it to a " +
+			"non-root uid; a text kern.log is usually mode -rw-r----- syslog:adm and is " +
+			"unreadable for the same reason. Set spec.runner.runAsUser: 0, or mount a " +
+			"kernel log this uid can read and point BURNIN_KERN_LOG_PATHS at it"
+	}
+	return out
 }
 
 // baseline counts what the log already held before the window opened.
@@ -173,6 +246,8 @@ func (k *kernelLogProbe) count() (xid, hw int64, ok bool) {
 func (k *kernelLogProbe) emit(out *emitter) {
 	out.set("xid_source", k.source)
 	if !k.available {
+		// The whole point of #134: a probe that did not run says what to change.
+		out.set("xid_source_detail", k.why())
 		return
 	}
 	if k.baselineOK && k.windowOK {

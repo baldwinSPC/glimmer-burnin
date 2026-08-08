@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -576,3 +577,76 @@ func (b *boundedOnce) scan(func(string)) error { return errTruncated }
 func (b *boundedOnce) close()                  { b.inner.close() }
 
 var errTruncated = errors.New("truncated")
+
+// xid_source=none must say WHY — issue #134.
+//
+// On a real GB10 with /dev/kmsg mounted exactly as the CRD documents, the probe
+// reported `xid_source=none` and nothing else. A profile gating xidEvents then
+// fails closed — correctly, since nothing was measured — but with no way to tell
+// a missing mount from a permission problem, and no hint that the cause is the
+// image's own non-root uid meeting kernel.dmesg_restrict=1.
+func TestKernelLogProbeSaysWhyItFoundNoSource(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("nothing is mounted", func(t *testing.T) {
+		p := newKernelLogProbe(config{
+			kmsgPath:     filepath.Join(dir, "absent-kmsg"),
+			kernLogPaths: []string{filepath.Join(dir, "absent-kern.log")},
+		})
+		if p.source != "none" {
+			t.Fatalf("source = %q", p.source)
+		}
+		out := newEmitter()
+		p.emit(out)
+
+		detail, ok := out.get("xid_source_detail")
+		if !ok {
+			t.Fatal("xid_source=none was emitted with no explanation at all — the operator " +
+				"cannot tell a missing mount from a permission problem")
+		}
+		if !strings.Contains(detail, "hostPaths") {
+			t.Errorf("a missing path should point at the field that mounts it: %q", detail)
+		}
+	})
+
+	t.Run("present but unreadable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: mode bits do not deny this process")
+		}
+		locked := filepath.Join(dir, "locked-kern.log")
+		mustWrite(t, locked, "boot\n")
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+
+		p := newKernelLogProbe(config{kernLogPaths: []string{locked}})
+		out := newEmitter()
+		p.emit(out)
+		detail, _ := out.get("xid_source_detail")
+
+		if !strings.Contains(detail, "not readable") {
+			t.Errorf("a permission failure must say so: %q", detail)
+		}
+		// The remedy nobody can guess from an errno: privileged is not enough,
+		// because the effective capability set is dropped for a non-root uid.
+		if !strings.Contains(detail, "runAsUser") {
+			t.Errorf("the explanation does not name the field that fixes it: %q", detail)
+		}
+		if !strings.Contains(detail, "dmesg_restrict") {
+			t.Errorf("the explanation does not name the host setting that causes it: %q", detail)
+		}
+	})
+
+	t.Run("a working source says nothing extra", func(t *testing.T) {
+		good := filepath.Join(dir, "kern.log")
+		mustWrite(t, good, "boot\n")
+		p := newKernelLogProbe(config{kernLogPaths: []string{good}})
+		out := newEmitter()
+		p.baseline()
+		p.collect()
+		p.emit(out)
+		if _, ok := out.get("xid_source_detail"); ok {
+			t.Error("a probe that found a source must not emit a failure explanation")
+		}
+	})
+}

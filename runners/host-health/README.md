@@ -253,8 +253,55 @@ missing device nodes the host has (see the `uverbs*` case in
 the path and the kubelet mounts the path.
 
 A text kernel log works too: mount it with `hostPaths` and point the runner at it
-with `BURNIN_KERN_LOG_PATHS` — and on a hardened node that is the more robust
-route, because it needs no capability at all.
+with `BURNIN_KERN_LOG_PATHS` — but note the mode. Debian ships
+`/var/log/kern.log` as `-rw-r----- syslog:adm`, which **this image's uid cannot
+read either**, so mounting it changes nothing on its own.
+
+### `xid_source=none` with the mount correct
+
+This image runs as uid **65532** by design (least privilege: the sysfs probes
+need nothing more). Two things follow, and together they are issue #134:
+
+- `/dev/kmsg` needs **`CAP_SYSLOG`** on any host with `kernel.dmesg_restrict=1`,
+  which is the default on Ubuntu and Debian.
+- **`privileged: true` does not supply it.** Linux drops a process's effective
+  capability set when it switches away from root, so a privileged container
+  running as a non-root uid holds no `CAP_SYSLOG` at all. The combination looks
+  sufficient and is not.
+
+The runner now says so rather than leaving you to guess — `xid_source=none` is
+accompanied by `xid_source_detail` naming each path it tried, whether the path
+was absent or unreadable, and the remedy.
+
+Two configurations work:
+
+```yaml
+# 1. Run as a uid that may read the ring buffer.
+spec:
+  runner:
+    runAsUser: 0
+    hostPaths:
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        type: CharDevice
+```
+
+```yaml
+# 2. No privilege at all: mount a log this uid can read, and name it.
+spec:
+  runner:
+    env:
+      - name: BURNIN_KERN_LOG_PATHS
+        value: /var/log/burnin/kern.log
+    hostPaths:
+      - path: /var/log/burnin/kern.log   # world-readable copy, e.g. via logrotate
+        mountPath: /var/log/burnin/kern.log
+        type: File
+```
+
+Prefer the second where a site can arrange it: it needs no capability, no root,
+and no privileged container, and it is the configuration a hardened node will
+still permit.
 
 One residual gap, unchanged by this field: if a node needs the reader to be
 **root** rather than merely to hold `CAP_SYSLOG`, the reconciler still cannot

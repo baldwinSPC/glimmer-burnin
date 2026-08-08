@@ -518,9 +518,28 @@ func podForTest(
 		// and stays true of the rendezvous variables.
 		container.Env = append(container.Env, spec.Runner.Env...)
 		container.ReadinessProbe = spec.Runner.ReadinessProbe
-		if spec.Runner.Privileged {
-			t := true
-			container.SecurityContext = &corev1.SecurityContext{Privileged: &t}
+		if spec.Runner.Privileged || spec.Runner.RunAsUser != nil {
+			container.SecurityContext = &corev1.SecurityContext{}
+			if spec.Runner.Privileged {
+				t := true
+				container.SecurityContext.Privileged = &t
+			}
+			// Separate from Privileged, because Linux drops the effective
+			// capability set when a process switches away from root: a privileged
+			// container running as a non-root uid does NOT hold CAP_SYSLOG, which
+			// is what reading /dev/kmsg needs wherever kernel.dmesg_restrict=1.
+			// Granting one and assuming the other is issue #134.
+			if spec.Runner.RunAsUser != nil {
+				uid := *spec.Runner.RunAsUser
+				container.SecurityContext.RunAsUser = &uid
+				// RunAsNonRoot defaults on some clusters via PodSecurity or a
+				// mutating admission policy, and it REFUSES a pod whose uid is 0
+				// — with an error about the image, not about this field. Saying
+				// so explicitly makes the intent legible and the failure legible
+				// if a policy still refuses it.
+				nonRoot := uid != 0
+				container.SecurityContext.RunAsNonRoot = &nonRoot
+			}
 		}
 		// Host mounts. This runs for EVERY scope and, at Pair scope, for both
 		// roles: podForTest is the one place a runner pod is built, so the server
