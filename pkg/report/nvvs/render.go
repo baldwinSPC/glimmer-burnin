@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -153,26 +154,49 @@ func (r Renderer) test(res contract.TestResult, info report.NodeInfo, node strin
 		base.EntityID = &id
 		t.Results = []Result{base}
 
-	case len(info.GPUs) > 0:
-		// Broadcast the node's verdict to that node's accelerators.
+	case len(info.GPUs) == 1:
+		// EXACTLY one device, so the binding is exact and is made.
+		id := info.GPUs[0].Index
+		base.EntityGroup = "GPU"
+		base.EntityID = &id
+		t.Results = []Result{base}
+
+	case len(info.GPUs) > 1:
+		// More than one device, so the verdict binds to NONE of them — issue
+		// #206.
 		//
-		// Exact on a single-GPU part. On a multi-GPU node it is an
-		// over-attribution: the runner reported one verdict for the node and
-		// this renderer cannot invent per-device detail it was never given. The
-		// info line says so on every result rather than letting a reader assume
-		// the per-GPU attribution was measured.
-		t.Results = make([]Result, 0, len(info.GPUs))
-		for _, g := range info.GPUs {
-			id := g.Index
-			cp := base
-			cp.EntityGroup = "GPU"
-			cp.EntityID = &id
-			if len(info.GPUs) > 1 {
-				cp.Info = append(append([]string{}, cp.Info...),
-					"attribution=node (this verdict is the node's; per-device detail was not measured)")
-			}
-			t.Results = append(t.Results, cp)
-		}
+		// This used to broadcast the node's verdict to every accelerator, with
+		// an info line saying the per-device attribution had not been measured.
+		// The line is honest and it does not reach the consumer that matters:
+		// NVVS consumers COUNT results[] objects, which is the normal reason to
+		// parse this format at all. Prose in info[] does not participate in
+		// counting, so one failing thermal-soak on an eight-GPU node was eight
+		// objects with status "Fail" and every tallying tool reported eight
+		// failed GPUs — an engineer replacing seven healthy parts, or a fleet
+		// manager quarantining eight devices.
+		//
+		// It is the split-Pair-verdict defect one level down, and it is not
+		// recoverable downstream: once the document has been forwarded or
+		// re-serialised, eight objects are eight results and nothing carries
+		// the fact that they were one.
+		//
+		// It is also more wrong than "over-attribution" suggests. clockprobe,
+		// thermal-soak and gpu-burn run on ONE CUDA device and report for that
+		// device alone, so the verdict was never about all eight — it was about
+		// one the ordinal cannot identify.
+		//
+		// An entity-less results[] entry is a shape DCGM itself produces (it is
+		// exactly what test_summary is), so binding to nothing costs no schema
+		// compatibility.
+		//
+		// The device the runner ACTUALLY measured is already in info[]:
+		// infoFor emits every metric as key=value, so a runner that reported
+		// pciBusId has said which part was under load. That is the only
+		// unambiguous statement available — an ordinal is not, because MIG and
+		// CUDA_VISIBLE_DEVICES both remap it — and duplicating it here would
+		// print the same line twice.
+		base.Info = append(append([]string{}, base.Info...), nodeScopeLine(info))
+		t.Results = []Result{base}
 
 	default:
 		// No inventory: report the result without claiming which device it was
@@ -181,6 +205,21 @@ func (r Renderer) test(res contract.TestResult, info report.NodeInfo, node strin
 	}
 
 	return t
+}
+
+// nodeScopeLine names every device on the node, for a human.
+//
+// The verdict binds to no entity, so this is where a reader learns what hardware
+// was in the machine. It is prose deliberately: a machine reading entity fields
+// must find none, and a person reading the document must still see the fleet.
+func nodeScopeLine(info report.NodeInfo) string {
+	ids := make([]string, 0, len(info.GPUs))
+	for _, g := range info.GPUs {
+		ids = append(ids, strconv.Itoa(int(g.Index)))
+	}
+	return fmt.Sprintf(
+		"scope=node gpus=%s (this verdict is about the node, not about any one device; "+
+			"it is emitted ONCE and is not duplicated per device)", strings.Join(ids, ","))
 }
 
 // testName keeps our name and annotates a link so the category alone cannot
