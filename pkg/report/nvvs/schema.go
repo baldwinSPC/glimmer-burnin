@@ -32,13 +32,20 @@
 // than approximate — they are constants in the vendor's source, not guesses.
 //
 // The NESTING of metadata, entity_groups and "Overall Result" relative to the
-// "DCGM Diagnostic" object is inferred and has NOT been checked against a real
-// capture. Until it is, this renderer is compatible in its vocabulary and
-// unverified in its exact tree. That is recorded in the package rather than
-// discovered by someone whose parser breaks: capturing `dcgmi diag -r1 -j` and
-// `-r2 -j` from real hardware and pinning them as golden fixtures is tracked
-// separately, and this package's tests assert the key names it controls rather
-// than pretending to assert a shape nobody has compared.
+// "DCGM Diagnostic" object is now CHECKED against a real capture, and the check
+// found it wrong.
+//
+// The capture was already here: runners/dcgm-diag/diagjson_test.go holds
+// `dcgm4GB10`, a genuine `dcgmi diag -j` document from this project's own GB10
+// fleet under DCGM 4.2.3. Its root keys are ["DCGM Diagnostic", "entity_groups",
+// "metadata"], with only "test_categories" inside the first — so metadata,
+// entity_groups and "Overall Result" are ROOT SIBLINGS, not children.
+// TestTheDocumentTreeMatchesARealCapture compares the two documents directly, so
+// the tree cannot be re-inferred.
+//
+// What remains unverified is narrower and is stated where it applies: the
+// entity_group_id enum values, and the key spellings this package deliberately
+// does not emit.
 package nvvs
 
 // Field names, verbatim from NvvsJsonStrings.h. Kept as constants so a typo is
@@ -59,9 +66,40 @@ const (
 	keyGPUSerials    = "GPU Device Serials"
 )
 
-// Document is the top-level object. The whole diagnostic hangs off one key.
+// Document is the top-level object.
+//
+// ONLY test_categories nests under "DCGM Diagnostic". metadata, entity_groups,
+// "Overall Result" and the document-level error and warning are SIBLINGS of it,
+// at the root.
+//
+// This was inferred, and inferred wrong, until it was compared with a real
+// capture. The capture was already in this repository: runners/dcgm-diag/
+// diagjson_test.go holds `dcgm4GB10`, a genuine `dcgmi diag -j` document from
+// this project's own GB10 fleet under DCGM 4.2.3, and its root keys are
+// exactly ["DCGM Diagnostic", "entity_groups", "metadata"] with only
+// "test_categories" inside the first.
+//
+// The consequence of the old shape was total rather than cosmetic: a consumer
+// reading the real tree looks for metadata and entity_groups at the root, finds
+// neither, and gets a document with no driver version, no serials and no entity
+// inventory — while every key name in it is correct, so nothing looks wrong.
+// TestTheDocumentTreeMatchesARealCapture pins it against the capture itself, so
+// this cannot be re-inferred.
 type Document struct {
 	Diagnostic Diagnostic `json:"DCGM Diagnostic"`
+
+	Metadata     *Metadata     `json:"metadata,omitempty"`
+	EntityGroups []EntityGroup `json:"entity_groups,omitempty"`
+	// OverallResult is the host's verdict. Kept distinct from a per-test status
+	// so that a reader who only looks here is not misled.
+	OverallResult string `json:"Overall Result,omitempty"`
+	// RuntimeError is set when the diagnostic itself could not run. We use it
+	// for a run that reached no verdict, which is a statement about the run and
+	// not about the hardware.
+	RuntimeError string `json:"runtime_error,omitempty"`
+	// Warning is the document-level caveat: a baseline sweep, a partial record.
+	Warning string   `json:"Warning,omitempty"`
+	AuxData *AuxData `json:"aux_data,omitempty"`
 }
 
 // Diagnostic is one host's report. NVVS is single-host by construction —
@@ -69,19 +107,9 @@ type Document struct {
 // these per node rather than a single document that misrepresents its shape.
 type Diagnostic struct {
 	Version string `json:"version,omitempty"`
-	// RuntimeError is set when the diagnostic itself could not run. We use it
-	// for a run that reached no verdict, which is a statement about the run and
-	// not about the hardware.
-	RuntimeError string `json:"runtime_error,omitempty"`
-	// Warning is the document-level caveat: a baseline sweep, a partial record.
-	Warning      string        `json:"Warning,omitempty"`
-	Metadata     *Metadata     `json:"metadata,omitempty"`
-	EntityGroups []EntityGroup `json:"entity_groups,omitempty"`
-	Categories   []Category    `json:"test_categories"`
-	// OverallResult is the host's verdict. Kept distinct from a per-test status
-	// so that a reader who only looks here is not misled.
-	OverallResult string   `json:"Overall Result,omitempty"`
-	AuxData       *AuxData `json:"aux_data,omitempty"`
+	// Categories is the ONLY key that nests here. Everything else that used to
+	// live in this struct is a root sibling; see Document.
+	Categories []Category `json:"test_categories"`
 }
 
 // Metadata is the environment the diagnostic observed.

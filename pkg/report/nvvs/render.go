@@ -70,24 +70,24 @@ func (r Renderer) document(in report.Input, verdict *contract.Envelope, final bo
 	fp := in.Fingerprint()
 	info, _ := in.NodeByName(node)
 
-	d := Diagnostic{
-		Version:      schemaTag,
+	doc := Document{
 		Metadata:     metadataFor(info, fp, node, in.Artifacts),
 		EntityGroups: entityGroupsFor(info),
 		AuxData:      auxFor(in, verdict, final, node),
 	}
+	d := Diagnostic{Version: schemaTag}
 
 	if !final {
 		// A run that never reached a verdict renders, because a soak reporting
 		// at hour six is useful. It must not read as a verdict, and NVVS's own
 		// field for "the diagnostic did not complete" is the honest place to
 		// say so.
-		d.RuntimeError = fmt.Sprintf(
+		doc.RuntimeError = fmt.Sprintf(
 			"this run had not finished when the report was generated (phase %s); it records progress, not a verdict",
 			verdict.Phase)
 	}
 	if verdict.Baseline {
-		d.Warning = "BASELINE RUN: this profile carried no thresholds. " +
+		doc.Warning = "BASELINE RUN: this profile carried no thresholds. " +
 			"It measured the hardware and certified nothing."
 	}
 
@@ -112,8 +112,9 @@ func (r Renderer) document(in report.Input, verdict *contract.Envelope, final bo
 		d.Categories = []Category{}
 	}
 
-	d.OverallResult = overall(verdict.Results, node)
-	return Document{Diagnostic: d}
+	doc.OverallResult = overall(verdict.Results, node)
+	doc.Diagnostic = d
+	return doc
 }
 
 // test renders one result.
