@@ -477,15 +477,18 @@ or extend the list for your fleet.
 
 ### Prerequisites for publishing
 
-Both are outside this directory and are **not** done by this runner's own change:
+Both were outside this directory and are **now done**; they are kept here as the
+record of what a new runner still owes.
 
-1. `thermal-soak` must be added to the `runner` choice list in
-   `.github/workflows/publish-runner.yml`, or the image cannot be built by the
-   workflow at all.
-2. A `defaultRunnerImages` entry in `internal/controller/pods.go`, once a tag
-   exists. Until then the kind deliberately has none, so it fails fast at plan
-   time asking for an explicit `spec.runner.image` instead of pull-failing on
-   every node.
+1. `thermal-soak` is in the `runner` choice list in
+   `.github/workflows/publish-runner.yml`. Without it the image cannot be built
+   by the workflow at all, and `runners/pins_test.go` fails a runner that is
+   missing from that list.
+2. `internal/controller/pods.go` pins a `defaultRunnerImages` entry. Before a tag
+   existed the kind deliberately had none, so it failed fast at plan time asking
+   for an explicit `spec.runner.image` rather than pull-failing on every node —
+   which is still the correct state for a kind whose runner has not been
+   published.
 
 ---
 

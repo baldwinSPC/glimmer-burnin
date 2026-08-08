@@ -368,8 +368,7 @@ jobs:
   # or is missing from the publish workflow's choice list.)
   #
   # WHY THIS IS NOT SIMPLY "BUILD ALL ELEVEN ON EVERY PR", which is what it should
-  # be: this repository is private on a personal account, so GitHub's free arm64
-  # hosted runners are unavailable and every arm64 stage runs under QEMU. One
+  # be: every arm64 stage runs under QEMU on the default hosted runner. One
   # measured data point: compute-smoke, the cheapest of the CUDA runners, took
   # 14m19s cold. The heavy ones compile six gencodes of a template-dense .cu, or
   # build NCCL from source, under that emulation. Eleven of those on every push
@@ -395,14 +394,17 @@ jobs:
   #     vanished, an upstream that retagged.
   #
   # What that leaves unguarded: for up to seven days, a runner can break for a
-  # reason outside its own directory and this workflow will not say so. Narrowing
-  # that costs money until the repo is public. When it is, the fix is no longer
-  # "run everything on an arm64 host" — with two platforms that only moves the
-  # emulation to the other half. The right shape then is one job per platform
-  # (ubuntu-latest for amd64, ubuntu-24.04-arm for arm64), each building natively
-  # and pushing by digest, with a merge step assembling the manifest list. That is
-  # a bigger change than this one and is deliberately not folded into it; the
-  # ARM64_RUNNER variable below remains as the stopgap that makes the arm64 half
+  # reason outside its own directory and this workflow will not say so.
+  #
+  # THE REPOSITORY IS NOW PUBLIC, so GitHub's free arm64 hosted runners are
+  # available and the constraint above is no longer the money it once was. The
+  # fix is NOT "run everything on an arm64 host" — with two platforms that only
+  # moves the emulation to the other half. The right shape is one job per
+  # platform (ubuntu-latest for amd64, ubuntu-24.04-arm for arm64), each building
+  # natively and pushing by digest, with a merge step assembling the manifest
+  # list; then building every runner on every PR is the honest thing to do. That
+  # is a bigger change than this one and is deliberately not folded into it. The
+  # ARM64_RUNNER variable below remains the stopgap that makes the arm64 half
   # native at the cost of emulating the amd64 half.
   runner-plan:
     runs-on: ubuntu-latest
