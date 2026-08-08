@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // The artifact channel: how a runner returns evidence that is not a metric.
@@ -40,6 +41,13 @@ import (
 //   - An UNTERMINATED fence is dropped whole. Accepting a partial payload would
 //     store a truncated JSON document that a renderer then fails on, at report
 //     time, far from the runner that produced it.
+//   - A BEGIN line whose HEADER does not parse is still a fence: the artifact is
+//     refused and its payload is consumed. Treating it as ordinary text instead
+//     was a real defect — a runner naming an artifact "has space.json" produced
+//     a marker with three fields, which fell through to the metric scanner along
+//     with the entire payload it was announcing. A line that says it opens a
+//     fence opens one; the only question left is whether its contents can be
+//     kept.
 //   - A NESTED begin marker refuses the outer artifact and RE-SCANS from that
 //     marker, treating it as the start of a fresh one. Resuming ordinary metric
 //     parsing there instead would be the first rule's own defect by another
@@ -53,8 +61,10 @@ import (
 // Nothing here can change a metric, a verdict or an exit code. An artifact is
 // evidence about a verdict, never part of one.
 
+func isSpace(b byte) bool { return b == ' ' || b == '\t' }
+
 const (
-	artifactBegin = "-----BEGIN BURNIN ARTIFACT "
+	artifactBegin = "-----BEGIN BURNIN ARTIFACT"
 	artifactEnd   = "-----END BURNIN ARTIFACT-----"
 	// markerSuffix closes the BEGIN line.
 	markerSuffix = "-----"
@@ -76,6 +86,12 @@ type Artifact struct {
 	// MediaType is what the payload IS, so a renderer does not have to guess.
 	MediaType string
 	// Payload is the extracted bytes. Empty when Dropped is set.
+	//
+	// The channel is LINE-oriented — it is stdout — so a payload is a sequence
+	// of lines and always ends in a newline. A runner with genuinely binary
+	// evidence must encode it (base64, and say so in the media type); a raw
+	// blob containing a 0x0a is indistinguishable from a line break here, and
+	// nothing downstream could tell them apart either.
 	Payload string
 	// SizeBytes is the payload's TRUE size, which is not len(Payload) when the
 	// artifact was dropped for being oversized — that is the whole point of
@@ -101,10 +117,19 @@ func extractArtifacts(stdout string) (artifacts []Artifact, rest []string) {
 	lines := strings.Split(stdout, "\n")
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], "\r")
-		name, mediaType, ok := parseArtifactBegin(line)
-		if !ok {
+		name, mediaType, kind := classifyBegin(line)
+		if kind == notAMarker {
 			rest = append(rest, lines[i])
 			continue
+		}
+		// A header that does not parse still opened a fence. Its payload is
+		// consumed below and the artifact is refused; see the file comment.
+		headerErr := ""
+		if kind == malformedMarker {
+			headerErr = fmt.Sprintf(
+				"the fence header %q is not \"<name> <mediaType>\"; both are required and "+
+					"neither may contain a space", name)
+			name, mediaType = "", ""
 		}
 
 		var payload strings.Builder
@@ -116,7 +141,7 @@ func extractArtifacts(stdout string) (artifacts []Artifact, rest []string) {
 				closed = true
 				break
 			}
-			if _, _, isBegin := parseArtifactBegin(body); isBegin {
+			if _, _, k := classifyBegin(body); k != notAMarker {
 				// A fence inside a fence. The payload has to encode it; guessing
 				// which marker was meant would corrupt one of the two.
 				nested = true
@@ -128,6 +153,11 @@ func extractArtifacts(stdout string) (artifacts []Artifact, rest []string) {
 		}
 
 		switch {
+		case headerErr != "":
+			// Reported before the other cases: a fence whose header is
+			// unreadable cannot be described any other way, and its size and
+			// closure say nothing useful about evidence nobody can name.
+			artifacts = append(artifacts, Artifact{Dropped: headerErr})
 		case nested:
 			artifacts = append(artifacts, Artifact{Name: name, MediaType: mediaType,
 				Dropped: "a BEGIN marker appeared inside the payload; encode it or split the artifact"})
@@ -163,19 +193,59 @@ func extractArtifacts(stdout string) (artifacts []Artifact, rest []string) {
 	return artifacts, rest
 }
 
-// parseArtifactBegin reads "-----BEGIN BURNIN ARTIFACT <name> <mediaType>-----".
+// markerKind is how much of a BEGIN line could be understood.
+type markerKind int
+
+const (
+	// notAMarker: an ordinary line of stdout.
+	notAMarker markerKind = iota
+	// validMarker: "<name> <mediaType>" both read.
+	validMarker
+	// malformedMarker: the line opens a fence but its header does not parse.
+	// The distinction from notAMarker is the whole point — see the file
+	// comment. The returned name is the raw header, clamped, so the refusal can
+	// say which artifact was lost.
+	malformedMarker
+)
+
+// classifyBegin reads "-----BEGIN BURNIN ARTIFACT <name> <mediaType>-----".
 //
 // Both fields are required. A nameless artifact cannot be referenced and an
 // untyped one cannot be rendered, and inventing a default for either would put
 // this package in the business of guessing what a runner meant.
-func parseArtifactBegin(line string) (name, mediaType string, ok bool) {
+func classifyBegin(line string) (name, mediaType string, kind markerKind) {
 	if !strings.HasPrefix(line, artifactBegin) || !strings.HasSuffix(line, markerSuffix) {
-		return "", "", false
+		return "", "", notAMarker
 	}
-	inner := strings.TrimSuffix(strings.TrimPrefix(line, artifactBegin), markerSuffix)
+	rest := strings.TrimSuffix(strings.TrimPrefix(line, artifactBegin), markerSuffix)
+	// The prefix stops at the keyword, so what follows must be empty or start
+	// with a space. Otherwise "-----BEGIN BURNIN ARTIFACTS a b-----" would open
+	// a fence, and a near-miss in a runner's own output would eat the lines
+	// after it. A header that is merely EMPTY does open one: the line plainly
+	// announces an artifact and simply failed to name it.
+	if rest != "" && !isSpace(rest[0]) {
+		return "", "", notAMarker
+	}
+	inner := strings.TrimSpace(rest)
 	fields := strings.Fields(inner)
 	if len(fields) != 2 {
-		return "", "", false
+		return truncateAtRune(inner, 120, "…"), "", malformedMarker
 	}
-	return fields[0], fields[1], true
+	return fields[0], fields[1], validMarker
+}
+
+// truncateAtRune cuts to at most max bytes without splitting a rune.
+//
+// A clamped header is put in an operator-written message, and a message ending
+// in half a rune renders as a replacement character that reads like corrupted
+// evidence rather than like a clamp.
+func truncateAtRune(s string, max int, suffix string) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + suffix
 }

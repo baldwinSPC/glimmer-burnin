@@ -368,6 +368,35 @@ disagree about the same hardware. One brain, two dispatchers.
   `BURNIN_RANK`/`BURNIN_NRANKS` failed immediately, because the refusing runners
   read exactly those in order to say no. READING A VARIABLE TO REFUSE IS NOT
   IMPLEMENTING THE CONTRACT.
+- **An artifact is evidence ABOUT a verdict, never part of one.** A runner
+  returns non-metric evidence — dcgmi's own JSON, a captured topology — in a
+  fenced block on stdout (`-----BEGIN BURNIN ARTIFACT <name> <mediaType>-----`),
+  and `pkg/runner` lifts those lines out BEFORE the metric scanner sees them.
+  That ordering is the whole feature: a dcgmi document is full of `"key": value`
+  lines, several of which parse, so without it a runner returning evidence would
+  silently rewrite its own measurements. Three consequences follow and none may
+  be relaxed. A line that OPENS a fence opens one even when its header does not
+  parse — the artifact is refused and its payload consumed, because treating a
+  three-field header (`has space.json`) as ordinary text handed the entire
+  payload it was announcing to the scanner, which is the defect the fence exists
+  to prevent, reached by the route nobody was watching. A failure to STORE an
+  artifact changes no phase: the payload goes to a run-owned ConfigMap, and a
+  full quota, a deleted namespace or an unusable name must never become a
+  hardware verdict — every such failure is recorded as a dropped `ArtifactRef`,
+  which is also why a refusal is REPORTED rather than swallowed ("produced no
+  evidence" and "the evidence was too large" are different facts, and only one
+  sends an engineer to a node). And an artifact NAME is the least trusted input
+  this operator has: it is refused, not sanitised, when it is not a legal
+  ConfigMap key, because a '/' makes the apiserver reject the whole object —
+  one runner's malformed name discarding every other test's evidence — while
+  rewriting `a/b` to `a_b` would collide two names onto one key and point a ref
+  at the wrong payload under the right digest. Payloads that are not valid UTF-8
+  go to `BinaryData`, and the reason is measured rather than assumed: the
+  apiserver does NOT reject them in `Data`, it stores them and mangles them to
+  U+FFFD on the way out to any JSON consumer — kubectl included — so the
+  evidence looks present and only the ref's digest reveals otherwise.
+  `test/envtest/artifacts_test.go` asserts that through a JSON client, because
+  the fake client stores whatever bytes it is handed and reports green.
 - **A container that never started has no stdout, so the KUBELET'S message is
   the only evidence there is.** `podOutcome` returns it as `detail` alongside the
   reason and `harvestPod` appends it to the stored message. Dropping it made a

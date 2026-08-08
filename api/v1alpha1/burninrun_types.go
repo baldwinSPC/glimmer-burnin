@@ -416,6 +416,20 @@ type TestResult struct {
 	// tell them apart will eventually treat one as the other.
 	Unmeasurable []string `json:"unmeasurable,omitempty"`
 
+	// Artifacts are the non-metric evidence the runner returned, by REFERENCE.
+	//
+	// The payload lives in a run-owned ConfigMap, never here: a status is read
+	// on every reconcile by every watcher, and a megabyte of dcgmi JSON inlined
+	// into it would be re-transmitted on each one. The reference carries what a
+	// consumer needs in order to decide whether to fetch — what it is, how big,
+	// and a digest to verify what it got.
+	//
+	// A ref with Dropped set is evidence that was REFUSED, kept deliberately.
+	// Omitting it would make "the runner produced no artifact" and "the artifact
+	// was too large to keep" the same observation, and only one of those is a
+	// reason to go and look at the node.
+	Artifacts []ArtifactRef `json:"artifacts,omitempty"`
+
 	// RepeatsRequired is the resolved BurnInTestSpec.RepeatCount for this run:
 	// how many passing executions this test owes per node. Pinned onto the
 	// result so a verdict stays readable after the BurnInTest is edited.
@@ -453,6 +467,32 @@ type TestResult struct {
 // be a burn-in that cannot record why it failed. The vocabulary is documented
 // in pkg/verdict and validated there, where getting it wrong costs a test
 // rather than a run.
+// ArtifactRef points at one piece of non-metric evidence a runner returned.
+//
+// It is a POINTER and not the payload; see TestResult.Artifacts for why.
+type ArtifactRef struct {
+	// Name is what the runner called it, e.g. "dcgmi.json", after sanitising.
+	Name string `json:"name"`
+	// MediaType is what the payload IS, so a renderer need not sniff it.
+	MediaType string `json:"mediaType,omitempty"`
+	// SizeBytes is the payload's TRUE size — including for a ref that was
+	// dropped for exceeding a cap, which is the case where it matters most,
+	// because "how much evidence did we lose" is the next question asked.
+	// +kubebuilder:validation:Minimum=0
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+	// Digest is "sha256:<hex>" over the stored payload, so a consumer that
+	// fetches it separately can verify it got what this verdict was about.
+	Digest string `json:"digest,omitempty"`
+	// ConfigMap is the run-owned ConfigMap holding the payload, and Key is the
+	// entry within it. Both empty when Dropped is set.
+	ConfigMap string `json:"configMap,omitempty"`
+	Key       string `json:"key,omitempty"`
+	// Dropped says why the evidence was not kept, and is empty when it was.
+	// An artifact is evidence ABOUT a verdict and never part of one, so a
+	// failure to store one is recorded here and changes no phase.
+	Dropped string `json:"dropped,omitempty"`
+}
+
 // NotEvaluated is a threshold that was never applied.
 //
 // It mirrors pkg/verdict.NotEvaluated and pkg/contract.NotEvaluated. Three

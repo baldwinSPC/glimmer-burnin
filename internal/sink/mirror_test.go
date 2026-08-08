@@ -41,6 +41,14 @@ func TestMirroredStructsAgree(t *testing.T) {
 			map[string]bool{})
 	})
 
+	// ArtifactRef exists twice, not three times: pkg/verdict never sees one,
+	// because an artifact is evidence ABOUT a verdict and never an input to it.
+	t.Run("ArtifactRef", func(t *testing.T) {
+		assertSameJSONShape(t,
+			reflect.TypeOf(burninv1alpha1.ArtifactRef{}),
+			reflect.TypeOf(contract.ArtifactRef{}))
+	})
+
 	t.Run("NotEvaluated", func(t *testing.T) {
 		assertSameJSONShape(t,
 			reflect.TypeOf(burninv1alpha1.NotEvaluated{}),

@@ -115,23 +115,49 @@ func TestOversizedArtifactRecordsItsTrueSize(t *testing.T) {
 	}
 }
 
-// A line that merely looks like a marker is not one. Both fields are required:
-// a nameless artifact cannot be referenced and an untyped one cannot be
-// rendered, and inventing a default would put this package in the business of
-// guessing what a runner meant.
-func TestIncompleteMarkersAreNotFences(t *testing.T) {
+// A line that OPENS a fence opens one, even when its header is unreadable — and
+// its payload is consumed rather than handed to the metric scanner.
+//
+// This test asserted the opposite first, and a real apiserver in test/envtest is
+// what disproved it. A runner naming an artifact "has space.json" prints a
+// header with three fields; treating that as ordinary text let the entire
+// payload it was announcing fall through and be parsed as metrics — the one
+// thing the fence exists to prevent, reached by the route nobody was watching.
+func TestAFenceWithAnUnreadableHeaderIsStillAFence(t *testing.T) {
+	for _, header := range []string{
+		"-----BEGIN BURNIN ARTIFACT-----",                  // no name, no type
+		"-----BEGIN BURNIN ARTIFACT only-a-name-----",      // no media type
+		"-----BEGIN BURNIN ARTIFACT has space.json j-----", // a name with a space
+		"-----BEGIN BURNIN ARTIFACT a b c-----",            // too many fields
+	} {
+		res := Parse("custom", header+"\nleaked=1\n-----END BURNIN ARTIFACT-----\nkept=2\nDONE\n", 0)
+
+		if len(res.Artifacts) != 1 || res.Artifacts[0].Dropped == "" {
+			t.Errorf("%q did not produce a refused artifact: %+v", header, res.Artifacts)
+		}
+		if v, ok := res.Metrics["leaked"]; ok {
+			t.Errorf("%q: leaked=%q reached the metric scanner from inside the fence "+
+				"it opened", header, v)
+		}
+		// The fence still closes, so ordinary stdout after it is ordinary again.
+		if res.Metrics["kept"] != "2" {
+			t.Errorf("%q swallowed the metrics after its END marker", header)
+		}
+	}
+}
+
+// A line that is not the fence syntax at all stays ordinary text. The marker is
+// exact: near-misses are a runner's own output and must be left alone.
+func TestNearMissesAreOrdinaryOutput(t *testing.T) {
 	for _, line := range []string{
-		"-----BEGIN BURNIN ARTIFACT-----",                     // no name, no type
-		"-----BEGIN BURNIN ARTIFACT only-a-name-----",         // no media type
-		"-----BEGIN BURNIN ARTIFACT a b c-----",               // too many fields
-		"----BEGIN BURNIN ARTIFACT a.json application/json--", // wrong fence
+		"----BEGIN BURNIN ARTIFACT a.json application/json--", // wrong fence width
+		"-----BEGIN BURNIN ARTIFACT a.json application/json",  // no closing dashes
+		"# -----BEGIN BURNIN ARTIFACT a.json application/json-----",
 	} {
 		res := Parse("custom", line+"\nmiscompares=0\nDONE\n", 0)
 		if len(res.Artifacts) != 0 {
 			t.Errorf("%q was treated as an artifact fence: %+v", line, res.Artifacts)
 		}
-		// And crucially the metric AFTER it still parses — a half-recognised
-		// marker must not swallow the rest of stdout.
 		if res.Metrics["miscompares"] != "0" {
 			t.Errorf("%q swallowed the metrics that followed it", line)
 		}

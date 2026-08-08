@@ -799,6 +799,10 @@ func (r *BurnInRunReconciler) advance(
 		parsed.Message = fmt.Sprintf("runner logs unavailable (%v) — thresholds cannot be evaluated; no verdict", logErr)
 	}
 	r.completeAttempt(ctx, run, p, t, nodes, attempt, pod.Name, &pod, parsed)
+	// After completeAttempt, which is what guarantees the result exists — and
+	// before the pod is deleted, because a container's log is the only copy of
+	// its stdout and the kubelet reclaims it with the pod.
+	r.harvestArtifacts(ctx, run, t.Name, pod.Name, parsed.Artifacts)
 	return advanceHarvested, advanceEffect{dirty: true}, nil
 }
 

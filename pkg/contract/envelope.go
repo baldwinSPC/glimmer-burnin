@@ -87,6 +87,9 @@ type TestResult struct {
 	// consumer that cannot distinguish them will eventually treat one as the
 	// other.
 	Unmeasurable []string `json:"unmeasurable,omitempty"`
+
+	// Artifacts are the non-metric evidence the runner returned, by reference.
+	Artifacts []ArtifactRef `json:"artifacts,omitempty"`
 }
 
 // Violation is one threshold a test failed.
@@ -109,6 +112,22 @@ type Violation struct {
 	Kind string `json:"kind"`
 	// Reason is the human-readable detail.
 	Reason string `json:"reason,omitempty"`
+}
+
+// ArtifactRef points at one piece of non-metric evidence a runner returned.
+//
+// Mirrors v1alpha1.ArtifactRef; internal/sink.TestMirroredStructsAgree keeps the
+// two in step. The payload is NOT in the envelope: a consumer that wants it
+// fetches the named ConfigMap, and one that only wants the verdict is not made
+// to carry a megabyte of dcgmi JSON to get it.
+type ArtifactRef struct {
+	Name      string `json:"name"`
+	MediaType string `json:"mediaType,omitempty"`
+	SizeBytes int64  `json:"sizeBytes,omitempty"`
+	Digest    string `json:"digest,omitempty"`
+	ConfigMap string `json:"configMap,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Dropped   string `json:"dropped,omitempty"`
 }
 
 // NotEvaluated is a threshold that was neither satisfied nor violated because it
