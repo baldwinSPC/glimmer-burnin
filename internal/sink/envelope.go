@@ -84,6 +84,17 @@ func testResult(r burninv1alpha1.TestResult) contract.TestResult {
 			Index: v.Index, Metric: v.Metric, Cause: v.Cause, Kind: v.Kind, Reason: v.Reason,
 		})
 	}
+	for _, a := range r.Artifacts {
+		// By reference, never by value. A consumer that only wants the verdict
+		// is not made to carry a megabyte of dcgmi JSON to get it; one that
+		// wants the evidence fetches the named ConfigMap and checks the digest.
+		// A ref whose Dropped is set is delivered too — evidence that was
+		// refused is itself a fact about the run.
+		out.Artifacts = append(out.Artifacts, contract.ArtifactRef{
+			Name: a.Name, MediaType: a.MediaType, SizeBytes: a.SizeBytes,
+			Digest: a.Digest, ConfigMap: a.ConfigMap, Key: a.Key, Dropped: a.Dropped,
+		})
+	}
 	for _, n := range r.NotEvaluated {
 		out.NotEvaluated = append(out.NotEvaluated, contract.NotEvaluated{
 			Metric: n.Metric, Reason: n.Reason,

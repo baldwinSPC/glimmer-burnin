@@ -458,6 +458,15 @@ func (r *BurnInRunReconciler) harvestGroup(
 	harvested := r.harvestMembers(ctx, t, nodes, pods)
 	combined := combineGroup(harvested.members, harvested.logErr, &t.Spec)
 	r.completeAttempt(ctx, run, p, t, nodes, attempt, root.Name, root, combined)
+	// EVERY rank. A collective's evidence is per-rank by nature — the whole
+	// point of a Group verdict is that one rank's report does not describe the
+	// others — so a ref list naming only the root would hide the ranks a reader
+	// most needs when the collective hung.
+	for _, m := range harvested.members {
+		if m.result != nil {
+			r.harvestArtifacts(ctx, run, t.Name, m.pod, m.result.Artifacts)
+		}
+	}
 	return advanceHarvested, advanceEffect{dirty: true}, nil
 }
 

@@ -478,6 +478,78 @@ spec:
                     TestResult is the outcome of one test within a run, aggregated over its
                     attempts.
                   properties:
+                    artifacts:
+                      description: |-
+                        Artifacts are the non-metric evidence the runner returned, by REFERENCE.
+
+                        The payload lives in a run-owned ConfigMap, never here: a status is read
+                        on every reconcile by every watcher, and a megabyte of dcgmi JSON inlined
+                        into it would be re-transmitted on each one. The reference carries what a
+                        consumer needs in order to decide whether to fetch — what it is, how big,
+                        and a digest to verify what it got.
+
+                        A ref with Dropped set is evidence that was REFUSED, kept deliberately.
+                        Omitting it would make "the runner produced no artifact" and "the artifact
+                        was too large to keep" the same observation, and only one of those is a
+                        reason to go and look at the node.
+                      items:
+                        description: |-
+                          Violation is one threshold a test did not satisfy, as recorded on a result.
+
+                          It mirrors verdict.Violation rather than reusing it, and that is forced
+                          rather than chosen: pkg/verdict imports this package, so importing it back
+                          would be a cycle. The controller maps between them in one place. If a field
+                          is added there, add it here too — a violation the API cannot express is a
+                          violation an operator never sees.
+
+                          Cause and Kind are deliberately NOT +kubebuilder:validation:Enum. An enum on
+                          a STATUS field turns every future violation kind into a rejected status
+                          write, which would wedge the run that discovered it — the failure mode would
+                          be a burn-in that cannot record why it failed. The vocabulary is documented
+                          in pkg/verdict and validated there, where getting it wrong costs a test
+                          rather than a run.
+                          ArtifactRef points at one piece of non-metric evidence a runner returned.
+
+                          It is a POINTER and not the payload; see TestResult.Artifacts for why.
+                        properties:
+                          configMap:
+                            description: |-
+                              ConfigMap is the run-owned ConfigMap holding the payload, and Key is the
+                              entry within it. Both empty when Dropped is set.
+                            type: string
+                          digest:
+                            description: |-
+                              Digest is "sha256:<hex>" over the stored payload, so a consumer that
+                              fetches it separately can verify it got what this verdict was about.
+                            type: string
+                          dropped:
+                            description: |-
+                              Dropped says why the evidence was not kept, and is empty when it was.
+                              An artifact is evidence ABOUT a verdict and never part of one, so a
+                              failure to store one is recorded here and changes no phase.
+                            type: string
+                          key:
+                            type: string
+                          mediaType:
+                            description: MediaType is what the payload IS, so a renderer
+                              need not sniff it.
+                            type: string
+                          name:
+                            description: Name is what the runner called it, e.g. "dcgmi.json",
+                              after sanitising.
+                            type: string
+                          sizeBytes:
+                            description: |-
+                              SizeBytes is the payload's TRUE size — including for a ref that was
+                              dropped for exceeding a cap, which is the case where it matters most,
+                              because "how much evidence did we lose" is the next question asked.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                        required:
+                        - name
+                        type: object
+                      type: array
                     attempts:
                       description: Attempts is the per-execution history, in order.
                       items:
@@ -627,20 +699,6 @@ spec:
                         ECC gate applied and was satisfied.
                       items:
                         description: |-
-                          Violation is one threshold a test did not satisfy, as recorded on a result.
-
-                          It mirrors verdict.Violation rather than reusing it, and that is forced
-                          rather than chosen: pkg/verdict imports this package, so importing it back
-                          would be a cycle. The controller maps between them in one place. If a field
-                          is added there, add it here too — a violation the API cannot express is a
-                          violation an operator never sees.
-
-                          Cause and Kind are deliberately NOT +kubebuilder:validation:Enum. An enum on
-                          a STATUS field turns every future violation kind into a rejected status
-                          write, which would wedge the run that discovered it — the failure mode would
-                          be a burn-in that cannot record why it failed. The vocabulary is documented
-                          in pkg/verdict and validated there, where getting it wrong costs a test
-                          rather than a run.
                           NotEvaluated is a threshold that was never applied.
 
                           It mirrors pkg/verdict.NotEvaluated and pkg/contract.NotEvaluated. Three

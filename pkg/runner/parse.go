@@ -131,6 +131,10 @@ type Result struct {
 	// are reported rather than silently dropped: a runner emitting an unusable
 	// name should be visible, not invisible.
 	InvalidNames []string
+	// Artifacts are the non-metric evidence the runner fenced on stdout — a
+	// dcgmi JSON document, a captured topology. Never part of a verdict; see
+	// artifact.go.
+	Artifacts []Artifact
 	// UndeclaredSkip records that the runner exited 2 without declaring a skip,
 	// so Verdict is Error rather than Skip. Kept as a field rather than left
 	// implicit because the two readings send an engineer to opposite places: a
@@ -328,7 +332,14 @@ func Parse(kind, stdout string, exitCode int) Result {
 	}
 	kindAliases := aliases[kind]
 
-	for _, line := range strings.Split(stdout, "\n") {
+	// Fenced artifacts are lifted out FIRST, and their payload lines never reach
+	// the scanner below. A dcgmi JSON document is full of `"key": value` lines
+	// and several would parse as metrics — so without this, a runner returning
+	// evidence would silently rewrite its own measurements.
+	artifacts, lines := extractArtifacts(stdout)
+	res.Artifacts = artifacts
+
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
