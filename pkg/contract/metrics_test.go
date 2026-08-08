@@ -93,6 +93,16 @@ func TestRegistryIsSelfConsistent(t *testing.T) {
 		// A registry entry that never states whether acceptance may be decided
 		// on it is the failure this tri-state exists to catch: a bool would
 		// have let the omission pass as a decision.
+		// Same tri-state discipline, for the same reason: a new entry that
+		// forgets the field must be caught here rather than silently inheriting
+		// whichever answer the zero value happens to encode.
+		switch m.Aggregation {
+		case AggSum, AggMin, AggMax, AggLast:
+		case AggUnspecified:
+			t.Errorf("registered metric %q does not declare an Aggregation; say how it combines when the same test runs twice", name)
+		default:
+			t.Errorf("registered metric %q declares unknown Aggregation %q", name, m.Aggregation)
+		}
 		switch m.ThresholdUse {
 		case ThresholdUseAcceptance, ThresholdUseEvidence:
 		case ThresholdUseUnspecified:
@@ -302,5 +312,67 @@ func TestValidateMetricsReportsEveryOffender(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention offending name %q", err, want)
 		}
+	}
+}
+
+// The combining rules that are wrong in a way nothing else would catch.
+//
+// Each of these is a metric where the obvious choice silently corrupts a verdict
+// across repeated windows, so they are asserted by name rather than left to the
+// self-consistency check.
+func TestAggregationOfTheEasilyMistakenMetrics(t *testing.T) {
+	cases := map[string]struct {
+		want Aggregation
+		why  string
+	}{
+		// LIFETIME totals. The runner reports these absolutely, not per window,
+		// so Sum multiplies them by the number of windows — a node with 4
+		// remapped rows reads as 12 after a three-segment soak and is condemned
+		// for damage it does not have. runners/host-health/README.md is the
+		// source: "Damage is lifetime, events are windowed."
+		"eccErrors":    {AggLast, "NVML reports the aggregate since reset, not the window"},
+		"remappedRows": {AggLast, "likewise a lifetime total"},
+
+		// WINDOWED events from the same runner, which DO sum.
+		"xidEvents":         {AggSum, "counted from the kernel log over the window"},
+		"pcieReplayErrors":  {AggSum, "differenced over the window"},
+		"nicLinkDownEvents": {AggSum, "differenced over the window"},
+
+		// A floor: the WORST window is the verdict. A soak holding 83% for
+		// eleven hours and 40% for one hour is a part that dropped to 40%, and
+		// Max or Last would certify the drop away.
+		"sustainedClockPct": {AggMin, "the worst window describes the part"},
+		"bandwidthGbps":     {AggMin, "likewise — the slowest window is the link"},
+
+		// A ceiling, the same reasoning inverted.
+		"gpuTempC":  {AggMax, "peak across the whole soak, not the last segment"},
+		"latencyUs": {AggMax, "the worst window's latency is the one a job feels"},
+
+		// A nameplate constant. Summing it is nonsense; Min or Max merely hide
+		// that it never varied.
+		"ratedBoostClockMHz": {AggLast, "a per-SKU constant read back from the driver"},
+		"gpuName":            {AggLast, "an identity, not a measurement"},
+	}
+	for name, c := range cases {
+		m, ok := Lookup(name)
+		if !ok {
+			t.Errorf("%q is not registered", name)
+			continue
+		}
+		if m.Aggregation != c.want {
+			t.Errorf("%s aggregates %q, want %q — %s", name, m.Aggregation, c.want, c.why)
+		}
+	}
+}
+
+// An unregistered name aggregates Last: the registry is an open world, and
+// inventing Sum or Min semantics for a name nothing has declared would be this
+// operator deciding what somebody else's measurement means, silently.
+func TestUnregisteredMetricAggregatesLast(t *testing.T) {
+	if got := AggregationFor("someThirdPartyReading"); got != AggLast {
+		t.Errorf("AggregationFor(unregistered) = %q, want %q", got, AggLast)
+	}
+	if got := AggregationFor("miscompares"); got != AggSum {
+		t.Errorf("AggregationFor(registered) = %q, want %q", got, AggSum)
 	}
 }
