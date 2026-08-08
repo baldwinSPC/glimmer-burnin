@@ -141,6 +141,53 @@ const (
 	ThresholdUseEvidence ThresholdUse = "Evidence"
 )
 
+// Aggregation says how a metric COMBINES when the same test runs more than once
+// and one verdict must be rendered across all of it.
+//
+// Nothing consumes this yet. It exists because the answer is a property of the
+// MEASURAND and belongs beside the name, not in a per-metric switch inside the
+// reconciler — that would be exactly the contract-shaped knowledge CLAUDE.md
+// keeps out of it, and it would have to be rewritten by anyone adding a metric.
+//
+// The rules are not interchangeable and picking the wrong one is silent:
+//
+//	Sum   a per-window count. Two windows of three miscompares is six.
+//	Min   a floor, where the WORST window is the verdict. A soak that held
+//	      83% of rated clock for eleven hours and 40% for one hour is a part
+//	      that dropped to 40%; averaging it would certify the drop away.
+//	Max   a ceiling, same reasoning inverted: peak temperature is the peak
+//	      across the whole soak, not the peak of the last segment.
+//	Last  a nameplate, an identity, or a LIFETIME total the runner already
+//	      reports absolutely. Summing a lifetime total across windows
+//	      multiplies it by the number of windows.
+type Aggregation string
+
+const (
+	// AggUnspecified is the zero value and is not valid for a registered
+	// metric — TestRegistryIsSelfConsistent refuses it, so "nobody decided"
+	// cannot inherit whichever answer the zero value happens to encode. That is
+	// the same discipline ThresholdUse uses and for the same reason.
+	AggUnspecified Aggregation = ""
+	AggSum         Aggregation = "Sum"
+	AggMin         Aggregation = "Min"
+	AggMax         Aggregation = "Max"
+	AggLast        Aggregation = "Last"
+)
+
+// AggregationFor returns how a metric combines across windows.
+//
+// An UNREGISTERED metric aggregates Last, deliberately. The registry is an open
+// world and a third-party runner's name is legitimate, but inventing Sum or Min
+// semantics for a name nothing has declared would be this operator deciding what
+// somebody else's measurement means — and getting it wrong silently, which is
+// the failure mode every rule in this file exists to prevent.
+func AggregationFor(name string) Aggregation {
+	if m, ok := registry[name]; ok {
+		return m.Aggregation
+	}
+	return AggLast
+}
+
 // Metric is a registered, canonical metric.
 type Metric struct {
 	Name string
@@ -152,6 +199,9 @@ type Metric struct {
 	// ThresholdUse says whether acceptance may be decided on this metric.
 	// Every registered metric must state one explicitly.
 	ThresholdUse ThresholdUse
+	// Aggregation says how the metric combines across repeated windows. Every
+	// registered metric must state one explicitly; see Aggregation.
+	Aggregation Aggregation
 }
 
 // SafeToThresholdOn reports whether a threshold against this metric decides
@@ -170,21 +220,25 @@ var registry = map[string]Metric{
 	"bandwidthGbps": {
 		Name: "bandwidthGbps", Unit: UnitGigabitsPerSecond,
 		Description:  "raw RDMA write throughput on a link, as reported by ib_write_bw",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"peakBandwidthGbps": {
 		Name: "peakBandwidthGbps", Unit: UnitGigabitsPerSecond,
 		Description:  "best single-iteration RDMA write throughput on a link; the average (bandwidthGbps) is the figure a link is accepted on, since one good iteration does not survive a marginal cable",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"busBandwidthGBs": {
 		Name: "busBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "NCCL bus bandwidth: algorithm bandwidth scaled by the collective's communication pattern",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"algBandwidthGBs": {
 		Name: "algBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "NCCL algorithm bandwidth: message size over collective time, with no scaling for the communication pattern; unlike busBandwidthGBs it is not comparable across collectives or rank counts",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
@@ -192,31 +246,37 @@ var registry = map[string]Metric{
 	"hostToDeviceBandwidthGBs": {
 		Name: "hostToDeviceBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "measured copy bandwidth from host memory into device memory; bounded by the host link (PCIe, or C2C on a coherent part)",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"deviceToHostBandwidthGBs": {
 		Name: "deviceToHostBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "measured copy bandwidth from device memory back to host memory; asymmetry with hostToDeviceBandwidthGBs is normal and is why the two directions are separate metrics",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"deviceToDeviceBandwidthGBs": {
 		Name: "deviceToDeviceBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "on-device copy bandwidth, device memory to device memory; bounded by the memory subsystem rather than by the host link",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"memoryBandwidthGBs": {
 		Name: "memoryBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "sustained device memory bandwidth achieved over the whole measurement window, not a peak sample",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"readBandwidthMBs": {
 		Name: "readBandwidthMBs", Unit: UnitMegabytesPerSecond,
 		Description:  "sustained read throughput reported by the host memory stress tool",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"writeBandwidthMBs": {
 		Name: "writeBandwidthMBs", Unit: UnitMegabytesPerSecond,
 		Description:  "sustained write throughput reported by the host memory stress tool",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
@@ -224,6 +284,7 @@ var registry = map[string]Metric{
 	"latencyUs": {
 		Name: "latencyUs", Unit: UnitMicroseconds,
 		Description:  "round-trip latency",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"minLatencyUs": {
@@ -249,26 +310,31 @@ var registry = map[string]Metric{
 	"ioLatencyUs": {
 		Name: "ioLatencyUs", Unit: UnitMicroseconds,
 		Description:  "mean per-operation latency of the test's read/write loop; distinct from latencyUs, which is a network round trip",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"elapsedS": {
 		Name: "elapsedS", Unit: UnitSeconds,
 		Description:  "wall-clock seconds the test body ran, excluding image pull and container start; a soak that exits early has not proven what its duration claims",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"durationRequestedS": {
 		Name: "durationRequestedS", Unit: UnitSeconds,
 		Description:  "the duration the runner was ASKED for (BURNIN_DURATION_SECONDS), echoed back before any clamping; it is an input read back, not a measurement, and elapsedS is the one that says what actually happened",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"warmupS": {
 		Name: "warmupS", Unit: UnitSeconds,
 		Description:  "seconds of load applied before sampling began, so an unwarmed part's legitimately idle clocks are not sampled; a probe's own schedule, not a property of the part",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"sampleWindowS": {
 		Name: "sampleWindowS", Unit: UnitSeconds,
 		Description:  "seconds of the run during which measurements were taken (elapsedS minus warmupS); it bounds how much evidence the other metrics rest on rather than saying anything about the hardware",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 
@@ -276,101 +342,121 @@ var registry = map[string]Metric{
 	"gpuTempC": {
 		Name: "gpuTempC", Unit: UnitCelsius,
 		Description:  "peak GPU temperature observed during the test",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"meanTempUnderLoadC": {
 		Name: "meanTempUnderLoadC", Unit: UnitCelsius,
 		Description:  "GPU temperature averaged across the load window; distinct from gpuTempC, which is the peak — a part that runs hot throughout and one that spikes once are different findings and must not share a name",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"tempAtMinClockC": {
 		Name: "tempAtMinClockC", Unit: UnitCelsius,
 		Description:  "the temperature recorded at the sample where the SM clock was lowest; it exists to attribute a clock shortfall to heat or to a power-delivery wedge, and its value depends on which single sample happened to be the minimum — so it explains a verdict rather than deciding one",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"thermalTempThresholdC": {
 		Name: "thermalTempThresholdC", Unit: UnitCelsius,
 		Description:  "the temperature at or above which the runner will attribute a clock shortfall to heat; a configured input echoed back so a verdict can be audited against the threshold that produced it, not a reading",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"powerDrawW": {
 		Name: "powerDrawW", Unit: UnitWatts,
 		Description:  "peak board power draw observed during the test",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"meanPowerW": {
 		Name: "meanPowerW", Unit: UnitWatts,
 		Description:  "board power averaged across the load window; the floor form is the useful gate, because a part that draws far LESS than its budget under full load is the power-delivery wedge signature rather than a well-behaved one",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"enforcedPowerLimitW": {
 		Name: "enforcedPowerLimitW", Unit: UnitWatts,
 		Description:  "the power limit the driver is currently enforcing on the board — on GB10 this is the negotiated USB-C Power-Delivery contract made visible, and a degraded supply or cable shows up here well below the board's default; absolute and therefore SKU-specific, so a fleet-wide gate belongs on powerLimitRatioPct",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"defaultPowerLimitW": {
 		Name: "defaultPowerLimitW", Unit: UnitWatts,
 		Description:  "the board's nameplate default power limit, read back from the driver so powerLimitRatioPct can be audited against its denominator; a nameplate constant identifies the SKU rather than its health, so gating on it fails a heterogeneous fleet for no hardware reason",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"powerLimitRatioPct": {
 		Name: "powerLimitRatioPct", Unit: UnitPercent,
 		Description:  "enforcedPowerLimitW as a percentage of defaultPowerLimitW: the SKU-portable form of 'is this board allowed its full power budget?', and well under 100 is the power-delivery wedge. NOTE it is omitted entirely on a part whose driver does not expose both limits (GB10 reports power.limit as [N/A], which the runner records in nvmlUnsupported), and an omitted metric fails its threshold closed — so a gate on this must be scoped to parts known to answer",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"sustainedClockPct": {
 		Name: "sustainedClockPct", Unit: UnitPercent,
 		Description:  "achieved SM clock as a percentage of the part's rated boost clock, averaged over the load window; the SKU-portable form of smClockMHz",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"smClockMHz": {
 		Name: "smClockMHz", Unit: UnitMegahertz,
 		Description:  "SM core clock sustained under load; absolute and therefore SKU-specific, which is why a fleet-wide gate belongs on sustainedClockPct",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"memClockMHz": {
 		Name: "memClockMHz", Unit: UnitMegahertz,
 		Description:  "device memory clock sustained under load",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"ratedBoostClockMHz": {
 		Name: "ratedBoostClockMHz", Unit: UnitMegahertz,
 		Description:  "the part's nameplate boost clock, read back from the driver so sustainedClockPct can be audited against its denominator; a nameplate constant identifies the SKU rather than its health, so gating on it fails a heterogeneous fleet for no hardware reason",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"minSmClockPct": {
 		Name: "minSmClockPct", Unit: UnitPercent,
 		Description:  "the LOWEST single SM-clock sample of the load window, as a percentage of rated boost; a floor on it asserts the part never dropped out, which sustainedClockPct's average can hide. It is a single sample, so it moves on one transient dip — calibrate it against measured fleet behaviour rather than against a spec sheet",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"maxSmClockPct": {
 		Name: "maxSmClockPct", Unit: UnitPercent,
 		Description:  "the HIGHEST single SM-clock sample of the load window, as a percentage of rated boost, recorded so the spread around sustainedClockPct is visible; it is not an acceptance figure, because a wedged part that boosts for one sample and collapses satisfies a floor on it while failing the sustained behaviour this measurement exists to judge",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"clockFloorPct": {
 		Name: "clockFloorPct", Unit: UnitPercent,
 		Description:  "the sustained-clock floor the runner was configured with, echoed back so a verdict can be read against the bar it was judged by; a configured input, not a measurement",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"thermalClockFloorPct": {
 		Name: "thermalClockFloorPct", Unit: UnitPercent,
 		Description:  "the more lenient sustained-clock floor the runner applies when a shortfall is positively attributed to heat, echoed back as configured; a configured input, not a measurement",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"clockFloorAppliedPct": {
 		Name: "clockFloorAppliedPct", Unit: UnitPercent,
 		Description:  "which of the two configured floors this run actually judged against (see clockFloorBasis); it records the runner's own decision so a pass or fail can be reproduced, and gating on it would gate on the runner's configuration rather than on the part",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"gpuUtilizationPct": {
 		Name: "gpuUtilizationPct", Unit: UnitPercent,
 		Description:  "device utilization averaged over the load window. It is the headline SYMPTOM of a clock wedge — it reads perfectly healthy while the clock does not — so it is published beside the clock to make that fault legible, not to be gated on: the runner already refuses to judge a run whose utilization shows the load never landed, and a threshold here would turn that same measurement artifact into a hardware verdict",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"memUtilizationPct": {
 		Name: "memUtilizationPct", Unit: UnitPercent,
 		Description:  "device memory-controller utilization averaged over the load window; for a deliberately register-resident load it is expected to be near zero, so its value describes the probe's own load shape rather than the part",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 
@@ -378,26 +464,31 @@ var registry = map[string]Metric{
 	"throughputTflops": {
 		Name: "throughputTflops", Unit: UnitTeraflops,
 		Description:  "achieved throughput; for compute-smoke this is a single unwarmed launch — a liveness signal, not a benchmark, and not safe to threshold on",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"sustainedThroughputTflops": {
 		Name: "sustainedThroughputTflops", Unit: UnitTeraflops,
 		Description:  "throughput averaged across a sustained burn, after the part has reached its steady thermal and clock state; unlike throughputTflops this is a benchmark figure and may be thresholded",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"sustainedFmaThroughputTflops": {
 		Name: "sustainedFmaThroughputTflops", Unit: UnitTeraflops,
 		Description:  "throughput of a register-resident FP32 FMA chain sustained across the load window — no memory traffic, so it moves in lockstep with the achieved clock and is an independent cross-check on it. It is DELIBERATELY not sustainedThroughputTflops: that name belongs to a dense GEMM burn, the two differ by a large factor on the same healthy part, and sharing a name would silently condemn every node a gate calibrated on the other one touched",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"peakFmaThroughputTflops": {
 		Name: "peakFmaThroughputTflops", Unit: UnitTeraflops,
 		Description:  "the best single measurement window of the same FMA load, published so throughputConsistencyPct can be audited against its denominator; as the best window rather than the sustained one it is the figure a collapsing part still satisfies, which is why the consistency ratio and not this is the gate",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"throughputConsistencyPct": {
 		Name: "throughputConsistencyPct", Unit: UnitPercent,
 		Description:  "sustainedFmaThroughputTflops as a percentage of peakFmaThroughputTflops: a part that starts fast and collapses mid-window scores low here even when its mean clock still clears every floor, which is the case an average is blind to",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
@@ -405,16 +496,19 @@ var registry = map[string]Metric{
 	"nonfiniteCount": {
 		Name: "nonfiniteCount", Unit: UnitNone,
 		Description:  "count of NaN or Inf values in a kernel's output",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"miscompares": {
 		Name: "miscompares", Unit: UnitNone,
 		Description:  "count of computed values that did not match the reference — a wrong answer from hardware that reported success",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"sdcDetections": {
 		Name: "sdcDetections", Unit: UnitNone,
 		Description:  "count of distinct silent-data-corruption incidents; miscompares counts every mismatched value, so one corrupted region can produce many miscompares and a single detection",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
@@ -422,46 +516,55 @@ var registry = map[string]Metric{
 	"eccErrors": {
 		Name: "eccErrors", Unit: UnitNone,
 		Description:  "count of ECC errors observed during the test",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"memoryErrors": {
 		Name: "memoryErrors", Unit: UnitNone,
 		Description:  "count of hardware memory errors reported by the host memory stress tool (stressapptest hardware incidents); host memory, not device ECC",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"xidEvents": {
 		Name: "xidEvents", Unit: UnitNone,
 		Description:  "count of NVIDIA Xid errors the driver logged during the test window",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"remappedRows": {
 		Name: "remappedRows", Unit: UnitNone,
 		Description:  "count of device memory rows the driver has remapped; a rising count is a degrading part even while every test still passes",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"pcieReplayErrors": {
 		Name: "pcieReplayErrors", Unit: UnitNone,
 		Description:  "count of PCIe replay events on the device's link — a link-integrity signal that usually precedes a bandwidth shortfall",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"nicLinkDownEvents": {
 		Name: "nicLinkDownEvents", Unit: UnitNone,
 		Description:  "count of link-down transitions on the node's fabric NICs during the test window",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"throttleEvents": {
 		Name: "throttleEvents", Unit: UnitNone,
 		Description:  "count of clock-throttle events observed during the test",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"throttledSamples": {
 		Name: "throttledSamples", Unit: UnitNone,
 		Description:  "count of individual samples in which the driver reported a CAPPING throttle reason; throttleEvents counts transitions into that state, so a part throttled once for the whole window scores 1 event and many samples, and the pair separates a brief excursion from a permanent cap",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"throttleReasonsMask": {
 		Name: "throttleReasonsMask", Unit: UnitNone,
 		Description:  "the union of the driver's raw throttle-reason bits over the run, kept so a stored result can be re-classified later against a vendor's own bit definitions. It is not a quantity: it is a bitfield in decimal, arithmetic on it is meaningless, and it includes the idle bit — which is not a throttle at all — so `throttleReasonsMask Equal 0` fails any part that was briefly idle mid-window. Gate on throttledSamples instead",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	// DELIBERATELY NOT REGISTERED: the per-reason sample counters that accompany
@@ -494,6 +597,7 @@ var registry = map[string]Metric{
 	"unsupportedReads": {
 		Name: "unsupportedReads", Unit: UnitNone,
 		Description:  "count of driver properties the runner asked for and was refused (the names are in nvmlUnsupported). It records how complete the probe's view was, and a non-zero count is NORMAL on a part that genuinely does not expose everything — GB10 refuses the power-limit reads — so gating on it condemns healthy hardware for its driver's silence, which is the same mistake as gating ECC counters on a part with no ECC",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 
@@ -501,31 +605,37 @@ var registry = map[string]Metric{
 	"diagTestsFailed": {
 		Name: "diagTestsFailed", Unit: UnitNone,
 		Description:  "count of individual diagnostic subtests that returned a failure; zero alongside a non-zero runner exit means the suite could not run rather than that the hardware failed",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"iterationsCompleted": {
 		Name: "iterationsCompleted", Unit: UnitNone,
 		Description:  "count of stress iterations the runner completed; a soak that completes far fewer than expected did less work than its duration suggests",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"samplesTaken": {
 		Name: "samplesTaken", Unit: UnitNone,
 		Description:  "count of measurement samples the probe collected during its window; it bounds how much evidence the derived statistics rest on, and its magnitude is set by the configured sample interval rather than by the part",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"loadLaunches": {
 		Name: "loadLaunches", Unit: UnitNone,
 		Description:  "count of load-kernel launches issued during the measured window; the runner sizes each launch to a fixed wall time on the part in front of it, so this lands near the same figure on a healthy and a wedged part alike and says nothing about either — elapsedS is the metric that says the window ran",
+		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"loadThreads": {
 		Name: "loadThreads", Unit: UnitNone,
 		Description:  "total CUDA threads the load was launched with, derived from the part's SM count; it records how the probe sized itself to the device, which makes a throughput figure reproducible and is not a property of the device's health",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"loadItersPerLaunch": {
 		Name: "loadItersPerLaunch", Unit: UnitNone,
 		Description:  "inner-loop iterations per load-kernel launch, chosen by calibrating against the live part so each launch takes a fixed wall time; it is an artefact of that calibration — a slower part gets a smaller number by design — so it explains the load rather than judging the part",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 
@@ -547,61 +657,73 @@ var registry = map[string]Metric{
 	"gpuName": {
 		Name: "gpuName", Unit: UnitNone,
 		Description:  "the accelerator's product name as the driver reports it (\"NVIDIA GB10\"). A label, not a measurement: no comparison against it is arithmetic, and identity is a fleet-inventory question rather than an acceptance one — target a heterogeneous fleet with node selectors, not with a threshold",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"computeCap": {
 		Name: "computeCap", Unit: UnitNone,
 		Description:  "the CUDA compute capability the device reports, as major.minor (\"12.1\"). It is a VERSION, not a quantity, and the resemblance is the trap: compared as a decimal, 12.1 and 12.10 are the same value and any ordering that looks right does so by coincidence of notation. A runner that cares about capability decides it in the runner, where the two components are compared separately",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"pciBusId": {
 		Name: "pciBusId", Unit: UnitNone,
 		Description:  "the device's PCI bus address, recorded so a verdict can be tied to a physical slot when a node holds several parts; an address, with no ordering a threshold could use",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"driverVersion": {
 		Name: "driverVersion", Unit: UnitNone,
 		Description:  "the NVIDIA driver version string (\"580.82.09\"). A three-component version does not parse as a float at all, so a gate on it fails closed on every node; driver-version policy belongs in a fleet's node labels and admission rules, not in a hardware acceptance verdict",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"builtCudaArch": {
 		Name: "builtCudaArch", Unit: UnitNone,
 		Description:  "the nvcc arch target this runner IMAGE was compiled for (\"sm_121a\"), printed by the runner so a stored result names the image that produced it. A property of the image that was pinned rather than of the part it landed on, and the runner already reports a mismatch itself as an Error naming the fix",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"migMode": {
 		Name: "migMode", Unit: UnitNone,
 		Description:  "whether MIG partitioning is enabled on the device (\"enabled\"/\"disabled\"). A configuration state expressed as a word; a runner whose measurement is unattributable under MIG skips (exit 2) on its own, which is the reported form of that finding",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"nvmlUnsupported": {
 		Name: "nvmlUnsupported", Unit: UnitNone,
 		Description:  "comma-separated names of the driver properties the runner asked for and was refused, recorded rather than substituted so an unsupported read can never be mistaken for a measured value. A list; unsupportedReads is its count, and neither is safe to gate on (see that entry)",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"configWarnings": {
 		Name: "configWarnings", Unit: UnitNone,
 		Description:  "semicolon-separated notes about configuration the runner adjusted or could not honour, so a result carries the reason it did not run exactly as asked. Free-form prose, and a gate on it can only fail",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"throttleReasons": {
 		Name: "throttleReasons", Unit: UnitNone,
 		Description:  "comma-separated names of the throttle reasons the driver latched during the run (\"none\" when it latched nothing) — the human-readable form of throttleReasonsMask. A list of labels; gate on throttledSamples for \"was it throttled at all\"",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"throttleClassification": {
 		Name: "throttleClassification", Unit: UnitNone,
 		Description:  "why the runner believes the clock fell short: one of none|thermal|powerCap|applicationClocks|unknown. This is an ATTRIBUTION, and a label — it exists to send an engineer to a cable or to a cooling path rather than to a die, and the runner has already failed the node itself when it is anything but none. Gate the clock (sustainedClockPct) and read this to find out why",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"pdWedgeSuspected": {
 		Name: "pdWedgeSuspected", Unit: UnitNone,
 		Description:  "whether the run matched the power-delivery wedge signature — slow, cool, and not thermally throttled: one of true|false|unknown. Deliberately TRI-STATE and therefore a label, not a boolean: without a temperature a wedge cannot be told from a thermal throttle, and \"we could not tell\" must not collapse into \"false\" and read as an all-clear. The runner fails the node on this itself; a threshold cannot express the three states and fails closed on all of them",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"clockFloorBasis": {
 		Name: "clockFloorBasis", Unit: UnitNone,
 		Description:  "which floor the run was judged against, general|thermal, naming the reason clockFloorAppliedPct is what it is; a label recording the runner's own decision",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 
@@ -630,26 +752,31 @@ var registry = map[string]Metric{
 	"xidSource": {
 		Name: "xidSource", Unit: UnitNone,
 		Description:  "where the Xid scan read from: kmsg|kernlog|none. A label naming the PROVENANCE of xidEvents, and the value that matters most is the one a gate cannot express — \"none\" means the scan did not run, and the counters it would have produced are omitted rather than zeroed, so xidEvents already fails closed on its own",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
 		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"hostHealthVersion": {
 		Name: "hostHealthVersion", Unit: UnitNone,
 		Description:  "the shape of the metric set this runner emitted, so a consumer charting these counters over months can tell when the set changed. A schema version of the OUTPUT, saying nothing whatever about the hardware; it parses as a number, which is precisely why it has to be registered",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"hostHealthStage": {
 		Name: "hostHealthStage", Unit: UnitNone,
 		Description:  "the furthest stage the runner reached, streamed as it goes so a process that is OOM-killed or brought down by a Go runtime fatal error still says where it died. On a run that completed it is always \"done\", which is why it is worthless as a gate and valuable as evidence: it only carries information when everything else is missing",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"hostHealthPanic": {
 		Name: "hostHealthPanic", Unit: UnitNone,
 		Description:  "the one-line summary of a panic the runner recovered from before exiting 3, present only on a run that crashed. It is recorded as a metric as well as in the message because a metric cannot be overwritten by a later stack frame, and the stored result outlives the pod whose log holds the trace",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 }

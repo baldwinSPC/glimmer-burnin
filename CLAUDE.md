@@ -294,6 +294,24 @@ disagree about the same hardware. One brain, two dispatchers.
   stops applying to it. Writing a threshold is what promotes a name from
   incidental evidence to acceptance-deciding, which is why registration is owed
   at that point and not before.
+- **A metric declares HOW IT COMBINES, because a soak will eventually run in
+  segments.** `pkg/contract.Metric.Aggregation` is `Sum`, `Min`, `Max` or `Last`,
+  it is required on every registered metric (the registry self-consistency test
+  refuses `Unspecified`, same discipline as `ThresholdUse`), and nothing consumes
+  it yet. It exists so the answer lives beside the NAME rather than in a
+  per-metric switch inside the reconciler, which is exactly the contract-shaped
+  knowledge this file keeps out of it. The rule that is wrong in a way nothing
+  else catches is LIFETIME versus WINDOWED, and host-health has both: `xidEvents`
+  and `pcieReplayErrors` are differenced over the window and `Sum`, while
+  `eccErrors` and `remappedRows` are NVML aggregates since reset and are `Last` —
+  summing those multiplies them by the number of windows, so a node with four
+  remapped rows reads as twelve after a three-segment soak and is condemned for
+  damage it does not have. A floor takes `Min` because the WORST window describes
+  the part (a soak holding 83% of rated clock for eleven hours and 40% for one is
+  a part that dropped to 40%; anything else certifies the drop away), and a
+  ceiling takes `Max` for the same reason inverted. An UNREGISTERED name
+  aggregates `Last`: inventing `Sum` semantics for a name nothing declared would
+  be this operator deciding what somebody else's measurement means, silently.
 - **Metric names are a contract.** `pkg/contract/metrics.go` holds the registry
   and the grammar: lowerCamelCase, a dimensional metric ends in a registered
   unit suffix (`Gbps`, `GBs`, `MBs`, `Us`, `Ms`, `S`, `C`, `W`, `Pct`,
