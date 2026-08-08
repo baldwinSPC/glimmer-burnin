@@ -5,8 +5,12 @@ package main
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 )
 
 // Real ib_write_bw output, captured from a DGX Spark pair over RoCE v2 with 4
@@ -177,4 +181,95 @@ func TestBwArgsOmitsGIDIndexOnInfiniBand(t *testing.T) {
 	if joined := strings.Join(bwArgs(p, plan{perftestPort: 18515, messageBytes: 1 << 20, qps: 4, bwSeconds: 40}, ""), " "); strings.Contains(joined, "-x") {
 		t.Errorf("bwArgs passed -x for an InfiniBand port: %q", joined)
 	}
+}
+
+// The tail was parsed and thrown away — a gap found by researching what industry
+// actually uses to qualify a fabric.
+//
+// perftest's latency table carries min, max and p99 alongside the mean, and this
+// runner read all four and emitted only the mean. A MEAN says a link is fine on
+// average, which is the one thing nobody needs to know about a fabric: a
+// collective runs at the speed of its slowest participant on EVERY iteration, so
+// a link with a healthy mean and a p99 an order of magnitude worse degrades every
+// job on the fleet while passing a bandwidth gate outright.
+func TestLatencyTailReachesTheOperator(t *testing.T) {
+	// A real ib_write_lat table shape: healthy mean, ugly tail. This is exactly
+	// what the old output could not express.
+	const out = `
+---------------------------------------------------------------------------------------
+ #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]    t_avg[usec]    t_stdev[usec]   99% percentile[usec]   99.9% percentile[usec]
+ 2       1000          1.52           412.80       1.61              1.74           0.42            38.90                  402.11
+---------------------------------------------------------------------------------------
+`
+	lat, err := parseLatency(out)
+	if err != nil {
+		t.Fatalf("parseLatency: %v", err)
+	}
+	if !lat.P99Measured {
+		t.Fatal("the percentile columns were present and were not parsed")
+	}
+	if lat.AvgUs > 2 && lat.P99Us < 30 {
+		t.Fatalf("fixture is wrong: it must pair a healthy mean with an ugly tail, got avg=%.2f p99=%.2f",
+			lat.AvgUs, lat.P99Us)
+	}
+
+	res := runner.Parse("ib-write-bw", latencyMetricLines(lat), 0)
+	for name, want := range map[string]string{
+		"latencyUs":    "1.74", // the mean, UNCHANGED: existing profiles keep meaning what they meant
+		"minLatencyUs": "1.52",
+		"maxLatencyUs": "412.80",
+		"p99LatencyUs": "38.90",
+	} {
+		if got := res.Metrics[name]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if len(res.InvalidNames) != 0 {
+		t.Errorf("the new names do not obey the metric grammar: %v", res.InvalidNames)
+	}
+	if !contract.SafeToThresholdOn("p99LatencyUs") {
+		t.Error("p99LatencyUs must be thresholdable — it is the number a collective runs at")
+	}
+	for _, evidence := range []string{"minLatencyUs", "maxLatencyUs"} {
+		if contract.SafeToThresholdOn(evidence) {
+			t.Errorf("%s must be Evidence: a fleet gating on one best or worst sample fails "+
+				"healthy links on noise", evidence)
+		}
+	}
+}
+
+// A perftest build whose table stops at t_stdev emits NO percentile key rather
+// than a fabricated one. The columns are recent and their absence is not an
+// error; an omitted metric then fails its threshold closed, which is honest.
+func TestOlderPerftestEmitsNoPercentile(t *testing.T) {
+	const out = `
+ #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]    t_avg[usec]    t_stdev[usec]
+ 2       1000          1.52           4.80         1.61              1.74           0.42
+`
+	lat, err := parseLatency(out)
+	if err != nil {
+		t.Fatalf("parseLatency: %v", err)
+	}
+	if lat.P99Measured {
+		t.Fatal("a table with no percentile columns reported one as measured")
+	}
+	res := runner.Parse("ib-write-bw", latencyMetricLines(lat), 0)
+	if v, ok := res.Metrics["p99LatencyUs"]; ok {
+		t.Errorf("p99LatencyUs = %q was emitted for a build that never measured it", v)
+	}
+	if res.Metrics["latencyUs"] != "1.74" || res.Metrics["maxLatencyUs"] != "4.80" {
+		t.Errorf("the rest of the table was lost: %v", res.Metrics)
+	}
+}
+
+// latencyMetricLines renders exactly the lines main.go's latency block emits, so
+// these tests exercise the EMISSION RULE rather than restating it.
+func latencyMetricLines(lat latResult) string {
+	out := "latency_us=" + strconv.FormatFloat(lat.AvgUs, 'f', 2, 64) + "\n" +
+		"latency_min_us=" + strconv.FormatFloat(lat.MinUs, 'f', 2, 64) + "\n" +
+		"latency_max_us=" + strconv.FormatFloat(lat.MaxUs, 'f', 2, 64) + "\n"
+	if lat.P99Measured {
+		out += "latency_p99_us=" + strconv.FormatFloat(lat.P99Us, 'f', 2, 64) + "\n"
+	}
+	return out + "IB_WRITE_BW_PASS\n"
 }

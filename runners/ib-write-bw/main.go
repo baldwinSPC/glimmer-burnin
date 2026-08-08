@@ -494,8 +494,35 @@ phases:
 	// sentinel declares that the HARDWARE cannot produce the measurement, and
 	// this is a property of the mode this runner chose. A threshold on
 	// peakBandwidthGbps therefore fails closed, which is correct — see README.
+	if bw.MsgRateMpps > 0 {
+		// Message rate is a SEPARATE finding from bandwidth, not a restatement
+		// of it. A link can carry its rated bytes while delivering far fewer
+		// messages per second than its class — a small-message regression that
+		// bandwidth alone cannot see, and that a collective feels immediately,
+		// because a collective is many small messages rather than one large one.
+		metric("msg_rate_mpps", strconv.FormatFloat(bw.MsgRateMpps, 'f', 3, 64))
+	}
 	if haveLat {
 		metric("latency_us", strconv.FormatFloat(lat.AvgUs, 'f', 2, 64))
+		metric("latency_min_us", strconv.FormatFloat(lat.MinUs, 'f', 2, 64))
+		metric("latency_max_us", strconv.FormatFloat(lat.MaxUs, 'f', 2, 64))
+		// THE TAIL IS THE FINDING, and it was being parsed and thrown away.
+		//
+		// A mean says a link is fine on average, which is the one thing nobody
+		// needs to know about a fabric. A collective runs at the speed of its
+		// slowest participant on every iteration, so a link with a healthy mean
+		// and a p99 an order of magnitude worse degrades every collective on the
+		// fleet while passing a bandwidth gate outright. That is precisely the
+		// "every performance test passes and the node is still broken" shape this
+		// project exists for.
+		//
+		// Emitted ONLY behind P99Measured. The percentile columns are recent in
+		// perftest and their absence is not an error, so an older build's output
+		// yields no key rather than a fabricated one — and a threshold on it then
+		// fails closed, which is the honest outcome.
+		if lat.P99Measured {
+			metric("latency_p99_us", strconv.FormatFloat(lat.P99Us, 'f', 2, 64))
+		}
 	}
 
 	logf("%d bytes x %d iterations over %s to %s", bw.Bytes, bw.Iterations, port.Device, dest)
