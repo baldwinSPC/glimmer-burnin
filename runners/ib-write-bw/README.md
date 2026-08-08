@@ -25,6 +25,10 @@ decision line, so a verdict never arrives without the numbers behind it.
 |---|---|---|
 | `bw_average` | `bandwidthGbps` | average RDMA write throughput over the whole duration |
 | `latency_us` | `latencyUs` | `ib_write_lat` `t_avg`, a 2-byte write round trip |
+| `latency_min_us` | `minLatencyUs` | fastest single round trip — the link's floor, evidence only |
+| `latency_max_us` | `maxLatencyUs` | slowest single round trip — evidence that qualifies the percentile |
+| `latency_p99_us` | `p99LatencyUs` | **99th percentile — the number a collective actually runs at.** Absent on a perftest build whose table stops at `t_stdev` |
+| `msg_rate_mpps` | `messageRateMpps` | millions of messages/sec — a separate finding from bandwidth |
 
 ### `--report_gbits` is not optional
 
@@ -366,3 +370,27 @@ Two DGX Sparks (NVIDIA GB10, aarch64, driver 580.82.09), ConnectX-7 at PCIe Gen5
 x4, RoCE v2 over a 200G Ethernet link, MTU 4096. Server on `spark-85a9`
 (`roceP2p1s0f1`), client on `spark-043a` (`roceP2p1s0f0`) — the crossed device
 pair was resolved automatically by route.
+
+## Why the tail, and not the mean
+
+A mean says a link is fine on average, which is the one thing nobody needs to
+know about a fabric.
+
+A collective runs at the speed of its **slowest participant on every
+iteration**. So a link whose mean latency is 1.7 µs and whose p99 is 39 µs
+degrades every job on the fleet — while passing a bandwidth gate outright,
+because bandwidth is unaffected. That is the shape of fault this project exists
+for: every performance test passes and the node is still broken.
+
+perftest measures the tail already. This runner parsed it and emitted only the
+mean, so the acceptance-grade number never left the pod. It does now.
+
+`p99LatencyUs` is the thresholdable one. `minLatencyUs` and `maxLatencyUs` are
+**Evidence**: a single best or worst sample on a shared fabric moves with a
+scheduler tick or an interrupt, and a fleet gating on one would fail healthy
+links on noise.
+
+**Ship these unthresholded first.** Nobody has measured what a healthy p99 looks
+like on this fleet's RoCE, and a floor invented from a spec sheet is exactly the
+mistake recorded five times over in this repository's history. Sweep with
+`spec.baseline: true`, aggregate per fingerprint class, then pin.

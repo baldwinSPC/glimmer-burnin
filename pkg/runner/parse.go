@@ -258,6 +258,13 @@ var aliases = map[string]map[string]string{
 		// GPL/BSD and is consumed here under the BSD option (see NOTICE).
 		"bw_average": "bandwidthGbps",
 		"bw_peak":    "peakBandwidthGbps",
+		// The latency tail. "latency_us" stays the MEAN, unchanged, so every
+		// existing profile keeps meaning what it meant; the percentile and the
+		// extremes are new names rather than a redefinition of that one.
+		"latency_min_us": "minLatencyUs",
+		"latency_max_us": "maxLatencyUs",
+		"latency_p99_us": "p99LatencyUs",
+		"msg_rate_mpps":  "messageRateMpps",
 	},
 
 	"gpudirect-rdma": {

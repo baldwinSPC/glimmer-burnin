@@ -226,6 +226,26 @@ var registry = map[string]Metric{
 		Description:  "round-trip latency",
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"minLatencyUs": {
+		Name: "minLatencyUs", Unit: UnitMicroseconds,
+		Description:  "the fastest single round trip observed. It is the link's floor — what the fabric can do with nothing in the way — and it is EVIDENCE rather than acceptance, because a gate on the best sample any run happened to catch says nothing about what the fabric delivers under load",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"maxLatencyUs": {
+		Name: "maxLatencyUs", Unit: UnitMicroseconds,
+		Description:  "the slowest single round trip observed. A single outlier is normal on a shared fabric — a scheduler tick, an interrupt — so this is evidence that qualifies p99LatencyUs rather than a gate of its own; a fleet gating on one worst sample fails healthy links on noise",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"p99LatencyUs": {
+		Name: "p99LatencyUs", Unit: UnitMicroseconds,
+		Description:  "99th-percentile round-trip latency: the number a collective actually runs at. A collective proceeds at the speed of its slowest participant on EVERY iteration, so a link with a healthy mean and a p99 an order of magnitude worse degrades every job on the fleet while passing a bandwidth gate outright. This is the acceptance-grade latency figure; latencyUs is the mean and is not",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"messageRateMpps": {
+		Name: "messageRateMpps", Unit: UnitNone,
+		Description:  "millions of messages per second the link sustained — a SEPARATE finding from bandwidth rather than a restatement of it. A link can carry its rated bytes while delivering far fewer messages per second than its class, which bandwidth cannot see and a collective feels immediately, because a collective is many small messages rather than one large one",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
 	"ioLatencyUs": {
 		Name: "ioLatencyUs", Unit: UnitMicroseconds,
 		Description:  "mean per-operation latency of the test's read/write loop; distinct from latencyUs, which is a network round trip",
