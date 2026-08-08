@@ -1186,3 +1186,32 @@ func TestGroup_AnEmDashDoesNotCostTheOtherRanks(t *testing.T) {
 			"names — the stored result is the only durable account once the pods' TTL expires", h-d, h)
 	}
 }
+
+// The undeclared-skip branch is clamped too, and it is the branch that needs it
+// most.
+//
+// summary() has two paths that embed a rank's own words. The ordinary one was
+// clamped; the UndeclaredSkip one returned early and was not — so the single
+// branch carrying the LEAST bounded text was the one branch that did not bound
+// it. An undeclared exit 2 is most often a crashed runner (a Go panic exits 2),
+// which means the message is the tail of a stack trace rather than a sentence
+// anybody wrote.
+func TestGroup_UndeclaredSkipSummaryIsClampedToo(t *testing.T) {
+	trace := strings.Repeat("main.(*probe).scan(0xc000123456, 0x1d) /src/main.go:132 +0x1d ", 60)
+
+	clamped := func(undeclared bool) int {
+		m := groupMember{rank: 0, node: "spark-a", result: &runner.Result{
+			Verdict: runner.VerdictError, ExitCode: 2, Message: trace,
+			UndeclaredSkip: undeclared,
+			Metrics:        map[string]string{}, Unmeasurable: map[string]bool{},
+		}}
+		return len(m.summary())
+	}
+
+	ordinary, undeclaredSkip := clamped(false), clamped(true)
+	if undeclaredSkip > ordinary+len(undeclaredSkipBrief)+64 {
+		t.Errorf("an undeclared-skip summary is %d bytes against %d for the same message on the "+
+			"ordinary path — the branch most likely to carry a raw stack trace is the one not "+
+			"being clamped", undeclaredSkip, ordinary)
+	}
+}

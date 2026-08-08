@@ -135,7 +135,7 @@ overrides it, which is the seam new hardware arrives through.
 | `host-health` | Node | Passive host/driver fault counters over the window; ECC, Xid, PCIe replays | ours (Go stdlib) |
 | `dcgm-diag` | Node | NVIDIA DCGM diagnostics | wrapper only — **DCGM is not shipped**, see below |
 | `ib-write-bw` | **Pair** | RDMA write bandwidth and latency across the link | linux-rdma/perftest (**BSD-2 option**) |
-| `nccl` | **Pair** | Collective bus bandwidth and miscompares | nccl-tests + NCCL (BSD-3) |
+| `nccl` | **Pair, Group** | Collective bus bandwidth and miscompares | NCCL (BSD-3) |
 | `gpudirect-rdma` | **Pair** | NIC-to-GPU peer-memory path | linux-rdma/perftest (**BSD-2 option**) |
 
 `custom` is any image honouring the runner contract, with no built-in parsing.
@@ -301,7 +301,7 @@ still fails closed.
 
 ## Status
 
-Working end to end for **Node-scope and Pair-scope** tests: CRDs, manager, run
+Working end to end for **Node-, Pair- and Group-scope** tests: CRDs, manager, run
 reconciler (pinned plan, wave cordoning, concurrency interlock, repeats,
 error-retry, checkpointing, two-pod Pair rendezvous), schedule and fingerprint
 reconcilers, threshold evaluation, and sink delivery over webhook / ConfigMap /
@@ -333,11 +333,21 @@ gate is made of.
 
 ### Known limitations
 
-- **No shipped runner image speaks the Group rendezvous yet.** Group *scope* is
-  executed and covered end to end on a kind cluster, but the `nccl` runner still
-  reads `BURNIN_ROLE=server|client` rather than `BURNIN_RANK`, so a Group test
-  today needs a custom runner image. Verifying an N-rank collective needs three
-  or more GPU nodes; tracked separately.
+- **No 3-rank collective has ever executed on hardware.** The `nccl` runner does
+  speak the Group rendezvous as of `v0.5.0` — it reads `BURNIN_RANK`,
+  `BURNIN_NRANKS` and `BURNIN_ROOT_HOST`, and it is the one kind the operator
+  will dispatch by default for a Group test — but no GPU cluster has run it.
+  Verifying an N-rank collective needs three or more GPU nodes and this fleet has
+  two; the bus-bandwidth scaling factor `2(n-1)/n` is exactly 1 at two ranks, so
+  n=3 is the first configuration in which a wrong factor is visible at all
+  ([#118](https://github.com/baldwinSPC/glimmer-burnin/issues/118)).
+
+  **Do not work around this by pinning an older `nccl` tag as
+  `spec.runner.image`.** Naming any image is the one thing that disables the
+  operator's Group check, and `v0.4.0` and earlier have no `BURNIN_RANK` handling
+  — they read the unset `BURNIN_ROLE` as a Node-scope run and exit 2 with a
+  declared `NCCL_SKIP`, so the run settles `Passed` around a collective that
+  never happened. Published tags are immutable and will do that forever.
 - **The `v0.1.0` and `v0.2.x` runner tags are `linux/arm64` only.** Published
   tags are immutable, so multi-arch begins at `v0.3.0`. An x86 fleet pinning an
   older tag must repin or build its own; from `v0.3.0` onward one tag serves both
