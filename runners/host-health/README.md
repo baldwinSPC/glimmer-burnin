@@ -531,3 +531,45 @@ all.
 - **`/dev/kmsg` in a privileged pod** — the read path (raw fd, `O_NONBLOCK`,
   `EAGAIN`/`EPIPE` handling) is unit-tested against a regular file, not against
   a real ring buffer under `dmesg_restrict`.
+
+## Fabric error counters, and the one that lies
+
+`/sys/class/infiniband/*/ports/*/counters/` and `hw_counters/` carry the error
+counters that predict a link failure long before bandwidth moves. This runner
+reads fourteen of them and emits the **delta over the observation window** —
+the since-boot total counts errors from a cable somebody already replaced, so
+gating on it condemns a node for its history rather than its present.
+
+### A saturated counter reads as a clean link
+
+The IB-spec PMA counters **do not wrap**. They pin at their maximum and stay
+there until something resets them:
+
+| counter | width | pegs at |
+|---|---|---|
+| `local_link_integrity_errors` | 4-bit | **15** |
+| `excessive_buffer_overrun_errors` | 4-bit | **15** |
+| `link_error_recovery` | 8-bit | 255 |
+| `symbol_error`, `port_rcv_errors`, … | 16-bit | 65535 |
+
+A port that has been throwing symbol errors for a month therefore sits at 65535
+forever, the delta across a burn-in window is **zero**, and the link reads as
+clean. The 4-bit ones peg almost immediately.
+
+So a counter observed at its ceiling is **not a measurement**. It is omitted —
+the same rule the ECC probe applies — and reported instead through
+`fabricCountersSaturated`, which is the gate:
+
+```yaml
+- { metric: fabricCountersSaturated, comparison: Equal, value: "0" }
+```
+
+`fabricSaturatedCounters` names them, so a reader knows whether the link is
+throwing symbol errors or dropping subnet-management packets.
+
+### Absent is not clean
+
+`/sys/class/infiniband` may be invisible inside the pod depending on the RDMA
+namespace mode. That reports `fabricCounterStatus=absent` and emits **no**
+counter at all, so a threshold on one fails closed rather than certifying a
+fabric nobody looked at.

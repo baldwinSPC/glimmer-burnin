@@ -298,6 +298,7 @@ func run(cfg config, w io.Writer) (code int) {
 	emitGPU(out, gpu0, gpu1)
 	emitAER(out, aer0, aer1)
 	emitNIC(out, nic0, nic1)
+	emitFabricCounters(out, nic0, nic1)
 	reconcilePCIeReplay(out, gpu0, gpu1, aer0, aer1)
 
 	out.set("elapsed_s", strconv.FormatFloat(cfg.now().Sub(start).Seconds(), 'f', 1, 64))

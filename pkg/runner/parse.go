@@ -227,10 +227,16 @@ var aliases = map[string]map[string]string{
 	},
 
 	"host-health": {
-		"nic_link_down":     "nicLinkDownEvents",
-		"pcie_replay_count": "pcieReplayErrors",
-		"xid_count":         "xidEvents",
-		"rows_remapped":     "remappedRows",
+		// Fabric error counters. The runner's keys are already lowerCamelCase
+		// after normalisation, so only the ones whose spelling would land wrong
+		// are aliased here; the rest fall through to snakeToLowerCamel.
+		"ib_counters_saturated": "fabricCountersSaturated",
+		"ib_saturated_counters": "fabricSaturatedCounters",
+		"ib_counter_status":     "fabricCounterStatus",
+		"nic_link_down":         "nicLinkDownEvents",
+		"pcie_replay_count":     "pcieReplayErrors",
+		"xid_count":             "xidEvents",
+		"rows_remapped":         "remappedRows",
 	},
 
 	"thermal-soak": {
