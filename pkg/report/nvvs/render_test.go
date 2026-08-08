@@ -65,9 +65,9 @@ func TestErrorRendersAsNotRunAndNeverAsFail(t *testing.T) {
 			Nodes: []string{"n1"}, Message: "image pull failed"},
 	)
 	docs := render(t, input(e))
-	d := docs["diag-n1.json"].Diagnostic
+	d := docs["diag-n1.json"]
 
-	got := d.Categories[0].Tests[0].Results[0].Status
+	got := d.Diagnostic.Categories[0].Tests[0].Results[0].Status
 	if got != statusNotRun {
 		t.Errorf("status = %q, want %q — an Error must never render as a hardware verdict", got, statusNotRun)
 	}
@@ -153,7 +153,7 @@ func TestEveryDocumentCarriesProvenance(t *testing.T) {
 		contract.TestResult{Name: "a", Kind: "compute-smoke", Phase: phasePassed, Nodes: []string{"n1"}},
 	)
 	docs := render(t, input(e))
-	aux := docs["diag-n1.json"].Diagnostic.AuxData
+	aux := docs["diag-n1.json"].AuxData
 
 	if aux == nil {
 		t.Fatal("no aux_data: the document does not say what produced it")
@@ -243,7 +243,7 @@ func TestABaselineRunIsLabelledAsMeasurementNotCertification(t *testing.T) {
 	)
 	e.Baseline = true
 	docs := render(t, input(e))
-	d := docs["diag-n1.json"].Diagnostic
+	d := docs["diag-n1.json"]
 
 	if !strings.Contains(strings.ToUpper(d.Warning), "BASELINE") {
 		t.Errorf("a baseline run must be visibly labelled, got Warning=%q", d.Warning)
@@ -259,7 +259,7 @@ func TestAnUnfinishedRunSaysSoRatherThanReadingAsAVerdict(t *testing.T) {
 	)
 	e.Reason = contract.ReasonCheckpoint
 	docs := render(t, input(e))
-	d := docs["diag-n1.json"].Diagnostic
+	d := docs["diag-n1.json"]
 
 	if d.RuntimeError == "" {
 		t.Error("an unfinished run rendered with no indication that it is not a verdict")
@@ -294,9 +294,9 @@ func TestADroppedArtifactIsSurfaced(t *testing.T) {
 		},
 	)
 	docs := render(t, input(e))
-	d := docs["diag-n1.json"].Diagnostic
+	d := docs["diag-n1.json"]
 
-	info := strings.Join(d.Categories[0].Tests[0].Results[0].Info, "|")
+	info := strings.Join(d.Diagnostic.Categories[0].Tests[0].Results[0].Info, "|")
 	if !strings.Contains(info, "evidence not stored") {
 		t.Errorf("a dropped artifact must be visible in the document, got %q", info)
 	}
