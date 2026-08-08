@@ -38,6 +38,20 @@ const (
 	ReasonCheckpoint Reason = "Checkpoint"
 )
 
+// Reasons is every delivery reason this contract defines.
+//
+// It exists so a test can be TOTAL over them. A test that hard-codes the list
+// stops covering the day somebody adds a fourth, and the properties asserted
+// per reason — that the summary tallies every execution, that the envelope
+// validates — are exactly the ones a new delivery path would be easiest to get
+// wrong on and hardest to notice.
+//
+// Adding a Reason means adding it here, and TestReasonsIsComplete reads this
+// file's own constants to make sure you did — otherwise forgetting would
+// silently narrow every test that ranges over it, which is the failure mode a
+// list like this exists to prevent and the one it would otherwise cause.
+var Reasons = []Reason{ReasonPhaseChanged, ReasonTestCompleted, ReasonCheckpoint}
+
 // RunRef identifies the run a delivery describes.
 type RunRef struct {
 	Namespace string `json:"namespace"`

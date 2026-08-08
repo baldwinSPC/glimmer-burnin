@@ -332,6 +332,47 @@ func TestSummaryCountsErroredAndSkipped(t *testing.T) {
 	}
 }
 
+// The summary is EXHAUSTIVE, on every delivery reason — issue #190.
+//
+// A summary that counts some of the phases is worse than none: a consumer
+// reading "8 passed, 0 failed" off a ten-execution run sees a clean sweep, and
+// the two executions that errored — hardware nobody measured — are invisible.
+// The one existing defence is a consumer that ignores Summary entirely and
+// re-walks Results, which is the shape of a contract nobody can use.
+//
+// Asserted per REASON because the envelope is built by one function under four
+// of them, and a checkpoint delivery mid-run is exactly where a partial tally
+// would be easiest to justify and hardest to notice.
+func TestSummaryIsExhaustiveOnEveryReason(t *testing.T) {
+	run := &burninv1alpha1.BurnInRun{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "run1", UID: "uid-1"},
+		Status: burninv1alpha1.BurnInRunStatus{
+			Phase:   burninv1alpha1.RunError,
+			Passed:  2,
+			Failed:  3,
+			Errored: 1,
+			Skipped: 4,
+			Results: make([]burninv1alpha1.TestResult, 10),
+		},
+	}
+	for _, reason := range contract.Reasons {
+		t.Run(string(reason), func(t *testing.T) {
+			s := EnvelopeFor(run, "p", reason, "k", time.Unix(1750000000, 0), nil).Summary
+			total := s.Passed + s.Failed + s.Errored + s.Skipped
+			if total != int32(len(run.Status.Results)) {
+				t.Errorf("summary totals %d across %d results (%+v) — a consumer asking "+
+					"'how many did not pass' cannot answer it from this",
+					total, len(run.Status.Results), s)
+			}
+			if s.Errored != 1 || s.Skipped != 4 {
+				t.Errorf("summary = %+v, want errored=1 skipped=4 — an errored execution "+
+					"measured nothing, and reporting it as anything else certifies "+
+					"hardware nobody looked at", s)
+			}
+		})
+	}
+}
+
 // The flag rides into every envelope, so a consumer can never mistake a
 // thresholdless sweep for a certification — issue #142.
 func TestEnvelopeCarriesBaseline(t *testing.T) {
