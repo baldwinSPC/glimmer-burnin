@@ -290,21 +290,25 @@ var registry = map[string]Metric{
 	"minLatencyUs": {
 		Name: "minLatencyUs", Unit: UnitMicroseconds,
 		Description:  "the fastest single round trip observed. It is the link's floor — what the fabric can do with nothing in the way — and it is EVIDENCE rather than acceptance, because a gate on the best sample any run happened to catch says nothing about what the fabric delivers under load",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"maxLatencyUs": {
 		Name: "maxLatencyUs", Unit: UnitMicroseconds,
 		Description:  "the slowest single round trip observed. A single outlier is normal on a shared fabric — a scheduler tick, an interrupt — so this is evidence that qualifies p99LatencyUs rather than a gate of its own; a fleet gating on one worst sample fails healthy links on noise",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"p99LatencyUs": {
 		Name: "p99LatencyUs", Unit: UnitMicroseconds,
 		Description:  "99th-percentile round-trip latency: the number a collective actually runs at. A collective proceeds at the speed of its slowest participant on EVERY iteration, so a link with a healthy mean and a p99 an order of magnitude worse degrades every job on the fleet while passing a bandwidth gate outright. This is the acceptance-grade latency figure; latencyUs is the mean and is not",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"messageRateMpps": {
 		Name: "messageRateMpps", Unit: UnitNone,
 		Description:  "millions of messages per second the link sustained — a SEPARATE finding from bandwidth rather than a restatement of it. A link can carry its rated bytes while delivering far fewer messages per second than its class, which bandwidth cannot see and a collective feels immediately, because a collective is many small messages rather than one large one",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"ioLatencyUs": {
@@ -737,16 +741,19 @@ var registry = map[string]Metric{
 	"fabricCountersSaturated": {
 		Name: "fabricCountersSaturated", Unit: UnitNone,
 		Description:  "how many IB/RoCE error counters were observed PINNED at their maximum. The IB-spec PMA counters do not wrap — they saturate and stay there until reset — so a port erroring long enough to peg a 16-bit counter shows a delta of ZERO across any window and reads as a clean link. This is the only signal that sees it, and `Equal 0` is the gate",
+		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"fabricSaturatedCounters": {
 		Name: "fabricSaturatedCounters", Unit: UnitNone,
 		Description:  "comma-separated names of the pegged counters, so a reader knows whether the link is throwing symbol errors or dropping subnet-management packets. A list of labels; gate on fabricCountersSaturated for the count",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"fabricCounterStatus": {
 		Name: "fabricCounterStatus", Unit: UnitNone,
 		Description:  "whether any IB/RoCE port was visible to the probe at all: ok|absent. `absent` is legitimate — /sys/class/infiniband may be invisible inside the pod depending on the RDMA namespace mode — and it is why every fabric counter is OMITTED rather than zeroed there, so a gate on one fails closed instead of certifying a fabric nobody looked at",
+		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"xidSource": {
