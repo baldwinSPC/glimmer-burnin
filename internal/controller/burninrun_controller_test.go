@@ -21,6 +21,7 @@ import (
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/internal/metrics"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 )
 
 // Verbatim stdout of the shipped compute-smoke runner on a real GB10.
@@ -4885,5 +4886,31 @@ func TestPodDetailIsBounded(t *testing.T) {
 	// above whatever came last.
 	if strings.ContainsAny(clampPodDetail("one\ntwo\nthree"), "\n\r") {
 		t.Error("the detail was copied with newlines intact")
+	}
+}
+
+// The Pair merge dedupes rejected metric names, as the Group merge does.
+//
+// pkg/runner appends one entry per OFFENDING LINE and progressive reporting is
+// expected, so a runner emitting one bad key per sample produces one entry per
+// sample — twice over at Pair scope, since both ends report. attemptOutcome
+// joins the whole list into a message stored once per attempt per retry.
+func TestPair_InvalidNamesAreDeduped(t *testing.T) {
+	side := func(role, node string) pairSide {
+		var names []string
+		for sample := 0; sample < 40; sample++ {
+			names = append(names, "nccl.busbw")
+		}
+		return pairSide{role: role, node: node, result: &runner.Result{
+			Verdict: runner.VerdictPass, InvalidNames: names,
+			Metrics: map[string]string{}, Unmeasurable: map[string]bool{},
+		}}
+	}
+	out := combinePair(side("server", "spark-a"), side("client", "spark-b"), nil,
+		&burninv1alpha1.BurnInTestSpec{})
+
+	if len(out.InvalidNames) != 1 {
+		t.Errorf("InvalidNames has %d entries for ONE distinct rejected name across two ends",
+			len(out.InvalidNames))
 	}
 }
