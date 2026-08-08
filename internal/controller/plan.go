@@ -55,6 +55,10 @@ type plan struct {
 	Sinks []string `json:"sinks,omitempty"`
 	// FailFast is the profile's policy at start.
 	FailFast bool `json:"failFast,omitempty"`
+	// Baseline records that this run MEASURES rather than certifies. Pinned like
+	// everything else the verdict is read against, so a consumer reading a stored
+	// run months later cannot be misled by a spec that has since been edited.
+	Baseline bool `json:"baseline,omitempty"`
 	// Tests are the materialised test specs, in execution order.
 	Tests []plannedTest `json:"tests"`
 }
@@ -72,8 +76,11 @@ type plannedTest struct {
 // though it is read live elsewhere, because a Pair-scope test under a cap of 1
 // can never launch, and a run that quietly waits out its deadline to say so is
 // a much worse report than one that refuses at start with the reason.
-func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targets []string, nodeCap int) (*plan, error) {
+func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targets []string, nodeCap int, baseline bool) (*plan, error) {
 	if err := refuseUnsatisfiableThresholds(tests); err != nil {
+		return nil, err
+	}
+	if err := refuseGatedBaseline(tests, baseline); err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}
@@ -82,6 +89,7 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 		Targets:  targets,
 		Sinks:    profile.Spec.Sinks,
 		FailFast: profile.Spec.FailFast,
+		Baseline: baseline,
 	}
 	for _, t := range tests {
 		// Result identity is (test name, node). A duplicate name would make
@@ -522,6 +530,13 @@ func runDeadline(run *burninv1alpha1.BurnInRun) time.Duration {
 	return time.Duration(*run.Spec.DeadlineSeconds) * time.Second
 }
 
+// isBaseline reports whether this run measures rather than certifies. Read from
+// the spec at start and then PINNED into the plan, because it is part of what a
+// verdict means and must not change under a run that is already executing.
+func isBaseline(run *burninv1alpha1.BurnInRun) bool {
+	return run.Spec.Baseline != nil && *run.Spec.Baseline
+}
+
 // suspended reports whether the run is paused. A suspended run launches nothing
 // new, reaches no terminal phase, and produces no verdict.
 func suspended(run *burninv1alpha1.BurnInRun) bool {
@@ -531,4 +546,43 @@ func suspended(run *burninv1alpha1.BurnInRun) bool {
 // cancelRequested reports whether spec.cancel is set.
 func cancelRequested(run *burninv1alpha1.BurnInRun) bool {
 	return run.Spec.Cancel != nil && *run.Spec.Cancel
+}
+
+// refuseGatedBaseline rejects a baseline run whose profile carries a threshold.
+//
+// A REFUSAL AND NOT A SUPPRESSION, and the distinction is the whole point. Making
+// spec.baseline suppress thresholds would turn it into a threshold-laundering
+// switch: a way to convert a failing acceptance run into a passing measurement
+// run by flipping a boolean, after the fact, with the profile unchanged. This
+// operator's premise is that a verdict cannot be edited into existence, and a
+// flag that can do it is worse than no flag.
+//
+// So the two are kept mutually exclusive at the point where it costs nothing —
+// before a node is cordoned — and the error names the test, because "your
+// profile has gates somewhere" is not actionable on a twelve-test suite.
+func refuseGatedBaseline(tests []resolvedTest, baseline bool) error {
+	if !baseline {
+		return nil
+	}
+	var gated []string
+	for _, t := range tests {
+		if len(t.spec.Thresholds) > 0 {
+			gated = append(gated, fmt.Sprintf("%q (%d threshold(s))", t.name, len(t.spec.Thresholds)))
+		}
+	}
+	if len(gated) == 0 {
+		return nil
+	}
+	shown := gated
+	if len(shown) > maxAdvisedThresholds {
+		shown = append(append([]string{}, gated[:maxAdvisedThresholds]...),
+			fmt.Sprintf("and %d more", len(gated)-maxAdvisedThresholds))
+	}
+	return fmt.Errorf(
+		"this run is marked spec.baseline but its profile carries thresholds on %d test(s): %s. "+
+			"A baseline MEASURES and an acceptance run CERTIFIES, and the flag does not suppress "+
+			"gates — that would be a way to turn a failing run into a passing one by editing a "+
+			"boolean. Either clear spec.baseline and let the gates decide, or point this run at a "+
+			"thresholdless profile",
+		len(gated), strings.Join(shown, "; "))
 }

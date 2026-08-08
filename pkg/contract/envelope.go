@@ -163,6 +163,16 @@ type ClusterRef struct {
 // Envelope is the delivered document.
 type Envelope struct {
 	Version string `json:"version"`
+
+	// Baseline says this run MEASURED rather than certified.
+	//
+	// Without it a thresholdless sweep and an acceptance run both deliver
+	// phase Passed, and a consumer gating admission on "the last run passed"
+	// certifies hardware against a run that gated nothing. The operator refuses
+	// to combine the flag with thresholds, so a true value here means the run
+	// carried no gates at all — it is a statement about what the verdict is
+	// WORTH, not a hint.
+	Baseline bool `json:"baseline,omitempty"`
 	// DeliveryID is the idempotency key. It is DERIVED, not random: a retry of
 	// the same delivery carries the same ID, so a receiver that has already
 	// applied it can discard the duplicate. See NewDeliveryID.

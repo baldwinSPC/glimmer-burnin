@@ -4983,3 +4983,73 @@ func TestRunAsUserIsSeparateFromPrivileged(t *testing.T) {
 }
 
 func int64p(v int64) *int64 { return &v }
+
+// A baseline run whose profile has gates is REFUSED, not silently ungated —
+// issue #142.
+//
+// The flag exists because a thresholdless sweep and an acceptance run both
+// deliver phase Passed, so a consumer gating admission on "the last run passed"
+// would certify hardware against a run that gated nothing. The refusal is the
+// half that keeps the flag honest: making it SUPPRESS thresholds would turn it
+// into a threshold-laundering switch — a way to convert a failing acceptance run
+// into a passing measurement run by editing a boolean.
+func TestBaselineRunWithThresholdsIsRefused(t *testing.T) {
+	gated := smokeTest("gated", burninv1alpha1.Threshold{
+		Metric: "nonfiniteCount", Comparison: burninv1alpha1.EQ, Value: "0",
+	})
+	run := newRun("run1", "acceptance", "spark-a")
+	run.Spec.Baseline = boolp(true)
+
+	h := newHarness(t,
+		gb10Node("spark-a"), gated,
+		profile("acceptance", nil, false, testRef("gated")),
+		run,
+	)
+	h.reconcile("run1")
+	h.reconcileUntilSettled("run1")
+
+	got := h.run("run1")
+	if got.Status.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error — a baseline carrying gates is a contradiction the "+
+			"operator must not resolve on its own", got.Status.Phase)
+	}
+	msg := got.Status.Results[0].Message
+	// Naming the test matters: "your profile has gates somewhere" is not
+	// actionable on a twelve-test suite.
+	if !strings.Contains(msg, `"gated"`) {
+		t.Errorf("the refusal does not name the offending test: %q", msg)
+	}
+	if !strings.Contains(msg, "does not suppress") {
+		t.Errorf("the refusal does not say why suppression was rejected: %q", msg)
+	}
+	if len(h.allPods("run1")) != 0 {
+		t.Error("a pod was scheduled for a run that was refused at plan time")
+	}
+	h.assertNoStrandedCordons()
+}
+
+// A thresholdless baseline runs exactly as it always did, and says what it is.
+func TestBaselineRunWithoutThresholdsMeasuresAndSaysSo(t *testing.T) {
+	run := newRun("run1", "sweep", "spark-a")
+	run.Spec.Baseline = boolp(true)
+
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("sweep-me"), // no thresholds
+		profile("sweep", nil, false, testRef("sweep-me")),
+		run,
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 0, "nonfinite_count=0\nFP4_GEMM_PASS\n", "Completed")
+	h.reconcileUntilSettled("run1")
+
+	got := h.run("run1")
+	if got.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("phase = %q, want Passed: %s", got.Status.Phase, got.Status.Results[0].Message)
+	}
+	// Evaluation is byte-identical: the metric is recorded exactly as always.
+	if got.Status.Results[0].Metrics["nonfiniteCount"] != "0" {
+		t.Errorf("a baseline must still record its measurements: %v", got.Status.Results[0].Metrics)
+	}
+}

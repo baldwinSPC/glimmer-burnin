@@ -298,6 +298,11 @@ func (r *BurnInScheduleReconciler) runForTick(sched *burninv1alpha1.BurnInSchedu
 			RetryOnErrorLimit:       &retryOnError,
 			DeadlineSeconds:         copyInt32(tpl.DeadlineSeconds),
 			TTLSecondsAfterFinished: copyInt32(tpl.TTLSecondsAfterFinished),
+			// Written explicitly for the same reason the two above are: whether
+			// a run measured or certified is exactly the thing an audit reads
+			// off the object months later, and inheriting it silently from a
+			// template that has since been edited would leave that unanswerable.
+			Baseline: copyBool(tpl.Baseline),
 		},
 	}
 	// The owner reference is what makes the Owns() watch, history GC and
@@ -637,4 +642,15 @@ func (r *BurnInScheduleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&burninv1alpha1.BurnInRun{}).
 		Named("burninschedule").
 		Complete(r)
+}
+
+// copyBool returns an independent pointer, so a run cannot alias the schedule's
+// own field and a later edit of the schedule cannot reach back into a run that
+// has already been created.
+func copyBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
 }

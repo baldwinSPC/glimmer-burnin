@@ -108,6 +108,18 @@ spec:
                 description: RunTemplate carries the run-shaped settings stamped onto
                   each created run.
                 properties:
+                  baseline:
+                    default: false
+                    description: |-
+                      Baseline marks every run this schedule creates as a MEASUREMENT rather
+                      than a certification. See BurnInRunSpec.Baseline — including that it
+                      refuses, rather than suppresses, a profile carrying thresholds.
+
+                      It is on the template because a recurring fleet baseline is the point:
+                      pinning a threshold honestly means sweeping the fleet first, and a sweep
+                      that has to be re-declared by hand every time is one somebody eventually
+                      runs against an acceptance profile.
+                    type: boolean
                   deadlineSeconds:
                     description: |-
                       DeadlineSeconds bounds each created run. A periodic schedule especially

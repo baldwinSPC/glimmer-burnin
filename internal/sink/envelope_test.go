@@ -331,3 +331,35 @@ func TestSummaryCountsErroredAndSkipped(t *testing.T) {
 			"pass' still cannot answer it from the summary", total)
 	}
 }
+
+// The flag rides into every envelope, so a consumer can never mistake a
+// thresholdless sweep for a certification — issue #142.
+func TestEnvelopeCarriesBaseline(t *testing.T) {
+	mk := func(baseline *bool) *contract.Envelope {
+		run := &burninv1alpha1.BurnInRun{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "run1", UID: "uid-1"},
+			Spec:       burninv1alpha1.BurnInRunSpec{Baseline: baseline},
+			Status: burninv1alpha1.BurnInRunStatus{
+				Phase:   burninv1alpha1.RunPassed,
+				Results: []burninv1alpha1.TestResult{{Name: "sweep", Phase: burninv1alpha1.RunPassed}},
+			},
+		}
+		return EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil)
+	}
+
+	sweep := mk(func() *bool { b := true; return &b }())
+	if !sweep.Baseline {
+		t.Error("a baseline run's envelope does not say so — a consumer gating admission on " +
+			"'the last run passed' would certify hardware against a run that gated nothing")
+	}
+	// Both phases are Passed. The flag is the ONLY thing distinguishing them.
+	if sweep.Phase != string(burninv1alpha1.RunPassed) {
+		t.Errorf("phase = %q, want Passed — a baseline still passes on exit 0", sweep.Phase)
+	}
+
+	for _, unset := range []*bool{nil, func() *bool { b := false; return &b }()} {
+		if mk(unset).Baseline {
+			t.Error("an ordinary acceptance run was delivered as a baseline")
+		}
+	}
+}

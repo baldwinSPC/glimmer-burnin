@@ -25,6 +25,10 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .spec.baseline
+      name: Baseline
+      priority: 1
+      type: boolean
     - jsonPath: .status.passed
       name: Passed
       type: integer
@@ -60,6 +64,30 @@ spec:
             description: BurnInRunSpec is one execution of a BurnInProfile against
               a target.
             properties:
+              baseline:
+                default: false
+                description: |-
+                  Baseline declares that this run MEASURES rather than certifies.
+
+                  Running thresholdless to gather baselines already works — a profile with
+                  no thresholds passes on exit 0 and records its metrics. What did not work
+                  was telling the two apart AFTERWARDS: a baseline sweep and an acceptance
+                  run both deliver phase Passed, so a consumer gating cluster admission on
+                  "the last run passed" would certify hardware against a run that gated
+                  nothing. That is a fail-open in the reporting path, and this flag is what
+                  closes it.
+
+                  IT DOES NOT SUPPRESS THRESHOLDS, and must never be made to. A run marked
+                  baseline whose profile carries a gate is REFUSED at start, as a config
+                  Error naming the test. Suppression would be a threshold-laundering switch —
+                  a way to turn a failing acceptance run into a passing measurement run by
+                  flipping a boolean — and this operator's whole premise is that a verdict
+                  cannot be edited into existence. If a profile has gates it is not a
+                  baseline; use a different profile.
+
+                  The flag rides into every delivered envelope, so a consumer can never
+                  mistake a sweep for a certification.
+                type: boolean
               cancel:
                 default: false
                 description: |-
