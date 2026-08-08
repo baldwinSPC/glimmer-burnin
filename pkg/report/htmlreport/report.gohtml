@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Burn-in report — {{.Run.Name}}</title>
+<style>
+/* Everything is inline. The document must open with no network, forever:
+   in a secure facility, as an email attachment, and in eighteen months. */
+:root{
+  --ink:#16181d; --soft:#5b6170; --rule:#d8dbe3; --panel:#f7f8fa; --bg:#fff;
+  /* Fail and Error are different HUES on purpose. They mean different things
+     and lead to different actions; two shades of red would hide that. */
+  --pass:#1a7150; --fail:#b3261e; --error:#a25a00; --skip:#5b6170;
+  --authoring:#5b4bb8; --cancel:#5b6170;
+}
+@media (prefers-color-scheme:dark){
+  :root{--ink:#e6e8ee;--soft:#9aa2b2;--rule:#2a2f3a;--panel:#171a21;--bg:#0f1116;
+        --pass:#4bb98d;--fail:#f2685c;--error:#e0973c;--skip:#9aa2b2;--authoring:#a394f0;--cancel:#9aa2b2;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1100px;margin:0 auto;padding:40px 28px 72px}
+h1{font-size:26px;line-height:1.2;margin:0 0 4px;letter-spacing:-.02em}
+h2{font-size:17px;margin:0;letter-spacing:-.01em}
+h3{font-size:14px;margin:0 0 6px}
+p{margin:0 0 12px}
+code,.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.9em}
+.sub{color:var(--soft);font-size:13px}
+section{margin-top:34px}
+.head{display:flex;align-items:baseline;gap:12px;border-top:1px solid var(--rule);padding-top:12px;margin-bottom:14px}
+.head .sub{margin-left:auto}
+
+/* Banner */
+.banner{border:1px solid var(--rule);border-left-width:6px;background:var(--panel);padding:16px 18px;border-radius:3px}
+.banner.pass{border-left-color:var(--pass)} .banner.fail{border-left-color:var(--fail)}
+.banner.error{border-left-color:var(--error)} .banner.skip{border-left-color:var(--skip)}
+.banner.cancelled{border-left-color:var(--cancel)} .banner.running{border-left-color:var(--soft)}
+.verdict{font-size:20px;font-weight:650;letter-spacing:-.01em}
+.verdict.pass{color:var(--pass)} .verdict.fail{color:var(--fail)}
+.verdict.error{color:var(--error)} .verdict.skip{color:var(--skip)}
+.verdict.cancelled{color:var(--cancel)} .verdict.running{color:var(--soft)}
+.facts{display:flex;flex-wrap:wrap;gap:4px 22px;margin-top:10px;font-size:13px;color:var(--soft)}
+.facts b{color:var(--ink);font-weight:600}
+
+/* Callouts */
+.note{border:1px solid var(--rule);border-left:4px solid var(--error);background:var(--panel);
+  padding:11px 14px;border-radius:3px;margin-top:10px;font-size:13.5px}
+.note.baseline{border-left-color:var(--authoring)}
+
+/* Counters */
+.counts{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+.count{border:1px solid var(--rule);border-radius:3px;padding:8px 14px;min-width:96px;background:var(--panel)}
+.count .n{font-size:21px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2}
+.count .l{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft)}
+.count.pass .n{color:var(--pass)} .count.fail .n{color:var(--fail)}
+.count.error .n{color:var(--error)} .count.skip .n{color:var(--skip)}
+
+/* Tables */
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--soft);font-weight:600;white-space:nowrap}
+td.node{font-family:ui-monospace,Menlo,monospace;white-space:nowrap}
+
+/* Status pill — the WORD carries the meaning so greyscale and colour-blind
+   readers lose nothing. Colour is reinforcement, never the only signal. */
+.pill{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;
+  padding:2px 7px;border-radius:3px;border:1px solid currentColor;white-space:nowrap}
+.pill.pass{color:var(--pass)} .pill.fail{color:var(--fail)} .pill.error{color:var(--error)}
+.pill.skip{color:var(--skip)} .pill.cancelled{color:var(--cancel)} .pill.running{color:var(--soft)}
+.pill.absent{color:var(--rule);border-style:dashed}
+
+/* Detail blocks */
+.card{border:1px solid var(--rule);border-radius:3px;margin-top:12px;overflow:hidden}
+.card>.t{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--panel);
+  border-bottom:1px solid var(--rule);flex-wrap:wrap}
+.card>.b{padding:12px 14px}
+.kv{display:flex;flex-wrap:wrap;gap:3px 18px;font-size:13px;font-family:ui-monospace,Menlo,monospace}
+.kv span{white-space:nowrap}
+.kv b{font-weight:600}
+.viol{border-left:3px solid var(--fail);padding:7px 0 7px 11px;margin-top:9px}
+.viol.error{border-left-color:var(--error)} .viol.authoring{border-left-color:var(--authoring)}
+.viol .m{font-family:ui-monospace,Menlo,monospace;font-weight:600;font-size:13px}
+.viol .why{font-size:12.5px;color:var(--soft);margin-top:2px}
+.notes{margin:9px 0 0;padding-left:18px;font-size:12.5px;color:var(--soft)}
+.notes li{margin:2px 0}
+.endpoints{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--soft)}
+footer{margin-top:44px;border-top:1px solid var(--rule);padding-top:14px;font-size:12px;color:var(--soft)}
+
+/* Print: this document gets printed and attached to claims. Force light,
+   keep the pills readable, and never break a card across a page. */
+@media print{
+  :root{--ink:#000;--soft:#444;--rule:#bbb;--panel:#fff;--bg:#fff;
+        --pass:#065f41;--fail:#8f1d16;--error:#7a4400;--skip:#444;--authoring:#3d3191;--cancel:#444}
+  body{font-size:11pt}
+  .wrap{max-width:none;padding:0}
+  .card,.banner,tr{break-inside:avoid}
+  section{break-before:auto}
+  a[href]:after{content:""}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Burn-in report</h1>
+  <div class="sub mono">{{with .Run.Namespace}}{{.}}/{{end}}{{.Run.Name}}{{with .Run.Profile}} · profile {{.}}{{end}}</div>
+
+  <div class="banner {{.Run.PhaseClass}}" style="margin-top:14px">
+    <div class="verdict {{.Run.PhaseClass}}">{{.Run.PhaseWord}}</div>
+    {{if not .Run.Final}}<div class="sub" style="margin-top:3px">Not a verdict — this run had not finished.</div>{{end}}
+    <div class="facts">
+      {{with .Run.StartedAt}}<span>Started <b>{{.}}</b></span>{{end}}
+      {{with .Run.FinishedAt}}<span>Finished <b>{{.}}</b></span>{{end}}
+      {{with .Run.Cluster}}<span>Cluster <b>{{.}}</b></span>{{end}}
+      {{with .Run.UID}}<span>Run <b class="mono">{{.}}</b></span>{{end}}
+    </div>
+  </div>
+
+  {{if .Run.Baseline}}
+  <div class="note baseline">
+    <b>Baseline run — nothing was certified.</b>
+    This profile carried no thresholds. The numbers below are measurements to set
+    gates from, and a pass here is not an acceptance.
+  </div>
+  {{end}}
+  {{if .Run.Cancelled}}
+  <div class="note">
+    <b>Cancelled.</b> The hardware was not judged.
+    {{with .Run.CancelWhy}}Reason given: {{.}}{{end}}
+  </div>
+  {{end}}
+
+  <div class="counts">
+    {{range .Summary}}<div class="count {{.Class}}"><div class="n">{{.Count}}</div><div class="l">{{.Label}}</div></div>{{end}}
+  </div>
+  <p class="sub" style="margin-top:8px">Counted in executions — one test on one node is one execution.</p>
+</header>
+
+{{if .Warnings}}
+<section>
+  <div class="head"><h2>What this report cannot tell you</h2></div>
+  {{range .Warnings}}<div class="note">{{.}}</div>{{end}}
+</section>
+{{end}}
+
+{{if not .Matrix.Empty}}
+<section>
+  <div class="head"><h2>Nodes and tests</h2><span class="sub">Link results are below — they belong to no single node</span></div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Node</th>{{range .Matrix.Tests}}<th>{{.}}</th>{{end}}</tr></thead>
+      <tbody>
+        {{range .Matrix.Rows}}
+        <tr><td class="node">{{.Node}}</td>
+        {{range .Cells}}<td><span class="pill {{.Class}}" title="{{.Title}}">{{.Word}}</span></td>{{end}}
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}
+
+{{if .Links}}
+<section>
+  <div class="head"><h2>Links</h2><span class="sub">A verdict about the connection, not about either end</span></div>
+  {{range .Links}}
+  <div class="card">
+    <div class="t">
+      <span class="pill {{.Status.Class}}">{{.Status.Word}}</span>
+      <h3 style="margin:0">{{.Name}}</h3>
+      <span class="sub">{{.Scope}}</span>
+      <span class="endpoints" style="margin-left:auto">{{.Label}}</span>
+    </div>
+    <div class="b">
+      <p class="sub" style="margin:0 0 8px">
+        This measurement is a property of the link between {{.Label}}.
+        Attributing it to one endpoint would send an engineer to the wrong machine.
+      </p>
+      {{if .Metrics}}<div class="kv">{{range .Metrics}}<span><b>{{.Key}}</b> {{.Value}}</span>{{end}}</div>{{end}}
+      {{range .Violations}}
+      <div class="viol {{.Class}}">
+        <div class="m">{{.Metric}}</div>
+        <div>{{.Reason}}</div>
+        {{with .CauseWhy}}<div class="why">{{.}}</div>{{end}}
+      </div>
+      {{end}}
+      {{if .Notes}}<ul class="notes">{{range .Notes}}<li>{{.}}</li>{{end}}</ul>{{end}}
+    </div>
+  </div>
+  {{end}}
+</section>
+{{end}}
+
+{{if .Nodes}}
+<section>
+  <div class="head"><h2>Per node</h2></div>
+  {{range .Nodes}}
+  <div class="card">
+    <div class="t"><h3 class="mono" style="margin:0">{{.Name}}</h3></div>
+    <div class="b">
+      {{range .Tests}}
+      <div style="margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <span class="pill {{.Status.Class}}">{{.Status.Word}}</span>
+          <b>{{.Name}}</b>
+          {{with .Kind}}<span class="sub">{{.}}</span>{{end}}
+        </div>
+        {{with .Message}}<div class="sub" style="margin-top:4px">{{.}}</div>{{end}}
+        {{if .Metrics}}<div class="kv" style="margin-top:6px">{{range .Metrics}}<span><b>{{.Key}}</b> {{.Value}}</span>{{end}}</div>{{end}}
+        {{range .Violations}}
+        <div class="viol {{.Class}}">
+          <div class="m">{{.Metric}}</div>
+          <div>{{.Reason}}</div>
+          {{with .CauseWhy}}<div class="why">{{.}}</div>{{end}}
+        </div>
+        {{end}}
+        {{if .Notes}}<ul class="notes">{{range .Notes}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+</section>
+{{end}}
+
+{{if .Inventory}}
+<section>
+  <div class="head"><h2>Hardware</h2><span class="sub">As captured when the run started</span></div>
+  {{range .Inventory}}
+  <div class="card">
+    <div class="t"><h3 class="mono" style="margin:0">{{.Node}}</h3>
+      {{if .Unknown}}<span class="sub">no inventory was collected</span>{{end}}</div>
+    {{if .Fields}}
+    <div class="b"><div class="kv">{{range .Fields}}<span><b>{{.Key}}</b> {{.Value}}</span>{{end}}</div></div>
+    {{end}}
+  </div>
+  {{end}}
+</section>
+{{end}}
+
+<footer>
+  Generated by {{.Meta.Generator}}{{with .Meta.GeneratedAt}} at {{.}}{{end}}.
+  <br>{{.Meta.Notice}}
+</footer>
+
+</div>
+</body>
+</html>
