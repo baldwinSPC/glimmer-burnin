@@ -324,26 +324,94 @@ func TestAHostTestAttachesToTheHostNotToAnAccelerator(t *testing.T) {
 	}
 }
 
-func TestAMultiGPUNodeSaysTheAttributionWasNotMeasured(t *testing.T) {
-	// The runner reported one verdict for the node. Broadcasting it to four
-	// devices is an over-attribution, and the document must not let a reader
-	// assume per-device detail was measured.
+// A node-scope verdict on a multi-GPU node is emitted ONCE — issue #206.
+//
+// This test previously asserted the opposite: that the verdict was broadcast to
+// every accelerator with an info line disclosing that the per-device attribution
+// had not been measured. The disclosure is honest and it does not reach the
+// consumer that matters.
+//
+// NVVS consumers COUNT results[] objects — tallying failures per entity is the
+// normal reason to parse this format. Prose in info[] does not participate in
+// counting. So one failing gpu-burn on an eight-GPU node was eight objects with
+// status "Fail", and every tallying tool reported eight failed GPUs: an engineer
+// replacing seven healthy parts, or a fleet manager quarantining eight devices.
+//
+// It is not recoverable downstream either. Once the document has been forwarded
+// or re-serialised, eight objects are eight results and nothing carries the fact
+// that they were one.
+//
+// The assertion is therefore on the COUNT, and its failure message says what a
+// counting consumer would conclude.
+func TestANodeVerdictIsEmittedOnceNotOncePerGPU(t *testing.T) {
+	gpus := make([]report.GPUInfo, 8)
+	for i := range gpus {
+		gpus[i] = report.GPUInfo{Index: int32(i), Model: "H100"}
+	}
 	e := envelope(phaseFailed,
 		contract.TestResult{Name: "gpu-burn", Kind: "gpu-burn", Phase: phaseFailed, Nodes: []string{"n1"}},
 	)
-	in := input(e, report.NodeInfo{Name: "n1", GPUs: []report.GPUInfo{
-		{Index: 0, Model: "H100"}, {Index: 1, Model: "H100"},
-	}})
-	docs := render(t, in)
+	docs := render(t, input(e, report.NodeInfo{Name: "n1", GPUs: gpus}))
 	results := docs["diag-n1.json"].Diagnostic.Categories[0].Tests[0].Results
 
-	if len(results) != 2 {
-		t.Fatalf("got %d results, want one per accelerator", len(results))
+	if len(results) != 1 {
+		t.Fatalf("one failing node-scope test produced %d results[] objects on an "+
+			"8-GPU node. A consumer that tallies failures per entity now reports %d "+
+			"failed GPUs for one node-level finding.", len(results), len(results))
 	}
-	for i, r := range results {
-		if !strings.Contains(strings.Join(r.Info, "|"), "attribution=node") {
-			t.Errorf("result %d does not disclose that the attribution is the node's: %v", i, r.Info)
-		}
+	r := results[0]
+	if r.EntityID != nil {
+		t.Errorf("the verdict is bound to entity_id %d. The runner measured one device "+
+			"and the document cannot say which; binding it to one names the wrong part.",
+			*r.EntityID)
+	}
+	if r.EntityGroup != "" {
+		t.Errorf("entity_group = %q on a verdict that binds to no entity", r.EntityGroup)
+	}
+
+	// The devices are still named, for a human. A machine finds no entity; a
+	// person still sees what was in the node.
+	info := strings.Join(r.Info, "|")
+	if !strings.Contains(info, "scope=node") {
+		t.Errorf("nothing says the verdict is node-scoped: %v", r.Info)
+	}
+	if !strings.Contains(info, "gpus=0,1,2,3,4,5,6,7") {
+		t.Errorf("the devices on the node are not named: %v", r.Info)
+	}
+
+	// And the entity inventory is still published, so the node's hardware is
+	// visible even though the verdict binds to none of it.
+	if egs := docs["diag-n1.json"].EntityGroups; len(egs) == 0 || len(egs[0].Entities) != 8 {
+		t.Errorf("entity_groups = %+v, want the node's 8 GPUs", egs)
+	}
+}
+
+// Where the runner said which device it measured, the document says so too.
+//
+// clockprobe, thermal-soak and gpu-burn each run on ONE CUDA device and emit its
+// bus address. On a multi-GPU node, where the verdict binds to no entity, that
+// line is the only unambiguous statement available about which part was under
+// load — an ordinal is not, because MIG and CUDA_VISIBLE_DEVICES both remap it.
+//
+// It reaches the document through infoFor, which emits every metric as
+// key=value. This test exists because that is load-bearing for a case it was not
+// written for: an earlier version of the #206 fix added a second, explicit
+// pciBusId line here, and the redundancy was only visible because mutating it
+// away changed nothing.
+func TestTheDeviceActuallyMeasuredIsNamedWhenKnown(t *testing.T) {
+	e := envelope(phaseFailed,
+		contract.TestResult{
+			Name: "gpu-burn", Kind: "gpu-burn", Phase: phaseFailed, Nodes: []string{"n1"},
+			Metrics: map[string]string{"pciBusId": "0000:01:00.0"},
+		},
+	)
+	docs := render(t, input(e, report.NodeInfo{Name: "n1", GPUs: []report.GPUInfo{
+		{Index: 0, Model: "H100"}, {Index: 1, Model: "H100"},
+	}}))
+	r := docs["diag-n1.json"].Diagnostic.Categories[0].Tests[0].Results[0]
+	if !strings.Contains(strings.Join(r.Info, "|"), "0000:01:00.0") {
+		t.Errorf("the runner reported which device it measured and the document does "+
+			"not carry it: %v", r.Info)
 	}
 }
 
@@ -357,8 +425,14 @@ func TestASingleGPUNodeDoesNotCarryTheAttributionCaveat(t *testing.T) {
 	docs := render(t, in)
 	r := docs["diag-n1.json"].Diagnostic.Categories[0].Tests[0].Results[0]
 
-	if strings.Contains(strings.Join(r.Info, "|"), "attribution=node") {
-		t.Error("a single-GPU node should not carry the multi-device attribution caveat")
+	if strings.Contains(strings.Join(r.Info, "|"), "scope=node") {
+		t.Error("a single-GPU node should not carry the multi-device caveat")
+	}
+	// And the binding IS made, because here it is exact. Losing it would trade
+	// one kind of imprecision for another.
+	if r.EntityID == nil || *r.EntityID != 0 || r.EntityGroup != "GPU" {
+		t.Errorf("a single-GPU node did not bind exactly: entity_group=%q entity_id=%v",
+			r.EntityGroup, r.EntityID)
 	}
 }
 
