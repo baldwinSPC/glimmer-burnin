@@ -76,8 +76,15 @@ const (
 	pairRoleClient = "client"
 )
 
-// pairRendezvousPollInterval is the backstop wake-up while a pair is mid-
-// rendezvous: the server has been created and the client has not started yet.
+// rendezvousPollInterval is the backstop wake-up while a unit is mid-rendezvous:
+// a Pair whose server exists and whose client has not started, or a Group whose
+// root is up and whose workers have not been created.
+//
+// It is ONE constant for both scopes, reached through advanceEffect.rendezvous
+// rather than through either scope's own code. Group briefly had an alias of its
+// own — declared, documented, and never referenced, because the shared wake-up
+// path in reconcileRunning was already clamping to this value. A second name for
+// one number is a number that will eventually be two.
 //
 // Pod events drive the common case — the controller Owns pods, so the server
 // going Ready re-triggers a reconcile immediately — and this only covers the
@@ -85,7 +92,7 @@ const (
 // window it covers is dead time on hardware the run is already holding, and
 // longer than a spin because the reconciler must not poll the API server in a
 // loop waiting for a container to bind a socket.
-const pairRendezvousPollInterval = 5 * time.Second
+const rendezvousPollInterval = 5 * time.Second
 
 // pairSide is one endpoint's report. A nil result means that end never produced
 // one, which is a different statement from "it reported nothing useful" and is

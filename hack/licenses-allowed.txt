@@ -1,0 +1,55 @@
+# The licences this project may ship, one per line.
+#
+# THIS FILE IS THE POLICY. hack/check-licenses.sh enforces it over the whole Go
+# module graph, and CI blocks on it. CLAUDE.md describes the policy in prose for
+# a human; this file is what actually decides.
+#
+# Why the rule is absolute: a copyleft dependency would make this project
+# unpublishable. It is distributed as source under Apache-2.0 and as container
+# images, and a GPL/AGPL/LGPL/SSPL/MPL/Sleepycat dependency anywhere in the
+# graph — including one arriving transitively, which is the case nobody sees —
+# would impose terms this project cannot meet.
+#
+# Adding a line here is a licensing decision, not a build fix. Each one carries
+# the reason it is safe.
+
+# ── The four the project was founded on ──────────────────────────────────────
+Apache-2.0
+MIT
+BSD-2-Clause
+BSD-3-Clause
+
+# ── ISC ──────────────────────────────────────────────────────────────────────
+#
+# Added when the check was first written, because the check found that the
+# project had ALREADY been shipping it. github.com/davecgh/go-spew arrives
+# through k8s.io/apimachinery/pkg/util/diff and is linked into the operator
+# binary — not a test-only dependency, as one might assume from what go-spew is
+# for. CLAUDE.md's prose listed four licences and had never described what the
+# project actually distributes.
+#
+# It is allowed rather than excepted because ISC is unambiguously permissive:
+# OSI-approved, functionally BSD-2-Clause with simplified wording, no reciprocal
+# obligation of any kind. The project's stated policy always included it; only
+# the written list in CLAUDE.md did not. That list is now corrected.
+ISC
+
+# ── The public-domain equivalents ────────────────────────────────────────────
+#
+# Not currently present in the graph. Listed because they impose no obligation
+# at all, so a dependency arriving under one is never a licensing question — and
+# leaving them out would mean a future CI failure that reads like a policy
+# violation when it is not.
+0BSD
+Unlicense
+CC0-1.0
+
+# ── NOT ALLOWED, and this is not a matter of preference ──────────────────────
+#
+#   GPL-*, AGPL-*, LGPL-*, SSPL-*, MPL-*, Sleepycat, CDDL-*, EPL-*, CPL-*
+#
+# There is no exception process for these. If a dependency you need is copyleft,
+# the answer is a different dependency, or an interface this project defines and
+# the consumer implements. Where an upstream is DUAL-licensed, we consume it
+# under the permissive option and NOTICE must say so explicitly — linux-rdma/
+# perftest is the worked example (GPL/BSD dual, consumed under BSD).

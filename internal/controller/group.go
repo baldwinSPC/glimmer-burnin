@@ -95,12 +95,6 @@ import (
 // not collide, because a rank that measured something nobody else did is
 // evidence worth storing.
 
-// groupRendezvousPollInterval is the backstop while a group is mid-rendezvous:
-// the root is up and the workers have not been created yet. Same reasoning as
-// pairRendezvousPollInterval, and deliberately the same value — the window it
-// covers is dead time on hardware the run is already holding.
-const groupRendezvousPollInterval = pairRendezvousPollInterval
-
 // groupMember is one rank's report. A nil result means that rank never produced
 // one, which is a different statement from "it reported nothing useful".
 type groupMember struct {

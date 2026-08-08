@@ -80,7 +80,6 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -501,13 +500,6 @@ func (e *emitter) writeTo(w io.Writer) {
 	for _, k := range e.order {
 		fmt.Fprintf(w, "%s=%s\n", k, e.vals[k])
 	}
-}
-
-// keys returns the emitted keys, sorted. Used by tests.
-func (e *emitter) keys() []string {
-	out := append([]string(nil), e.order...)
-	sort.Strings(out)
-	return out
 }
 
 // ---------------------------------------------------------------------------

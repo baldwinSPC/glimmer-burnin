@@ -51,6 +51,17 @@ test:
 # `go test ./...`. CI sets BURNIN_ENVTEST=required, which turns that skip into a
 # hard failure — a suite that silently skips in CI has negative value.
 
+.PHONY: licenses
+licenses: ## Enforce the licence policy over the whole Go module graph.
+	go run ./hack/licensecheck
+
+.PHONY: vulncheck
+vulncheck: ## Report vulnerabilities in code paths this project actually reaches.
+	go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+.PHONY: supply-chain
+supply-chain: licenses vulncheck ## Everything the supply-chain CI job runs, minus the linter binary.
+
 .PHONY: envtest-assets
 envtest-assets: ## Download the envtest kube-apiserver + etcd binaries.
 	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path

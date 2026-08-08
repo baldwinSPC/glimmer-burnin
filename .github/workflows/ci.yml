@@ -136,6 +136,52 @@ jobs:
           go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.2 crd rbac:roleName=burnin-manager-role webhook paths=./... output:crd:artifacts:config=config/crd output:rbac:artifacts:config=config/rbac
           git diff --exit-code api/ config/ || { echo "::error::generated code/manifests are stale — run 'make generate manifests' and commit"; exit 1; }
 
+  # ── supply chain: licences, vulnerabilities, lint ─────────────────────────────
+  #
+  # BLOCKING, all three, like everything else in this file. #177 filed these as a
+  # group because they share a failure mode: each enforces a rule the project
+  # already believed it was following.
+  #
+  # The licence check is the one that matters most. CLAUDE.md says a copyleft
+  # dependency would make this project unpublishable, and that rule was enforced
+  # by PROSE. Individual runner Dockerfiles assert their upstream C project's
+  # licence at build time — genuinely good, and it catches the case that has
+  # actually bitten — but nothing looked at the Go module graph, so a transitive
+  # dependency arriving under GPL passed every check this repository had.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # As everywhere else: the toolchain comes from go.mod so CI and a
+          # laptop cannot drift. go.mod carries a `toolchain` directive as well
+          # as a `go` directive, and the two say different things on purpose —
+          # `go` is the language version a CONSUMER of pkg/verdict, pkg/runner,
+          # pkg/contract or pkg/report must have, and raising it would force
+          # every one of them to upgrade; `toolchain` is what WE build with, and
+          # it is what govulncheck's verdict is about. Go's own toolchain
+          # switching honours the directive even if the action installs the
+          # older one, so this holds however setup-go resolves the file.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Licence policy (no copyleft, anywhere in the module graph)
+        run: go run ./hack/licensecheck
+
+      # First-party, and low-noise because it reports only vulnerabilities in
+      # code paths actually REACHED. When this first ran, it found ten reachable
+      # standard-library vulnerabilities — including an auth bypass in
+      # crypto/x509 that internal/sink's webhook TLS path reaches — because the
+      # toolchain in go.mod was months stale and nothing was looking.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
   # ── e2e: the shipped manifests on a real cluster ──────────────────────────────
   #
   # THE MOST VALUABLE STEP IN THIS JOB IS NOT A TEST. It is "Apply config/ to the

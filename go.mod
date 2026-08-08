@@ -2,6 +2,8 @@ module github.com/baldwinSPC/glimmer-burnin
 
 go 1.26.0
 
+toolchain go1.26.5
+
 require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/robfig/cron/v3 v3.0.1
