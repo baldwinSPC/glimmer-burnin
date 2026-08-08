@@ -121,8 +121,14 @@ func (m groupMember) summary() string {
 	// collective went unmeasured is the record that outlives every Event about it.
 	if m.result.UndeclaredSkip {
 		out += ": " + undeclaredSkipBrief
+		// Clamped on THIS path too, and it is the path that needs it most: an
+		// undeclared exit 2 is most often a crashed runner, so the message here
+		// is the tail of a Go panic trace rather than a sentence anyone wrote.
+		// The early return used to skip the clamp below, which made the one
+		// branch carrying the least bounded text the one branch that did not
+		// bound it.
 		if s := strings.TrimSpace(m.result.Message); s != "" {
-			out += " [runner said: " + s + "]"
+			out += " [runner said: " + clampRunnerLine(s) + "]"
 		}
 		return out
 	}
