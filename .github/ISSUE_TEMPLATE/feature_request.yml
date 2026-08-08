@@ -1,0 +1,40 @@
+name: Feature request
+description: Something the operator should do and does not
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What you cannot do today, in terms of the hardware or the fleet rather
+        than in terms of an API you have already designed.
+    validations: {required: true}
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations: {required: true}
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you considered and rejected
+      description: Including doing nothing, and doing it outside this project.
+
+  - type: dropdown
+    id: scope-check
+    attributes:
+      label: Does this need a vendor branch in the reconciler?
+      description: >-
+        Vendor neutrality lives in the reconciler: accelerator-specific
+        behaviour belongs in a runner image. Adding support for a vendor should
+        mean adding a runner, not adding an `if nvidia {}`. If your proposal
+        needs a branch, say so here — it is not automatically refused, but it
+        needs a reason.
+      options:
+        - "No — it is vendor-neutral, or it lives in a runner"
+        - "Yes, and I explain why above"
+        - "I am not sure"
+    validations: {required: true}
