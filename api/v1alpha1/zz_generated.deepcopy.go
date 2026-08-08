@@ -215,6 +215,11 @@ func (in *BurnInRunSpec) DeepCopyInto(out *BurnInRunSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Baseline != nil {
+		in, out := &in.Baseline, &out.Baseline
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Cancel != nil {
 		in, out := &in.Cancel, &out.Cancel
 		*out = new(bool)
@@ -321,6 +326,11 @@ func (in *BurnInRunTemplate) DeepCopyInto(out *BurnInRunTemplate) {
 	if in.RetryOnErrorLimit != nil {
 		in, out := &in.RetryOnErrorLimit, &out.RetryOnErrorLimit
 		*out = new(int32)
+		**out = **in
+	}
+	if in.Baseline != nil {
+		in, out := &in.Baseline, &out.Baseline
+		*out = new(bool)
 		**out = **in
 	}
 }

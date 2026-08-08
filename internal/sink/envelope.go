@@ -25,6 +25,7 @@ func EnvelopeFor(
 ) *contract.Envelope {
 	env := &contract.Envelope{
 		Version:    contract.Version,
+		Baseline:   run.Spec.Baseline != nil && *run.Spec.Baseline,
 		DeliveryID: contract.NewDeliveryID(string(run.UID), reason, eventKey),
 		Reason:     reason,
 		SentAt:     now.UTC(),

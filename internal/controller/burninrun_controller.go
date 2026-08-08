@@ -255,7 +255,7 @@ func (r *BurnInRunReconciler) start(ctx context.Context, run *burninv1alpha1.Bur
 		return res, err
 	}
 
-	p, err := buildPlan(profile, tests, targets, maxConcurrentNodes(run))
+	p, err := buildPlan(profile, tests, targets, maxConcurrentNodes(run), isBaseline(run))
 	if err != nil {
 		return r.finalizeError(ctx, run, profileSinks(profile), err)
 	}

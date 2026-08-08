@@ -89,6 +89,17 @@ type BurnInRunTemplate struct {
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
 	RetryOnErrorLimit *int32 `json:"retryOnErrorLimit,omitempty"`
+
+	// Baseline marks every run this schedule creates as a MEASUREMENT rather
+	// than a certification. See BurnInRunSpec.Baseline — including that it
+	// refuses, rather than suppresses, a profile carrying thresholds.
+	//
+	// It is on the template because a recurring fleet baseline is the point:
+	// pinning a threshold honestly means sweeping the fleet first, and a sweep
+	// that has to be re-declared by hand every time is one somebody eventually
+	// runs against an acceptance profile.
+	// +kubebuilder:default=false
+	Baseline *bool `json:"baseline,omitempty"`
 }
 
 // BurnInScheduleSpec runs a BurnInProfile against a target on a cron schedule.
