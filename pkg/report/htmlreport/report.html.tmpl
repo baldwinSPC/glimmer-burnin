@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Burn-in report — {{.Run.Namespace}}/{{.Run.Name}}</title>
+<style>
+/* Everything inline. A report that fetches a stylesheet is useless in a secure
+   facility, useless as an attachment, and useless once the CDN path moves. */
+:root{--fg:#1a1a1a;--muted:#5c5c5c;--rule:#d8d8d8;--bg:#fff;--panel:#f7f7f7;
+--pass:#1a7f37;--fail:#b32d2e;--error:#8250df;--skip:#57606a;--unknown:#9a6700}
+*{box-sizing:border-box}
+body{margin:0;padding:2rem 1.25rem;background:var(--bg);color:var(--fg);
+font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+max-width:70rem;margin-inline:auto}
+h1,h2,h3{line-height:1.25;margin:2rem 0 .6rem}
+h1{font-size:1.6rem;margin-top:0}
+h2{font-size:1.2rem;border-bottom:1px solid var(--rule);padding-bottom:.3rem}
+h3{font-size:1rem}
+table{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.35rem .55rem;text-align:left;vertical-align:top}
+th{background:var(--panel);font-weight:600}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em}
+.banner{border:2px solid var(--rule);border-radius:6px;padding:1rem 1.15rem;margin:0 0 1.25rem}
+.banner .phase{font-size:1.35rem;font-weight:700;letter-spacing:.02em}
+.banner dl{display:grid;grid-template-columns:max-content 1fr;gap:.15rem .8rem;margin:.7rem 0 0}
+.banner dt{color:var(--muted)}
+.banner dd{margin:0}
+.tag{display:inline-block;padding:.08rem .45rem;border:1px solid currentColor;
+border-radius:3px;font-size:.78rem;font-weight:700;letter-spacing:.04em}
+.pass{color:var(--pass)}.fail{color:var(--fail)}.error{color:var(--error)}
+.skip{color:var(--skip)}.unknown{color:var(--unknown)}.absent{color:var(--muted)}
+/* Status is TEXT first. A reader who cannot perceive the colour difference, or
+   who printed this in greyscale, must still tell a condemned node from an
+   unmeasured one. */
+.cell{text-align:center;font-weight:700;font-size:.8rem;letter-spacing:.03em}
+.note{background:var(--panel);border-left:3px solid var(--rule);padding:.6rem .8rem;margin:.7rem 0}
+.warn{border-left-color:var(--fail)}
+ul.tight{margin:.35rem 0;padding-left:1.2rem}
+footer{margin-top:2.5rem;padding-top:.8rem;border-top:1px solid var(--rule);
+color:var(--muted);font-size:.85rem}
+@media print{
+  body{padding:0;max-width:none;font-size:11pt}
+  h2{page-break-after:avoid}
+  table,.banner,.detail{page-break-inside:avoid}
+  footer{position:static}
+}
+</style>
+</head>
+<body>
+
+<h1>Burn-in report</h1>
+
+<div class="banner">
+  <div class="phase {{(index .Statuses 0).Class}}">
+    {{- $s := .Run.Phase -}}
+    <span class="mono">{{$s}}</span>
+    {{if not .Run.Final}} <span class="tag fail">INCOMPLETE</span>{{end}}
+    {{if .Run.Baseline}} <span class="tag">BASELINE — MEASUREMENT ONLY</span>{{end}}
+  </div>
+  <dl>
+    <dt>Run</dt><dd class="mono">{{.Run.Namespace}}/{{.Run.Name}}</dd>
+    <dt>Run UID</dt><dd class="mono">{{.Run.UID}}</dd>
+    {{if .Run.Profile}}<dt>Profile</dt><dd class="mono">{{.Run.Profile}}</dd>{{end}}
+    {{if .Run.Cluster}}<dt>Cluster</dt><dd class="mono">{{.Run.Cluster.Name}}</dd>{{end}}
+    {{if .Run.StartedAt}}<dt>Started</dt><dd>{{.Run.StartedAt}}</dd>{{end}}
+    {{if .Run.FinishedAt}}<dt>Finished</dt><dd>{{.Run.FinishedAt}}</dd>{{end}}
+    {{if .Run.CancelReason}}<dt>Cancelled</dt><dd>{{.Run.CancelReason}}</dd>{{end}}
+    <dt>Results</dt><dd>
+      <span class="pass">{{.Run.Summary.Passed}} passed</span>,
+      <span class="fail">{{.Run.Summary.Failed}} failed</span>,
+      <span class="error">{{.Run.Summary.Errored}} errored (unjudged)</span>,
+      <span class="skip">{{.Run.Summary.Skipped}} skipped</span>
+    </dd>
+  </dl>
+</div>
+
+{{if .Limitations}}
+<div class="note warn">
+  <strong>What this document cannot tell you</strong>
+  <ul class="tight">{{range .Limitations}}<li>{{.}}</li>{{end}}</ul>
+</div>
+{{end}}
+
+<h2>Results by node</h2>
+{{if .Rows}}
+<table>
+  <thead><tr><th>Node</th>{{range .Columns}}<th>{{.}}</th>{{end}}</tr></thead>
+  <tbody>
+  {{range .Rows}}
+    <tr><th class="mono">{{.Node}}</th>
+    {{range .Cells}}<td class="cell {{.Class}}">{{.Symbol}}</td>{{end}}
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+<table>
+  <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+  <tbody>
+  {{range .Statuses}}<tr><td class="cell {{.Class}}">{{.Symbol}}</td><td>{{.Means}}</td></tr>{{end}}
+  <tr><td class="cell absent">·</td><td>this node did not run this test</td></tr>
+  </tbody>
+</table>
+{{else}}<p>No per-node results were recorded.</p>{{end}}
+
+{{if .Links}}
+<h2>Links</h2>
+<div class="note">
+  A link verdict is a statement about the <strong>link or the collective</strong>,
+  never about either endpoint. Attributing it to one end sends an engineer to
+  replace the wrong part.
+</div>
+<table>
+  <thead><tr><th>Test</th><th>Scope</th><th>Endpoints</th><th>Status</th><th>Detail</th></tr></thead>
+  <tbody>
+  {{range .Links}}
+    {{$st := statusOf .Result.Phase}}
+    <tr>
+      <td class="mono">{{.Result.Name}}</td>
+      <td>{{.Scope}}</td>
+      <td class="mono">{{.Label}}</td>
+      <td class="cell {{$st.Class}}">{{$st.Symbol}}</td>
+      <td>{{.Result.Message}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{if .Details}}
+<h2>Test detail</h2>
+{{range .Details}}
+<div class="detail">
+  <h3><span class="mono">{{.Result.Name}}</span> on <span class="mono">{{.Node}}</span>
+      — <span class="{{.Status.Class}}">{{.Status.Symbol}}</span></h3>
+  {{if .Result.Message}}<p>{{.Result.Message}}</p>{{end}}
+
+  {{if .Causes}}
+  <table>
+    <thead><tr><th>Metric</th><th>Why it did not pass</th><th>Who should act</th></tr></thead>
+    <tbody>
+    {{range .Causes}}
+      <tr><td class="mono">{{.Metric}}</td><td>{{.Reason}}</td><td>{{.Advice}}</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{end}}
+
+  {{if .Result.NotEvaluated}}
+  <div class="note">
+    <strong>Thresholds that were NOT evaluated</strong> — neither satisfied nor
+    violated. A gate that did not run is not a gate that passed.
+    <ul class="tight">
+    {{range .Result.NotEvaluated}}<li><span class="mono">{{.Metric}}</span>: {{.Reason}}</li>{{end}}
+    </ul>
+  </div>
+  {{end}}
+
+  {{if .Result.Unmeasurable}}
+  <div class="note">
+    The runner declared these <strong>unmeasurable on this hardware</strong>. That
+    is a claim about the part — not a measurement of zero.
+    <ul class="tight">{{range .Result.Unmeasurable}}<li class="mono">{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}
+
+  {{if .Result.Metrics}}
+  <table>
+    <thead><tr><th>Measured</th><th>Value</th></tr></thead>
+    <tbody>{{range $k, $v := .Result.Metrics}}<tr><td class="mono">{{$k}}</td><td class="mono">{{$v}}</td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
+
+  {{if .Result.Artifacts}}
+  <p><strong>Evidence:</strong></p>
+  <ul class="tight">
+  {{range .Result.Artifacts}}
+    {{if .Dropped}}<li class="fail"><span class="mono">{{.Name}}</span> — NOT KEPT: {{.Dropped}}</li>
+    {{else}}<li><span class="mono">{{.Name}}</span> ({{.MediaType}}, {{.SizeBytes}} bytes) —
+      configmap <span class="mono">{{.ConfigMap}}</span> key <span class="mono">{{.Key}}</span></li>{{end}}
+  {{end}}
+  </ul>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+
+<h2>Hardware inventory</h2>
+{{range .Nodes}}
+<h3 class="mono">{{.Name}}</h3>
+{{if .Known}}
+  <dl class="banner">
+    {{if .Info.OSImage}}<dt>OS</dt><dd>{{.Info.OSImage}}</dd>{{end}}
+    {{if .Info.Kernel}}<dt>Kernel</dt><dd class="mono">{{.Info.Kernel}}</dd>{{end}}
+    {{if .Info.Digest}}<dt>Fingerprint</dt><dd class="mono">{{.Info.Digest}}</dd>{{end}}
+  </dl>
+  {{if .Info.GPUs}}
+  <table>
+    <thead><tr><th>#</th><th>Model</th><th>Arch</th><th>Driver</th><th>Serial</th><th>PCI</th></tr></thead>
+    <tbody>{{range .Info.GPUs}}<tr>
+      <td>{{.Index}}</td><td>{{.Model}}</td><td class="mono">{{.Arch}}</td>
+      <td class="mono">{{.DriverVer}}</td><td class="mono">{{.Serial}}</td><td class="mono">{{.PCIBusID}}</td>
+    </tr>{{end}}</tbody>
+  </table>
+  {{end}}
+  {{if .Info.NICs}}
+  <table>
+    <thead><tr><th>Interface</th><th>Role</th><th>Model</th><th>RDMA</th><th>Link</th><th>Mbps</th></tr></thead>
+    <tbody>{{range .Info.NICs}}<tr>
+      <td class="mono">{{.Name}}</td><td>{{.Role}}</td><td>{{.Model}}</td>
+      <td class="mono">{{.RDMADevice}}</td><td>{{.LinkLayer}}</td><td>{{.SpeedMbps}}</td>
+    </tr>{{end}}</tbody>
+  </table>
+  {{end}}
+{{else}}
+  <p class="muted">No structured inventory was collected for this node. An absent
+  field was not measured; it is not a claim that the hardware lacks it.</p>
+{{end}}
+{{end}}
+
+{{if .Run.Fingerprint}}
+<h3>Captured at run start</h3>
+<table>
+  <thead><tr><th>Key</th><th>Value</th></tr></thead>
+  <tbody>{{range $k, $v := .Run.Fingerprint}}<tr><td class="mono">{{$k}}</td><td class="mono">{{$v}}</td></tr>{{end}}</tbody>
+</table>
+{{end}}
+
+<footer>
+  Generated by {{.Meta.Generator}} {{.Meta.Version}}{{if .Meta.GeneratedAt.IsZero}}{{else}} at {{.Meta.GeneratedAt.UTC.Format "2006-01-02 15:04:05 UTC"}}{{end}}.
+  Run UID <span class="mono">{{.Run.UID}}</span>.
+  Thresholds are site-authored: a pass means the measurements satisfied the gates
+  this site wrote, not that the hardware is fit for any particular purpose.
+</footer>
+
+</body>
+</html>
