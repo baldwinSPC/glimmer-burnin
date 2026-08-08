@@ -108,6 +108,11 @@ pinned to.
 
 ## Milestones
 
+Status lives in the issues, not on this page — GitHub already tracks what is
+open. What follows is the reasoning and the ordering, which is the part worth
+writing down. Items are marked landed here only where leaving them unmarked
+would make the surrounding prose wrong.
+
 ### R1 — Contract and reporting
 
 The delivery envelope carried less than the operator knew: per-threshold
@@ -119,10 +124,13 @@ Additions here must stay additive, and that is not only good manners: consumers
 import the contract package directly and may be pinned to an older version than
 the operator, so a newer envelope has to decode cleanly against an older struct.
 
-- [#139] Violations, not-evaluated thresholds and unmeasurable metrics now cross
-  the boundary as data rather than prose — **landed**
-- [#140] An envelope cannot say which cluster it came from
-- [#141] A metric that spans two windows has no combining rule
+The widening itself has since landed: violations with their causes,
+not-evaluated thresholds and unmeasurable metrics now cross the boundary as data
+([#139]); an envelope names the cluster it came from and its summary accounts for
+all four phases rather than two ([#140]); and every metric declares how it
+combines across windows ([#141]), which is what lets a segmented soak render one
+verdict over many windows.
+
 - [#142] A thresholdless sweep is indistinguishable from a certification
 - [#143] A runner has nowhere to put evidence that is not a metric
 - [#144] `pkg/report`: a stored verdict has no renderer
@@ -165,7 +173,9 @@ ends the week, and a retry starts it over.
 - [#160] One precision is not a compute verdict: sweep the GEMM
 - [#161] `memory-bw` never measures the links between devices
 - [#162] A minute of clean traffic does not find a flapping optic
-- [#163] `ib-write-bw` reports a latency it cannot be asked for
+- [#163] `ib-write-bw` reports a latency it cannot be asked for — the tail
+  (p99, min, max, message rate) now reaches the result; asking for latency as its
+  own gated execution still waits on variants ([#155])
 - [#164] When a fabric test fails, nothing answers whether plain TCP works
 - [#165] Storage is the one subsystem the suite never touches
 - [#166] Steady load never tests the power path's transients
