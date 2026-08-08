@@ -63,7 +63,59 @@ type TestResult struct {
 	Metrics map[string]string `json:"metrics,omitempty"`
 	// Message is the human-readable outcome: the failing threshold, or the
 	// underlying error when Phase is Error.
+	//
+	// It names only the FIRST violation, because that field is frozen. Violations
+	// below is the complete picture; a consumer must not parse this.
 	Message string `json:"message,omitempty"`
+
+	// Violations are every threshold this test failed, in spec order.
+	//
+	// Before this existed a consumer saw one sentence of prose and had to parse
+	// English to learn whether a node was implicated — and a run that failed
+	// three gates for three different reasons delivered as one sentence about the
+	// first. Read Cause before acting: a Failed test can mix a hardware shortfall
+	// with a broken threshold, and only the former is a reason to touch a node.
+	Violations []Violation `json:"violations,omitempty"`
+
+	// NotEvaluated are thresholds that were never applied, so a consumer can tell
+	// a gate that did not run from a gate that passed without reading prose.
+	NotEvaluated []NotEvaluated `json:"notEvaluated,omitempty"`
+
+	// Unmeasurable are the metric names the runner positively declared it cannot
+	// measure on this hardware. A claim about the PART: "this part has no ECC"
+	// and "this part reported zero ECC errors" are different statements, and a
+	// consumer that cannot distinguish them will eventually treat one as the
+	// other.
+	Unmeasurable []string `json:"unmeasurable,omitempty"`
+}
+
+// Violation is one threshold a test failed.
+//
+// It mirrors api/v1alpha1.Violation and pkg/verdict's violation shape. The
+// duplication is deliberate — this package must stay free of Kubernetes types so
+// a consumer can decode a verdict without client-go — and the three are held in
+// step by TestMirroredStructsAgree rather than by anyone remembering.
+type Violation struct {
+	// Index is the threshold's position in the test's spec.thresholds.
+	Index int32 `json:"index"`
+	// Metric is the threshold's metric name, as written in the profile.
+	Metric string `json:"metric"`
+	// Cause says WHO SHOULD ACT and is the field to read first:
+	// Measurement (the hardware fell short), Evidence (the runner's report could
+	// not support a judgement — the node is unjudged, not condemned), or
+	// Authoring (the threshold itself is broken; no node should be touched).
+	Cause string `json:"cause"`
+	// Kind is the specific route, finer-grained than Cause.
+	Kind string `json:"kind"`
+	// Reason is the human-readable detail.
+	Reason string `json:"reason,omitempty"`
+}
+
+// NotEvaluated is a threshold that was neither satisfied nor violated because it
+// was never applied.
+type NotEvaluated struct {
+	Metric string `json:"metric"`
+	Reason string `json:"reason"`
 }
 
 // Summary is the run's tally, in units of per-(test, node) EXECUTIONS — a

@@ -55,6 +55,21 @@ func testResult(r burninv1alpha1.TestResult) contract.TestResult {
 		Nodes:   r.Nodes,
 		Metrics: r.Metrics,
 		Message: r.Message,
+		// The structured half of the verdict. Message names only the first
+		// violation and is frozen there; without these a consumer had to parse
+		// English to learn whether a node was implicated, and a run that failed
+		// three gates delivered as one sentence about the first.
+		Unmeasurable: append([]string(nil), r.Unmeasurable...),
+	}
+	for _, v := range r.Violations {
+		out.Violations = append(out.Violations, contract.Violation{
+			Index: v.Index, Metric: v.Metric, Cause: v.Cause, Kind: v.Kind, Reason: v.Reason,
+		})
+	}
+	for _, n := range r.NotEvaluated {
+		out.NotEvaluated = append(out.NotEvaluated, contract.NotEvaluated{
+			Metric: n.Metric, Reason: n.Reason,
+		})
 	}
 	if r.StartedAt != nil {
 		t := r.StartedAt.Time.UTC()
