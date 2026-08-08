@@ -461,6 +461,7 @@ func (r *BurnInRunReconciler) pairPod(
 // Error outranks Fail.
 func combinePair(server, client pairSide, logErr error, spec *burninv1alpha1.BurnInTestSpec) runner.Result {
 	out := runner.Result{Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}
+	var invalid []string
 
 	// Server first, client second, so the client wins any key both report.
 	for _, s := range []pairSide{server, client} {
@@ -470,7 +471,7 @@ func combinePair(server, client pairSide, logErr error, spec *burninv1alpha1.Bur
 		for k, v := range s.result.Metrics {
 			out.Metrics[k] = v
 		}
-		out.InvalidNames = append(out.InvalidNames, s.result.InvalidNames...)
+		invalid = append(invalid, s.result.InvalidNames...)
 	}
 	// A declaration of unmeasurability never overwrites a real measurement: if
 	// one end measured the quantity, it was measurable on this link.
@@ -484,6 +485,14 @@ func combinePair(server, client pairSide, logErr error, spec *burninv1alpha1.Bur
 			}
 		}
 	}
+
+	// Deduped for the same reason the Group merge is: pkg/runner appends one
+	// entry per OFFENDING LINE and progressive reporting is expected there, so a
+	// runner emitting one bad key per sample gives one entry per sample, twice
+	// over at Pair scope. attemptOutcome joins the list into a message stored
+	// once per attempt per retry. The SET is the finding; how many times it was
+	// printed is not.
+	out.InvalidNames = dedupeStrings(invalid)
 
 	verdict, exit := pairVerdict(server, client)
 	out.Verdict = verdict
