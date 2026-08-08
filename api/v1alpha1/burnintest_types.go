@@ -348,6 +348,26 @@ type RunnerSpec struct {
 	// the field that actually gets them into the container.
 	Privileged bool `json:"privileged,omitempty"`
 
+	// RunAsUser overrides the uid the runner container runs as. Unset uses the
+	// image's own USER, which for every runner this project publishes is the
+	// non-root 65532.
+	//
+	// IT IS A PRIVILEGE GRANT AND IT IS SEPARATE FROM Privileged ON PURPOSE,
+	// because the two are not the same thing and one does not imply the other.
+	// Linux drops a process's effective capabilities when it switches away from
+	// root, so a container that is `privileged: true` and runs as uid 65532 does
+	// NOT hold CAP_SYSLOG — which is exactly what reading /dev/kmsg needs on any
+	// host with kernel.dmesg_restrict=1. That combination looks sufficient, is
+	// not, and produces a probe that silently reports nothing (issue #134).
+	//
+	// Set it to 0 only for a test that genuinely needs a root-owned host
+	// resource, and prefer the alternative where one exists: a kernel log the
+	// image's own uid can read, named through the runner's environment, needs no
+	// privilege at all. Every runner here degrades honestly without it — a source
+	// it could not read is reported as unread, never as clean.
+	// +optional
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
 	// HostPaths are paths on the NODE made visible inside the runner container.
 	//
 	// This is the most security-relevant field in this API and it is deliberately

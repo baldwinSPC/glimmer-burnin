@@ -916,6 +916,11 @@ func (in *RunnerSpec) DeepCopyInto(out *RunnerSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.RunAsUser != nil {
+		in, out := &in.RunAsUser, &out.RunAsUser
+		*out = new(int64)
+		**out = **in
+	}
 	if in.HostPaths != nil {
 		in, out := &in.HostPaths, &out.HostPaths
 		*out = make([]HostPathMount, len(*in))

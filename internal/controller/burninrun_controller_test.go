@@ -4914,3 +4914,72 @@ func TestPair_InvalidNamesAreDeduped(t *testing.T) {
 			len(out.InvalidNames))
 	}
 }
+
+// runAsUser is a privilege grant SEPARATE from privileged, and it has to be —
+// issue #134.
+//
+// Linux drops a process's effective capability set when it switches away from
+// root, so a container that is `privileged: true` and runs as the image's
+// non-root uid does NOT hold CAP_SYSLOG. That is exactly what reading /dev/kmsg
+// needs wherever kernel.dmesg_restrict=1, which is why host-health reported
+// xid_source=none on a node whose mount was correct.
+func TestRunAsUserIsSeparateFromPrivileged(t *testing.T) {
+	uidFor := func(mutate func(*burninv1alpha1.RunnerSpec)) *corev1.SecurityContext {
+		spec := burninv1alpha1.BurnInTestSpec{
+			Kind:   burninv1alpha1.KindHostHealth,
+			Runner: &burninv1alpha1.RunnerSpec{Image: "example.invalid/hh:v1"},
+		}
+		mutate(spec.Runner)
+		pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, "spark-a",
+			burninv1alpha1.TargetSelector{}, nil)
+		if err != nil {
+			t.Fatalf("podForTest: %v", err)
+		}
+		return pod.Spec.Containers[0].SecurityContext
+	}
+
+	t.Run("neither set leaves the image's own USER alone", func(t *testing.T) {
+		if sc := uidFor(func(*burninv1alpha1.RunnerSpec) {}); sc != nil {
+			t.Errorf("a test asking for no privilege got a SecurityContext: %+v", sc)
+		}
+	})
+
+	t.Run("runAsUser alone does not grant privileged", func(t *testing.T) {
+		sc := uidFor(func(r *burninv1alpha1.RunnerSpec) { r.RunAsUser = int64p(0) })
+		if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 0 {
+			t.Fatalf("runAsUser did not reach the container: %+v", sc)
+		}
+		if sc.Privileged != nil && *sc.Privileged {
+			t.Error("asking for a uid silently granted privileged as well — these are " +
+				"separate grants and must stay separate")
+		}
+		// A cluster policy that defaults RunAsNonRoot refuses uid 0 with an error
+		// about the IMAGE rather than about this field. Stating it makes the
+		// intent legible either way.
+		if sc.RunAsNonRoot == nil || *sc.RunAsNonRoot {
+			t.Errorf("runAsUser: 0 must declare RunAsNonRoot=false: %+v", sc)
+		}
+	})
+
+	t.Run("privileged alone does not change the uid", func(t *testing.T) {
+		sc := uidFor(func(r *burninv1alpha1.RunnerSpec) { r.Privileged = true })
+		if sc == nil || sc.Privileged == nil || !*sc.Privileged {
+			t.Fatalf("privileged did not reach the container: %+v", sc)
+		}
+		if sc.RunAsUser != nil {
+			t.Error("privileged silently set a uid — a privileged container running as a " +
+				"non-root uid is exactly the combination that looks sufficient and is not")
+		}
+	})
+
+	t.Run("both together", func(t *testing.T) {
+		sc := uidFor(func(r *burninv1alpha1.RunnerSpec) {
+			r.Privileged, r.RunAsUser = true, int64p(0)
+		})
+		if sc.Privileged == nil || !*sc.Privileged || sc.RunAsUser == nil || *sc.RunAsUser != 0 {
+			t.Errorf("both grants must reach the container: %+v", sc)
+		}
+	})
+}
+
+func int64p(v int64) *int64 { return &v }
