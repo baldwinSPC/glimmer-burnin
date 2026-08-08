@@ -394,6 +394,28 @@ type TestResult struct {
 	// reason to touch a node.
 	Violations []Violation `json:"violations,omitempty"`
 
+	// NotEvaluated are the thresholds that were neither satisfied nor violated,
+	// because they were never applied — a RequiredIfMeasurable gate on a metric
+	// the runner declared unmeasurable.
+	//
+	// It is recorded as DATA rather than left in Message because the distinction
+	// it carries is the one a consumer most needs and can least infer from
+	// prose: a gate that did not run is not a gate that passed. A Passed test
+	// whose ECC gate never applied must never be indistinguishable from one whose
+	// ECC gate applied and was satisfied.
+	NotEvaluated []NotEvaluated `json:"notEvaluated,omitempty"`
+
+	// Unmeasurable are the metric names the runner POSITIVELY DECLARED it cannot
+	// measure on this hardware (the reserved `n/a` value).
+	//
+	// This is a claim about the PART, not about the run, and it is the only thing
+	// that lets a RequiredIfMeasurable gate be reported as not-evaluated rather
+	// than failing a healthy node. It must survive to a consumer intact:
+	// "this part has no ECC" and "this part reported zero ECC errors" are
+	// different statements about different hardware, and a consumer that cannot
+	// tell them apart will eventually treat one as the other.
+	Unmeasurable []string `json:"unmeasurable,omitempty"`
+
 	// RepeatsRequired is the resolved BurnInTestSpec.RepeatCount for this run:
 	// how many passing executions this test owes per node. Pinned onto the
 	// result so a verdict stays readable after the BurnInTest is edited.
@@ -431,6 +453,20 @@ type TestResult struct {
 // be a burn-in that cannot record why it failed. The vocabulary is documented
 // in pkg/verdict and validated there, where getting it wrong costs a test
 // rather than a run.
+// NotEvaluated is a threshold that was never applied.
+//
+// It mirrors pkg/verdict.NotEvaluated and pkg/contract.NotEvaluated. Three
+// mirrors is unfortunate and deliberate: pkg/verdict must not import this
+// package (it would be a cycle) and pkg/contract must stay free of Kubernetes
+// types so a consumer can decode a verdict without client-go. The three are held
+// in step by a test rather than by anyone remembering.
+type NotEvaluated struct {
+	// Metric is the threshold's metric name, as written in the profile.
+	Metric string `json:"metric"`
+	// Reason is why it was not applied (see pkg/verdict.ReasonUnmeasurable).
+	Reason string `json:"reason"`
+}
+
 type Violation struct {
 	// Index is the threshold's position in the test's spec.thresholds, so a
 	// report can point at the offending entry rather than at the test.

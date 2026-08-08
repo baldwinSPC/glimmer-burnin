@@ -586,6 +586,53 @@ spec:
                       items:
                         type: string
                       type: array
+                    notEvaluated:
+                      description: |-
+                        NotEvaluated are the thresholds that were neither satisfied nor violated,
+                        because they were never applied — a RequiredIfMeasurable gate on a metric
+                        the runner declared unmeasurable.
+
+                        It is recorded as DATA rather than left in Message because the distinction
+                        it carries is the one a consumer most needs and can least infer from
+                        prose: a gate that did not run is not a gate that passed. A Passed test
+                        whose ECC gate never applied must never be indistinguishable from one whose
+                        ECC gate applied and was satisfied.
+                      items:
+                        description: |-
+                          Violation is one threshold a test did not satisfy, as recorded on a result.
+
+                          It mirrors verdict.Violation rather than reusing it, and that is forced
+                          rather than chosen: pkg/verdict imports this package, so importing it back
+                          would be a cycle. The controller maps between them in one place. If a field
+                          is added there, add it here too — a violation the API cannot express is a
+                          violation an operator never sees.
+
+                          Cause and Kind are deliberately NOT +kubebuilder:validation:Enum. An enum on
+                          a STATUS field turns every future violation kind into a rejected status
+                          write, which would wedge the run that discovered it — the failure mode would
+                          be a burn-in that cannot record why it failed. The vocabulary is documented
+                          in pkg/verdict and validated there, where getting it wrong costs a test
+                          rather than a run.
+                          NotEvaluated is a threshold that was never applied.
+
+                          It mirrors pkg/verdict.NotEvaluated and pkg/contract.NotEvaluated. Three
+                          mirrors is unfortunate and deliberate: pkg/verdict must not import this
+                          package (it would be a cycle) and pkg/contract must stay free of Kubernetes
+                          types so a consumer can decode a verdict without client-go. The three are held
+                          in step by a test rather than by anyone remembering.
+                        properties:
+                          metric:
+                            description: Metric is the threshold's metric name, as
+                              written in the profile.
+                            type: string
+                          reason:
+                            description: Reason is why it was not applied (see pkg/verdict.ReasonUnmeasurable).
+                            type: string
+                        required:
+                        - metric
+                        - reason
+                        type: object
+                      type: array
                     phase:
                       description: |-
                         Phase is the test's verdict across all attempts. With repeats it is the
@@ -647,6 +694,20 @@ spec:
                         look like a slow one.
                       format: date-time
                       type: string
+                    unmeasurable:
+                      description: |-
+                        Unmeasurable are the metric names the runner POSITIVELY DECLARED it cannot
+                        measure on this hardware (the reserved `n/a` value).
+
+                        This is a claim about the PART, not about the run, and it is the only thing
+                        that lets a RequiredIfMeasurable gate be reported as not-evaluated rather
+                        than failing a healthy node. It must survive to a consumer intact:
+                        "this part has no ECC" and "this part reported zero ECC errors" are
+                        different statements about different hardware, and a consumer that cannot
+                        tell them apart will eventually treat one as the other.
+                      items:
+                        type: string
+                      type: array
                     violations:
                       description: |-
                         Violations lists EVERY threshold the deciding attempt did not satisfy, in
@@ -658,21 +719,6 @@ spec:
                         hardware shortfall with a broken threshold, and only the former is a
                         reason to touch a node.
                       items:
-                        description: |-
-                          Violation is one threshold a test did not satisfy, as recorded on a result.
-
-                          It mirrors verdict.Violation rather than reusing it, and that is forced
-                          rather than chosen: pkg/verdict imports this package, so importing it back
-                          would be a cycle. The controller maps between them in one place. If a field
-                          is added there, add it here too — a violation the API cannot express is a
-                          violation an operator never sees.
-
-                          Cause and Kind are deliberately NOT +kubebuilder:validation:Enum. An enum on
-                          a STATUS field turns every future violation kind into a rejected status
-                          write, which would wedge the run that discovered it — the failure mode would
-                          be a burn-in that cannot record why it failed. The vocabulary is documented
-                          in pkg/verdict and validated there, where getting it wrong costs a test
-                          rather than a run.
                         properties:
                           cause:
                             description: |-

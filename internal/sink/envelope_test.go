@@ -165,3 +165,78 @@ func TestBuildRejectsMisconfiguredSinks(t *testing.T) {
 		}
 	}
 }
+
+// A run that failed three gates delivers all three — issue #139.
+//
+// Before this, Message carried one sentence about the FIRST violation (that
+// field is frozen at those semantics), so a consumer had to parse English to
+// learn whether a node was implicated. Cause is the field that decides whether
+// anybody should walk to a rack, and it existed only inside the cluster.
+func TestEnvelopeCarriesEveryViolation(t *testing.T) {
+	run := &burninv1alpha1.BurnInRun{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "run1", UID: "uid-1"},
+		Status: burninv1alpha1.BurnInRunStatus{
+			Phase: burninv1alpha1.RunFailed,
+			Results: []burninv1alpha1.TestResult{{
+				Name: "soak", Kind: "thermal-soak", Phase: burninv1alpha1.RunFailed,
+				Nodes:   []string{"spark-a"},
+				Message: "sustainedClockPct 61.0 below the 70 floor",
+				Violations: []burninv1alpha1.Violation{
+					{Index: 0, Metric: "sustainedClockPct", Cause: "Measurement", Kind: "Unsatisfied", Reason: "61.0 < 70"},
+					{Index: 1, Metric: "throttleEvents", Cause: "Measurement", Kind: "Unsatisfied", Reason: "3 != 0"},
+					{Index: 2, Metric: "gpuTemperature", Cause: "Authoring", Kind: "MetricUnregistered", Reason: "no such metric"},
+				},
+			}},
+		},
+	}
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0))
+
+	got := env.Results[0].Violations
+	if len(got) != 3 {
+		t.Fatalf("envelope carried %d violation(s), want 3 — a consumer parsing Message sees "+
+			"only the first", len(got))
+	}
+	// The field that decides whether anybody walks to a rack.
+	if got[2].Cause != "Authoring" {
+		t.Errorf("violation[2].Cause = %q, want Authoring — a broken threshold must not be "+
+			"delivered as a hardware shortfall", got[2].Cause)
+	}
+	if got[0].Metric != "sustainedClockPct" || got[1].Metric != "throttleEvents" {
+		t.Errorf("violations lost their metric names: %+v", got)
+	}
+}
+
+// "This part has no ECC" and "this part reported zero ECC errors" are different
+// statements about different hardware, and both used to deliver as prose.
+func TestEnvelopeCarriesUnmeasurableAndNotEvaluated(t *testing.T) {
+	run := &burninv1alpha1.BurnInRun{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "run1", UID: "uid-1"},
+		Status: burninv1alpha1.BurnInRunStatus{
+			Phase: burninv1alpha1.RunPassed,
+			Results: []burninv1alpha1.TestResult{{
+				Name: "health", Kind: "host-health", Phase: burninv1alpha1.RunPassed,
+				Nodes:        []string{"spark-a"},
+				Metrics:      map[string]string{"xidEvents": "0"},
+				Unmeasurable: []string{"eccErrors", "remappedRows"},
+				NotEvaluated: []burninv1alpha1.NotEvaluated{
+					{Metric: "eccErrors", Reason: "unmeasurable on this hardware"},
+				},
+			}},
+		},
+	}
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0))
+	r := env.Results[0]
+
+	if len(r.Unmeasurable) != 2 {
+		t.Errorf("unmeasurable = %v, want both declarations — this is a claim about the PART "+
+			"and must reach the consumer intact", r.Unmeasurable)
+	}
+	if len(r.NotEvaluated) != 1 || r.NotEvaluated[0].Metric != "eccErrors" {
+		t.Errorf("notEvaluated = %+v — a Passed test whose ECC gate never ran must not be "+
+			"indistinguishable from one whose ECC gate ran and was satisfied", r.NotEvaluated)
+	}
+	// And the run still passed: recording this changes no verdict.
+	if env.Phase != string(burninv1alpha1.RunPassed) {
+		t.Errorf("phase = %q, want Passed", env.Phase)
+	}
+}

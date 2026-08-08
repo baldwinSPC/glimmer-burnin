@@ -4,6 +4,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -972,7 +973,7 @@ func (r *BurnInRunReconciler) completeAttempt(
 ) {
 	res, _ := r.beginAttempt(run, t, nodes, attempt, pod)
 	now := metav1.NewTime(r.now())
-	phase, message, violations := attemptOutcome(t, parsed)
+	phase, message, ev := attemptOutcome(t, parsed)
 
 	a := &res.Attempts[len(res.Attempts)-1]
 	exit := int32(parsed.ExitCode)
@@ -1001,7 +1002,11 @@ func (r *BurnInRunReconciler) completeAttempt(
 		// threshold failure assigns nil, which CLEARS any violations left by an
 		// earlier errored attempt — a retry that then passes must not keep the
 		// gates its predecessor missed.
-		res.Violations = violations
+		// All three assigned unconditionally and from the SAME attempt, so a
+		// retry that passes cannot keep its predecessor's evidence.
+		res.Violations = ev.violations
+		res.NotEvaluated = ev.notEvaluated
+		res.Unmeasurable = ev.unmeasurable
 		recount(run)
 		// One completion per execution unit: the nodes are part of the event
 		// identity, or a second node's completion would dedupe away against
@@ -1104,10 +1109,19 @@ const emptyHarvestMessage = "runner exited 0 but reported no metrics at all — 
 // The violations are non-empty only when thresholds decided the phase. A
 // runner's own exit-1 is its assertion about the hardware, not a threshold
 // verdict, so it carries none — there is no gate to point at.
-func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhase, string, []burninv1alpha1.Violation) {
+func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhase, string, attemptEvidence) {
 	var phase burninv1alpha1.RunPhase
-	var violations []burninv1alpha1.Violation
+	var ev attemptEvidence
 	message := parsed.Message
+
+	// The runner's own declarations survive whatever the thresholds decide.
+	// "This part cannot produce this measurement" is a claim about the HARDWARE
+	// and it is true of a passing run as much as a failing one, so it is recorded
+	// on every phase rather than only where a gate happened to notice it.
+	for name := range parsed.Unmeasurable {
+		ev.unmeasurable = append(ev.unmeasurable, name)
+	}
+	sort.Strings(ev.unmeasurable)
 
 	switch parsed.Verdict {
 	case runner.VerdictPass:
@@ -1166,7 +1180,7 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 				if prior := strings.TrimSpace(parsed.Message); prior != "" {
 					message = strings.TrimSpace(message + " [" + prior + "]")
 				}
-				violations = violationsFor(out)
+				ev.violations = violationsFor(out)
 				// Message names the first gate only, and that field is frozen.
 				// Without this tail a node that missed three gates reads as a
 				// node that missed one, and an engineer replaces one part per
@@ -1182,6 +1196,11 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 			// puts it on the TestResult and therefore in the delivered envelope: a
 			// Passed test whose ECC gate never ran must never be indistinguishable
 			// from one whose ECC gate ran and was satisfied.
+			for _, n := range out.NotEvaluated {
+				ev.notEvaluated = append(ev.notEvaluated, burninv1alpha1.NotEvaluated{
+					Metric: n.Metric, Reason: n.Reason,
+				})
+			}
 			if why := out.NotEvaluatedMessage(); why != "" {
 				message = strings.TrimSpace(message + " [" + why + "]")
 			}
@@ -1227,7 +1246,16 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 			" [runner emitted %d metric name(s) the contract rejects: %s%s]",
 			len(parsed.InvalidNames), strings.Join(shown, ", "), suffix))
 	}
-	return phase, message, violations
+	return phase, message, ev
+}
+
+// attemptEvidence is the structured half of an outcome — everything a consumer
+// would otherwise have to parse out of Message, which names only the first
+// violation and is frozen there.
+type attemptEvidence struct {
+	violations   []burninv1alpha1.Violation
+	notEvaluated []burninv1alpha1.NotEvaluated
+	unmeasurable []string
 }
 
 // violationsFor maps an evaluated outcome onto the API's own violation shape.
