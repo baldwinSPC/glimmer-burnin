@@ -98,7 +98,7 @@ func (r Renderer) document(in report.Input, verdict *contract.Envelope, final bo
 			continue
 		}
 		cat := categoryFor(res.Kind)
-		byCategory[cat] = append(byCategory[cat], r.test(res, info, node))
+		byCategory[cat] = append(byCategory[cat], r.test(res, info, node, verdict.Baseline))
 	}
 
 	for _, cat := range []string{catDeployment, catIntegration, catHardware, catStress} {
@@ -113,14 +113,14 @@ func (r Renderer) document(in report.Input, verdict *contract.Envelope, final bo
 		d.Categories = []Category{}
 	}
 
-	doc.OverallResult = overall(verdict.Results, node)
+	doc.OverallResult = overall(verdict.Results, node, verdict.Baseline)
 	doc.Diagnostic = d
 	return doc
 }
 
 // test renders one result.
-func (r Renderer) test(res contract.TestResult, info report.NodeInfo, node string) Test {
-	status := statusFor(res.Phase)
+func (r Renderer) test(res contract.TestResult, info report.NodeInfo, node string, baseline bool) Test {
+	status := statusUnder(res.Phase, baseline)
 	link := len(res.Nodes) > 1
 
 	t := Test{
@@ -312,16 +312,31 @@ func infoFor(res contract.TestResult, link bool, node string) []string {
 	return out
 }
 
-// overall is the host's verdict, and it is deliberately pessimistic in the same
-// order the engine uses: an Error outranks a Fail because nothing was measured,
-// and neither is allowed to be hidden by a passing sibling.
-func overall(results []contract.TestResult, node string) string {
+// overall is the host's verdict, and it is an ADMISSION GATE rather than a
+// diagnosis: both a Fail and a Not Run answer "do not admit this node", and the
+// distinction between them lives in each result's own status, which is where a
+// reader looking for a diagnosis goes.
+//
+// It is computed per DOCUMENT, so a node that passed does not report Fail
+// because a different node failed. It is deliberately pessimistic — neither a
+// Fail nor an Error may be hidden by a passing sibling — and the precedence
+// between those two follows the engine that produced the verdict. See the
+// switch.
+//
+// The BASELINE rule is not here, and that is deliberate. It lives in exactly one
+// place, statusUnder, which this function computes its flags through: a baseline
+// run's results are all Skip before they reach the switch below. A second
+// baseline case here was written first and removed, because it could never fire
+// — this function reaches the phases only via statusUnder — so it was
+// unreachable code in the shape of a guard, which is worse than none. One rule,
+// one site, one test.
+func overall(results []contract.TestResult, node string, baseline bool) string {
 	var sawError, sawFail, sawSkip, sawPass bool
 	for _, res := range results {
 		if !touches(res, node) {
 			continue
 		}
-		switch statusFor(res.Phase) {
+		switch statusUnder(res.Phase, baseline) {
 		case statusNotRun:
 			sawError = true
 		case statusFail:
@@ -333,10 +348,33 @@ func overall(results []contract.TestResult, node string) string {
 		}
 	}
 	switch {
+	case sawFail:
+		// FAIL BEATS ERROR, and the order matters more than it looks.
+		//
+		// This used to rank Error first, justified as "deliberately pessimistic
+		// in the same order the engine uses". The engine uses the OPPOSITE
+		// order and documents it: finalize() says "Precedence: Failed beats
+		// Error beats Passed. A required test that FAILED is a hardware verdict
+		// and wins outright", and implements it by setting RunError and then
+		// overwriting it with RunFailed.
+		//
+		// So a run the operator settled `Failed` rendered this node's verdict as
+		// "Not Run" — which in real dcgmi means a plugin that was not selected,
+		// and which consumers filter as infrastructure noise. A GPU that missed
+		// a sustained-clock gate was queued for a re-run instead of an RMA,
+		// because an unrelated image pull failed on the same node. "Not Run" is
+		// a strictly weaker claim than the run had established, and it is the
+		// Error/Fail collapse this package exists to prevent, running in the
+		// direction nobody checks.
+		//
+		// The Error-beats-Fail precedence that DOES exist here is the PAIR rule,
+		// and it answers a different question: it combines the two ends of ONE
+		// measurement, where a machinery failure at either end means the link
+		// was never measured. Aggregating INDEPENDENT tests on a host is
+		// finalize()'s case, not that one.
+		return statusFail
 	case sawError:
 		return statusNotRun
-	case sawFail:
-		return statusFail
 	case sawPass:
 		return statusPass
 	case sawSkip:
