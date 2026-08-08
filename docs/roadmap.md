@@ -115,6 +115,10 @@ violations, classified by cause, exist on the CRD status and reach an external
 consumer only as one sentence of prose. Everything downstream of the operator is
 built on the envelope, so this is the critical path.
 
+Additions here must stay additive, and that is not only good manners: consumers
+import the contract package directly and may be pinned to an older version than
+the operator, so a newer envelope has to decode cleanly against an older struct.
+
 - [#139] The envelope drops the violations the status already records
 - [#140] An envelope cannot say which cluster it came from
 - [#141] A metric that spans two windows has no combining rule
@@ -181,12 +185,19 @@ branch. Adding an accelerator should mean adding a runner, not adding an
 
 ### R7 — Open-source launch
 
+This repository is already public. The items below are the ones that would
+normally have happened first, which makes a couple of them live rather than
+preparatory — most obviously the absence of any non-public way to report a
+vulnerability in software that runs on production hardware.
+
+- [#176] A stranger cannot report a vulnerability — **the live one**
 - [#174] There is still no supported way to install the operator
 - [#175] Nothing this project publishes is signed
-- [#176] A stranger cannot report a vulnerability
 - [#177] The licence policy is enforced by prose, not by CI
 - [#178] The design lives in a file addressed to robots
-- [#179] Make the repository public
+- [#179] The launch checklist that never happened, including the module-path
+  decision — now urgent, because an external consumer already imports these
+  packages and Go module paths do not follow redirects
 
 ### R-loop — Test factory
 
