@@ -519,3 +519,133 @@ func keysOf(m map[string]json.RawMessage) []string {
 	}
 	return out
 }
+
+// A measured hardware Fail is not erased by a sibling Error.
+//
+// `overall()` ranked Error above Fail, and justified it as "deliberately
+// pessimistic in the same order the engine uses". The engine uses the opposite
+// order, and says so: finalize() is documented "Precedence: Failed beats Error
+// beats Passed. A required test that FAILED is a hardware verdict and wins
+// outright", and it implements that by setting RunError and then OVERWRITING it
+// with RunFailed.
+//
+// So the operator settled such a run `Failed` while this renderer printed the
+// node's verdict as "Not Run" — which in real dcgmi means a plugin that was not
+// selected, and which every consumer filters as infrastructure noise. A GPU that
+// missed a sustained-clock gate got queued for a re-run instead of an RMA,
+// because an unrelated image pull failed on the same node.
+//
+// The Error-beats-Fail precedence that DOES exist in this project is the PAIR
+// rule, and it is a different question: it combines the two ends of ONE
+// measurement, where a machinery failure at either end means the link was never
+// measured at all. Aggregating INDEPENDENT tests on a host is finalize()'s case,
+// not that one.
+func TestAMeasuredFailSurvivesASiblingError(t *testing.T) {
+	e := envelope(phaseFailed,
+		contract.TestResult{
+			Name: "soak", Kind: "thermal-soak", Phase: phaseFailed, Nodes: []string{"n1"},
+			Violations: []contract.Violation{{
+				Metric: "sustainedClockPct", Cause: "Measurement", Reason: "61.2 is below 80"}},
+		},
+		contract.TestResult{
+			Name: "fp4", Kind: "compute-smoke", Phase: phaseError, Nodes: []string{"n1"},
+			Message: "ImagePullBackOff",
+		},
+	)
+	docs := render(t, input(e))
+	got := docs["diag-n1.json"].OverallResult
+
+	if got == statusNotRun {
+		t.Fatalf("Overall Result = %q. The hardware WAS judged and fell short; "+
+			"\"Not Run\" states that it was never measured, which is a strictly weaker "+
+			"claim than the run established. In real dcgmi that value means a plugin "+
+			"was not selected, so a triage queue treats it as infrastructure noise and "+
+			"the node is re-run rather than replaced.", got)
+	}
+	if got != statusFail {
+		t.Errorf("Overall Result = %q, want %q", got, statusFail)
+	}
+
+	// And the operator's own aggregate agrees, which is the point: the two must
+	// not disagree about the same run.
+	if e.Phase != phaseFailed {
+		t.Fatalf("fixture drift: the envelope's own phase is %q", e.Phase)
+	}
+}
+
+// An Error with no Fail beside it is still "Not Run".
+//
+// Asserted alongside the above so the fix cannot be "always report Fail", which
+// would destroy the distinction in the other direction.
+func TestAnErrorAloneIsStillNotRun(t *testing.T) {
+	e := envelope(phaseError,
+		contract.TestResult{Name: "fp4", Kind: "compute-smoke", Phase: phaseError,
+			Nodes: []string{"n1"}, Message: "ImagePullBackOff"},
+		contract.TestResult{Name: "smoke2", Kind: "compute-smoke", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+	)
+	docs := render(t, input(e))
+	if got := docs["diag-n1.json"].OverallResult; got != statusNotRun {
+		t.Errorf("Overall Result = %q, want %q — a passing test beside an errored one "+
+			"does not make the node measured", got, statusNotRun)
+	}
+}
+
+// A baseline run never reports an admission.
+//
+// The Baseline flag reached only the prose Warning and aux_data, so the document
+// asserted "Overall Result": "Pass" and then said in English that it certified
+// nothing. Anything reading the verdict field — which is what that field is for
+// — could not tell a thresholdless measurement sweep from a certification, which
+// is the exact fail-open the flag was added to close.
+func TestABaselineRunNeverReportsAnAdmission(t *testing.T) {
+	e := envelope(phasePassed,
+		contract.TestResult{Name: "soak", Kind: "thermal-soak", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+	)
+	e.Baseline = true
+	docs := render(t, input(e))
+	d := docs["diag-n1.json"]
+
+	if d.OverallResult == statusPass {
+		t.Fatalf("Overall Result = %q on a run that applied NO thresholds. A consumer "+
+			"admitting nodes on \"the last diagnostic passed\" certifies a fleet against "+
+			"a run that gated nothing.", d.OverallResult)
+	}
+	// The per-test statuses are honest too: nothing here met a criterion,
+	// because there were none to meet.
+	st := d.Diagnostic.Categories[0].Tests[0].Results[0].Status
+	if st == statusPass {
+		t.Errorf("a baseline result rendered %q; no threshold was applied to it", st)
+	}
+	// And the prose stays, because a machine reads the field and a person reads
+	// the sentence.
+	if !strings.Contains(strings.ToUpper(d.Warning), "BASELINE") {
+		t.Error("the baseline label was lost from the document-level warning")
+	}
+}
+
+// statusUnder is the single site of the baseline rule, and this pins it there.
+//
+// The document-level test above cannot distinguish two guards from one: an
+// earlier version of this fix also refused a baseline admission inside overall(),
+// and mutating that away changed nothing — overall() reaches every phase THROUGH
+// statusUnder, so its own baseline case could never fire. Unreachable code in the
+// shape of a guard is worse than no code, so it was removed and the rule lives
+// in one place, tested directly.
+func TestStatusUnderIsWhereTheBaselineRuleLives(t *testing.T) {
+	for _, phase := range []string{phasePassed, phaseFailed, phaseSkipped, phaseError} {
+		if got := statusUnder(phase, true); got != statusSkip {
+			t.Errorf("statusUnder(%q, baseline=true) = %q, want %q — no threshold was "+
+				"applied to any of them, so none met a criterion", phase, got, statusSkip)
+		}
+	}
+	// With the flag off it is the plain mapping again, so the rule is about the
+	// baseline rather than about refusing everything.
+	if got := statusUnder(phasePassed, false); got != statusPass {
+		t.Errorf("statusUnder(Passed, baseline=false) = %q, want %q", got, statusPass)
+	}
+	if got := statusUnder(phaseError, false); got != statusNotRun {
+		t.Errorf("statusUnder(Error, baseline=false) = %q, want %q", got, statusNotRun)
+	}
+}

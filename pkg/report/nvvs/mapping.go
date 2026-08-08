@@ -83,6 +83,26 @@ func categoryFor(kind string) string {
 //
 // Pending and Running both become "Not Run", which is accurate: at the moment
 // the document was rendered, that test had produced no verdict.
+// statusUnder is statusFor, with the run-level baseline rule applied.
+//
+// A baseline run applied NO thresholds, so no result in it met a criterion —
+// there were none to meet. Rendering such a result as "Pass" is how a
+// thresholdless measurement sweep becomes indistinguishable from a
+// certification to anything reading the status field, which is the fail-open
+// the Baseline flag exists to close.
+//
+// It is separate from statusFor rather than folded into it because statusFor is
+// the pure phase-to-vocabulary mapping, and TestPhaseVocabularyMatchesTheAPI
+// reads the API's own constants through it to check this package has been taught
+// every phase. Adding a second argument there would make that guard about two
+// things at once.
+func statusUnder(phase string, baseline bool) string {
+	if baseline {
+		return statusSkip
+	}
+	return statusFor(phase)
+}
+
 func statusFor(phase string) string {
 	switch phase {
 	case phasePassed:
