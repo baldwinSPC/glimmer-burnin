@@ -110,16 +110,17 @@ pinned to.
 
 ### R1 — Contract and reporting
 
-The delivery envelope carries less than the operator knows. Per-threshold
-violations, classified by cause, exist on the CRD status and reach an external
-consumer only as one sentence of prose. Everything downstream of the operator is
-built on the envelope, so this is the critical path.
+The delivery envelope carried less than the operator knew: per-threshold
+violations, classified by cause, existed on the CRD status and reached an
+external consumer only as one sentence of prose. Everything downstream of the
+operator is built on the envelope, which is what makes this the critical path.
 
 Additions here must stay additive, and that is not only good manners: consumers
 import the contract package directly and may be pinned to an older version than
 the operator, so a newer envelope has to decode cleanly against an older struct.
 
-- [#139] The envelope drops the violations the status already records
+- [#139] Violations, not-evaluated thresholds and unmeasurable metrics now cross
+  the boundary as data rather than prose — **landed**
 - [#140] An envelope cannot say which cluster it came from
 - [#141] A metric that spans two windows has no combining rule
 - [#142] A thresholdless sweep is indistinguishable from a certification
