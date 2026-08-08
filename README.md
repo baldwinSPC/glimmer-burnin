@@ -361,6 +361,15 @@ gate is made of.
   observed** — no wedged part was available to test against. Tracked in
   [#61](https://github.com/baldwinSPC/glimmer-burnin/issues/61).
 
+## Where this is going
+
+[docs/roadmap.md](./docs/roadmap.md) — the test matrix as it stands, what each
+milestone is for, and links to the issues that carry the work.
+
+To add a test kind, start at
+[docs/dev/new-testkind-playbook.md](./docs/dev/new-testkind-playbook.md): the
+ordered checklist, and which guard test catches each mistake.
+
 ## License
 
 [Apache-2.0](./LICENSE). See [NOTICE](./NOTICE). Contributions: [CONTRIBUTING.md](./CONTRIBUTING.md).
