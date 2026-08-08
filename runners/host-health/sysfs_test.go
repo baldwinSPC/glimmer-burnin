@@ -238,3 +238,102 @@ func TestReconcilePCIeReplayEmitsNothingWithoutASource(t *testing.T) {
 		t.Errorf("pcie_replay_source = %q, want none", got)
 	}
 }
+
+// A SATURATED fabric counter is not a measurement — the trap that fails towards
+// certifying broken hardware.
+//
+// The IB-spec PMA counters do not wrap. They PIN at their maximum and stay there
+// until something resets them, so a port that has been throwing symbol errors
+// for a month sits at 65535 forever — and the delta across a burn-in window is
+// zero. A broken link then reads as a clean one, which is the one direction this
+// project never accepts.
+func TestSaturatedFabricCounterIsNotReportedAsClean(t *testing.T) {
+	build := func(symbolErrors string) nicSample {
+		root := t.TempDir()
+		port := filepath.Join(root, "class", "infiniband", "mlx5_0", "ports", "1")
+		mustWrite(t, filepath.Join(port, "state"), "4: ACTIVE\n")
+		mustWrite(t, filepath.Join(port, "counters", "link_downed"), "0\n")
+		mustWrite(t, filepath.Join(port, "counters", "symbol_error"), symbolErrors+"\n")
+		// A second, healthy counter proves the refusal is PER COUNTER.
+		mustWrite(t, filepath.Join(port, "counters", "port_rcv_errors"), "3\n")
+		return probeNIC(root)
+	}
+
+	t.Run("pegged at the ceiling", func(t *testing.T) {
+		before, after := build("65535"), build("65535")
+		out := newEmitter()
+		emitFabricCounters(out, before, after)
+
+		if v, ok := out.get("ib_symbol_errors"); ok {
+			t.Errorf("ib_symbol_errors=%q was emitted for a counter pinned at its ceiling — "+
+				"the delta is zero and the link reads as clean", v)
+		}
+		// The counters that were NOT pegged still report.
+		if v, _ := out.get("ib_port_rcv_errors"); v != "0" {
+			t.Errorf("a healthy counter was withheld because a different one was pegged: %q", v)
+		}
+		// Saturation is its OWN signal, gateable, and distinct from a counter
+		// this driver simply does not expose. Without it the pegged link is
+		// invisible: the delta is zero and everything reads clean.
+		if v, _ := out.get("ib_counters_saturated"); v != "1" {
+			t.Errorf("ib_counters_saturated = %q, want 1 — a pegged counter is a link whose "+
+				"error history is unreadable, and the delta cannot see it", v)
+		}
+		if names, _ := out.get("ib_saturated_counters"); names != "ib_symbol_errors" {
+			t.Errorf("ib_saturated_counters = %q, want the pegged counter named", names)
+		}
+	})
+
+	t.Run("below the ceiling is measured normally", func(t *testing.T) {
+		before, after := build("10"), build("14")
+		out := newEmitter()
+		emitFabricCounters(out, before, after)
+		if v, _ := out.get("ib_symbol_errors"); v != "4" {
+			t.Errorf("delta = %q, want 4", v)
+		}
+		if v, _ := out.get("ib_counters_saturated"); v != "0" {
+			t.Errorf("ib_counters_saturated = %q, want 0 — nothing was pegged", v)
+		}
+	})
+}
+
+// No IB or RoCE port visible at all is ABSENT, never a clean zero. /sys/class/
+// infiniband may be invisible inside the pod depending on RDMA namespace mode,
+// and a threshold on any fabric counter must then fail closed.
+func TestNoFabricPortIsAbsentNotClean(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "class", "net", "eth0", "carrier_down_count"), "0\n")
+
+	out := newEmitter()
+	emitFabricCounters(out, probeNIC(root), probeNIC(root))
+
+	if st, _ := out.get("ib_counter_status"); st != "absent" {
+		t.Errorf("ib_counter_status = %q, want absent", st)
+	}
+	for _, c := range fabricCounters {
+		if v, ok := out.get(c.key); ok {
+			t.Errorf("%s=%q was emitted with no fabric port visible", c.key, v)
+		}
+	}
+}
+
+// A counter this kernel does not expose is withheld, not zeroed — and only that
+// counter.
+func TestUnexposedFabricCounterIsWithheldAlone(t *testing.T) {
+	root := t.TempDir()
+	port := filepath.Join(root, "class", "infiniband", "mlx5_0", "ports", "1")
+	mustWrite(t, filepath.Join(port, "state"), "4: ACTIVE\n")
+	mustWrite(t, filepath.Join(port, "counters", "link_downed"), "0\n")
+	mustWrite(t, filepath.Join(port, "counters", "symbol_error"), "2\n")
+	// port_rcv_errors deliberately absent.
+
+	out := newEmitter()
+	emitFabricCounters(out, probeNIC(root), probeNIC(root))
+
+	if _, ok := out.get("ib_symbol_errors"); !ok {
+		t.Error("a readable counter was withheld because a different one was missing")
+	}
+	if v, ok := out.get("ib_port_rcv_errors"); ok {
+		t.Errorf("ib_port_rcv_errors=%q was emitted for a counter this kernel does not expose", v)
+	}
+}

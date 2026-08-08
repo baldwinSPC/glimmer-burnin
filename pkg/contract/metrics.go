@@ -612,6 +612,21 @@ var registry = map[string]Metric{
 	// forever. hostHealthVersion is the sly one here, exactly as computeCap is
 	// above: it is "1", so it parses, and a gate on it silently compares a schema
 	// version as a decimal.
+	"fabricCountersSaturated": {
+		Name: "fabricCountersSaturated", Unit: UnitNone,
+		Description:  "how many IB/RoCE error counters were observed PINNED at their maximum. The IB-spec PMA counters do not wrap — they saturate and stay there until reset — so a port erroring long enough to peg a 16-bit counter shows a delta of ZERO across any window and reads as a clean link. This is the only signal that sees it, and `Equal 0` is the gate",
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"fabricSaturatedCounters": {
+		Name: "fabricSaturatedCounters", Unit: UnitNone,
+		Description:  "comma-separated names of the pegged counters, so a reader knows whether the link is throwing symbol errors or dropping subnet-management packets. A list of labels; gate on fabricCountersSaturated for the count",
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"fabricCounterStatus": {
+		Name: "fabricCounterStatus", Unit: UnitNone,
+		Description:  "whether any IB/RoCE port was visible to the probe at all: ok|absent. `absent` is legitimate — /sys/class/infiniband may be invisible inside the pod depending on the RDMA namespace mode — and it is why every fabric counter is OMITTED rather than zeroed there, so a gate on one fails closed instead of certifying a fabric nobody looked at",
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"xidSource": {
 		Name: "xidSource", Unit: UnitNone,
 		Description:  "where the Xid scan read from: kmsg|kernlog|none. A label naming the PROVENANCE of xidEvents, and the value that matters most is the one a gate cannot express — \"none\" means the scan did not run, and the counters it would have produced are omitted rather than zeroed, so xidEvents already fails closed on its own",

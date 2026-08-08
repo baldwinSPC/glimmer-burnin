@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -177,6 +178,84 @@ type nicSample struct {
 	ibDownOK  bool
 	ibPorts   int
 	ibActive  int
+
+	// fabric holds the per-counter totals summed across every IB/RoCE port, and
+	// whether each was readable everywhere it was looked for. Absence is per
+	// COUNTER, not per probe: kernels and drivers expose different subsets, and
+	// withholding every counter because one was missing would throw away the
+	// evidence that is there.
+	fabric map[string]int64
+	// fabricOK is false for a counter that was unreadable on at least one port,
+	// or that was SATURATED — see fabricCounters.
+	fabricOK map[string]bool
+	// fabricSaturated names the counters observed AT their ceiling. It is kept
+	// apart from fabricOK because the two mean opposite things about the node:
+	// a counter this driver does not expose is normal and says nothing, while a
+	// PEGGED counter is a link whose error history is unreadable and is very
+	// likely bad. Collapsing them into one "partial" state made the common,
+	// meaningless case indistinguishable from the alarming one.
+	fabricSaturated map[string]bool
+}
+
+// fabricCounters are the IB/RoCE error counters worth reading, with the width
+// each saturates at.
+//
+// THE SATURATION IS THE TRAP, and it fails towards certifying broken hardware.
+// The IB-spec PMA counters do not wrap — they PIN at their maximum and stay
+// there until something resets them. A port that has been throwing symbol errors
+// for a month sits at 65535 forever, so the delta across a burn-in window is
+// zero and the link reads as clean. That is a broken link reported as healthy,
+// which is the one direction this project never accepts.
+//
+// So a counter observed at its ceiling is not a measurement. It is reported
+// unmeasurable — the same rule the ECC probe already applies — and a threshold
+// on it then fails closed rather than passing on a zero that means "pegged".
+//
+// The hw_counters are driver-provided rather than IB-spec: they are 64-bit and
+// do not saturate in any practical time, so their ceiling is recorded as 0
+// meaning "no ceiling".
+var fabricCounters = []struct {
+	// dir is "counters" (IB-spec PMA) or "hw_counters" (driver-provided).
+	dir string
+	// file is the sysfs name; key is the runner's metric key.
+	file, key string
+	// ceiling is the saturating maximum, or 0 when the counter cannot saturate.
+	ceiling int64
+	// why says what a non-zero value means, for the log.
+	why string
+}{
+	// IB-spec PMA counters. Widths are from the InfiniBand Architecture
+	// Specification's PortCounters attribute.
+	{"counters", "symbol_error", "ib_symbol_errors", 65535,
+		"physical-layer errors on the wire: a cable, a transceiver, or a port"},
+	{"counters", "link_error_recovery", "ib_link_error_recovery", 255,
+		"the link retrained itself; a marginal physical link does this repeatedly"},
+	{"counters", "port_rcv_errors", "ib_port_rcv_errors", 65535,
+		"packets received with an error"},
+	{"counters", "port_rcv_remote_physical_errors", "ib_rcv_remote_physical_errors", 65535,
+		"the PEER reported a physical error — the fault is on the other end or in between"},
+	{"counters", "local_link_integrity_errors", "ib_local_link_integrity_errors", 15,
+		"local link integrity threshold exceeded; a very small ceiling, so it pegs quickly"},
+	{"counters", "excessive_buffer_overrun_errors", "ib_excessive_buffer_overruns", 15,
+		"flow control broke down; also a very small ceiling"},
+	{"counters", "port_xmit_discards", "ib_port_xmit_discards", 65535,
+		"packets dropped on transmit, usually congestion or a downed peer"},
+	{"counters", "VL15_dropped", "ib_vl15_dropped", 65535,
+		"subnet-management packets dropped"},
+
+	// Driver-provided. 64-bit, no practical ceiling.
+	{"hw_counters", "packet_seq_err", "roce_packet_seq_errors", 0,
+		"out-of-sequence packets: retransmission, and a direct drag on collective throughput"},
+	{"hw_counters", "out_of_sequence", "roce_out_of_sequence", 0,
+		"receiver saw a gap in the sequence"},
+	{"hw_counters", "out_of_buffer", "roce_out_of_buffer", 0,
+		"no receive buffer was available; the classic RoCE congestion signature"},
+	{"hw_counters", "rnr_nak_retry_err", "roce_rnr_nak_retries", 0,
+		"receiver-not-ready retries exhausted"},
+	{"hw_counters", "local_ack_timeout_err", "roce_local_ack_timeouts", 0,
+		"an acknowledgement never arrived"},
+	{"hw_counters", "rx_icrc_encapsulated", "roce_icrc_errors", 0,
+		"CRC failures on encapsulated RoCE frames — corruption on the wire"},
 }
 
 func (n nicSample) linkDownTotal() (int64, bool) {
@@ -245,6 +324,7 @@ func probeNIC(sysfsRoot string) nicSample {
 				} else {
 					s.ibDownOK = false
 				}
+				s.readFabricCounters(filepath.Join(portsDir, p.Name()))
 			}
 		}
 	}
@@ -296,4 +376,88 @@ func readSysfsInt(path string) (int64, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// readFabricCounters accumulates one port's error counters.
+//
+// A counter sitting AT its ceiling is refused rather than added: see
+// fabricCounters for why a saturated counter is a broken link that reads as a
+// clean one. Refusal is per counter and per port — one pegged counter on one
+// port withholds that counter for the node, and says nothing about the others.
+func (s *nicSample) readFabricCounters(portDir string) {
+	if s.fabric == nil {
+		s.fabric, s.fabricOK = map[string]int64{}, map[string]bool{}
+		s.fabricSaturated = map[string]bool{}
+	}
+	for _, c := range fabricCounters {
+		if _, seen := s.fabricOK[c.key]; !seen {
+			s.fabricOK[c.key] = true
+		}
+		n, ok := readSysfsInt(filepath.Join(portDir, c.dir, c.file))
+		switch {
+		case !ok:
+			// Not exposed by this kernel or driver. Withhold the aggregate
+			// rather than under-report it.
+			s.fabricOK[c.key] = false
+		case c.ceiling > 0 && n >= c.ceiling:
+			// Pegged. The true value is unknown and at least this, so a delta
+			// across the window is meaningless — and would read as zero.
+			s.fabricOK[c.key] = false
+			s.fabricSaturated[c.key] = true
+		default:
+			s.fabric[c.key] += n
+		}
+	}
+}
+
+// emitFabricCounters reports the DELTA over the observation window, plus the
+// since-boot total as evidence.
+//
+// The delta is the thresholdable form. A since-boot total counts every error
+// since the machine last rebooted, including ones from a cable somebody has
+// already replaced, so gating on it condemns a node for its history rather than
+// for its present.
+func emitFabricCounters(out *emitter, before, after nicSample) {
+	if after.fabric == nil {
+		// No IB or RoCE port was visible at all — which happens legitimately,
+		// because /sys/class/infiniband may be invisible inside the pod depending
+		// on the RDMA namespace mode. Distinct from "visible and clean", and a
+		// threshold on any of these then fails closed.
+		out.set("ib_counter_status", "absent")
+		return
+	}
+	out.set("ib_counter_status", "ok")
+
+	for _, c := range fabricCounters {
+		if !after.fabricOK[c.key] {
+			// Either this driver does not expose the counter — normal, and
+			// says nothing about the node — or it is pegged, which is reported
+			// as its own signal below. Either way it is OMITTED rather than
+			// zeroed, so a gate on it fails closed.
+			continue
+		}
+		out.setInt(c.key+"_total", after.fabric[c.key])
+		if d, ok := delta(before.fabric[c.key], after.fabric[c.key],
+			before.fabricOK[c.key], after.fabricOK[c.key]); ok {
+			out.setInt(c.key, d)
+		}
+	}
+
+	// SATURATION IS ITS OWN FINDING, and a gateable one.
+	//
+	// It is not "a counter was missing" — it is a counter pinned at its maximum,
+	// which means this port has been erroring long enough to peg a 16-bit (or,
+	// for link integrity, a 4-bit) counter and has not been reset since. The
+	// delta across any window is then zero, so without this the link reads as
+	// clean. A profile can gate `ibCountersSaturated Equal 0` and catch exactly
+	// the case the delta cannot see.
+	saturated := make([]string, 0, len(after.fabricSaturated))
+	for key := range after.fabricSaturated {
+		saturated = append(saturated, key)
+	}
+	sort.Strings(saturated)
+	out.setInt("ib_counters_saturated", int64(len(saturated)))
+	if len(saturated) > 0 {
+		out.set("ib_saturated_counters", strings.Join(saturated, ","))
+	}
 }
