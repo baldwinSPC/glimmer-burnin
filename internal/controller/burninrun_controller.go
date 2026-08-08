@@ -651,8 +651,8 @@ func (r *BurnInRunReconciler) persistPass(ctx context.Context, run *burninv1alph
 		r.deliverCheckpoint(ctx, run, p.Sinks, r.checkpointSequence(run, p))
 	}
 	wake := r.nextWake(run, p)
-	if pass.rendezvous && wake > pairRendezvousPollInterval {
-		wake = pairRendezvousPollInterval
+	if pass.rendezvous && wake > rendezvousPollInterval {
+		wake = rendezvousPollInterval
 	}
 	return ctrl.Result{RequeueAfter: wake}, nil
 }

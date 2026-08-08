@@ -63,12 +63,25 @@ Rules that apply to work in this repo:
 
 ## Licensing rules (strict)
 
-- **Permissive only: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause.**
+- **The allow-list is `hack/licenses-allowed.txt`, and it is ENFORCED, not
+  described.** `go run ./hack/licensecheck` walks the whole Go module graph and
+  CI blocks on it. This paragraph is for a human; that file is what decides.
+- Permissive only: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, and the
+  public-domain equivalents (0BSD, Unlicense, CC0-1.0). ISC is on the list
+  because the check found the project had ALREADY been shipping it — go-spew
+  arrives through `k8s.io/apimachinery/pkg/util/diff` and is linked into the
+  operator binary — while this file listed four licences and had never described
+  what the project actually distributes. That is the shape of the problem a
+  prose-only policy has.
 - **Never** add a dependency under a copyleft license — GPL, AGPL, LGPL, SSPL,
-  MPL, or Sleepycat. This is not a preference; a copyleft dependency would make
-  the project unpublishable.
+  MPL, Sleepycat, CDDL or EPL. This is not a preference; a copyleft dependency
+  would make the project unpublishable. There is no exception process: if the
+  dependency you need is copyleft, the answer is a different dependency, or an
+  interface this project defines and the consumer implements.
 - Verify a new dependency's license **in the PR description**. If you cannot
-  verify it, ask before touching `go.mod`.
+  verify it, ask before touching `go.mod`. An UNCLASSIFIABLE licence fails the
+  check exactly like a copyleft one — an unidentified licence is the one most
+  likely to be a problem, so it must never default to acceptable.
 - Where an upstream project is dual-licensed, state explicitly which option we
   consume it under, in `NOTICE` (e.g. `linux-rdma/perftest` is GPL/BSD
   dual-licensed and must be consumed under the **BSD** option).
@@ -98,15 +111,36 @@ make envtest-assets  # download the envtest kube-apiserver + etcd
 make test-envtest    # controller invariants against a REAL apiserver
 make e2e             # kind cluster + apply config/ + the e2e suite
 make e2e-clean       # delete the kind cluster
+
+make licenses        # the licence policy, over the whole module graph
+make vulncheck       # govulncheck: only vulnerabilities in reachable code
+make supply-chain    # both of the above
 ```
+
+`golangci-lint` is configured in `.golangci.yml` and runs in CI. The starting set
+is deliberately small — `govet`, `ineffassign`, `unused`, `staticcheck` (SA only)
+— because a linter enabled with everything gets disabled in anger and then
+protects nothing. Turning another one on is a small PR that fixes what it finds;
+`.golangci.yml` records which are next and why each is not on yet.
+
+**The Go toolchain is pinned in `go.mod`, and the `go` and `toolchain` directives
+say different things on purpose.** `go` is the language version a CONSUMER of
+`pkg/verdict`, `pkg/runner`, `pkg/contract` or `pkg/report` must have, and
+raising it forces every one of them to upgrade. `toolchain` is what this project
+BUILDS with, and it is what `govulncheck`'s verdict is about — when the check was
+first added it found ten reachable standard-library vulnerabilities, including an
+auth bypass in `crypto/x509` that `internal/sink`'s webhook TLS path reaches,
+purely because the toolchain was stale. Bump `toolchain` freely; bump `go` only
+with a reason.
 
 After changing anything in `api/v1alpha1`, run `make generate manifests` and
 **commit the results** (`zz_generated.deepcopy.go`, `config/crd/*`,
 `config/rbac/*`). CI checks for drift.
 
 CI (`.github/workflows/ci.yml`) runs build, vet, gofmt, test, the
-no-glimmer-import guard, and the CRD drift check. All of them are **blocking** —
-nothing there is informational.
+no-glimmer-import guard, the CRD drift check, and the supply-chain job (licence
+policy, `govulncheck`, `golangci-lint`). All of them are **blocking** — nothing
+there is informational.
 
 ### Three tiers of test, and what each one can see
 

@@ -365,7 +365,9 @@ func TestFileSourceScanRetainsNothing(t *testing.T) {
 	}
 	logBytes := uint64(len(log))
 	mustWrite(t, path, string(log))
-	log = nil
+	// `log` is deliberately not nilled here. It is never read again, so it is
+	// already dead by liveness analysis and its backing array is collectable —
+	// an explicit `log = nil` measured nothing and only looked like it did.
 
 	src, err := openFileLog(path)
 	if err != nil {

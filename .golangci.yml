@@ -1,0 +1,71 @@
+# golangci-lint configuration.
+#
+# The starting set is CONSERVATIVE on purpose (#177). A linter turned on with
+# everything enabled produces a wall of findings, gets disabled in anger, and
+# then protects nothing. These four are the ones that find BUGS rather than
+# style, the repository is clean against them today, and the job is BLOCKING —
+# which is the house rule: nothing in this project's CI is informational.
+#
+# Turning a further linter on is a small PR that fixes what it finds. That is the
+# order things should happen in.
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    # Suspicious constructs: printf verbs that do not match their arguments,
+    # struct tags that do not parse, locks copied by value.
+    - govet
+    # A value assigned and never read. Usually an error that was captured and
+    # then dropped, or — as it was here — a line that documents an intent the
+    # compiler had already carried out, so it measured nothing while looking
+    # like it did.
+    - ineffassign
+    # Dead code. It found a constant in the Group reconciler that was declared,
+    # documented and never referenced, because the shared wake-up path was
+    # already doing the job. A second name for one number is a number that will
+    # eventually be two.
+    - unused
+    # The static analysis suite. See the exclusions below — they are narrow and
+    # each says when it comes off.
+    - staticcheck
+
+  settings:
+    staticcheck:
+      # SA* only: the bug-finding checks. ST* (style) and QF* (quickfix
+      # suggestions) are opinions, and adopting a house style is a different
+      # conversation from finding defects.
+      checks:
+        - "all"
+        - "-ST*"
+        - "-QF*"
+        # SA1019 is DEPRECATION, and every current instance is a real one:
+        # controller-runtime's scheme.Builder, mgr.GetEventRecorderFor, and
+        # Result.Requeue. Migrating off them is a behavioural change to the
+        # manager's event and requeue paths, which does not belong in the PR
+        # that turns the linter on — a lint change that alters what the
+        # controller does is a lint change nobody can review.
+        #
+        # Tracked separately; remove this line with that work.
+        - "-SA1019"
+
+  exclusions:
+    # A generated file's style is the generator's business.
+    generated: lax
+    rules:
+      - path: zz_generated\..*\.go
+        linters: [staticcheck, govet, unused, ineffassign]
+
+# NOT ENABLED YET, and why — so the next person does not have to re-derive it:
+#
+#   errcheck — 22 findings today, and every one is either fmt.Fprintf to a
+#     runner's own stdout or a deferred Close on a socket or pipe. Both are the
+#     classic false-positive class: a runner that cannot write to stdout has no
+#     recovery available, and a deferred Close on a read side has nothing to
+#     report. Turning it on means annotating 22 call sites, which buries the two
+#     or three that might be real. It is worth doing as its own change, with
+#     each site examined rather than blanket-suppressed.
+#
+#   gosec, revive, gocritic, errorlint — worth having, none of them free. Add
+#     one per PR, fixing what it finds.
