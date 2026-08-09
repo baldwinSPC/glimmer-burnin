@@ -771,10 +771,11 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 	// runner never opens a CUDA context and never executes nvidia-smi; check the
 	// source before making it.
 	noAccelerator := map[string]string{
-		"ib-write-bw":   "measures the wire through RDMA verbs; the CUDA variant is gpudirect-rdma",
-		"memory-stress": "exercises HOST memory through stressapptest",
-		"disk-io":       "measures storage through direct I/O against a declared path; no accelerator is involved",
-		"tcp-baseline":  "measures the kernel TCP stack through iperf3; it is the accelerator-free half of the fabric story and runs on nodes with no GPU at all",
+		"ib-write-bw":       "measures the wire through RDMA verbs; the CUDA variant is gpudirect-rdma",
+		"memory-stress":     "exercises HOST memory through stressapptest",
+		"fingerprint-probe": "READS ABOUT accelerators over a read-only sysfs mount and never opens one; it must work on a node whose device plugin never came up",
+		"disk-io":           "measures storage through direct I/O against a declared path; no accelerator is involved",
+		"tcp-baseline":      "measures the kernel TCP stack through iperf3; it is the accelerator-free half of the fabric story and runs on nodes with no GPU at all",
 	}
 
 	for _, d := range runnerDirs(t) {

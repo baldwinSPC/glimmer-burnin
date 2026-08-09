@@ -1,0 +1,38 @@
+# fingerprint-probe: what the hardware says about itself.
+#
+# Useful on exactly the node where everything else is silent — no device plugin,
+# no Node Feature Discovery, no labels — because PCI IDs are reported by the
+# device over a bus rather than written by software that chose to describe it.
+#
+# NOTE ON THE IMAGE. There is no published fingerprint-probe image yet, so
+# spec.runner.image is REQUIRED and this names a placeholder. Publishing is
+# manual and follows verification on real hardware.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: fingerprint-probe
+spec:
+  kind: fingerprint-probe
+  runner:
+    image: ghcr.io/baldwinspc/glimmer-burnin-fingerprint-probe:REPLACE-ME
+    # The ONLY way this pod reaches the node's filesystem. READ-ONLY, and
+    # readOnly defaults to true throughout this API — stated here anyway,
+    # because a privilege grant deserves to be visible where it is granted.
+    hostPaths:
+      - path: /sys
+        mountPath: /host/sys
+        readOnly: true
+        # Assert-only: the kubelet will not create it. An operator sent to
+        # MEASURE a fleet must never mutate it.
+        type: Directory
+  thresholds:
+    # An identity is EVIDENCE. `acceleratorVendors Equal nvidia` would fail an
+    # AMD node for being AMD and read as a hardware verdict — fleet-composition
+    # rules belong in spec.target.nodeSelector, where they are targeting rather
+    # than accusation. pkg/verdict's linter will say so if you try.
+    #
+    # A COUNT is different, and is the one gate worth writing here: a node that
+    # should hold eight cards and reports seven has lost one.
+    - metric: acceleratorCount
+      comparison: GreaterThanOrEqual
+      value: "1"

@@ -30,6 +30,7 @@ cover.out
 /compute-smoke
 /dcgm-diag
 /disk-io
+/fingerprint-probe
 /gpu-burn
 /gpudirect-rdma
 /host-health

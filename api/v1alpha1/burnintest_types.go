@@ -147,6 +147,21 @@ const (
 	// write that would leave the filesystem near full.
 	KindDiskIO TestKind = "disk-io"
 
+	// KindFingerprintProbe reports what the hardware says about itself: PCI
+	// vendor and device IDs read from a read-only sysfs mount.
+	//
+	// Every other way this operator learns a node's identity depends on
+	// something else having described it — a device plugin's labels, or the
+	// extended resources it advertises. Both are silent on a node where the
+	// plugin never came up, and there the node simply looks like it has no
+	// accelerator. PCI IDs are reported by the device over a bus and need no
+	// software to have chosen to describe it.
+	//
+	// Its output is EVIDENCE. The runner has no failure path: it passes when it
+	// could look and skips when it could not. A count may be gated; an identity
+	// string may not, and pkg/contract marks them so the linter says so.
+	KindFingerprintProbe TestKind = "fingerprint-probe"
+
 	// KindHostHealth is a Node-scope read of host- and driver-side fault
 	// counters over the test window (xidEvents, pcieReplayErrors,
 	// nicLinkDownEvents, remappedRows, eccErrors).
@@ -236,6 +251,7 @@ var BuiltInKinds = []TestKind{
 	KindTCPBaseline,
 	KindMemoryBW,
 	KindDiskIO,
+	KindFingerprintProbe,
 	KindHostHealth,
 	KindClockProbe,
 	KindMemoryStress,
@@ -283,8 +299,14 @@ func (k TestKind) IsBuiltIn() bool {
 // KindCustom is never burst-only: the whole point of it is an image this
 // project knows nothing about, and claiming its runner ignores a duration would
 // be a guess about somebody else's code.
+// KindFingerprintProbe is burst-only for a different reason from
+// KindComputeSmoke: not because the work is a bounded burst, but because there
+// is no work at all. It reads sysfs once. Holding a node for two minutes to
+// re-read the same immutable file would occupy hardware and measure nothing —
+// so a profile that wants both an identity and a soak pairs it with a soak
+// kind, exactly as it would with compute-smoke.
 func (k TestKind) BurstOnly() bool {
-	return k == KindComputeSmoke
+	return k == KindComputeSmoke || k == KindFingerprintProbe
 }
 
 // BurnInTestSpec defines one acceptance test.
