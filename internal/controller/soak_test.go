@@ -1083,3 +1083,52 @@ func TestAnUnsegmentedErrorStillReportsTheAttemptsOwnMetrics(t *testing.T) {
 		t.Errorf("an unsegmented result grew an aggregate: %v", res.AggregatedMetrics)
 	}
 }
+
+// The window length is pinned on the result, like the segment count beside it.
+//
+// SegmentsCompleted is a COUNT, and a count is not a duration: "40 of 288" says
+// how far a soak got only if the reader also knows how long a window is. Neither
+// the status nor the delivery envelope carries the run's spec, so without this
+// the number cannot be turned into hours by anything downstream — and the
+// envelope's segment block (#229) is assembled from these fields.
+func TestSoak_TheResultRecordsTheWindowLength(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 1800, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.burnSegment("run1", 1, 0, cleanSegment())
+
+	res := soakResult(t, h.run("run1"))
+	if res.SegmentSeconds != 900 {
+		t.Errorf("segmentSeconds = %d, want 900 — pinned from the plan alongside segmentsRequired=%d",
+			res.SegmentSeconds, res.SegmentsRequired)
+	}
+}
+
+// And an unsegmented test records none, so zero keeps meaning "not segmented"
+// on every field of the block rather than only on the count.
+func TestAnUnsegmentedResultRecordsNoWindowLength(t *testing.T) {
+	bt := &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "soak"},
+		Spec: burninv1alpha1.BurnInTestSpec{
+			Kind: burninv1alpha1.KindThermalSoak, Scope: burninv1alpha1.ScopeNode,
+			DurationSeconds: 2700,
+		},
+	}
+	h := newHarness(t,
+		gb10Node("spark-a"), bt,
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	pod := h.awaitSegmentPod("run1", 1)
+	h.startPod(pod)
+	h.reconcile("run1")
+
+	res := soakResult(t, h.run("run1"))
+	if res.SegmentSeconds != 0 || res.SegmentsRequired != 0 {
+		t.Errorf("an unsegmented result grew a window length: segmentSeconds=%d segmentsRequired=%d",
+			res.SegmentSeconds, res.SegmentsRequired)
+	}
+}

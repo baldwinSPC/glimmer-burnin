@@ -213,6 +213,33 @@ until anybody aggregates, replays or archives envelopes.
 | `unmeasurable` | Metric names the runner positively declared it cannot measure on this hardware. A claim about the **part**. |
 | `artifacts` | Non-metric evidence, **by reference**. The payload is not in the envelope. |
 | `variantAxes` | The matrix labels this cell came from — `{"precision": "fp4"}`. Group a sweep by these rather than by splitting test names on a hyphen, which works until a variant is called `fp8-dense` and then works wrongly and silently. |
+| `segments` | Present **only for a segmented soak**, absent for an ordinary execution. See below. |
+
+### `results[].segments` — a soak, and how much of it burned
+
+```json
+"segments": { "completed": 40, "required": 288, "segmentSeconds": 900, "truncatedAttempts": 23 }
+```
+
+A soak is divided into a sequence of shorter pods so that an eviction costs one
+window instead of the week. That is a **scheduling** decision and it deliberately
+does not change the verdict — thresholds are applied once, at the end, to the
+fold — so `phase` and `metrics` look identical whichever way a test was run.
+This block is the only thing that tells them apart.
+
+| Field | Meaning |
+|---|---|
+| `completed` / `required` | **`40 of 288` and `288 of 288` are different statements about a node.** `completed` counts only segments that finished *cleanly* and contributed to the fold, so it does not advance for an interruption — `completed < required` on a terminal result means the soak was cut short. |
+| `segmentSeconds` | One window's length. `completed` is a count, and a count is not a duration; the envelope does not carry the run's spec, so without this there is no way to turn `40` into ten hours. |
+| `truncatedAttempts` | Passing segments dropped from the attempt history to keep the status writable. A consumer counting delivered attempts undercounts by exactly this much, and would never learn that it did. The verdict is unaffected — it is read from the persisted fold, never from the attempt list. |
+
+Two things follow for a consumer. **`metrics` on such a result is a FOLD**, not a
+reading: `gpuTempC` is the peak across every window and `elapsedS` is the sum of
+them. How each key combined is declared beside its name in the registry and
+answered by `contract.AggregationFor` — query that rather than assuming, and note
+that an *unregistered* name folds `Last`. And **a segmented soak that settles
+`Error` still reports the aggregate**, because the errored window measured
+nothing; read `elapsedS` against the declared duration to see how far it got.
 
 What is **not** in a result, and where to get it: per-attempt history
 (`attempts`, including `AttemptTrigger`, which records why each attempt

@@ -2328,6 +2328,7 @@ func ensureResult(run *burninv1alpha1.BurnInRun, t plannedTest, nodes []string) 
 		// for every test that does not set spec.soak, which is the behaviour
 		// every result had before segments existed.
 		SegmentsRequired: segmentsRequired(&t.Spec),
+		SegmentSeconds:   segmentSeconds(&t.Spec),
 	})
 	return &run.Status.Results[len(run.Status.Results)-1]
 }

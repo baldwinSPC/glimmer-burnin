@@ -80,6 +80,18 @@ func testResult(r burninv1alpha1.TestResult) contract.TestResult {
 		Unmeasurable: append([]string(nil), r.Unmeasurable...),
 		VariantAxes:  r.VariantAxes,
 	}
+	// Present only for a segmented soak, so a consumer reads its absence as "this
+	// was one pod" rather than comparing a zero against a sentinel. Keyed on
+	// SegmentsRequired, which is the same flag the reconciler branches on — a
+	// result carries it if and only if its verdict was rendered over the fold.
+	if r.SegmentsRequired > 0 {
+		out.Segments = &contract.SegmentSummary{
+			Completed:         r.SegmentsCompleted,
+			Required:          r.SegmentsRequired,
+			SegmentSeconds:    r.SegmentSeconds,
+			TruncatedAttempts: r.TruncatedAttempts,
+		}
+	}
 	for _, v := range r.Violations {
 		out.Violations = append(out.Violations, contract.Violation{
 			Index: v.Index, Metric: v.Metric, Cause: v.Cause, Kind: v.Kind, Reason: v.Reason,
