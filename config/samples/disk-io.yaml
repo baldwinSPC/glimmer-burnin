@@ -1,0 +1,51 @@
+# disk-io: the subsystem the rest of the suite never touches.
+#
+# NOTE ON THE IMAGE. There is no published disk-io image yet, so
+# spec.runner.image is REQUIRED here and this sample names a placeholder.
+# Publishing is manual and follows verification on real hardware. Without a
+# default, a run fails at plan time naming the problem, rather than
+# ImagePullBackOff-ing on every targeted node.
+#
+# READ runners/disk-io/README.md BEFORE POINTING THIS ANYWHERE. This is the one
+# runner in the suite that writes, and what it writes and where is a decision
+# the site makes here, in hostPaths, and nowhere else.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: disk-io
+spec:
+  kind: disk-io
+  durationSeconds: 120
+  runner:
+    image: ghcr.io/baldwinspc/glimmer-burnin-disk-io:REPLACE-ME
+    # The ONLY way this pod reaches the node's filesystem. A test that declares
+    # nothing here gets a pod with no volumes at all, and the runner skips.
+    #
+    # Point it at SCRATCH. The runner writes one file it creates and removes,
+    # and refuses to run if that would leave under 2 GiB free — but a directory
+    # whose free space you are unsure of is the wrong directory.
+    hostPaths:
+      - path: /mnt/scratch
+        mountPath: /mnt/scratch
+        # readOnly defaults to TRUE everywhere in this API, so a write test has
+        # to say so explicitly. That is the point of the default.
+        readOnly: false
+        # Assert-only: the kubelet will not create this path. An operator sent
+        # to measure a fleet must not mutate it — if /mnt/scratch does not
+        # exist, the pod fails and says so.
+        type: Directory
+    env:
+      - name: DISK_IO_PATH
+        value: /mnt/scratch
+      - name: DISK_IO_SIZE_MB
+        value: "2048"
+  thresholds:
+    # No bandwidth floor. This project pins thresholds from MEASURED baselines,
+    # never from a datasheet — a drive's sequential number depends on the
+    # filesystem, the block size and how full it is, and a figure copied from a
+    # spec sheet fails every healthy node in the fleet.
+    #
+    # Run it thresholdless first, look at what the fleet reports, then gate.
+    - metric: ioErrors
+      comparison: Equal
+      value: "0"

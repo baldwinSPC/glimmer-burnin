@@ -96,6 +96,13 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - glibc (distroless base)         LGPL-2.1-or-later, dynamically linked and
       unmodified, which LGPL 2.1 section 6 permits without relicensing.
 
+  runners/disk-io
+    - no third-party component, and deliberately so: fio, IOR and elbencho are
+      all GPL, so the measurement is a CGO-free Apache-2.0 Go binary over the Go
+      standard library (BSD-3-Clause). The image builds with GOPROXY=off and the
+      runner's own metricnames_test.go rejects any import outside the standard
+      library, so this stays a fact rather than an intention.
+
   runners/host-health
     - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
       standard library (BSD-3-Clause).

@@ -53,6 +53,7 @@ func TestUnitOf(t *testing.T) {
 		{"pcieReplayErrors", UnitNone},
 		{"nicLinkDownEvents", UnitNone},
 		{"tcpRetransmits", UnitNone},
+		{"ioErrors", UnitNone},
 		{"memoryErrors", UnitNone},
 		{"diagTestsFailed", UnitNone},
 		{"iterationsCompleted", UnitNone},
@@ -186,6 +187,7 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"pcieReplayErrors":    {UnitNone, ThresholdUseAcceptance},
 		"nicLinkDownEvents":   {UnitNone, ThresholdUseAcceptance},
 		"tcpRetransmits":      {UnitNone, ThresholdUseAcceptance},
+		"ioErrors":            {UnitNone, ThresholdUseAcceptance},
 		"throttleEvents":      {UnitNone, ThresholdUseAcceptance},
 		"throttledSamples":    {UnitNone, ThresholdUseAcceptance},
 		"throttleReasonsMask": {UnitNone, ThresholdUseEvidence},
@@ -205,6 +207,7 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		// asserted here by name rather than left to review.
 		"gpuName":                 {UnitNone, ThresholdUseEvidence},
 		"tcpTestInterface":        {UnitNone, ThresholdUseEvidence},
+		"diskIoPath":              {UnitNone, ThresholdUseEvidence},
 		"tcpMgmtInterface":        {UnitNone, ThresholdUseEvidence},
 		"computeCap":              {UnitNone, ThresholdUseEvidence},
 		"pciBusId":                {UnitNone, ThresholdUseEvidence},
@@ -353,6 +356,7 @@ func TestAggregationOfTheEasilyMistakenMetrics(t *testing.T) {
 		"pcieReplayErrors":  {AggSum, "differenced over the window"},
 		"nicLinkDownEvents": {AggSum, "differenced over the window"},
 		"tcpRetransmits":    {AggSum, "a per-window count of retransmitted segments"},
+		"ioErrors":          {AggSum, "a per-window count of I/O errors"},
 
 		// A floor: the WORST window is the verdict. A soak holding 83% for
 		// eleven hours and 40% for one hour is a part that dropped to 40%, and

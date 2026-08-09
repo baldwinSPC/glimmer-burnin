@@ -565,6 +565,12 @@ var registry = map[string]Metric{
 		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"ioErrors": {
+		Name: "ioErrors", Unit: UnitNone,
+		Description:  "count of I/O errors observed during a storage test. A zero here IS a measurement — the run reached the device and counted none — unlike a bandwidth figure, which is omitted when nothing moved rather than reported as zero",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
 	"nicLinkDownEvents": {
 		Name: "nicLinkDownEvents", Unit: UnitNone,
 		Description:  "count of link-down transitions on the node's fabric NICs during the test window",
@@ -685,6 +691,12 @@ var registry = map[string]Metric{
 	"tcpMgmtInterface": {
 		Name: "tcpMgmtInterface", Unit: UnitNone,
 		Description:  "the interface carrying this node's default route, which the guard treats as the management path and refuses to load. Reported alongside tcpTestInterface so a reader can see the two were different",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"diskIoPath": {
+		Name: "diskIoPath", Unit: UnitNone,
+		Description:  "the directory a storage test measured. A label: recorded because a throughput figure with no path beside it cannot be checked against the node's topology later — measuring a container overlay and measuring an NVMe produce the same-shaped number",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
