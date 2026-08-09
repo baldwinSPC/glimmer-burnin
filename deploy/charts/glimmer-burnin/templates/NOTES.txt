@@ -1,0 +1,27 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+Check the manager is up:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "glimmer-burnin.fullname" . }}
+
+Then define a test and a profile, and run one:
+
+  kubectl apply -f https://raw.githubusercontent.com/baldwinSPC/glimmer-burnin/v{{ .Chart.AppVersion }}/config/samples/node-acceptance.yaml
+
+TWO THINGS TO KNOW BEFORE YOU POINT THIS AT HARDWARE
+
+  1. This operator CORDONS the nodes it tests, immediately before it puts load
+     on them, and releases them afterwards. Its footprint tracks
+     maxConcurrentNodes rather than the size of your target list.
+
+  2. A runner image is executed against real hardware, and the default images
+     are NVIDIA-oriented. Set spec.runner.image per test to point at your own
+     build for anything else.
+
+{{- if not .Values.leaderElection }}
+
+WARNING: leaderElection is off. A rolling update starts the second manager
+before the first is gone, so two managers will reconcile the same run — which is
+the race the lease exists to prevent. Turn it back on unless you know why you
+did this.
+{{- end }}

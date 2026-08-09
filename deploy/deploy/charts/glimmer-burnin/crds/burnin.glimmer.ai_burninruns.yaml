@@ -1,0 +1,889 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: burninruns.burnin.glimmer.ai
+spec:
+  group: burnin.glimmer.ai
+  names:
+    categories:
+    - burnin
+    kind: BurnInRun
+    listKind: BurnInRunList
+    plural: burninruns
+    shortNames:
+    - bir
+    singular: burninrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.profileRef
+      name: Profile
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.baseline
+      name: Baseline
+      priority: 1
+      type: boolean
+    - jsonPath: .status.passed
+      name: Passed
+      type: integer
+    - jsonPath: .status.failed
+      name: Failed
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: BurnInRun is one execution of a BurnInProfile against a target.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: BurnInRunSpec is one execution of a BurnInProfile against
+              a target.
+            properties:
+              baseline:
+                default: false
+                description: |-
+                  Baseline declares that this run MEASURES rather than certifies.
+
+                  Running thresholdless to gather baselines already works — a profile with
+                  no thresholds passes on exit 0 and records its metrics. What did not work
+                  was telling the two apart AFTERWARDS: a baseline sweep and an acceptance
+                  run both deliver phase Passed, so a consumer gating cluster admission on
+                  "the last run passed" would certify hardware against a run that gated
+                  nothing. That is a fail-open in the reporting path, and this flag is what
+                  closes it.
+
+                  IT DOES NOT SUPPRESS THRESHOLDS, and must never be made to. A run marked
+                  baseline whose profile carries a gate is REFUSED at start, as a config
+                  Error naming the test. Suppression would be a threshold-laundering switch —
+                  a way to turn a failing acceptance run into a passing measurement run by
+                  flipping a boolean — and this operator's whole premise is that a verdict
+                  cannot be edited into existence. If a profile has gates it is not a
+                  baseline; use a different profile.
+
+                  The flag rides into every delivered envelope, so a consumer can never
+                  mistake a sweep for a certification.
+                type: boolean
+              cancel:
+                default: false
+                description: |-
+                  Cancel requests that this run stop for good. It is the CANCEL_BURNIN
+                  verb: an external control plane sets it, the run drives to Cancelled,
+                  and every node the run cordoned is released.
+
+                  Cancel is ONE-WAY. Once the controller has observed it and begun
+                  cancelling, clearing the flag does not resurrect the run; a run that
+                  could un-cancel would race its own cleanup and could leave a node
+                  cordoned with nothing left to uncordon it. To run again, create a new
+                  BurnInRun — which is also what makes the audit trail honest, since the
+                  new run has its own fingerprint and its own evidence.
+
+                  Cancelled is terminal and is NOT a hardware verdict. Tests that finished
+                  before the cancel keep their real results; tests that had not run are
+                  left unjudged rather than being marked failed.
+                type: boolean
+              cancelPolicy:
+                default: Graceful
+                description: |-
+                  CancelPolicy decides the fate of in-flight executions when Cancel is
+                  set. Ignored unless Cancel is true.
+                enum:
+                - Graceful
+                - Immediate
+                type: string
+              cancelReason:
+                description: |-
+                  CancelReason is free-form text recorded on the run and carried in the
+                  exported envelope, so a consumer reading a Cancelled verdict months
+                  later can tell "facility power event" from "operator typo'd the target"
+                  from "superseded by a newer run". A cancellation with no reason is the
+                  one result nobody can act on.
+                maxLength: 512
+                type: string
+              deadlineSeconds:
+                description: |-
+                  DeadlineSeconds bounds the WHOLE run, measured from status.startedAt:
+                  every test, every node, every repeat and every retry together. nil or 0
+                  means no deadline.
+
+                  Exceeding it drives the run to Error, not Failed and not Cancelled. Error
+                  is correct because a run that ran out of time did not judge the hardware
+                  it had not reached yet, and reporting that as a hardware verdict would
+                  condemn parts that were never tested. It is not Cancelled because nobody
+                  asked for it — Cancelled is reserved for an explicit request, so that a
+                  consumer can tell an operator's decision from a bound being hit.
+
+                  Tests that DID complete before the deadline keep their real results.
+                  A deadline stops a run; it does not retract evidence already gathered.
+
+                  This is the outer bound that keeps a run from occupying nodes forever:
+                  per-test DurationSeconds bounds one execution, but repeats, retries and
+                  a long node list multiply, and MaxConcurrentNodes=1 makes a wide sweep
+                  long by design.
+                format: int32
+                minimum: 0
+                type: integer
+              force:
+                default: false
+                description: |-
+                  Force admits this run even when one of its targets is already held by
+                  another active BurnInRun. DEFAULT false, and it should stay false.
+
+                  THIS IS THE ESCAPE HATCH ON A FACILITY INTERLOCK, not a way to go faster.
+                  MaxConcurrentNodes bounds how many nodes ONE run drives at full power;
+                  nothing about it bounds how many runs drive the same node, and two runs
+                  each honouring a cap of 1 on the same node are two full-power soaks on one
+                  machine — twice the power, twice the heat, and each run believing it is
+                  compliant. That is what admission refuses, and it is why the refusal is
+                  the default rather than a warning.
+
+                  The refusal is also a correctness gate, not only a facility one. Two soaks
+                  contending for the same accelerators, memory bandwidth and fabric measure
+                  each other rather than the hardware, so both report degraded numbers and a
+                  healthy node earns a failing verdict — or, as observed on real hardware,
+                  the kubelet kills one of them and the run reports exit 137 against a node
+                  that was never at fault.
+
+                  Setting it is a statement that the overlap is deliberate and that the
+                  power and cooling headroom has been checked by the person setting it. It
+                  is recorded on the run and in the exported envelope, so a verdict produced
+                  under contention can be identified as such months later.
+
+                  It does NOT disable the cordon ownership rules. A forced run still refuses
+                  to take, overwrite or release a node another run has stamped, and it still
+                  records the node's PRE-BURN-IN schedulability rather than the cordon it
+                  finds — a forced overlap must not be able to launder another run's cordon
+                  into permanent prior state.
+                type: boolean
+              maxConcurrentNodes:
+                default: 1
+                description: |-
+                  MaxConcurrentNodes caps how many nodes this run exercises at the same
+                  time. DEFAULT 1 — strictly sequential.
+
+                  THIS IS A FACILITY SAFETY INTERLOCK, NOT A PERFORMANCE KNOB. Burn-in
+                  deliberately drives hardware to its power and thermal limits; that is
+                  the whole point of the test. Raising this multiplies real electrical
+                  load and real heat in a real room. Ten nodes at full power draw is a
+                  rack-level power event, and every accelerator in the run holding maximum
+                  load at once is a cooling event — either can trip a breaker, exceed a
+                  PDU's budget, or push inlet temperatures past what the room can carry.
+                  The consequences land on hardware that was never under test.
+
+                  The default of 1 is the safe floor, and it is deliberately inconvenient:
+                  a large sweep is slow at 1, and the operator raising it is the person
+                  who has to have checked the circuit and the cooling headroom first. It
+                  must never be raised automatically, defaulted higher "for throughput",
+                  or inferred from cluster size. If a run is too slow, the answer is a
+                  facility conversation, not a bigger number.
+
+                  There is a correctness reason too, on top of the facility one: concurrent
+                  nodes contend for shared fabric and shared power, so a node measured
+                  beside nine others under full load is not measured under the same
+                  conditions as one measured alone. A bandwidth or clock verdict taken
+                  under contention is not comparable to one taken sequentially.
+                format: int32
+                minimum: 1
+                type: integer
+              profileRef:
+                description: ProfileRef names the BurnInProfile to run (same namespace).
+                type: string
+              retryOnErrorLimit:
+                default: 0
+                description: |-
+                  RetryOnErrorLimit is how many extra attempts a test gets after an ERROR.
+                  Default 0 — no retries.
+
+                  Retries apply to the Error phase ONLY: image pull failure, node
+                  disappearing mid-test, runner crash, an exit code outside the runner
+                  contract. Those say our machinery malfunctioned and the hardware was
+                  never judged, and re-running is the correct response.
+
+                  A RETRY MUST NEVER RE-RUN A FAILED TEST. A Failed verdict is a
+                  measurement: the hardware was judged and did not meet the threshold.
+                  Re-running it until it passes launders a real hardware fault into an
+                  acceptance, which is the single worst outcome this operator can produce
+                  — a bad part shipped to production with a clean certificate. Marginal
+                  hardware is exactly the hardware that passes on the second try. If a
+                  test is genuinely flaky in a way retries would paper over, the fix is a
+                  better threshold or a repeat count, both of which make the gate
+                  stricter, not looser.
+
+                  Skipped is likewise never retried: a test that does not apply to this
+                  hardware will not start applying to it on the next attempt.
+
+                  Each retry re-runs the full test, so the cost is bounded by
+                  DeadlineSeconds. Attempts are recorded individually on the TestResult so
+                  a node that only passes after three retries is visible as such, not
+                  indistinguishable from one that passed first time.
+                format: int32
+                minimum: 0
+                type: integer
+              suspend:
+                default: false
+                description: |-
+                  Suspend pauses the run: no new test pods are launched. Executions
+                  already in flight are left alone to finish and record their results —
+                  suspending is not a reason to discard evidence.
+
+                  Suspend is REVERSIBLE and NON-TERMINAL. A suspended run produces no
+                  verdict and reaches no terminal phase; clearing the flag resumes it from
+                  where it stopped, with the results it had already recorded intact. Use
+                  it for a maintenance window or a facility power constraint, where the
+                  run should continue later rather than be redone.
+
+                  Cancel dominates Suspend: a run that is both suspended and cancelled
+                  cancels, because a suspended run that could never be cancelled would be
+                  unstoppable without deleting the object.
+                type: boolean
+              target:
+                description: Target selects the node(s) under test.
+                properties:
+                  nodeNames:
+                    description: |-
+                      NodeNames explicitly names nodes. For a profile containing a Pair-scope
+                      test exactly two are required, and they must be distinct; the operator
+                      pairs them for the point-to-point tests, running the server on the first
+                      and the client on the second. The requirement is ENFORCED at run start —
+                      a Pair test against one node, or three, is a terminal configuration Error
+                      naming the count it got, never a run that quietly measures something
+                      else.
+                    items:
+                      type: string
+                    type: array
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      NodeSelector selects nodes by label (e.g. glimmer.ai/interconnect=roce-200g).
+                      The same exactly-two rule applies to what it resolves to.
+                    type: object
+                  tolerations:
+                    description: Tolerations applied to every test pod so it can land
+                      on tainted GPU nodes.
+                    items:
+                      description: |-
+                        The pod this Toleration is attached to tolerates any taint that matches
+                        the triple <key,value,effect> using the matching operator <operator>.
+                      properties:
+                        effect:
+                          description: |-
+                            Effect indicates the taint effect to match. Empty means match all taint effects.
+                            When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                          type: string
+                        key:
+                          description: |-
+                            Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                            If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                          type: string
+                        operator:
+                          description: |-
+                            Operator represents a key's relationship to the value.
+                            Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                            Exists is equivalent to wildcard for value, so that a pod can
+                            tolerate all taints of a particular category.
+                            Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                          type: string
+                        tolerationSeconds:
+                          description: |-
+                            TolerationSeconds represents the period of time the toleration (which must be
+                            of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                            it is not set, which means tolerate the taint forever (do not evict). Zero and
+                            negative values will be treated as 0 (evict immediately) by the system.
+                          format: int64
+                          type: integer
+                        value:
+                          description: |-
+                            Value is the taint value the toleration matches to.
+                            If the operator is Exists, the value should be empty, otherwise just a regular string.
+                          type: string
+                      type: object
+                    type: array
+                type: object
+              ttlSecondsAfterFinished:
+                description: |-
+                  TTLSecondsAfterFinished garbage-collects the run (and its pods) this long
+                  after it reaches a terminal phase. 0 keeps it.
+                format: int32
+                type: integer
+            required:
+            - profileRef
+            - target
+            type: object
+          status:
+            description: BurnInRunStatus tracks execution and the exported verdict.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              cordonedNodes:
+                description: |-
+                  CordonedNodes are the nodes this run cordoned and therefore owes an
+                  uncordon. It is the durable record the cleanup path works from: without
+                  it, a controller restart between cordoning a node and finishing the run
+                  has no way to know which nodes it made unschedulable, and the fleet
+                  silently loses capacity nothing will ever give back. Only nodes the run
+                  itself cordoned are listed, so a node an administrator had already
+                  cordoned is never uncordoned on the run's way out.
+                items:
+                  type: string
+                type: array
+              errored:
+                description: |-
+                  Errored counts tests that produced no verdict because the machinery
+                  malfunctioned. It is counted separately from Failed and must never be
+                  folded into it: a summary that shows "0 failed" while eight tests never
+                  ran reads as a clean sweep of hardware nothing actually measured.
+                format: int32
+                type: integer
+              failed:
+                format: int32
+                type: integer
+              fingerprint:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Fingerprint is the NodeFingerprint captured at run start (what hardware
+                  this verdict actually applies to).
+                type: object
+              finishedAt:
+                format: date-time
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              passed:
+                format: int32
+                type: integer
+              phase:
+                default: Pending
+                description: |-
+                  RunPhase is the lifecycle of a BurnInRun, and doubles as the phase of an
+                  individual TestResult.
+                enum:
+                - Pending
+                - Running
+                - Passed
+                - Failed
+                - Error
+                - Skipped
+                - Cancelled
+                type: string
+              priorUnschedulable:
+                additionalProperties:
+                  type: boolean
+                description: |-
+                  PriorUnschedulable is each target node's schedulability AS THE RUN FOUND
+                  IT, keyed by node name, captured once when the run starts and never
+                  recomputed. True means the node was already out of the scheduler before
+                  this run touched it, and must be left that way.
+
+                  It exists because the answer to "was this node already cordoned?" has to
+                  be a property of the RUN, not a reading taken at some arbitrary later
+                  moment. A run cordons and releases a node once per wave, so the same
+                  question used to be re-asked several times per run and answered from
+                  whatever spec.unschedulable happened to say at that instant. Any cordon
+                  the run could not attribute to itself — its own, seen after a manager
+                  restart or an annotation it no longer recognises; a node an operator
+                  cordoned while the burn-in was already holding it — was then recorded as
+                  "pre-existing" and faithfully made PERMANENT on the way out, which is a
+                  stranded cordon with a paper trail saying it was intentional.
+
+                  Captured before the first cordon and never overwritten, so it survives a
+                  restart, is identical on every reconcile, and cannot be contaminated by
+                  the run's own footprint. Nodes absent from the map (a target that did not
+                  exist at start, or a run that began under an older operator) fall back to
+                  reading the node, which is the old behaviour and no worse than it.
+                type: object
+              results:
+                items:
+                  description: |-
+                    TestResult is the outcome of one test within a run, aggregated over its
+                    attempts.
+                  properties:
+                    artifacts:
+                      description: |-
+                        Artifacts are the non-metric evidence the runner returned, by REFERENCE.
+
+                        The payload lives in a run-owned ConfigMap, never here: a status is read
+                        on every reconcile by every watcher, and a megabyte of dcgmi JSON inlined
+                        into it would be re-transmitted on each one. The reference carries what a
+                        consumer needs in order to decide whether to fetch — what it is, how big,
+                        and a digest to verify what it got.
+
+                        A ref with Dropped set is evidence that was REFUSED, kept deliberately.
+                        Omitting it would make "the runner produced no artifact" and "the artifact
+                        was too large to keep" the same observation, and only one of those is a
+                        reason to go and look at the node.
+                      items:
+                        description: |-
+                          Violation is one threshold a test did not satisfy, as recorded on a result.
+
+                          It mirrors verdict.Violation rather than reusing it, and that is forced
+                          rather than chosen: pkg/verdict imports this package, so importing it back
+                          would be a cycle. The controller maps between them in one place. If a field
+                          is added there, add it here too — a violation the API cannot express is a
+                          violation an operator never sees.
+
+                          Cause and Kind are deliberately NOT +kubebuilder:validation:Enum. An enum on
+                          a STATUS field turns every future violation kind into a rejected status
+                          write, which would wedge the run that discovered it — the failure mode would
+                          be a burn-in that cannot record why it failed. The vocabulary is documented
+                          in pkg/verdict and validated there, where getting it wrong costs a test
+                          rather than a run.
+                          ArtifactRef points at one piece of non-metric evidence a runner returned.
+
+                          It is a POINTER and not the payload; see TestResult.Artifacts for why.
+                        properties:
+                          configMap:
+                            description: |-
+                              ConfigMap is the run-owned ConfigMap holding the payload, and Key is the
+                              entry within it. Both empty when Dropped is set.
+                            type: string
+                          digest:
+                            description: |-
+                              Digest is "sha256:<hex>" over the stored payload, so a consumer that
+                              fetches it separately can verify it got what this verdict was about.
+                            type: string
+                          dropped:
+                            description: |-
+                              Dropped says why the evidence was not kept, and is empty when it was.
+                              An artifact is evidence ABOUT a verdict and never part of one, so a
+                              failure to store one is recorded here and changes no phase.
+                            type: string
+                          key:
+                            type: string
+                          mediaType:
+                            description: MediaType is what the payload IS, so a renderer
+                              need not sniff it.
+                            type: string
+                          name:
+                            description: Name is what the runner called it, e.g. "dcgmi.json",
+                              after sanitising.
+                            type: string
+                          sizeBytes:
+                            description: |-
+                              SizeBytes is the payload's TRUE size — including for a ref that was
+                              dropped for exceeding a cap, which is the case where it matters most,
+                              because "how much evidence did we lose" is the next question asked.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    attempts:
+                      description: Attempts is the per-execution history, in order.
+                      items:
+                        description: |-
+                          TestAttempt is one execution of a test on a node — one pod, one exit code,
+                          one set of metrics.
+
+                          Attempts are recorded individually rather than collapsed into the final
+                          phase because the shape of the attempt history IS the hardware signal. A node
+                          that passed on the first try and a node that passed on the fourth try after
+                          three errors are both "Passed" at the test level and are very different
+                          parts. Keeping the history is also the only way to audit the retry rule:
+                          every retry's predecessor must be an Error, and that is checkable here.
+                        properties:
+                          attempt:
+                            description: |-
+                              Attempt is the 1-based index of this execution within the test's
+                              attempt sequence on this node.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          exitCode:
+                            description: |-
+                              ExitCode is the runner's raw exit code (0 pass, 1 fail, 2 skip, anything
+                              else Error). Recorded raw so an out-of-contract code stays visible as
+                              the contract violation it is instead of being flattened into Error.
+                            format: int32
+                            type: integer
+                          finishedAt:
+                            format: date-time
+                            type: string
+                          lastCheckpointAt:
+                            description: |-
+                              LastCheckpointAt is when this execution's in-progress metrics were last
+                              refreshed, if BurnInTestSpec.CheckpointIntervalSeconds is enabled. While
+                              the attempt is running, Metrics below are checkpoint evidence, not a
+                              judged result.
+                            format: date-time
+                            type: string
+                          message:
+                            description: Message is a human-readable outcome for this
+                              execution.
+                            type: string
+                          metrics:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Metrics are this execution's parsed metrics. Per-attempt rather than
+                              merged: merging would silently discard the run where the bandwidth
+                              dipped, which is the run that mattered.
+                            type: object
+                          node:
+                            description: |-
+                              Node is the node this execution ran on. For Pair and Group scope it is
+                              the rank-0 / initiating node; Nodes on the TestResult carries the full set.
+                            type: string
+                          phase:
+                            description: |-
+                              Phase is this execution's own outcome. It is not the test's outcome: a
+                              test with repeats is Passed only if EVERY attempt passed, and a test
+                              with retries is Passed if the LAST attempt passed after Errors.
+                            enum:
+                            - Pending
+                            - Running
+                            - Passed
+                            - Failed
+                            - Error
+                            - Skipped
+                            - Cancelled
+                            type: string
+                          podName:
+                            description: |-
+                              PodName is the pod that carried this execution, so a stored result can
+                              still be traced back to logs and events.
+                            type: string
+                          startedAt:
+                            format: date-time
+                            type: string
+                          trigger:
+                            description: Trigger says why this execution happened.
+                            enum:
+                            - Initial
+                            - Repeat
+                            - ErrorRetry
+                            type: string
+                        required:
+                        - attempt
+                        - trigger
+                        type: object
+                      type: array
+                    errorRetries:
+                      description: |-
+                        ErrorRetries is how many attempts were spent recovering from Error. It
+                        is tracked separately from repeats so retries can never be mistaken for
+                        satisfying RepeatCount: an errored attempt performed no measurement and
+                        therefore owes its repeat again.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    finishedAt:
+                      format: date-time
+                      type: string
+                    kind:
+                      description: |-
+                        TestKind is a well-known category. The kind selects the default runner image
+                        and result parser; Runner may override the image. Unknown kinds are allowed
+                        (custom runners) but get no built-in parsing.
+                      type: string
+                    lastCheckpointAt:
+                      description: |-
+                        LastCheckpointAt is when the running attempt last refreshed Metrics.
+                        Non-nil with a nil FinishedAt means the numbers below are a mid-flight
+                        sample and no threshold has been applied to them yet.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable outcome (a failing
+                        threshold, the real error).
+                      type: string
+                    metrics:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Metrics are the parsed numeric results the thresholds were evaluated
+                        against (e.g. busBandwidthGBs: "23.4", eccErrors: "0"). With repeats
+                        these are the metrics of the attempt that decided the verdict — the
+                        first failing attempt if the test failed, otherwise the last — so the
+                        numbers here always explain the phase beside them. Per-attempt numbers
+                        are in Attempts.
+                      type: object
+                    name:
+                      type: string
+                    nodes:
+                      items:
+                        type: string
+                      type: array
+                    notEvaluated:
+                      description: |-
+                        NotEvaluated are the thresholds that were neither satisfied nor violated,
+                        because they were never applied — a RequiredIfMeasurable gate on a metric
+                        the runner declared unmeasurable.
+
+                        It is recorded as DATA rather than left in Message because the distinction
+                        it carries is the one a consumer most needs and can least infer from
+                        prose: a gate that did not run is not a gate that passed. A Passed test
+                        whose ECC gate never applied must never be indistinguishable from one whose
+                        ECC gate applied and was satisfied.
+                      items:
+                        description: |-
+                          NotEvaluated is a threshold that was never applied.
+
+                          It mirrors pkg/verdict.NotEvaluated and pkg/contract.NotEvaluated. Three
+                          mirrors is unfortunate and deliberate: pkg/verdict must not import this
+                          package (it would be a cycle) and pkg/contract must stay free of Kubernetes
+                          types so a consumer can decode a verdict without client-go. The three are held
+                          in step by a test rather than by anyone remembering.
+                        properties:
+                          metric:
+                            description: Metric is the threshold's metric name, as
+                              written in the profile.
+                            type: string
+                          reason:
+                            description: Reason is why it was not applied (see pkg/verdict.ReasonUnmeasurable).
+                            type: string
+                        required:
+                        - metric
+                        - reason
+                        type: object
+                      type: array
+                    phase:
+                      description: |-
+                        Phase is the test's verdict across all attempts. With repeats it is the
+                        AND of every attempt; with retries it is the outcome of the last attempt
+                        after the Errors that preceded it.
+                      enum:
+                      - Pending
+                      - Running
+                      - Passed
+                      - Failed
+                      - Error
+                      - Skipped
+                      - Cancelled
+                      type: string
+                    repeatsCompleted:
+                      description: |-
+                        RepeatsCompleted is how many of those executions have passed so far.
+                        Passed requires RepeatsCompleted == RepeatsRequired; a test that stopped
+                        short is not passing, it is unfinished.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    repeatsRequired:
+                      description: |-
+                        RepeatsRequired is the resolved BurnInTestSpec.RepeatCount for this run:
+                        how many passing executions this test owes per node. Pinned onto the
+                        result so a verdict stays readable after the BurnInTest is edited.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    scope:
+                      description: |-
+                        TestScope is the topology a test exercises.
+
+                        Acceptance of an interconnect — NCCL over RoCE/IB, ib_write_bw, GPUDirect —
+                        is only meaningful across at least two nodes, so the operator schedules and
+                        correlates multi-node tests, not just per-node ones.
+
+                        Node, Pair and Group all execute. A scope this operator version does not
+                        recognise is recorded as a terminal Error rather than skipped: a required
+                        acceptance test the operator cannot run must never let hardware pass by
+                        omission.
+                      enum:
+                      - Node
+                      - Pair
+                      - Group
+                      type: string
+                    startedAt:
+                      description: |-
+                        StartedAt is when the FIRST attempt began executing, and FinishedAt is
+                        when the LAST attempt ended, so the pair always spans the test's real
+                        occupancy of the hardware — including the time lost to errored attempts
+                        and the gaps between repeats. Anything narrower would under-report how
+                        long a node was actually held.
+
+                        StartedAt is set when execution actually begins, never at scheduling
+                        time: a pod that sat unschedulable for an hour did not test anything for
+                        that hour, and counting the wait as test time would make a stuck run
+                        look like a slow one.
+                      format: date-time
+                      type: string
+                    unmeasurable:
+                      description: |-
+                        Unmeasurable are the metric names the runner POSITIVELY DECLARED it cannot
+                        measure on this hardware (the reserved `n/a` value).
+
+                        This is a claim about the PART, not about the run, and it is the only thing
+                        that lets a RequiredIfMeasurable gate be reported as not-evaluated rather
+                        than failing a healthy node. It must survive to a consumer intact:
+                        "this part has no ECC" and "this part reported zero ECC errors" are
+                        different statements about different hardware, and a consumer that cannot
+                        tell them apart will eventually treat one as the other.
+                      items:
+                        type: string
+                      type: array
+                    variantAxes:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        VariantAxes are the matrix labels this execution came from — {precision:
+                        fp4}, {class: soak} — or empty for a test with no variants.
+
+                        Echoed so a report can group a sweep's cells without parsing them back out
+                        of test names. Names are result identity and are stable, but they are
+                        STRINGS: recovering "which precision was this" by splitting on a hyphen
+                        works until a variant is called "fp8-dense", and then it works wrongly and
+                        silently.
+                      type: object
+                    violations:
+                      description: |-
+                        Violations lists EVERY threshold the deciding attempt did not satisfy, in
+                        spec order — the same attempt Metrics came from, so the two always explain
+                        the same execution. Empty unless Phase is Failed.
+
+                        Message names only the first, because that field is frozen; this is the
+                        complete picture. Read Cause before acting: a Failed test can mix a
+                        hardware shortfall with a broken threshold, and only the former is a
+                        reason to touch a node.
+                      items:
+                        properties:
+                          cause:
+                            description: |-
+                              Cause says who should act, and is the field to read first:
+
+                                Measurement — the hardware fell short. This one is about the part.
+                                Evidence    — the runner's report could not support a judgement
+                                              (metric missing, unparseable, non-finite, contradictory,
+                                              or declared unmeasurable under a gate that requires it).
+                                              The node is unjudged, not condemned.
+                                Authoring   — the threshold itself is broken. No hardware is implicated
+                                              and no node should be touched; the profile needs fixing.
+                            type: string
+                          index:
+                            description: |-
+                              Index is the threshold's position in the test's spec.thresholds, so a
+                              report can point at the offending entry rather than at the test.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          kind:
+                            description: |-
+                              Kind is the specific route, finer-grained than Cause (e.g. Unsatisfied,
+                              NotReported, ThresholdValueNonNumeric). See pkg/verdict.
+                            type: string
+                          metric:
+                            description: Metric is the threshold's metric name, as
+                              written in the profile.
+                            type: string
+                          reason:
+                            description: |-
+                              Reason is the full sentence explaining this violation. For the first
+                              violation it is exactly the leading text of Message.
+                            type: string
+                        required:
+                        - cause
+                        - index
+                        - kind
+                        - metric
+                        type: object
+                      type: array
+                  required:
+                  - kind
+                  - name
+                  - phase
+                  - scope
+                  type: object
+                type: array
+              sinkStatus:
+                additionalProperties:
+                  type: string
+                description: SinkStatus records the last export attempt per sink.
+                type: object
+              skipped:
+                description: |-
+                  Skipped counts tests that do not apply to this hardware (runner exit 2).
+                  Also never folded into Failed — a node that cannot run a test has not
+                  failed it.
+                format: int32
+                type: integer
+              startedAt:
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
