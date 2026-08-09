@@ -2,6 +2,7 @@ package nvvs
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -648,4 +649,210 @@ func TestStatusUnderIsWhereTheBaselineRuleLives(t *testing.T) {
 	if got := statusUnder(phaseError, false); got != statusNotRun {
 		t.Errorf("statusUnder(Error, baseline=false) = %q, want %q", got, statusNotRun)
 	}
+}
+
+// A serial is never attributed to the wrong device.
+//
+// metadata carried "GPU Device Serials" and "GPU Device IDs" as POSITIONAL
+// arrays built by appending only non-empty values. With GPU 0's serial
+// uncaptured and GPU 1's captured, the array was ["SN-GPU1"] and a positional
+// reader attributes it to GPU 0 — naming the wrong part in the one document
+// somebody attaches to an RMA.
+//
+// A positional array cannot express a partial set at all, which is why DCGM's
+// live form is per-entity serial_num: it is self-describing, and it can simply
+// be absent for the device that has none.
+func TestASerialIsNeverAttributedToTheWrongDevice(t *testing.T) {
+	e := envelope(phasePassed,
+		contract.TestResult{Name: "smoke", Kind: "compute-smoke", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+	)
+	docs := render(t, input(e, report.NodeInfo{Name: "n1", GPUs: []report.GPUInfo{
+		{Index: 0, Model: "NVIDIA H100"},                    // serial NOT captured
+		{Index: 1, Model: "NVIDIA H100", Serial: "SN-GPU1"}, // captured
+	}}))
+	d := docs["diag-n1.json"]
+
+	// Per-entity, where position cannot drift.
+	if len(d.EntityGroups) != 1 || len(d.EntityGroups[0].Entities) != 2 {
+		t.Fatalf("entity_groups = %+v, want both devices", d.EntityGroups)
+	}
+	ents := d.EntityGroups[0].Entities
+	if ents[0].SerialNum != "" {
+		t.Errorf("GPU 0's serial was not captured but the document reports %q",
+			ents[0].SerialNum)
+	}
+	if ents[1].SerialNum != "SN-GPU1" {
+		t.Errorf("GPU 1's serial = %q, want SN-GPU1", ents[1].SerialNum)
+	}
+
+	// And no positional array anywhere that could re-introduce the drift.
+	raw := rawOf(t, e, report.NodeInfo{Name: "n1", GPUs: []report.GPUInfo{
+		{Index: 0, Model: "NVIDIA H100"},
+		{Index: 1, Model: "NVIDIA H100", Serial: "SN-GPU1"},
+	}})
+	for _, key := range []string{"GPU Device Serials", "GPU Device IDs"} {
+		if strings.Contains(raw, key) {
+			t.Errorf("%q is a positional array; with a partial set it shifts every "+
+				"later element and misattributes a serial to the wrong device", key)
+		}
+	}
+}
+
+// A node that was targeted and reported nothing still gets a document.
+//
+// The document set came only from nodes NAMED IN RESULTS, so a node the run
+// targeted and which produced nothing — the case a reader most needs to see —
+// vanished, and the report read as a fleet that was fully measured.
+func TestATargetedNodeThatReportedNothingStillGetsADocument(t *testing.T) {
+	e := envelope(phasePassed,
+		contract.TestResult{Name: "smoke", Kind: "compute-smoke", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+	)
+	docs := render(t, input(e,
+		report.NodeInfo{Name: "n1"},
+		report.NodeInfo{Name: "n2", Kernel: "6.11.0"}, // targeted, reported nothing
+	))
+	d, ok := docs["diag-n2.json"]
+	if !ok {
+		t.Fatalf("no document for a targeted node that produced no result; the report "+
+			"reads as a fleet that was fully measured. Got: %v", docKeys(docs))
+	}
+	if d.OverallResult == statusPass {
+		t.Errorf("a node that measured nothing reports %q", d.OverallResult)
+	}
+}
+
+// A declared skip keeps its reason.
+//
+// Only Failed and Error results carried their message. A Skipped result's
+// message is the runner's own `_SKIP` line — the declaration that the test does
+// not apply to this hardware, and the evidence that the skip was DECLARED rather
+// than a crash exiting 2. Dropping it leaves a bare "Skip" that a reader cannot
+// distinguish from either.
+func TestADeclaredSkipKeepsItsReason(t *testing.T) {
+	e := envelope(phasePassed,
+		contract.TestResult{
+			Name: "fp4", Kind: "compute-smoke", Phase: phaseSkipped, Nodes: []string{"n1"},
+			Message: "FP4_GEMM_SKIP: NVFP4 requires compute capability 12.0/12.1, and this part reports 9.0",
+		},
+	)
+	docs := render(t, input(e))
+	r := docs["diag-n1.json"].Diagnostic.Categories[0].Tests[0].Results[0]
+
+	joined := strings.Join(r.Info, "|")
+	for _, w := range r.Warnings {
+		joined += "|" + w.Warning
+	}
+	if !strings.Contains(joined, "FP4_GEMM_SKIP") {
+		t.Fatalf("the skip's declared reason is gone; a bare %q cannot be told from a "+
+			"crash that exited 2. Result: %+v", r.Status, r)
+	}
+}
+
+// A result naming no node is reported once, not in every document.
+func TestANodelessResultIsNotDuplicatedIntoEveryDocument(t *testing.T) {
+	e := envelope(phaseError,
+		contract.TestResult{Name: "unresolvable", Kind: "custom", Phase: phaseError,
+			Message: "the profile named a test that does not resolve"},
+		contract.TestResult{Name: "smoke", Kind: "compute-smoke", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+		contract.TestResult{Name: "smoke", Kind: "compute-smoke", Phase: phasePassed,
+			Nodes: []string{"n2"}},
+	)
+	docs := render(t, input(e))
+
+	var seen int
+	for name, d := range docs {
+		for _, c := range d.Diagnostic.Categories {
+			for _, tst := range c.Tests {
+				if strings.Contains(tst.Name, "unresolvable") {
+					seen++
+					t.Logf("found in %s", name)
+				}
+			}
+		}
+	}
+	if seen != 1 {
+		t.Errorf("a result naming no node appears in %d documents, want 1. Reported "+
+			"once per node it becomes N findings from one, which is the same "+
+			"over-counting a broadcast verdict causes.", seen)
+	}
+}
+
+// A result whose node name is empty is not dropped.
+func TestAResultWithAnEmptyNodeNameIsNotDropped(t *testing.T) {
+	// A named node must be present too: with the orphan alone, nodesIn returns
+	// nothing and the empty-name fallback document picks it up by accident. The
+	// loss only happens once there is a real node to enumerate instead.
+	e := envelope(phaseFailed,
+		contract.TestResult{Name: "orphan", Kind: "custom", Phase: phaseFailed,
+			Nodes: []string{""}, Message: "recorded against no node"},
+		contract.TestResult{Name: "smoke", Kind: "compute-smoke", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+	)
+	docs := render(t, input(e))
+
+	var seen bool
+	for _, d := range docs {
+		for _, c := range d.Diagnostic.Categories {
+			for _, tst := range c.Tests {
+				if tst.Name == "orphan" {
+					seen = true
+				}
+			}
+		}
+	}
+	if !seen {
+		t.Fatalf("a result whose node name is the empty string vanished from every "+
+			"document. A required acceptance test missing from the document that "+
+			"certifies the fleet is the worst failure this package has. Got: %v",
+			docKeys(docs))
+	}
+}
+
+// A partial record does not render confidently.
+//
+// contract.Summary is an independent tally of executions. When it accounts for
+// more than the results present, these documents are a SUBSET — and a confident
+// document over an inconsistent record is how a fleet gets signed off against
+// the results that happened to be delivered.
+func TestAPartialRecordIsNotAConfidentDocument(t *testing.T) {
+	e := envelope(phasePassed,
+		contract.TestResult{Name: "smoke", Kind: "compute-smoke", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+	)
+	e.Summary = contract.Summary{Passed: 12} // twelve ran; one was delivered
+	docs := render(t, input(e))
+	d := docs["diag-n1.json"]
+
+	if d.OverallResult == statusPass {
+		t.Fatalf("a document covering 1 of 12 executions reports %q", d.OverallResult)
+	}
+	if !strings.Contains(strings.ToLower(d.Warning), "incomplete") &&
+		!strings.Contains(strings.ToLower(d.Warning), "subset") {
+		t.Errorf("nothing in the document says the record is partial: Warning=%q", d.Warning)
+	}
+}
+
+func docKeys(m map[string]Document) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func rawOf(t *testing.T, e *contract.Envelope, nodes ...report.NodeInfo) string {
+	t.Helper()
+	outs, err := Renderer{}.Render(input(e, nodes...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, o := range outs {
+		b.Write(o.Data)
+	}
+	return b.String()
 }

@@ -35,12 +35,7 @@ func (r Renderer) Render(in report.Input) ([]report.Output, error) {
 		return nil, fmt.Errorf("nvvs: no delivery to render")
 	}
 
-	nodes := nodesIn(verdict.Results)
-	if len(nodes) == 0 {
-		// A run whose results name no node still deserves a document — it is
-		// evidence that a run happened and judged nothing.
-		nodes = []string{""}
-	}
+	nodes := documentSet(verdict.Results, in.Nodes)
 
 	outputs := make([]report.Output, 0, len(nodes))
 	for _, node := range nodes {
@@ -91,6 +86,11 @@ func (r Renderer) document(in report.Input, verdict *contract.Envelope, final bo
 		doc.Warning = "BASELINE RUN: this profile carried no thresholds. " +
 			"It measured the hardware and certified nothing."
 	}
+	if note := incompleteNote(verdict); note != "" {
+		// Appended rather than replacing, because a baseline run can also be a
+		// partial one and a reader needs both facts.
+		doc.Warning = strings.TrimSpace(doc.Warning + " " + note)
+	}
 
 	byCategory := map[string][]Test{}
 	for _, res := range verdict.Results {
@@ -114,6 +114,11 @@ func (r Renderer) document(in report.Input, verdict *contract.Envelope, final bo
 	}
 
 	doc.OverallResult = overall(verdict.Results, node, verdict.Baseline)
+	if incompleteNote(verdict) != "" {
+		// A confident document over an inconsistent record is how a fleet gets
+		// signed off against the results that happened to be delivered.
+		doc.OverallResult = statusNotRun
+	}
 	doc.Diagnostic = d
 	return doc
 }
@@ -251,9 +256,15 @@ func warningsFor(res contract.TestResult) []Warning {
 	}
 	// A failing or errored test with no structured violations still owes the
 	// reader its message, or the document would show a bare "Fail".
+	//
+	// A SKIP owes it too, and used to lose it. A skipped result's message is the
+	// runner's own `_SKIP` line — the declaration that the test does not apply to
+	// this hardware, and the evidence that the skip was DECLARED rather than a
+	// crash exiting 2, which is a distinction this project spends real effort to
+	// preserve. A bare "Skip" cannot be told from either.
 	if len(out) == 0 && res.Message != "" {
 		switch res.Phase {
-		case phaseFailed, phaseError:
+		case phaseFailed, phaseError, phaseSkipped:
 			out = append(out, Warning{Warning: res.Message})
 		}
 	}
@@ -384,6 +395,34 @@ func overall(results []contract.TestResult, node string, baseline bool) string {
 	}
 }
 
+// incompleteNote reports when the run's own tally accounts for more executions
+// than this record contains.
+//
+// contract.Summary is an INDEPENDENT count, produced by the operator from its
+// own status rather than derived from the results carried here. When the two
+// disagree, what we hold is a subset — a webhook that dropped a delivery, a
+// ConfigMap that was truncated, a results directory copied mid-run — and every
+// document built from it is describing part of a run while looking like it
+// describes all of it.
+//
+// It is deliberately one-directional. MORE results than the summary counts is
+// not flagged: repeats and retries legitimately produce several results per
+// execution, so that direction is normal rather than suspicious.
+func incompleteNote(verdict *contract.Envelope) string {
+	s := verdict.Summary
+	expected := s.Passed + s.Failed + s.Errored + s.Skipped
+	present := int32(len(verdict.Results))
+	if expected <= present {
+		return ""
+	}
+	return fmt.Sprintf(
+		"INCOMPLETE RECORD: the run's own summary accounts for %d executions and this "+
+			"record contains %d, so these documents are a SUBSET of the run. Every "+
+			"\"Overall Result\" here is %q as a result: a confident document over an "+
+			"inconsistent record is how a fleet gets signed off against the results that "+
+			"happened to be delivered.", expected, present, statusNotRun)
+}
+
 // metadataFor fills only what was genuinely captured.
 func metadataFor(info report.NodeInfo, fp map[string]string, node string, artifacts []report.Artifact) *Metadata {
 	m := &Metadata{}
@@ -391,13 +430,18 @@ func metadataFor(info report.NodeInfo, fp map[string]string, node string, artifa
 		if g.DriverVer != "" && m.DriverVersion == "" {
 			m.DriverVersion = g.DriverVer
 		}
-		if g.Model != "" {
-			m.GPUDeviceIDs = append(m.GPUDeviceIDs, g.Model)
-		}
-		if g.Serial != "" {
-			m.GPUSerials = append(m.GPUSerials, g.Serial)
-		}
 	}
+	// "GPU Device IDs" and "GPU Device Serials" are DELIBERATELY NOT POPULATED.
+	//
+	// They are positional arrays, and they were built by appending only the
+	// non-empty values — so with GPU 0's serial uncaptured and GPU 1's captured,
+	// the array was ["SN-GPU1"] and a positional reader attributes it to GPU 0.
+	// That names the wrong part in the one document somebody attaches to an RMA.
+	//
+	// The shape cannot express a partial set at all, which is why DCGM's live
+	// form is per-entity serial_num: it is self-describing and can simply be
+	// absent for a device that has none. entityGroupsFor emits that. Neither key
+	// appears in the real 4.2.3 capture this package is pinned against.
 	// A DCGM version is only claimable from a real dcgmi document. We ship no
 	// DCGM and inventing a version would be the fabrication this package exists
 	// to refuse, so it stays absent unless one was passed through.
@@ -470,9 +514,18 @@ func auxFor(in report.Input, verdict *contract.Envelope, final bool, node string
 
 // touches reports whether a result concerns this node. A result naming no node
 // is run-scoped and appears in every document.
+// touches reports whether a result belongs in this node's document.
+//
+// A result that names no node belongs in the UNASSIGNED document and in no
+// other. It used to return true for every node, so one unresolvable test
+// appeared once per node in the fleet — which is the same over-counting a
+// broadcast verdict causes, and it inflates one config error into N findings.
 func touches(res contract.TestResult, node string) bool {
-	if node == "" || len(res.Nodes) == 0 {
-		return true
+	if unassigned(res) {
+		return node == ""
+	}
+	if node == "" {
+		return false
 	}
 	for _, n := range res.Nodes {
 		if n == node {
@@ -482,18 +535,66 @@ func touches(res contract.TestResult, node string) bool {
 	return false
 }
 
-// nodesIn returns every node named by any result, in stable order.
-func nodesIn(results []contract.TestResult) []string {
+// documentSet is every node this run needs a document for.
+//
+// Three sources, and each was a silent loss on its own:
+//
+//   - nodes NAMED IN RESULTS, the obvious one;
+//   - nodes the caller supplied INVENTORY for. A node the run targeted and which
+//     produced nothing is exactly the case a reader most needs to see, and
+//     omitting it made the report read as a fleet that was fully measured;
+//   - the UNASSIGNED document, whenever any result cannot be attributed to a
+//     named node — a result whose Nodes is empty, or names only "". Those used
+//     to be dropped outright once a real node existed to enumerate instead, and
+//     a required acceptance test missing from the document that certifies the
+//     fleet is the worst failure this package has.
+//
+// The unassigned document is "" here and becomes diag-unassigned.json. It is
+// emitted only when something actually lands in it, so a healthy run does not
+// grow an empty file nobody can explain.
+func documentSet(results []contract.TestResult, inventory []report.NodeInfo) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, r := range results {
-		for _, n := range r.Nodes {
-			if n != "" && !seen[n] {
-				seen[n] = true
-				out = append(out, n)
-			}
+	add := func(n string) {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
 		}
 	}
+	for _, r := range results {
+		for _, n := range r.Nodes {
+			add(n)
+		}
+	}
+	for _, n := range inventory {
+		add(n.Name)
+	}
 	sort.Strings(out)
+
+	if anyUnassigned(results) {
+		// Last, so it sorts after the real nodes rather than into them.
+		out = append(out, "")
+	}
 	return out
+}
+
+// anyUnassigned reports whether some result belongs to no named node.
+func anyUnassigned(results []contract.TestResult) bool {
+	for _, r := range results {
+		if unassigned(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// unassigned is a result this document set cannot attribute to a named node:
+// no nodes at all, or nothing but empty names.
+func unassigned(res contract.TestResult) bool {
+	for _, n := range res.Nodes {
+		if n != "" {
+			return false
+		}
+	}
+	return true
 }

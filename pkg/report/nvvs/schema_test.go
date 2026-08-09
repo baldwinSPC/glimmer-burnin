@@ -200,17 +200,45 @@ func TestTheDocumentTreeMatchesARealCapture(t *testing.T) {
 		t.Fatalf("our document has no parseable %q object: %v", keyRoot, err)
 	}
 
-	// Every key the capture places at the root, we must place at the root.
+	// Every key the capture places at the root, we must place at the root TOO —
+	// when we emit it at all.
+	//
+	// Presence is not asserted, and that is deliberate: this package omits what
+	// was not captured, so a run with no driver version and no serials
+	// legitimately has no metadata object. Requiring presence would make the
+	// never-fabricate rule and this guard contradict each other, and one of them
+	// would lose. What is asserted is PLACEMENT: whatever we do emit must be
+	// where a consumer reading the real tree looks for it.
 	for key := range captureRoot {
-		if _, ok := ourRoot[key]; !ok {
-			t.Errorf("the capture has %q at the ROOT and our document does not. A "+
-				"consumer reading the real tree will not find it.", key)
-		}
 		if _, nested := ourInner[key]; nested {
 			t.Errorf("we nest %q inside %q; the capture has it at the ROOT. Every key "+
 				"name here is correct, so nothing looks wrong — the consumer simply "+
 				"gets a document with no %s.", key, keyRoot, key)
 		}
+	}
+	// And at least one of them must actually be emitted, or the loop above is
+	// checking a document that has nothing to check.
+	var emitted int
+	for key := range captureRoot {
+		if _, ok := ourRoot[key]; ok {
+			emitted++
+		}
+	}
+	if emitted < len(captureRoot) {
+		missing := make([]string, 0, len(captureRoot))
+		for key := range captureRoot {
+			if _, ok := ourRoot[key]; !ok {
+				missing = append(missing, key)
+			}
+		}
+		sort.Strings(missing)
+		t.Logf("note: this sample emits no %v — expected when nothing was captured "+
+			"for them, but if that is unintended the placement above went unchecked",
+			missing)
+	}
+	if emitted == 0 {
+		t.Fatal("our document shares no root key with the capture at all, so the " +
+			"placement check above examined nothing")
 	}
 	// And nothing the capture nests may escape to the root.
 	for key := range captureInner {
@@ -249,7 +277,9 @@ func emitSample(t *testing.T) []byte {
 		contract.TestResult{Name: "a", Kind: "compute-smoke", Phase: phasePassed, Nodes: []string{"n1"}},
 	)
 	in := input(e)
-	in.Nodes = []report.NodeInfo{{Name: "n1", GPUs: []report.GPUInfo{{Index: 0, Model: "NVIDIA GB10"}}}}
+	in.Nodes = []report.NodeInfo{{Name: "n1", GPUs: []report.GPUInfo{
+		{Index: 0, Model: "NVIDIA GB10", DriverVer: "580.82.09", Serial: "SN-0"},
+	}}}
 	outs, err := Renderer{}.Render(in)
 	if err != nil {
 		t.Fatal(err)
