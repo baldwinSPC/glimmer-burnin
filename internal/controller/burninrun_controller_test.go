@@ -908,7 +908,7 @@ func TestRun_MissingProfileIsTerminalError(t *testing.T) {
 // contract — and an unknown kind is the case that can never acquire a default
 // image, so this test cannot rot the way it did once before: it was written
 // against thermal-soak, and quietly stopped testing anything the day
-// thermal-soak's image was published and added to defaultRunnerImages.
+// thermal-soak's image was published and added to pkg/runnerimages.
 func TestRun_KindWithoutImageIsError(t *testing.T) {
 	soak := &burninv1alpha1.BurnInTest{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "soak"},

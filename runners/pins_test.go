@@ -15,7 +15,7 @@
 //     measured by with no audit trail and nothing to bisect.
 //   - Every runner directory can actually be published. The publish workflow's
 //     `runner` input is a hand-written choice list; a directory missing from it
-//     cannot be built at all, and a defaultRunnerImages entry pointing at a tag
+//     cannot be built at all, and a pkg/runnerimages entry pointing at a tag
 //     no workflow can produce is an ImagePullBackOff with no way out.
 //   - Every C++ unit test a runner ships is actually compiled and run
 //     (cxxtests_test.go). The C++ and CUDA runners cannot be tested from a Go
@@ -374,7 +374,7 @@ func TestFromArgsAreDeclaredBeforeTheFirstFrom(t *testing.T) {
 // workflow_dispatch inputs of type `choice` cannot be generated, so this list is
 // the one place in the runner tooling that must be maintained by hand. A runner
 // missing from it cannot be published at all — and the operator's
-// defaultRunnerImages would point at a tag no workflow can produce, which
+// pkg/runnerimages would point at a tag no workflow can produce, which
 // reaches the fleet as an ImagePullBackOff on every node.
 func TestPublishWorkflowOffersEveryRunner(t *testing.T) {
 	src, err := os.ReadFile(publishWorkflow)

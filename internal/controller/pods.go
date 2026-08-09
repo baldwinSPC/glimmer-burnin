@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runnerimages"
 )
 
 // Pod labels used to find a run's pods and attribute them to a test/node/attempt.
@@ -38,88 +39,6 @@ const (
 	// finds the root of a collective without anybody decoding a name hash.
 	labelRank = "burnin.glimmer.ai/rank"
 )
-
-// defaultRunnerImages maps a TestKind to its default runner image. A kind
-// without an entry requires spec.runner.image — scheduling a pod with no image
-// would produce an ImagePullBackOff blamed on the hardware.
-//
-// Images are pinned by version, never :latest: a readiness/acceptance verdict
-// must be reproducible, and a floating tag changes the test under every
-// existing profile with no audit trail.
-//
-// PUBLICATION STATUS — every entry below is published, public, and immutable.
-//
-// All eleven images are v0.5.0, published to GHCR, public, and anonymously
-// pullable.
-//
-// THESE TAGS WERE NOT VERIFIED ON REAL HARDWARE BEFORE PUBLICATION, which this
-// file's own rule below ("publish only after the kernel has been verified on
-// real hardware") requires. The GPU fleet was unavailable and the release was
-// cut anyway, deliberately and with the trade understood. What DOES stand behind
-// them: the unit, envtest and kind-based e2e tiers, including a real three-node
-// rendezvous for Group scope, and four rounds of adversarial review that found
-// twenty defects in this release's own code. What does not: no GB10 has run
-// these exact tags, NO 3-RANK COLLECTIVE HAS EVER EXECUTED through the N-rank
-// path on any hardware, and CI builds runner images by CHANGED DIRECTORY — so
-// the runners whose sources did not move are republished from sources CI did not
-// rebuild for this release.
-//
-// The v0.3.0 tags remain published and immutable, and the measurements behind
-// THEM were taken on a two-node DGX Spark cluster with the v0.2.0 build of the
-// same sources: the Node-scope suite passed 10/10 across both nodes, and the
-// Pair-scope fabric suite passed with ib-write-bw at 99.61 Gb/s, nccl at
-// 12.02 GB/s bus bandwidth, and gpudirect-rdma correctly reporting exit 2 on
-// hardware whose unified memory has no peer-memory provider. Pin v0.3.0 if
-// hardware-verified images matter more to you than the v0.4.0 fixes — but read
-// the release notes first: two of those fixes are false negatives that were
-// certifying hardware nobody measured.
-//
-// ARCHITECTURE: linux/amd64 AND linux/arm64. A node pulls only its own
-// platform's layers, so one tag serves an x86 rack and a Grace rack alike, and
-// x86 users no longer need to set spec.runner.image to run at all.
-//
-// That is the HOST axis and it is not the GPU axis. A tag resolving on a host
-// says nothing about whether the image contains code for the accelerator in it —
-// compute-smoke carries only the CC 12.x kernel and reports a B200 as an ERROR,
-// hardware unjudged — not a Skip, because a B200 does do NVFP4 and the test
-// applies to it — and nccl ships one gencode that an unlisted fleet must
-// rebuild. Each runner's README states its
-// GPU coverage; conflating the two is how an operator ends up reporting Error on
-// hardware it simply was not built for.
-//
-// A missing entry fails fast and legibly at plan time ("set spec.runner.image");
-// a present-but-unpullable entry fails slowly, per node, and looks like an
-// infrastructure fault rather than a configuration one. That asymmetry is why
-// nothing is listed here before it is actually published.
-//
-// The names follow the publish workflow's own construction —
-// ghcr.io/<owner lowercased>/glimmer-burnin-<kind>:<version> — so an entry here
-// and a workflow_dispatch of publish-runner with the same version agree by
-// construction rather than by anyone remembering to keep them in step.
-var defaultRunnerImages = map[burninv1alpha1.TestKind]string{
-	// compute-smoke moves off v0.1.0 deliberately. That tag is public and
-	// immutable and stays exactly as it is, but it reports "no usable CUDA
-	// device", a wrong-arch image, and every CUDA runtime error as exit 1 —
-	// a hardware FAILURE verdict against the node. v0.2.0 was the first build
-	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
-	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
-	// repushed ones.
-	burninv1alpha1.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.5.0",
-
-	burninv1alpha1.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.5.0",
-	burninv1alpha1.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.5.0",
-	burninv1alpha1.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.5.0",
-	burninv1alpha1.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.5.0",
-	burninv1alpha1.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.5.0",
-	burninv1alpha1.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.5.0",
-	burninv1alpha1.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.5.0",
-	burninv1alpha1.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.5.0",
-	burninv1alpha1.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.5.0",
-	burninv1alpha1.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.5.0",
-
-	// KindCustom has no default by definition: it exists so a user can point
-	// any image at the contract, and inventing a default would defeat it.
-}
 
 // defaultDurationSeconds bounds a test whose spec does not: an unbounded
 // acceptance pod that hangs would wedge the whole run.
@@ -452,7 +371,7 @@ func runnerImage(spec *burninv1alpha1.BurnInTestSpec) (string, error) {
 	if spec.Runner != nil && spec.Runner.Image != "" {
 		return spec.Runner.Image, nil
 	}
-	if img, ok := defaultRunnerImages[spec.Kind]; ok {
+	if img, ok := runnerimages.Default(spec.Kind); ok {
 		return img, nil
 	}
 	return "", fmt.Errorf("no default runner image for kind %q — set spec.runner.image", spec.Kind)
