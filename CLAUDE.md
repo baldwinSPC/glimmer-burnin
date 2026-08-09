@@ -520,6 +520,18 @@ disagree about the same hardware. One brain, two dispatchers.
   and is not re-checked, or a lowered cap would strand a running server against
   a peer that never arrives. `spec.cancel` with `CancelImmediate` is the tool
   for getting load off the floor now.
+- **A runner pod is never safely evictable, and that is not a knob.** Every
+  runner pod carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`
+  unconditionally, at every scope. It is holding a node this operator CORDONED
+  precisely so that nothing else lands there, and moving it discards a
+  measurement in progress — which is then recorded as an `Error`, spending retry
+  budget on a fault the cluster caused rather than the hardware. Over a
+  multi-day soak the cluster's own housekeeping is the most likely thing to end
+  a run. `spec.runner.priorityClassName` is a PASSTHROUGH for the different
+  mechanism (preemption under contention); the operator never creates a
+  PriorityClass, because a cluster-scoped object minted by a test-runner is a
+  footgun and a permission it should not hold. The capacity arithmetic a long
+  soak implies is in `docs/soaks.md` rather than here.
 - **Cordoning follows the wave, not the target list.** A node is cordoned
   immediately before the run puts load on it and released once it is no longer
   holding any, so a run's footprint on the fleet tracks `maxConcurrentNodes`

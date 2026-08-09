@@ -368,6 +368,22 @@ type RunnerSpec struct {
 	// +optional
 	RunAsUser *int64 `json:"runAsUser,omitempty"`
 
+	// PriorityClassName points this test's pods at a PriorityClass the SITE
+	// manages.
+	//
+	// Passthrough only. This operator never creates a PriorityClass: a
+	// cluster-scoped object minted by a test-runner is a footgun, and it is a
+	// permission the operator should not need — its RBAC does not grow for this
+	// field, which is the point.
+	//
+	// It is worth setting on contended hardware, where a multi-day soak is
+	// otherwise one preemption away from an Error. Every runner pod already
+	// carries the autoscaler's safe-to-evict: false annotation, which handles
+	// consolidation; this handles contention, which is a different mechanism
+	// and needs a different answer.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// HostPaths are paths on the NODE made visible inside the runner container.
 	//
 	// This is the most security-relevant field in this API and it is deliberately

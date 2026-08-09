@@ -506,6 +506,22 @@ func podForTest(
 			Name:      podNameForRole(run, testIndex, node, attempt, role),
 			Namespace: run.Namespace,
 			Labels:    labels,
+			Annotations: map[string]string{
+				// UNCONDITIONALLY, at every scope, for every duration.
+				//
+				// A burn-in pod is never safely evictable. It is holding a node
+				// this operator CORDONED precisely so that nothing else lands
+				// there, and moving it discards a measurement in progress —
+				// which the operator then records as an Error, spending retry
+				// budget on a fault the cluster caused rather than the hardware.
+				//
+				// There is no case where the honest answer is "yes, move this",
+				// so there is no knob. Over a multi-day soak the cluster's own
+				// housekeeping — an autoscaler consolidation pass, a drain, a
+				// preemption — is the most likely thing to end a run, and this
+				// is the one protection Kubernetes offers that costs nothing.
+				annotationSafeToEvict: "false",
+			},
 		},
 		Spec: corev1.PodSpec{
 			// Never restart: the exit code IS the verdict, and a restarted
@@ -518,8 +534,14 @@ func podForTest(
 			// The target's own tolerations let the runner land on a node that
 			// carries taints of its own; runnerTolerations adds the one this
 			// operator cannot do without.
-			Tolerations:           runnerTolerations(target.Tolerations),
-			HostNetwork:           spec.HostNetwork,
+			Tolerations: runnerTolerations(target.Tolerations),
+			HostNetwork: spec.HostNetwork,
+			// Passthrough only. A site that runs burn-in on contended hardware
+			// points tests at a PriorityClass IT manages; this operator never
+			// creates one, because a cluster-scoped object minted by a
+			// test-runner is a footgun and a permission it should not hold.
+			// Unset is the default and means exactly what it means today.
+			PriorityClassName:     priorityClassOf(spec),
 			ActiveDeadlineSeconds: &deadline,
 			Containers:            []corev1.Container{container},
 			// Nil unless the test declared host mounts, so a test that asked for
@@ -793,4 +815,18 @@ func envSafeAxis(name string) bool {
 		}
 	}
 	return true
+}
+
+// annotationSafeToEvict is the cluster-autoscaler's own key. Spelled out here
+// rather than imported: it is a string in somebody else's contract, and taking
+// a dependency on their module to spell it would be a heavier price than the
+// constant.
+const annotationSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+
+// priorityClassOf reads the test's requested PriorityClass, or "" for none.
+func priorityClassOf(spec *burninv1alpha1.BurnInTestSpec) string {
+	if spec == nil || spec.Runner == nil {
+		return ""
+	}
+	return spec.Runner.PriorityClassName
 }
