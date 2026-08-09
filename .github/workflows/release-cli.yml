@@ -1,0 +1,76 @@
+name: release-cli
+
+# Builds and signs the `burnin` CLI for a tag.
+#
+# Separate from the image publishing workflows on purpose. A runner image is
+# executed by a node's readiness gate, so those stay manual (workflow_dispatch)
+# and are published only after a kernel has been verified on real hardware. A
+# CLI binary is run deliberately by a person or a provisioning script, so tagging
+# is the right trigger — nothing degrades a fleet because a tag was cut.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and sign nothing; verify the config and the build"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # KEYLESS SIGNING. cosign exchanges this token with Sigstore for a
+      # short-lived certificate bound to this workflow's identity, so what a
+      # verifier checks is "this repository's release workflow built it" rather
+      # than "somebody held a key". Same identity model as the image workflows.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser derives the changelog from history; a shallow clone
+          # produces a changelog that silently omits everything before the
+          # fetch depth.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      # The tests run here too. A release is the one build nobody re-checks by
+      # hand afterwards, and a signed artifact carries more implied trust than
+      # an unsigned one — signing something untested would put a Sigstore
+      # certificate on a binary nothing verified.
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: >-
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run)
+                && 'build --snapshot --clean'
+                || 'release --clean' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### burnin CLI"
+            echo
+            echo "- ref: \`${GITHUB_REF}\`"
+            echo "- linux and darwin, amd64 and arm64"
+            echo "- \`burnin\` and \`kubectl-burnin\` in each archive"
+            echo "- checksums signed with cosign keyless"
+          } >> "$GITHUB_STEP_SUMMARY"

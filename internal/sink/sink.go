@@ -154,6 +154,17 @@ func (s *Sender) Send(ctx context.Context, env *contract.Envelope) error {
 	if err := env.Validate(); err != nil {
 		return Permanent(err)
 	}
+	// A Sender built as a struct literal has a zero policy, and a zero
+	// MaxAttempts means the retry loop below never runs its body: the envelope
+	// is silently never sent, and the caller is told it "failed after 0
+	// attempts" with a nil cause. Defaulting here rather than trusting every
+	// construction site — a delivery path that quietly delivers nothing is the
+	// worst failure this package can have, because the run it was reporting on
+	// really did happen.
+	s.Policy = s.Policy.withDefaults()
+	if s.sleep == nil {
+		s.sleep = sleepCtx
+	}
 
 	var last error
 	for attempt := 1; attempt <= s.Policy.MaxAttempts; attempt++ {

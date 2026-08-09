@@ -51,6 +51,9 @@ FLAGS
   --runtime         auto|docker|podman|nerdctl (default auto)
   --retry-on-error  how many times an Error may be retried, per test (default 0)
   --dry-run         resolve and print what would run, then stop
+  --sink-url        POST the envelope to this URL when the run finishes
+  --sink-token-file file holding the bearer token — a file, never a flag, so the
+                    credential is not in every process listing on the box
 
 TWO MACHINES (Pair-scope tests)
 
@@ -90,6 +93,7 @@ type runFlags struct {
 	retries    int
 	dryRun     bool
 	pair       pairFlags
+	sink       sinkFlags
 }
 
 type multiFlag []string
@@ -114,6 +118,10 @@ func runRun(args []string) error {
 	fs.StringVar(&f.pair.role, "role", "", "server|client, for a link test across two machines")
 	fs.StringVar(&f.pair.peer, "peer", "", "the server's address (client only)")
 	fs.StringVar(&f.pair.peerNode, "peer-node", "", "the peer's name, for messages only")
+	fs.StringVar(&f.sink.url, "sink-url", "", "POST the envelope here when the run finishes")
+	fs.StringVar(&f.sink.tokenFile, "sink-token-file", "", "file holding the bearer token")
+	fs.BoolVar(&f.sink.insecure, "sink-insecure-skip-tls-verify", false, "development only")
+	fs.DurationVar(&f.sink.timeout, "sink-timeout", 30*time.Second, "per-attempt timeout")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -133,6 +141,14 @@ func runRun(args []string) error {
 	}
 
 	rz, err := f.pair.rendezvous()
+	if err != nil {
+		return exitWith(exitError, err)
+	}
+
+	// The sink is built BEFORE anything runs. A missing token file or a
+	// malformed URL is a mistake worth catching in the first second, not after
+	// a multi-hour soak has produced the result it would have carried.
+	sender, err := f.sink.deliverer()
 	if err != nil {
 		return exitWith(exitError, err)
 	}
@@ -191,6 +207,18 @@ func runRun(args []string) error {
 			// The run happened and its verdict stands; failing to file it is
 			// worth saying loudly and is not a reason to discard the verdict.
 			warn("results were not written: %v", err)
+		}
+	}
+
+	if sender != nil {
+		if !deciding(rz) {
+			// A server end has no verdict to deliver, and posting one would put
+			// a second document about one link into a consumer's history.
+			fmt.Fprintf(os.Stderr, "burnin: not delivering from the server end — the client sends the link's envelope\n")
+		} else if env, err := EnvelopeFor(report); err != nil {
+			warn("no envelope to deliver: %v", err)
+		} else {
+			deliver(ctx, os.Stderr, sender, env)
 		}
 	}
 
