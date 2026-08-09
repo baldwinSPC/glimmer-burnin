@@ -496,6 +496,57 @@ var registry = map[string]Metric{
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
+	// --- GEMM sweep (gemm-sweep) --------------------------------------------
+	//
+	// One kind, one execution per precision, selected by the `precision` variant
+	// axis. Thresholds are per variant: an FP4 throughput floor and an FP64
+	// floor are different numbers about different silicon.
+	"achievedTflops": {
+		Name: "achievedTflops", Unit: UnitTeraflops,
+		Description: "sustained GEMM throughput at the precision this execution ran, in TFLOP/s. " +
+			"Compare it only against a floor written for the SAME precision — tensor-core and " +
+			"CUDA-core paths differ by more than an order of magnitude and a single floor across " +
+			"them means nothing",
+		// A FLOOR takes Min: the worst window describes the part. A run that
+		// held 700 TFLOP/s for eleven minutes and 90 for one is a part that
+		// dropped to 90, and averaging certifies the drop away.
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"maxRelativeError": {
+		Name: "maxRelativeError", Unit: UnitNone,
+		Description: "the largest relative deviation between the device result and the host reference " +
+			"over the whole output. Dimensionless. What counts as acceptable is PRECISION-SPECIFIC — " +
+			"an FP4 tolerance applied to FP64 would accept a broken part, and an FP64 tolerance " +
+			"applied to FP4 would condemn a working one",
+		// The WORST deviation describes the part, so segments take Max.
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"gemmPrecision": {
+		Name: "gemmPrecision", Unit: UnitNone,
+		Description: "which precision this execution actually ran (fp4, fp8, bf16, tf32, fp64). " +
+			"A LABEL: it is echoed so a stored result is self-describing, and it is what makes a " +
+			"sweep's cells distinguishable long after the profile that produced them was edited",
+		// Last: the label of the most recent segment. Summing a word is
+		// meaningless, and so is taking its minimum.
+		Aggregation: AggLast,
+		// Evidence, not Acceptance. Its values are WORDS, and a threshold is
+		// compared as a float64 — so a gate on it would fail closed on every
+		// node forever while reading as a hardware verdict.
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"gemmShape": {
+		Name: "gemmShape", Unit: UnitNone,
+		Description: "the M x N x K the sweep ran, e.g. \"8192x8192x8192\". A LABEL, and the thing " +
+			"that makes a throughput number comparable: two TFLOP/s figures from different shapes " +
+			"are not the same measurement",
+		Aggregation: AggLast,
+		// Evidence for the same reason as gemmPrecision: "8192x8192x8192" is
+		// not a number, and a gate on it can never be satisfied.
+		ThresholdUse: ThresholdUseEvidence,
+	},
+
 	// --- Correctness counters -----------------------------------------------
 	"nonfiniteCount": {
 		Name: "nonfiniteCount", Unit: UnitNone,
