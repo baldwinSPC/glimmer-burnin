@@ -394,3 +394,40 @@ links on noise.
 like on this fleet's RoCE, and a floor invented from a spec sheet is exactly the
 mistake recorded five times over in this repository's history. Sweep with
 `spec.baseline: true`, aggregate per fingerprint class, then pin.
+
+## Measuring one property at a time
+
+This runner measures two properties of a link, and they answer different
+questions. Bandwidth is what a large-message transfer gets. Latency is what a
+small-message collective gets, and the all-reduce at the end of every training
+step is latency-bound long before it is bandwidth-bound.
+
+By default it measures both, which is what every profile written before variants
+existed does. To ask for one, set the `measurand` variant axis:
+
+```yaml
+variants:
+  - name: bandwidth
+    axes: {measurand: bandwidth}
+  - name: latency
+    axes: {measurand: latency}
+    durationSeconds: 120
+```
+
+The operator injects that as `BURNIN_VARIANT_MEASURAND`. Three things follow:
+
+- **A latency-only execution gets the whole window.** With no bandwidth phase
+  there is nothing to carve the latency budget out of.
+- **A latency-only execution emits no bandwidth metrics.** Reporting
+  `bw_average=0` from a phase that never ran would be a fabricated measurement;
+  omitting it means a bandwidth threshold fails closed instead, which is the
+  honest outcome for a gate written about a measurand this cell did not measure.
+- **A latency-only execution that gets no reading is an Error, not a pass.** When
+  latency rides alongside bandwidth it is secondary evidence and losing it is
+  logged rather than fatal. When it is the whole measurement, losing it means
+  nothing was measured and the link is unjudged.
+
+An unrecognised measurand is **refused** (exit 3), never defaulted. Guessing
+"both" would hand an author the measurement they did not ask for while applying
+the thresholds they wrote for the one they did — a latency gate on a bandwidth
+run fails every link forever and reads as a fabric verdict on healthy hardware.

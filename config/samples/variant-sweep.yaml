@@ -90,3 +90,52 @@ spec:
         - name: standard
           axes: {class: standard}
           durationSeconds: 1800
+
+---
+# The fabric equivalent: bandwidth and latency are two properties of one link,
+# and only one of them predicts collective performance.
+#
+# ib-write-bw already measures both — ib_write_bw and ib_write_lat both ship in
+# the image — but before variants, latency was a number that came along with a
+# bandwidth test and could not carry thresholds of its own. As a variant it can.
+#
+# A latency-only cell emits NO bandwidth metrics. That is deliberate: reporting
+# bw_average=0 from a phase that never ran would be a fabricated measurement, and
+# a bandwidth threshold would fail the link on a number nobody took. Omitting it
+# means such a gate fails closed instead, which is the honest outcome — the gate
+# was written for a measurand this execution did not measure.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: fabric-both-properties
+spec:
+  failFast: false
+  tests:
+    - testRef: ib-write-bw-link
+      variants:
+        - name: bandwidth
+          axes: {measurand: bandwidth}
+          thresholds:
+            # Measured on this project's own RoCE fabric, which sustains about
+            # 100 Gb/s rather than its 200G line rate. A floor taken from the
+            # line rate would fail every healthy link in the fleet.
+            - metric: bandwidthGbps
+              comparison: GreaterThanOrEqual
+              value: "90"
+
+        - name: latency
+          axes: {measurand: latency}
+          # The whole window goes to latency: with no bandwidth phase there is
+          # nothing to carve a budget out of.
+          durationSeconds: 120
+          thresholds:
+            # THE TAIL IS THE FINDING. A collective runs at the speed of its
+            # slowest participant on every iteration, so a link with a healthy
+            # mean and a p99 an order of magnitude worse degrades every
+            # collective on the fleet while passing a bandwidth gate outright.
+            - metric: p99LatencyUs
+              comparison: LessThanOrEqual
+              value: "25"
+            - metric: latencyUs
+              comparison: LessThanOrEqual
+              value: "10"
