@@ -223,6 +223,12 @@ var registry = map[string]Metric{
 		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"tcpThroughputGbps": {
+		Name: "tcpThroughputGbps", Unit: UnitGigabitsPerSecond,
+		Description:  "TCP throughput between two nodes, as reported by iperf3. Deliberately NOT bandwidthGbps: that is an RDMA verbs measurement and this is a kernel-stack one over a different path, and a profile running both would otherwise have the second silently overwrite the first — which is exactly the comparison the test exists to enable",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
 	"peakBandwidthGbps": {
 		Name: "peakBandwidthGbps", Unit: UnitGigabitsPerSecond,
 		Description:  "best single-iteration RDMA write throughput on a link; the average (bandwidthGbps) is the figure a link is accepted on, since one good iteration does not survive a marginal cable",
@@ -302,6 +308,12 @@ var registry = map[string]Metric{
 	"p99LatencyUs": {
 		Name: "p99LatencyUs", Unit: UnitMicroseconds,
 		Description:  "99th-percentile round-trip latency: the number a collective actually runs at. A collective proceeds at the speed of its slowest participant on EVERY iteration, so a link with a healthy mean and a p99 an order of magnitude worse degrades every job on the fleet while passing a bandwidth gate outright. This is the acceptance-grade latency figure; latencyUs is the mean and is not",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"tcpRttUs": {
+		Name: "tcpRttUs", Unit: UnitMicroseconds,
+		Description:  "mean smoothed round-trip time the sender's TCP stack observed during the test. A path property rather than a fabric one — it includes host stack and scheduling — so it is a useful ceiling gate and a poor floor",
 		Aggregation:  AggMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
@@ -547,6 +559,12 @@ var registry = map[string]Metric{
 		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"tcpRetransmits": {
+		Name: "tcpRetransmits", Unit: UnitNone,
+		Description:  "count of TCP segment retransmissions during the test. The signal worth gating on: a link that reaches line rate while retransmitting heavily has a problem that throughput alone will not show, and it will surface later as tail latency in a collective",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
 	"nicLinkDownEvents": {
 		Name: "nicLinkDownEvents", Unit: UnitNone,
 		Description:  "count of link-down transitions on the node's fabric NICs during the test window",
@@ -658,6 +676,18 @@ var registry = map[string]Metric{
 	// wedge is a clockprobe exit 1 with the classification in the message. A
 	// profile does not need — and cannot have — a threshold to reach the same
 	// verdict.
+	"tcpTestInterface": {
+		Name: "tcpTestInterface", Unit: UnitNone,
+		Description:  "the interface the TCP baseline actually loaded. Recorded because the management-path guard's decision is only auditable if the answer is in the result: a number with no interface beside it cannot be checked against the node's topology later",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"tcpMgmtInterface": {
+		Name: "tcpMgmtInterface", Unit: UnitNone,
+		Description:  "the interface carrying this node's default route, which the guard treats as the management path and refuses to load. Reported alongside tcpTestInterface so a reader can see the two were different",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"gpuName": {
 		Name: "gpuName", Unit: UnitNone,
 		Description:  "the accelerator's product name as the driver reports it (\"NVIDIA GB10\"). A label, not a measurement: no comparison against it is arithmetic, and identity is a fleet-inventory question rather than an acceptance one — target a heterogeneous fleet with node selectors, not with a threshold",

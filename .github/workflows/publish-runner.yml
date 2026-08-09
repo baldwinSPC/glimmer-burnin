@@ -28,6 +28,7 @@ on:
           - ib-write-bw
           - nccl
           - gpudirect-rdma
+          - tcp-baseline
       version:
         description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
         required: true
@@ -42,7 +43,8 @@ on:
           amd64 sm_90) and is almost always what you want — an explicit value is
           applied to BOTH platforms, so sm_121a here produces an amd64 image
           full of GB10 code that no x86 host can run. Ignored by the CPU-only
-          runners (host-health, memory-stress, ib-write-bw), by dcgm-diag, and
+          runners (host-health, memory-stress, ib-write-bw, tcp-baseline), by
+          dcgm-diag, and
           by the soak family (clockprobe, thermal-soak, gpu-burn), whose
           Dockerfiles compile a fixed multi-gencode list instead.
         required: true
