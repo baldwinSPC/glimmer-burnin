@@ -146,11 +146,27 @@ func guardPath(peerHost, role string) (int, bool) {
 
 	// An explicitly named interface is the author's own choice and is judged
 	// more harshly than one the routing table picked — see classifyRoute.
+	//
+	// The route is looked up whenever a peer address exists, EVEN WHEN an
+	// interface was named, because the name is an assertion to be checked
+	// against it rather than a substitute for it. See reconcileIface.
 	explicit := strings.TrimSpace(os.Getenv("TCP_BASELINE_INTERFACE"))
-	testIface := explicit
-	if testIface == "" && peerHost != "" {
-		testIface = ifaceForAddr(peerHost, hostIfaces())
+	routed := ""
+	if peerHost != "" {
+		routed = ifaceForAddr(peerHost, hostIfaces())
 	}
+
+	agreed := reconcileIface(explicit, routed)
+	if agreed.decision != routeOK {
+		// Both interfaces are in the reason; the metrics record what was NAMED
+		// and what the node's management path is, which is what an auditor
+		// reading the stored result needs.
+		metric("tcpTestInterface", agreed.iface)
+		metric("tcpMgmtInterface", mgmt)
+		return fin(exitError, "%s", agreed.reason), false
+	}
+	testIface := agreed.iface
+
 	if testIface == "" && role == roleServer && explicit == "" {
 		// A server has no peer address to route towards yet. It is told which
 		// interface to bind, or the guard cannot say anything about it.
@@ -246,12 +262,9 @@ func runClient(peerHost, peerNode string, port, duration int) int {
 
 	// The metrics, whatever the verdict. A number is worth recording even when
 	// the run is about to fail, because the number is what explains it.
-	metric("tcpThroughputGbps", trim(res.ThroughputGbps))
-	metric("tcpRetransmits", strconv.Itoa(res.Retransmits))
-	if res.HasRTT {
-		metric("tcpRttUs", trim(res.MeanRttUs))
+	for _, kv := range measurements(res) {
+		metric(kv[0], kv[1])
 	}
-	metric("elapsedS", trim(res.Seconds))
 
 	if res.ThroughputGbps <= 0 {
 		return fin(exitFail, "iperf3 completed but measured no throughput to %s (node %s)", peerHost, peerNode)
@@ -259,6 +272,28 @@ func runClient(peerHost, peerNode string, port, duration int) int {
 
 	logf("tcp-baseline: %.3f Gbps, %d retransmits", res.ThroughputGbps, res.Retransmits)
 	return exitPass
+}
+
+// measurements turns a parsed result into the key=value lines this runner puts
+// on stdout — which, with the exit code, is the entire contract.
+//
+// Separated from the printing so that WHAT IS EMITTED is testable without a
+// subprocess. The rule it enforces is that a metric the platform did not report
+// is ABSENT, never zero, and that rule lives in what reaches stdout rather than
+// in what parseIperf managed to read: a correct parse followed by an
+// unconditional print is the same fabricated zero, arriving by a route no test
+// of the parser can see.
+func measurements(res iperfResult) [][2]string {
+	out := [][2]string{
+		{"tcpThroughputGbps", trim(res.ThroughputGbps)},
+	}
+	if res.HasRetransmits {
+		out = append(out, [2]string{"tcpRetransmits", strconv.Itoa(res.Retransmits)})
+	}
+	if res.HasRTT {
+		out = append(out, [2]string{"tcpRttUs", trim(res.MeanRttUs)})
+	}
+	return append(out, [2]string{"elapsedS", trim(res.Seconds)})
 }
 
 func runIperf(peerHost string, port, duration int) (string, error) {
@@ -301,6 +336,7 @@ const connectTimeoutMs = 30000
 type iperfResult struct {
 	ThroughputGbps float64
 	Retransmits    int
+	HasRetransmits bool
 	MeanRttUs      float64
 	HasRTT         bool
 	Seconds        float64
@@ -340,8 +376,14 @@ func parseIperf(raw string) (iperfResult, error) {
 		ThroughputGbps: doc.End.SumSent.Bits / 1e9,
 		Seconds:        doc.End.SumSent.Seconds,
 	}
+	// Absent on a platform with no TCP_INFO — the same condition that hides
+	// mean_rtt below, and handled the same way for the same reason. A 0 here
+	// would be a count nobody took, and it is the metric the shipped sample
+	// gates with `Equal 0`, so the fabricated zero would PASS rather than merely
+	// mislead. Omitted, never zeroed.
 	if doc.End.SumSent.Retrans != nil {
 		res.Retransmits = *doc.End.SumSent.Retrans
+		res.HasRetransmits = true
 	}
 	// mean_rtt is absent on platforms without TCP_INFO. Omitted rather than
 	// reported as zero: a zero RTT is a measurement nobody took, and a gate on

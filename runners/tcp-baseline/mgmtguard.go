@@ -118,6 +118,60 @@ func classifyRoute(peerIface, mgmtIface string, explicit bool) guardResult {
 	return guardResult{decision: routeOK, iface: peerIface, mgmtIface: mgmtIface}
 }
 
+// reconcileIface decides which interface the guard should judge, from what the
+// author NAMED (TCP_BASELINE_INTERFACE) and where the kernel would actually
+// SEND (the route lookup towards the peer).
+//
+// The named interface is an ASSERTION TO BE CHECKED, never an answer to be
+// trusted, and that distinction is the whole of this function. Nothing binds
+// iperf3 to the named interface — no --bind is passed, deliberately, because the
+// routing table is what decides where a packet goes and a runner that overrode
+// it would be measuring a path the node does not use. So a name that disagrees
+// with the route describes traffic that will not happen.
+//
+// Trusting the name let the guard clear a run whose load then went out over the
+// management path: the string was compared against the management interface,
+// matched nothing, and the packets left via the default route regardless. The
+// guard reported that it had checked. That is worse than no guard, because a
+// refusal that never fires reads as a safety property.
+//
+// A disagreement is an ERROR and not a skip. Something is wrong with the
+// profile or the node — one of the two facts is stale — and neither is a
+// statement about the hardware, so nobody should be sent to a rack and nothing
+// should be certified.
+func reconcileIface(explicit, routed string) guardResult {
+	switch {
+	case explicit == "":
+		// Nothing named. The route is the only fact available and it is the
+		// authoritative one anyway; "" here is a genuine unknown, which
+		// classifyRoute turns into the fail-closed Error.
+		return guardResult{decision: routeOK, iface: routed}
+
+	case routed == "":
+		// Nothing to cross-check against. This is the SERVER end: the operator
+		// does not create the client until the server is Ready, so the peer's
+		// DNS record does not resolve yet and no route can be looked up. The
+		// named interface is all there is, and classifyRoute still judges it
+		// against the management interface — which is the check that matters for
+		// a server, because binding is the thing it is about to do.
+		return guardResult{decision: routeOK, iface: explicit}
+
+	case explicit != routed:
+		return guardResult{
+			decision: routeUnknown,
+			iface:    explicit,
+			reason: fmt.Sprintf(
+				"TCP_BASELINE_INTERFACE names %s, but the kernel routes traffic to this peer out of %s. "+
+					"Nothing binds the test to the named interface — the routing table decides where packets "+
+					"go — so the guard would be clearing %s while the load went to %s. Refusing: fix the route, "+
+					"or name the interface the peer is actually reachable through",
+				explicit, routed, explicit, routed),
+		}
+	}
+
+	return guardResult{decision: routeOK, iface: explicit}
+}
+
 // defaultRouteIface parses /proc/net/route for the interface carrying the
 // default route.
 //

@@ -37,12 +37,26 @@ ever refuse a test that would have been safe, never permit one that would not.
 | A separate fabric interface reaches the peer | runs | the case this test exists for |
 | The only route to the peer is the default-route interface | **Skip** | a one-NIC node cannot be load-tested safely; that is a fact about the hardware, not a fault in it |
 | `TCP_BASELINE_INTERFACE` names the default-route interface | **Error** | the author asked for something unsafe, and a silent skip would leave them believing it ran |
+| `TCP_BASELINE_INTERFACE` names an interface the peer is *not* routed through | **Error** | the name is an assertion, and it is false — see below |
 | `/proc/net/route` unreadable, or no default route | **Error** | fails closed — not knowing which interface is the management one is not permission to find out by saturating it |
 | The peer's interface cannot be determined | **Error** | same |
 
 There is **no `--force`**. The only honest reason to want one is "I am confident
 this is fine", and the cases where an operator is confident and wrong are
 exactly the ones that cost a fleet.
+
+`TCP_BASELINE_INTERFACE` is an **assertion to be checked, not an answer to be
+trusted**. Nothing binds iperf3 to it — no `--bind` is passed, deliberately,
+because the routing table is what decides where a packet goes and a runner that
+overrode it would be measuring a path the node does not use. So wherever a peer
+address exists to route towards, the runner looks the route up *anyway* and
+refuses a name that disagrees with it. Trusting the name would let the guard
+clear a run whose load then went out over the management path — the string
+matched nothing, the packets left via the default route regardless, and the
+guard reported that it had checked. A refusal that never fires is worse than no
+guard, because it reads as a safety property. The server end has no resolvable
+peer yet (the operator does not create the client until the server is Ready), so
+there is nothing to contradict and the name stands on its own.
 
 The decision is recorded in the result — `tcpTestInterface` and
 `tcpMgmtInterface` — on every path including the refusals, because a guard whose
@@ -66,7 +80,7 @@ retried.
 | Metric | Meaning |
 |---|---|
 | `tcpThroughputGbps` | sender-side throughput |
-| `tcpRetransmits` | retransmitted segments — see below |
+| `tcpRetransmits` | retransmitted segments, **omitted** where the platform has no `TCP_INFO` — see below |
 | `tcpRttUs` | mean smoothed RTT, **omitted** where the platform has no `TCP_INFO` |
 | `elapsedS` | measured window |
 | `tcpTestInterface`, `tcpMgmtInterface` | the guard's decision |
@@ -75,6 +89,13 @@ All read from iperf3's **sender** summary. Retransmits and RTT are properties
 the sending stack observes and the receiver cannot report; taking throughput
 from one end and the rest from the other would produce a result whose numbers
 came from two different places.
+
+Both come from `TCP_INFO` and both are **omitted, never zeroed**, where the
+platform does not supply them. A zero there is a count nobody took, and
+`tcpRetransmits` is the metric the sample gates `Equal 0` — so a fabricated zero
+would not merely mislead, it would *pass*, certifying a path whose retransmits
+were never counted. An omitted metric fails a `Required` gate closed, which is
+the correct direction.
 
 **Retransmits are the interesting signal.** A link that reaches line rate while
 retransmitting heavily has a problem that throughput alone will not show, and it

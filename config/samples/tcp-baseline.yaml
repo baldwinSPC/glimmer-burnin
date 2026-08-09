@@ -27,6 +27,13 @@ spec:
       # REQUIRED on the server end, which has no peer address to route towards
       # and therefore nothing for the management-path guard to compare. Set this
       # to the FABRIC interface — naming the default-route interface is refused.
+      #
+      # env applies to BOTH pods of the pair, so the client gets it too. There it
+      # is an ASSERTION RATHER THAN AN ANSWER: the client can look up the real
+      # route to its peer, and a name that disagrees with it is an Error naming
+      # both. Nothing binds iperf3 to this interface — the routing table decides
+      # where packets go — so a name trusted without that check would clear a run
+      # whose load then left over the management path.
       - name: TCP_BASELINE_INTERFACE
         value: enp1s0f0
     # Without a probe, "Ready" only means the container started, and a client
