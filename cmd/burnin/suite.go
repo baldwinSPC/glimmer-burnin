@@ -1,0 +1,239 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strings"
+
+	"k8s.io/apimachinery/pkg/util/yaml"
+
+	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
+)
+
+// A suite file is multi-document YAML of the SAME objects the CRDs use.
+//
+// Not a CLI-native schema, deliberately. The apimachinery dependency costs this
+// binary some size, and what it buys is that a profile is copy-paste identical
+// between `kubectl apply` and a bare host: one schema to document, one linter to
+// run, and a site that has tuned an acceptance profile in-cluster can run it on
+// a fresh box without translating anything.
+//
+// A slimmer parallel schema would be a third contract that can drift, which is
+// the disease this whole design exists to cure.
+
+// suite is what a file declares.
+type suite struct {
+	Profiles map[string]*api.BurnInProfile
+	Tests    map[string]*api.BurnInTest
+	// Order records the order profiles appeared, so "the only profile" and "the
+	// first profile" are answerable without a map iteration.
+	Order []string
+}
+
+// typeMeta is the minimum needed to route a document to its type.
+type typeMeta struct {
+	Kind       string `json:"kind"`
+	APIVersion string `json:"apiVersion"`
+}
+
+// loadSuite reads one or more YAML files.
+func loadSuite(paths []string) (*suite, error) {
+	s := &suite{
+		Profiles: map[string]*api.BurnInProfile{},
+		Tests:    map[string]*api.BurnInTest{},
+	}
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, fmt.Errorf("opening %s: %w", p, err)
+		}
+		err = s.readAll(f, p)
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(s.Profiles) == 0 {
+		return nil, fmt.Errorf("no BurnInProfile found — a suite needs one to say what runs and in what order")
+	}
+	return s, nil
+}
+
+func (s *suite) readAll(r io.Reader, name string) error {
+	// A YAMLReader splits on the document separator and hands back raw bytes,
+	// which is what this needs: each document is routed by its own kind before
+	// anything tries to give it a type.
+	rdr := yaml.NewYAMLReader(bufio.NewReader(r))
+	for i := 0; ; i++ {
+		raw, err := rdr.Read()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("%s: document %d: %w", name, i+1, err)
+		}
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+
+		var tm typeMeta
+		if err := yaml.Unmarshal(raw, &tm); err != nil {
+			return fmt.Errorf("%s: document %d: %w", name, i+1, err)
+		}
+
+		switch tm.Kind {
+		case "BurnInProfile":
+			var p api.BurnInProfile
+			if err := yaml.Unmarshal(raw, &p); err != nil {
+				return fmt.Errorf("%s: BurnInProfile: %w", name, err)
+			}
+			if _, dup := s.Profiles[p.Name]; dup {
+				return fmt.Errorf("%s: two profiles named %q", name, p.Name)
+			}
+			s.Profiles[p.Name] = &p
+			s.Order = append(s.Order, p.Name)
+
+		case "BurnInTest":
+			var t api.BurnInTest
+			if err := yaml.Unmarshal(raw, &t); err != nil {
+				return fmt.Errorf("%s: BurnInTest: %w", name, err)
+			}
+			if _, dup := s.Tests[t.Name]; dup {
+				return fmt.Errorf("%s: two tests named %q", name, t.Name)
+			}
+			s.Tests[t.Name] = &t
+
+		case "":
+			return fmt.Errorf("%s: document %d has no kind — is it a Kubernetes object?", name, i+1)
+
+		default:
+			// A suite file may sit beside sinks, schedules and runs that only
+			// mean something in a cluster. Ignoring them lets one file serve
+			// both paths, which is the entire reason for reusing the schema.
+			continue
+		}
+	}
+}
+
+// buildPlan resolves a profile into something localrun can execute.
+func (s *suite) buildPlan(profileName, node string, retries int32) (localrun.Plan, []string, error) {
+	profile, err := s.profile(profileName)
+	if err != nil {
+		return localrun.Plan{}, nil, err
+	}
+
+	p := localrun.Plan{
+		Node:              node,
+		FailFast:          profile.Spec.FailFast,
+		RetryOnErrorLimit: retries,
+	}
+
+	var warnings []string
+	seen := map[string]bool{}
+
+	for i, pt := range profile.Spec.Tests {
+		spec, name, err := s.resolveTest(profile.Name, i, pt)
+		if err != nil {
+			return localrun.Plan{}, nil, err
+		}
+		// Test name is result identity, and the operator enforces uniqueness at
+		// plan time. Enforced here too, or two results would collide in the
+		// report and one would silently win.
+		if seen[name] {
+			return localrun.Plan{}, nil, fmt.Errorf(
+				"profile %s names the test %q twice — a test name is a result's identity", profile.Name, name)
+		}
+		seen[name] = true
+
+		warnings = append(warnings, clusterOnlyFields(name, spec)...)
+
+		p.Tests = append(p.Tests, localrun.PlannedTest{
+			Name:     name,
+			Spec:     spec,
+			Required: pt.Required == nil || *pt.Required,
+		})
+	}
+
+	if len(p.Tests) == 0 {
+		return localrun.Plan{}, nil, fmt.Errorf("profile %s lists no tests", profile.Name)
+	}
+	return p, warnings, nil
+}
+
+// resolveTest turns a profile entry into a concrete spec.
+func (s *suite) resolveTest(profile string, i int, pt api.ProfileTest) (api.BurnInTestSpec, string, error) {
+	switch {
+	case pt.Inline != nil && pt.TestRef != "":
+		return api.BurnInTestSpec{}, "", fmt.Errorf(
+			"profile %s test %d sets both testRef and inline — they are mutually exclusive", profile, i+1)
+
+	case pt.Inline != nil:
+		name := pt.TestRef
+		if name == "" {
+			name = fmt.Sprintf("%s-%d", pt.Inline.Kind, i+1)
+		}
+		return *pt.Inline, name, nil
+
+	case pt.TestRef != "":
+		t, ok := s.Tests[pt.TestRef]
+		if !ok {
+			return api.BurnInTestSpec{}, "", fmt.Errorf(
+				"profile %s references the test %q, which is not in this suite — "+
+					"add its BurnInTest document, or pass the file that has it", profile, pt.TestRef)
+		}
+		return t.Spec, t.Name, nil
+
+	default:
+		return api.BurnInTestSpec{}, "", fmt.Errorf("profile %s test %d names nothing", profile, i+1)
+	}
+}
+
+// profile picks the profile to run.
+func (s *suite) profile(name string) (*api.BurnInProfile, error) {
+	if name != "" {
+		p, ok := s.Profiles[name]
+		if !ok {
+			return nil, fmt.Errorf("no profile %q in this suite; found: %s", name, strings.Join(s.profileNames(), ", "))
+		}
+		return p, nil
+	}
+	if len(s.Profiles) == 1 {
+		return s.Profiles[s.Order[0]], nil
+	}
+	// Refused rather than defaulting to the first. Picking one silently means a
+	// user gets a run they did not ask for, against hardware they care about.
+	return nil, fmt.Errorf("this suite declares %d profiles; name one with --profile: %s",
+		len(s.Profiles), strings.Join(s.profileNames(), ", "))
+}
+
+func (s *suite) profileNames() []string {
+	out := append([]string(nil), s.Order...)
+	sort.Strings(out)
+	return out
+}
+
+// clusterOnlyFields reports the parts of a spec that only mean something under a
+// scheduler.
+//
+// Warned about rather than silently ignored: a user whose profile sets a
+// nodeSelector has a belief about where this runs, and letting that pass without
+// a word would leave the belief intact and wrong.
+func clusterOnlyFields(name string, spec api.BurnInTestSpec) []string {
+	var out []string
+	switch spec.Scope {
+	case api.ScopePair, api.ScopeGroup:
+		out = append(out, fmt.Sprintf(
+			"%s is %s-scope: it needs a peer, which this command cannot arrange yet — run it with --role and --peer once that lands, or in a cluster",
+			name, spec.Scope))
+	}
+	if spec.Runner != nil && spec.Runner.ReadinessProbe != nil {
+		out = append(out, fmt.Sprintf(
+			"%s declares a readinessProbe, which only a kubelet acts on; the runner's own rendezvous still applies", name))
+	}
+	return out
+}
