@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -673,5 +674,154 @@ func TestFingerprintName_IsIdentityForRealNodeNamesAndSafeOtherwise(t *testing.T
 	}
 	if fingerprintName("Node_A") == fingerprintName("node-a") {
 		t.Error("sanitisation collapsed two distinct node names onto one fingerprint")
+	}
+}
+
+// A publisher's domain may be subdomained, and the vendor is still the vendor.
+//
+// Intel's GPU device plugin publishes under `gpu.intel.com`, so taking the FIRST
+// label of the domain named the vendor "gpu". That was invisible while the only
+// source was labels — Intel's NFD labels arrive under a kubernetes.io domain and
+// are filtered out before they reach here — and it becomes load-bearing the
+// moment allocatable resources are read, because `gpu.intel.com/i915` is exactly
+// how an Intel node advertises its accelerators.
+//
+// The rule is the REGISTRABLE domain — the last two labels — and then the
+// organisation is the first label of that. Still branch-free, still no vendor
+// named anywhere in this file.
+func TestNodeFingerprint_VendorSurvivesASubdomainedPublisher(t *testing.T) {
+	for domain, want := range map[string]string{
+		"gpu.intel.com":     "intel",
+		"nvidia.com":        "nvidia",
+		"amd.com":           "amd",
+		"tenstorrent.com":   "tenstorrent",
+		"some-new-npu.dev":  "some-new-npu",
+		"accel.habana.ai":   "habana",
+		"a.b.c.example.org": "example",
+	} {
+		if got := vendorFromDomain(domain); got != want {
+			t.Errorf("vendorFromDomain(%q) = %q, want %q", domain, got, want)
+		}
+	}
+}
+
+// A device plugin that advertises a resource but publishes no labels still
+// produces a fingerprint.
+//
+// The label-domain derivation is elegant and branch-free, and it depends
+// entirely on something ELSE having labelled the node. On a cluster with no Node
+// Feature Discovery, before a device plugin's labeller has rolled out, or on a
+// node whose plugin is half-broken, the node simply LOOKS LIKE IT HAS NO
+// ACCELERATOR — and the vendor seam then has nothing to resolve an image
+// against. The failure is silent, which is the worst property a fingerprint can
+// have.
+//
+// `status.allocatable` is a second source of exactly the same authority: it is
+// the same device plugin saying the same thing through the other channel it
+// already owns. No new component, no new permission, no new dependency.
+func TestNodeFingerprint_ADevicePluginWithNoLabelsIsStillFingerprinted(t *testing.T) {
+	for _, tc := range []struct {
+		resource   string
+		qty        string
+		wantVendor string
+		wantCount  int
+	}{
+		{"nvidia.com/gpu", "4", "nvidia", 4},
+		{"amd.com/gpu", "2", "amd", 2},
+		{"gpu.intel.com/i915", "1", "intel", 1},
+		{"gpu.intel.com/xe", "3", "intel", 3},
+	} {
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "n1"},
+			Status: corev1.NodeStatus{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:               resource.MustParse("64"),
+					corev1.ResourceMemory:            resource.MustParse("128Gi"),
+					corev1.ResourceName(tc.resource): resource.MustParse(tc.qty),
+				},
+			},
+		}
+		gpus := gpusFrom(node)
+		if len(gpus) != tc.wantCount {
+			t.Errorf("%s=%s: gpus = %d, want %d (%+v)", tc.resource, tc.qty, len(gpus), tc.wantCount, gpus)
+			continue
+		}
+		if gpus[0].Vendor != tc.wantVendor {
+			t.Errorf("%s: vendor = %q, want %q", tc.resource, gpus[0].Vendor, tc.wantVendor)
+		}
+	}
+}
+
+// Labels are RICHER than a resource count — they carry the model, the
+// architecture, the driver — so allocatable is a fallback and never an override.
+// A node with both must be fingerprinted from the labels.
+func TestNodeFingerprint_LabelsWinOverAllocatable(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "n1",
+			Labels: map[string]string{
+				"nvidia.com/gpu.product": "NVIDIA GB10",
+				"nvidia.com/gpu.count":   "1",
+			},
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8"),
+			},
+		},
+	}
+	gpus := gpusFrom(node)
+	if len(gpus) != 1 {
+		t.Fatalf("gpus = %d, want 1 from the labels — allocatable must not override a richer source", len(gpus))
+	}
+	if gpus[0].Model != "NVIDIA GB10" {
+		t.Errorf("model = %q, want the labelled model", gpus[0].Model)
+	}
+}
+
+// A resource this project has never heard of is recorded with the vendor its
+// domain names, not dropped and not guessed at.
+//
+// The registry of accelerator resource NAMES is a vocabulary, not a policy:
+// every match is handled identically and the vendor still comes from the domain.
+// Dropping an unrecognised vendor's node would be the silent no-accelerator
+// failure this whole fallback exists to end.
+func TestNodeFingerprint_AnUnknownAcceleratorVendorIsRecordedNotDropped(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "n1"},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceName("some-new-npu.dev/gpu"): resource.MustParse("2"),
+			},
+		},
+	}
+	gpus := gpusFrom(node)
+	if len(gpus) != 2 {
+		t.Fatalf("gpus = %d, want 2 (%+v)", len(gpus), gpus)
+	}
+	if gpus[0].Vendor != "some-new-npu" {
+		t.Errorf("vendor = %q, want some-new-npu from the domain", gpus[0].Vendor)
+	}
+}
+
+// And an ordinary resource is not an accelerator. cpu, memory, pods, ephemeral
+// storage and a hugepages request must never materialise a GPU entry.
+func TestNodeFingerprint_OrdinaryResourcesAreNotAccelerators(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "n1"},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:                        resource.MustParse("64"),
+				corev1.ResourceMemory:                     resource.MustParse("128Gi"),
+				corev1.ResourcePods:                       resource.MustParse("110"),
+				corev1.ResourceEphemeralStorage:           resource.MustParse("1Ti"),
+				corev1.ResourceName("hugepages-2Mi"):      resource.MustParse("8Gi"),
+				corev1.ResourceName("example.com/fpga"):   resource.MustParse("1"),
+				corev1.ResourceName("rdma/rdma_shared_a"): resource.MustParse("4"),
+			},
+		},
+	}
+	if gpus := gpusFrom(node); len(gpus) != 0 {
+		t.Errorf("gpus = %+v, want none — no accelerator resource is present", gpus)
 	}
 }
