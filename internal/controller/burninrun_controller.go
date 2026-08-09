@@ -1302,6 +1302,33 @@ func (r *BurnInRunReconciler) completeAttempt(
 			res.Message = fmt.Sprintf("attempt %d errored (%s); retrying", attempt, message)
 			return
 		}
+		// AN ERROR AT THE END DOES NOT DISCARD THE SOAK.
+		//
+		// settle overwrites the result's evidence with the deciding attempt's,
+		// which is right for a Pass and for a Fail: both are assertions about the
+		// hardware, and the window that made the assertion is what explains it.
+		// An Error asserts nothing about hardware. It says this attempt produced
+		// no measurement — which is not a reason to throw away the attempts that
+		// did.
+		//
+		// The loss is worst exactly where segmentation is most valuable. An
+		// evicted or unschedulable pod prints nothing at all, so parsed.Metrics is
+		// empty, and a six-day soak that errored in its last hour reported Error
+		// with no metrics whatsoever. AggregatedMetrics still held the evidence,
+		// but res.Metrics is the field consumers read and the envelope carries, so
+		// six days of measurement was unreachable outside the object.
+		//
+		// The folded Unmeasurable set goes the same way and for the same reason: a
+		// runner positively established that this part has no ECC to read, and an
+		// eviction two windows later is not new information about that. Violations
+		// and NotEvaluated are deliberately NOT carried across — a segmented soak
+		// gates only at the end, so there are none to carry, and synthesising some
+		// here would report gate outcomes for a test that never reached its gate.
+		if res.SegmentsRequired > 0 && len(res.AggregatedMetrics) > 0 {
+			settle(burninv1alpha1.RunError, message, res.AggregatedMetrics,
+				attemptEvidence{unmeasurable: res.Unmeasurable})
+			return
+		}
 		settle(burninv1alpha1.RunError, message, parsed.Metrics, ev)
 	}
 	recount(run)

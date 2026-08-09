@@ -181,9 +181,20 @@ The distinction that matters most is the one the whole operator is built around:
 | **`Failed`** | the hardware was measured and fell short. **Never retried** — re-running a measurement until it comes out clean launders a fault into an acceptance. |
 | **`Error`** | the measurement did not happen. The hardware is **unjudged**, not condemned. This is the retryable phase, and it is where an eviction, a drain, a reboot or an image-pull failure lands. |
 
-A soak that ends `Error` at hour eighty tells you nothing about the part. Read
-`TestAttempt.Trigger` to see why each attempt happened, and the run's conditions
-for anything the operator noticed at plan time.
+A soak that ends `Error` at hour eighty tells you nothing about the part — but
+it does tell you what the eighty hours before it measured. **A segmented soak
+that settles `Error` reports the AGGREGATE, not the window that errored.** The
+errored window measured nothing, and an evicted pod usually printed nothing at
+all; overwriting the fold with it would discard every clean segment at the last
+step. So `metrics` on such a result is the same fold a completed soak would
+carry, and it is the honest answer to "how much of this actually burned" — read
+it together with `elapsedS`, which says how far the soak got.
+
+An unsegmented test is unchanged: it has no fold, and its `Error` reports the
+readings the errored attempt itself printed, which are what explain the error.
+
+Read `TestAttempt.Trigger` to see why each attempt happened, and the run's
+conditions for anything the operator noticed at plan time.
 
 **`retryOnErrorLimit` re-runs an `Error` and nothing else.** On an unsegmented
 soak that means the retry starts the duration over from zero, which is worth

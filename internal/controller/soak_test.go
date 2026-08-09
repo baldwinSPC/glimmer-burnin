@@ -955,3 +955,131 @@ func TestSoak_AnUnsegmentedTestIsUnchanged(t *testing.T) {
 		t.Errorf("attempts = %+v, want one Initial attempt", res.Attempts)
 	}
 }
+
+// ─── Acceptance: an Error at the end does not discard the soak ────────────────
+
+// A soak that errors in its last window must still report what the windows
+// before it measured.
+//
+// `settle` overwrites res.Metrics with the metrics of the attempt that decided
+// the verdict, which is right for a Pass and for a Fail — both are assertions
+// about the hardware, explained by the window that made them. An ERROR asserts
+// nothing about hardware. It says this attempt produced no measurement, and an
+// attempt that produced no measurement is not a reason to discard the 287 that
+// did.
+//
+// The failure is worst exactly where the feature is most valuable: an evicted
+// or unschedulable pod prints nothing at all, so parsed.Metrics is empty and a
+// six-day soak reports Error with no metrics whatsoever. AggregatedMetrics still
+// holds the evidence on the object, but res.Metrics is the field every consumer
+// reads and the envelope carries.
+func TestSoak_AnErrorInTheLastSegmentKeepsWhatTheEarlierOnesMeasured(t *testing.T) {
+	run := newRun("run1", "acceptance", "spark-a")
+	// No retry budget: the first error settles, which is the state a long soak
+	// reaches anyway once its single cumulative budget is spent.
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 1800, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		run,
+	)
+
+	// The clean window also DECLARES a counter unmeasurable on this part, which
+	// foldSegment records on the result. That declaration is evidence about the
+	// hardware exactly as the metrics are, and settle overwrites it from the
+	// same errored attempt.
+	h.burnSegment("run1", 1, 0, cleanSegment()+"ecc_errors=n/a\n")
+	res := soakResult(t, h.run("run1"))
+	if got := res.AggregatedMetrics["elapsedS"]; got != "900" {
+		t.Fatalf("aggregate elapsedS = %q after one clean segment, want 900", got)
+	}
+	if len(res.Unmeasurable) == 0 {
+		t.Fatalf("the clean segment's n/a declaration was not folded onto the result")
+	}
+
+	// Segment 2 is evicted before the container printed anything — no stdout at
+	// all, which is the ordinary shape of an eviction and the case that loses
+	// everything.
+	h.burnSegment("run1", 2, 137, "")
+	h.reconcileUntilSettled("run1")
+
+	run = h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunError {
+		t.Fatalf("run phase = %q, want Error", run.Status.Phase)
+	}
+	res = soakResult(t, run)
+	if res.Phase != burninv1alpha1.RunError {
+		t.Fatalf("result phase = %q, want Error", res.Phase)
+	}
+
+	if len(res.Metrics) == 0 {
+		t.Fatalf("res.Metrics is empty: the errored window measured nothing and replaced 900 seconds "+
+			"that did. AggregatedMetrics still holds %v, but nothing downstream reads that field",
+			res.AggregatedMetrics)
+	}
+	if got := res.Metrics["elapsedS"]; got != "900" {
+		t.Errorf("res.Metrics[elapsedS] = %q, want 900 — the aggregate, not the errored window", got)
+	}
+	// The aggregate itself is untouched by the settle.
+	if got := res.AggregatedMetrics["elapsedS"]; got != "900" {
+		t.Errorf("aggregate elapsedS = %q after the settle, want 900", got)
+	}
+	// One clean segment really did complete, and the count says so.
+	if res.SegmentsCompleted != 1 {
+		t.Errorf("segmentsCompleted = %d, want 1 — the errored segment contributes nothing", res.SegmentsCompleted)
+	}
+	// The n/a declaration survives too. A runner positively established that
+	// this part has no ECC to read; an eviction two windows later is not new
+	// information about that.
+	if len(res.Unmeasurable) == 0 {
+		t.Errorf("the folded Unmeasurable set was cleared by the errored attempt's empty evidence")
+	}
+}
+
+// The counterpart, and the one the segmented carry-over must not swallow.
+//
+// An ORDINARY test that errors still reports what its runner printed, from the
+// attempt that errored. There is no aggregate for it — foldSegment never runs on
+// an unsegmented test — so a carry-over written without the SegmentsRequired
+// guard would settle it with an empty map and lose the very output that explains
+// the error. That mistake is invisible from the segmented test above, because
+// widening a condition it already satisfies changes nothing about it.
+func TestAnUnsegmentedErrorStillReportsTheAttemptsOwnMetrics(t *testing.T) {
+	bt := &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "soak"},
+		Spec: burninv1alpha1.BurnInTestSpec{
+			Kind:            burninv1alpha1.KindThermalSoak,
+			Scope:           burninv1alpha1.ScopeNode,
+			DurationSeconds: 2700,
+		},
+	}
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	pod := h.awaitSegmentPod("run1", 1)
+	h.startPod(pod)
+	h.reconcile("run1")
+	// Exit 3: the runner reached the hardware, could not judge it, and said so
+	// with the readings it did take. Those readings are the whole diagnosis.
+	h.finishPod(pod, 3, thermalSegmentStdout("412", "94.0", "31.5", "2"), "Error")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunError {
+		t.Fatalf("run phase = %q, want Error", run.Status.Phase)
+	}
+	res := soakResult(t, run)
+	if got := res.Metrics["elapsedS"]; got != "412" {
+		t.Errorf("res.Metrics[elapsedS] = %q, want 412 — the errored attempt's own reading", got)
+	}
+	if got := res.Metrics["xidEvents"]; got != "2" {
+		t.Errorf("res.Metrics[xidEvents] = %q, want 2 — the reading that explains the error", got)
+	}
+	if len(res.AggregatedMetrics) != 0 {
+		t.Errorf("an unsegmented result grew an aggregate: %v", res.AggregatedMetrics)
+	}
+}
