@@ -39,15 +39,15 @@ ARG IPERF_REF=3.19.1
 # tag would change what a fleet is measured by with no audit trail.  Bumping
 # IPERF_REF means bumping IPERF_SHA with it.
 #
-# RESOLVE IT WITH BOTH REFSPECS, AND TAKE THE PEELED ONE:
+# Resolve it with the CARET-BRACE form, which matters here because iperf3's
+# release tags are ANNOTATED:
 #
-#   git ls-remote https://github.com/esnet/iperf.git 'refs/tags/<ref>' 'refs/tags/<ref>^{}'
+#   git ls-remote https://github.com/esnet/iperf.git 'refs/tags/<ref>^{}'
 #
-# iperf's release tags are ANNOTATED, so `refs/tags/3.19.1` is the tag OBJECT
-# (2674a7de…) and `refs/tags/3.19.1^{}` is the commit (0fa686ef…).  The assert
-# below compares against `git rev-parse HEAD` in a shallow clone, which is the
-# COMMIT — so the unpeeled value fails every build, as it did on the first
-# attempt at this file.  DCGM's tags are annotated too and cost the same cycle.
+# Without `^{}` ls-remote answers with the TAG OBJECT's hash, while the check
+# below compares against `git rev-parse HEAD` — the COMMIT the tag points at.
+# The two differ for every annotated tag, so the plain form yields a value that
+# looks right, is right about the tag, and fails this assertion.
 ARG IPERF_SHA=0fa686ef204229a02dcc21a48823ebd47e60e9a2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -60,14 +60,8 @@ WORKDIR /src
 RUN got="$(git rev-parse HEAD)"; \
     if [ "${got}" != "${IPERF_SHA}" ]; then \
       echo "refusing to build: ${IPERF_REF} is ${got}, expected ${IPERF_SHA}" >&2; \
-      if [ "$(git cat-file -t "${IPERF_SHA}" 2>/dev/null)" = "tag" ]; then \
-        echo "IPERF_SHA is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
-        echo "Use the peeled value: $(git rev-parse "${IPERF_SHA}^{commit}")" >&2; \
-        echo "  git ls-remote ${IPERF_REPO} 'refs/tags/${IPERF_REF}^{}'" >&2; \
-      fi; \
       exit 1; \
-    fi; \
-    echo "iperf3 ${IPERF_REF} = ${got}: OK"
+    fi
 
 # Refuse to ship a tool whose licence is not the one this project checked.  A
 # permissive licence is a build-time fact here, not a line in a README that
@@ -105,13 +99,24 @@ ARG IPERF_REF=3.19.1
 
 # CGO_ENABLED=0 leaves a binary that links nothing at all, so "no NVIDIA library,
 # no copyleft library" is a structural property rather than a hope.
-WORKDIR /w
-COPY go.mod go.sum ./
-RUN go mod download
-COPY runners/tcp-baseline/ ./runners/tcp-baseline/
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w -X main.iperfVersion=${IPERF_REF}" \
-      -o /out/tcp-baseline ./runners/tcp-baseline/
+#
+# GOPROXY=off is the load-bearing part: this wrapper imports NOTHING outside the
+# standard library, and turning the proxy off makes that a build-time fact. A
+# dependency added later fails the build here rather than quietly appearing in a
+# published image whose licence inventory nobody re-derived.
+#
+# The build CONTEXT is this directory — see the runner-images job in ci.yml — so
+# the module is created here rather than inherited from the repository root.
+ENV CGO_ENABLED=0 GOPROXY=off GOFLAGS=-mod=mod
+WORKDIR /src
+COPY *.go ./
+RUN rm -f ./*_test.go && go mod init glimmer-burnin-tcp-baseline
+RUN mkdir -p /out && GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+      -ldflags="-s -w -X main.iperfVersion=${IPERF_REF}" \
+      -o /out/tcp-baseline .
+RUN ldd /out/tcp-baseline > /out/wrapper-ldd.txt 2>&1 || true; \
+    cat /out/wrapper-ldd.txt; \
+    ! grep -qiE 'libcud(art|a)|libnv' /out/wrapper-ldd.txt
 
 # ── final image ──────────────────────────────────────────────────────────────
 FROM ${RUNTIME_IMAGE}
@@ -130,5 +135,10 @@ ENV PATH=/usr/local/bin:/usr/bin:/bin
 # BurnInTest makes, and an image cannot grant it to itself.  Without it the
 # guard fails closed and the test reports an Error, which is the intended
 # degradation: it will not measure a path it cannot classify.
+
+# Unprivileged. The guard reads /proc/net/route, which is world-readable, and
+# iperf3 binds a port above 1024 — nothing here needs root, and a runner that
+# asks for it anyway is a privilege nobody audited.
+USER 65532:65532
 
 ENTRYPOINT ["/usr/local/bin/tcp-baseline"]

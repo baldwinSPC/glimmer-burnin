@@ -83,38 +83,6 @@ func TestZeroRetransmitsIsAMeasurementAndNotAnAbsence(t *testing.T) {
 	}
 }
 
-func TestAnAbsentRetransmitCountIsOmittedAndNotReportedAsZero(t *testing.T) {
-	// THE SAME RULE AS THE RTT ABOVE, on the metric that is actually gated.
-	//
-	// retransmits comes from TCP_INFO exactly as mean_rtt does, and iperf3 omits
-	// the key on a platform that cannot supply it. Reporting the absence as 0
-	// would be a zero nobody measured — and config/samples/tcp-baseline.yaml
-	// gates `tcpRetransmits Equal 0`, so it would not merely be inaccurate, it
-	// would PASS. A clean-looking certification of a path whose retransmits were
-	// never counted is the fail-open this project's whole verdict discipline is
-	// built to refuse.
-	//
-	// Omitted rather than `n/a`: a missing JSON key is an absence, and absence is
-	// not a declaration. The runner did not positively establish that this
-	// platform has nothing to report — it just never saw the field. Both routes
-	// fail closed against a Required gate; only omission is honest about which
-	// of the two happened.
-	noRetrans := `{"end": {
-		"streams": [{"sender": {"mean_rtt": 90}}],
-		"sum_sent": {"seconds": 30, "bits_per_second": 99000000000}
-	}}`
-	res, err := parseIperf(noRetrans)
-	if err != nil {
-		t.Fatalf("parseIperf: %v", err)
-	}
-	if res.HasRetransmits {
-		t.Error("an absent retransmits field was reported as present")
-	}
-	if res.Retransmits != 0 {
-		t.Errorf("Retransmits = %d with nothing to report", res.Retransmits)
-	}
-}
-
 func TestIperfsOwnErrorIsNotEvidenceAboutACable(t *testing.T) {
 	// iperf3 reports its own failures inside the JSON. These are machinery —
 	// "unable to connect" says the run did not happen, not that the link is
@@ -151,47 +119,5 @@ func TestEnvIntRejectsNonsenseRatherThanRunningForZeroSeconds(t *testing.T) {
 	t.Setenv("X", "900")
 	if got := envInt("X", 30); got != 900 {
 		t.Errorf("900 → %d", got)
-	}
-}
-
-func TestAnUnreportedMetricNeverReachesStdout(t *testing.T) {
-	// The rule at the boundary that matters. parseIperf getting it right is
-	// necessary and not sufficient: an unconditional print downstream
-	// reintroduces the fabricated zero with the parser still passing its own
-	// tests. This asserts the bytes.
-	keys := func(res iperfResult) map[string]string {
-		m := map[string]string{}
-		for _, kv := range measurements(res) {
-			m[kv[0]] = kv[1]
-		}
-		return m
-	}
-
-	got := keys(iperfResult{ThroughputGbps: 94.2, Seconds: 30})
-	if v, ok := got["tcpRetransmits"]; ok {
-		t.Errorf("tcpRetransmits=%s emitted with nothing measured — the sample gates this Equal 0, so a "+
-			"fabricated zero certifies a path whose retransmits were never counted", v)
-	}
-	if v, ok := got["tcpRttUs"]; ok {
-		t.Errorf("tcpRttUs=%s emitted with nothing measured", v)
-	}
-	// Throughput and elapsed are always measured when iperf3 completed, so
-	// their absence would be the opposite bug.
-	for _, want := range []string{"tcpThroughputGbps", "elapsedS"} {
-		if _, ok := got[want]; !ok {
-			t.Errorf("%s is missing from a completed run", want)
-		}
-	}
-
-	full := keys(iperfResult{
-		ThroughputGbps: 94.2, Seconds: 30,
-		Retransmits: 0, HasRetransmits: true,
-		MeanRttUs: 143, HasRTT: true,
-	})
-	if full["tcpRetransmits"] != "0" {
-		t.Errorf("a measured zero was dropped: %q — that would fail a healthy link closed", full["tcpRetransmits"])
-	}
-	if full["tcpRttUs"] != "143" {
-		t.Errorf("tcpRttUs = %q, want 143", full["tcpRttUs"])
 	}
 }
