@@ -90,13 +90,24 @@ ARG IPERF_REF=3.19.1
 
 # CGO_ENABLED=0 leaves a binary that links nothing at all, so "no NVIDIA library,
 # no copyleft library" is a structural property rather than a hope.
-WORKDIR /w
-COPY go.mod go.sum ./
-RUN go mod download
-COPY runners/tcp-baseline/ ./runners/tcp-baseline/
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w -X main.iperfVersion=${IPERF_REF}" \
-      -o /out/tcp-baseline ./runners/tcp-baseline/
+#
+# GOPROXY=off is the load-bearing part: this wrapper imports NOTHING outside the
+# standard library, and turning the proxy off makes that a build-time fact. A
+# dependency added later fails the build here rather than quietly appearing in a
+# published image whose licence inventory nobody re-derived.
+#
+# The build CONTEXT is this directory — see the runner-images job in ci.yml — so
+# the module is created here rather than inherited from the repository root.
+ENV CGO_ENABLED=0 GOPROXY=off GOFLAGS=-mod=mod
+WORKDIR /src
+COPY *.go ./
+RUN rm -f ./*_test.go && go mod init glimmer-burnin-tcp-baseline
+RUN mkdir -p /out && GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+      -ldflags="-s -w -X main.iperfVersion=${IPERF_REF}" \
+      -o /out/tcp-baseline .
+RUN ldd /out/tcp-baseline > /out/wrapper-ldd.txt 2>&1 || true; \
+    cat /out/wrapper-ldd.txt; \
+    ! grep -qiE 'libcud(art|a)|libnv' /out/wrapper-ldd.txt
 
 # ── final image ──────────────────────────────────────────────────────────────
 FROM ${RUNTIME_IMAGE}
@@ -115,5 +126,10 @@ ENV PATH=/usr/local/bin:/usr/bin:/bin
 # BurnInTest makes, and an image cannot grant it to itself.  Without it the
 # guard fails closed and the test reports an Error, which is the intended
 # degradation: it will not measure a path it cannot classify.
+
+# Unprivileged. The guard reads /proc/net/route, which is world-readable, and
+# iperf3 binds a port above 1024 — nothing here needs root, and a runner that
+# asks for it anyway is a privilege nobody audited.
+USER 65532:65532
 
 ENTRYPOINT ["/usr/local/bin/tcp-baseline"]
