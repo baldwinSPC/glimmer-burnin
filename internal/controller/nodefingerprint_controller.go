@@ -434,7 +434,7 @@ func observeNode(node *corev1.Node) burninv1alpha1.NodeFingerprintStatus {
 		OSImage: node.Status.NodeInfo.OSImage,
 		Kernel:  node.Status.NodeInfo.KernelVersion,
 		Labels:  salientLabels(node.Labels),
-		GPUs:    gpusFromLabels(node.Labels),
+		GPUs:    gpusFrom(node),
 		NICs:    nicsFromLabels(node.Labels),
 	}
 }
@@ -551,11 +551,23 @@ func isNonVendorDomain(domain string) bool {
 // vendorFromDomain reads the vendor off the domain that published the fact:
 // `nvidia.com/gpu.product` was published by nvidia. That is where the vendor
 // name comes from — not from a table in this file.
+// A PUBLISHER'S DOMAIN MAY BE SUBDOMAINED, so it is the REGISTRABLE domain — the
+// last two labels — whose first label names the organisation. Taking the first
+// label of the whole domain read `gpu.intel.com` as a vendor called "gpu".
+//
+// That was invisible while labels were the only source: Intel's own facts arrive
+// through NFD under a `kubernetes.io` domain and are filtered out before they
+// reach here. It becomes load-bearing the moment allocatable resources are read,
+// because `gpu.intel.com/i915` is exactly how an Intel node advertises its
+// accelerators — and a vendor of "gpu" resolves against nothing.
+//
+// Still branch-free, and still no vendor named in this file.
 func vendorFromDomain(domain string) string {
-	if i := strings.Index(domain, "."); i > 0 {
-		return strings.ToLower(domain[:i])
+	labels := strings.Split(strings.ToLower(domain), ".")
+	if len(labels) > 2 {
+		labels = labels[len(labels)-2:]
 	}
-	return strings.ToLower(domain)
+	return labels[0]
 }
 
 // gpuFacts is what one publishing domain said about the node's accelerators.
@@ -652,6 +664,114 @@ func (f *gpuFacts) fillFrom(other *gpuFacts) {
 }
 
 // gpusFromLabels materialises the accelerator inventory the node advertises.
+// gpusFrom reads a node's accelerators, from its labels where anything labelled
+// them and from `status.allocatable` where nothing did.
+//
+// The label derivation is elegant and branch-free and it depends ENTIRELY on
+// something else having labelled the node. On a cluster with no Node Feature
+// Discovery, before a device plugin's labeller has rolled out, or on a node whose
+// plugin is half-broken, the node simply looks like it has no accelerator — and
+// the vendor seam then has nothing to resolve an image against. The failure is
+// SILENT, which is the worst property a fingerprint can have: a node with no
+// accelerator is not tested, and a node that is not tested is certified by
+// omission.
+//
+// `status.allocatable` is a second source of exactly the same authority. It is
+// the same device plugin saying the same thing through the other channel it
+// already owns, so this needs no new component, no new permission and no new
+// dependency — and the vendor still comes off the DNS domain of the resource
+// name, which is the same derivation applied to a second source rather than a
+// second derivation.
+//
+// Labels WIN. They carry the model, the architecture, the driver and the memory;
+// allocatable carries a count. A fallback that overrode the richer source would
+// throw away everything a working discovery stack publishes.
+func gpusFrom(node *corev1.Node) []burninv1alpha1.GPUInfo {
+	if gpus := gpusFromLabels(node.Labels); len(gpus) > 0 {
+		return gpus
+	}
+	return gpusFromAllocatable(node.Status.Allocatable)
+}
+
+// acceleratorResourceNames is the NAME part of an extended resource that means
+// "accelerator". A vocabulary, not a policy: every match is handled identically
+// and the vendor is still read off the domain, so adding a spelling is adding
+// data and never a branch.
+var acceleratorResourceNames = map[string]bool{
+	"gpu":             true, // nvidia.com/gpu, amd.com/gpu, and most others
+	"gpu.shared":      true, // time-sliced NVIDIA
+	"i915":            true, // Intel, pre-Xe kernel driver
+	"i915_monitoring": true,
+	"xe":              true, // Intel, Xe kernel driver
+	"npu":             true,
+	"tpu":             true,
+	"accelerator":     true,
+}
+
+// gpusFromAllocatable derives accelerators from advertised extended resources.
+//
+// Two ways a resource qualifies, neither of which names a vendor: its NAME is in
+// the vocabulary above, or its DOMAIN is an accelerator domain (`gpu.intel.com`
+// and anything else that puts `gpu` at the front), which covers a publisher
+// adding a resource this project has not heard of.
+//
+// An unrecognised DOMAIN is recorded with whatever vendor it names rather than
+// dropped or guessed at — dropping it would be the silent no-accelerator failure
+// this fallback exists to end. An unrecognised NAME under an ordinary domain is
+// not an accelerator: `example.com/fpga` and `rdma/rdma_shared_a` are real
+// extended resources that are not what this operator measures, and materialising
+// a GPU for every extended resource on a node would make the fingerprint report
+// hardware that is not there.
+func gpusFromAllocatable(allocatable corev1.ResourceList) []burninv1alpha1.GPUInfo {
+	type found struct {
+		vendor string
+		count  int
+	}
+	var groups []found
+	for name, qty := range allocatable {
+		domain, res := splitLabelKey(string(name))
+		if domain == "" || isNonVendorDomain(domain) {
+			// A core resource (cpu, memory, pods) carries no domain at all, and
+			// kubernetes.io is not a silicon vendor.
+			continue
+		}
+		if !acceleratorResourceNames[strings.ToLower(res)] && !isAcceleratorDomain(domain) {
+			continue
+		}
+		n, ok := qty.AsInt64()
+		if !ok || n <= 0 || n > maxGPUsPerFingerprint {
+			continue
+		}
+		groups = append(groups, found{vendor: vendorFromDomain(domain), count: int(n)})
+	}
+	// Deterministic, because a map range is not and a fingerprint that reordered
+	// itself between reconciles would report drift on a node nothing happened to.
+	sort.Slice(groups, func(i, j int) bool { return groups[i].vendor < groups[j].vendor })
+
+	var out []burninv1alpha1.GPUInfo
+	index := int32(0)
+	for _, g := range groups {
+		for i := 0; i < g.count; i++ {
+			// Vendor and index only. Allocatable says how many and who made
+			// them, and says nothing about the model, the architecture, the
+			// driver or the memory — so those stay EMPTY rather than being
+			// filled with a plausible guess. An empty field is a fact about what
+			// the node published; an invented one is a fact about nothing.
+			out = append(out, burninv1alpha1.GPUInfo{Index: index, Vendor: g.vendor})
+			index++
+		}
+	}
+	return out
+}
+
+// isAcceleratorDomain reports whether a resource domain is itself a declaration
+// that what it publishes is an accelerator — `gpu.intel.com/xe`. It reads the
+// domain's own first label and names no vendor.
+func isAcceleratorDomain(domain string) bool {
+	first, _, _ := strings.Cut(strings.ToLower(domain), ".")
+	return first == "gpu" || first == "accelerator" || first == "npu" || first == "tpu"
+}
+
 func gpusFromLabels(labels map[string]string) []burninv1alpha1.GPUInfo {
 	byDomain := map[string]*gpuFacts{}
 	unattributed := &gpuFacts{}
