@@ -700,6 +700,33 @@ func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.B
 	if err != nil {
 		return out, err
 	}
+	// A WAVE CAN BE MANY PODS LONG, so the nodes this run HOLDS are not only the
+	// ones with a pod alive this instant.
+	//
+	// busyNodes counts live pods, which was the whole truth while every execution
+	// was one pod. A segmented soak is not: between segment N and segment N+1
+	// there is a moment with no pod at all, and a repeat and an error-retry have
+	// the same gap. Reading the interlock from live pods alone made that gap look
+	// like released capacity, so a second target took the slot and
+	// releaseHeldNodes gave the first node's cordon back — halfway through a
+	// multi-day acceptance soak.
+	//
+	// Both halves of that are severe. The soak STOPS BEING A SOAK: at cap 1 over
+	// two targets each node runs one window then idles for one, and a part
+	// allowed to cool for as long as it was loaded never reaches the thermal
+	// steady state the test exists to hold it at, so throttling and
+	// heat-dependent faults are precisely what that schedule cannot find. And the
+	// cordon is the only thing keeping FOREIGN workload off a node under burn-in
+	// — runner pods tolerate node.kubernetes.io/unschedulable, so the cordon
+	// never protected against this operator, only against everything else — which
+	// means ordinary fleet work could land beside a measurement in progress.
+	//
+	// Seeding rather than replacing is deliberate: this can only ever make the
+	// run hold MORE, never less, so the live-pod count stays the floor and a
+	// controller restart still cannot lose track of what is already running.
+	for node := range holdingNodes(run) {
+		busy[node] = true
+	}
 	// A pod that exists and has not started keeps the fast cadence: that is the
 	// window where scheduling problems appear — unschedulable, ImagePullBackOff,
 	// a node that went away — and where a fast reaction is worth the traffic.
@@ -2183,6 +2210,38 @@ func (r *BurnInRunReconciler) reconcileDeleted(ctx context.Context, run *burninv
 
 	controllerutil.RemoveFinalizer(run, burninv1alpha1.FinalizerCordonCleanup)
 	return ctrl.Result{}, client.IgnoreNotFound(r.Update(ctx, run))
+}
+
+// holdingNodes are the nodes this run is holding BETWEEN pods.
+//
+// A result that has not settled owes more work on its nodes, whether the next
+// pod is the next segment of a soak, the next repeat, or a retry after an error.
+// The node is not free in the gap and must not be offered to another target: the
+// run is mid-measurement on it, and the pause is an artefact of how the
+// measurement is scheduled rather than a statement that the hardware is idle.
+//
+// Every node of the result, not just the first: a Pair holds both of its nodes
+// for the whole test and a Group holds all of its ranks, which is the same rule
+// admission already applies when the unit starts.
+//
+// Read from status rather than from pods on purpose. Status is what survives a
+// controller restart, and it is the same record `recount` and the deadline sweep
+// read, so the interlock cannot disagree with them about which executions are
+// still open.
+func holdingNodes(run *burninv1alpha1.BurnInRun) map[string]bool {
+	held := map[string]bool{}
+	for i := range run.Status.Results {
+		res := &run.Status.Results[i]
+		if res.Phase.IsTerminal() {
+			continue
+		}
+		for _, n := range res.Nodes {
+			if n != "" {
+				held[n] = true
+			}
+		}
+	}
+	return held
 }
 
 // busyNodes is the set of nodes this run currently holds under test load. It is

@@ -323,6 +323,23 @@ either pod exists. Cordoning every target up front took a two-node cluster
 entirely out of scheduling and hollowed out the interlock, whose whole premise is
 that only N nodes are occupied at once.
 
+**A wave can be many pods long, and "holding" is read from the RESULT and not
+from a live pod.** A segmented soak, a repeat and an error-retry each have a
+moment between pods where nothing is running, and reading the interlock from live
+pods alone made that gap look like released capacity: a second target took the
+slot and the first node's cordon came off halfway through a multi-day acceptance.
+Both halves of that are severe — the soak stops being a soak (at cap 1 over two
+targets each node runs one window then idles for one, and a part allowed to cool
+for as long as it was loaded never reaches the thermal steady state the test
+exists to hold it at), and the cordon is the only thing keeping *foreign*
+workload off a node under burn-in, since runner pods tolerate
+`node.kubernetes.io/unschedulable` and it therefore never protected against this
+operator to begin with. `holdingNodes` seeds the busy set from every non-terminal
+result's nodes — every node of the unit, so a pair holds both ends and a group
+holds every rank — and it *seeds* rather than replaces, so the live-pod count
+stays the floor and a controller restart still cannot lose track of what is
+already running.
+
 **A pair is one unit of load and costs two slots.** `maxConcurrentNodes` counts
 nodes, and a pair holds both of its nodes for the whole test, so it is admitted
 only when two slots are free — and never at the default cap of 1, which the run
