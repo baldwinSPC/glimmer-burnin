@@ -235,10 +235,18 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"eccVendorConflict":       {UnitNone, ThresholdUseEvidence},
 		"amdRasUnreadableFiles":   {UnitNone, ThresholdUseEvidence},
 		"xidSource":               {UnitNone, ThresholdUseEvidence},
-		"nodeReady":               {UnitNone, ThresholdUseEvidence},
-		"hostHealthVersion":       {UnitNone, ThresholdUseEvidence},
-		"hostHealthStage":         {UnitNone, ThresholdUseEvidence},
-		"hostHealthPanic":         {UnitNone, ThresholdUseEvidence},
+		// gemm-sweep. The two labels are Evidence because their values are
+		// words and a shape — a threshold is compared as a float64, so a gate on
+		// either fails closed on every node forever while reading as a hardware
+		// verdict.
+		"achievedTflops":    {UnitTeraflops, ThresholdUseAcceptance},
+		"maxRelativeError":  {UnitNone, ThresholdUseAcceptance},
+		"gemmPrecision":     {UnitNone, ThresholdUseEvidence},
+		"gemmShape":         {UnitNone, ThresholdUseEvidence},
+		"nodeReady":         {UnitNone, ThresholdUseEvidence},
+		"hostHealthVersion": {UnitNone, ThresholdUseEvidence},
+		"hostHealthStage":   {UnitNone, ThresholdUseEvidence},
+		"hostHealthPanic":   {UnitNone, ThresholdUseEvidence},
 	}
 
 	for name, w := range want {
