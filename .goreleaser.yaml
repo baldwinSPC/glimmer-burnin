@@ -1,0 +1,111 @@
+# Release configuration for the `burnin` CLI.
+#
+# goreleaser is MIT-licensed and is a BUILD tool invoked by CI, not a module
+# dependency — it never enters go.mod, so it is outside the dependency licence
+# policy that governs what this project ships.
+#
+# The operator is published as a container image by publish-operator.yml. This
+# file covers the other artifact: a binary a provisioning script runs on a
+# machine that is not yet a cluster member, which is exactly the case the
+# container image cannot serve.
+version: 2
+
+project_name: burnin
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  # The same main package built twice under two names.
+  #
+  # kubectl discovers plugins by filename: an executable named kubectl-burnin on
+  # PATH is what makes `kubectl burnin report` work, and there is no other
+  # mechanism. Shipping both names rather than documenting a symlink means the
+  # plugin works from an extracted archive, on a machine where the person
+  # installing it may not have write access anywhere else on PATH.
+  - id: burnin
+    binary: burnin
+    main: ./cmd/burnin
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: kubectl-burnin
+    binary: kubectl-burnin
+    main: ./cmd/burnin
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: burnin
+    ids: [burnin, kubectl-burnin]
+    name_template: "burnin_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+# Keyless signing over the checksum file.
+#
+# Signing the checksums rather than each archive is the Sigstore convention and
+# is not a shortcut: the checksum file names every artifact by digest, so one
+# signature covers all of them and a verifier checks the signature once and then
+# the digests. See docs/verifying-images.md for the same identity model applied
+# to the images.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Verifying
+
+    Every release is signed with cosign keyless. To verify:
+
+    ```
+    cosign verify-blob checksums.txt \
+      --signature checksums.txt.sig \
+      --certificate checksums.txt.pem \
+      --certificate-identity-regexp 'https://github\.com/baldwinSPC/glimmer-burnin/\.github/workflows/.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    ```
+
+    Then check your archive against `checksums.txt`.
+
+    `kubectl-burnin` is the same binary under the name kubectl looks for; put it
+    on PATH and `kubectl burnin report` works.

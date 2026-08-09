@@ -145,3 +145,23 @@ func TestZeroPolicyGetsDefaults(t *testing.T) {
 		t.Errorf("zero policy did not pick up defaults: %+v", p)
 	}
 }
+
+func TestAStructLiteralSenderStillDelivers(t *testing.T) {
+	// A Sender built without NewSender has a zero policy, and a zero
+	// MaxAttempts would make the retry loop never run its body: the envelope is
+	// silently never sent, and the caller is told it "failed after 0 attempts"
+	// with a nil cause.
+	//
+	// The worst failure this package can have, because the run it was reporting
+	// on really did happen — so the zero value is made safe rather than left as
+	// a rule every construction site has to remember.
+	d := &stubDeliverer{}
+	s := &Sender{Deliverer: d}
+
+	if err := s.Send(context.Background(), testEnvelope()); err != nil {
+		t.Fatalf("Send = %v, want nil", err)
+	}
+	if d.calls != 1 {
+		t.Errorf("delivered %d times, want 1", d.calls)
+	}
+}

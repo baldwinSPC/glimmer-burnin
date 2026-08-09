@@ -8,6 +8,13 @@ bin/
 cover.out
 .DS_Store
 
+# goreleaser's output: eight binaries and their archives. Anchored like the
+# rest, and here for the same reason the runner entries below are — this
+# repository has twice committed a built binary that nothing ignored, and a
+# snapshot build run locally to check the release config drops ~100 MB of them
+# in one go.
+/dist/
+
 # Every runner directory is `package main`, so `go build ./runners/<name>/` — and
 # `go build ./...` — drops an executable called <name> HERE, at the repository
 # root, not beside its source. Untracked and unignored, the next `git add -A`
