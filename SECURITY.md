@@ -72,6 +72,17 @@ of what this operator does:
   project actually reaches; if you have found one it missed, please say how it
   is reached.
 
+## Verifying what you pulled
+
+Every published image is signed with cosign keyless signing, and the signature
+covers the DIGEST rather than the tag. See
+[docs/verifying-images.md](docs/verifying-images.md) for the exact `cosign verify`
+invocation and the certificate identity to pin.
+
+Gating your cluster on that verification is worth doing for this project
+specifically: a runner image is executed by a node's readiness gate, against
+hardware you are deciding whether to accept.
+
 ## Supported versions
 
 Only the latest minor release receives security fixes. This project has not yet
