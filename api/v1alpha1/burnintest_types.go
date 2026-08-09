@@ -128,6 +128,25 @@ const (
 	// Folding it into gpu-burn would report one number for two faults.
 	KindMemoryBW TestKind = "memory-bw"
 
+	// KindDiskIO is a Node-scope storage measurement: sequential throughput and
+	// operation latency against a site-declared path, with the page cache
+	// bypassed.
+	//
+	// Storage is otherwise unmeasured by this suite, and on an AI node it is not
+	// a minor subsystem: checkpoint writes, dataset streaming and shared-
+	// filesystem reads are where a training run stalls when the NVMe underneath
+	// it is degrading. A drive with a thermal-throttling controller passes every
+	// other test here.
+	//
+	// Its runner is standard-library-only, which is a LICENSING decision: fio,
+	// IOR and elbencho are all GPL, and a copyleft dependency would make this
+	// project unpublishable.
+	//
+	// It writes, so its safety rules are part of the kind: no declared path
+	// means no test, it only ever writes a file it created, and it refuses a
+	// write that would leave the filesystem near full.
+	KindDiskIO TestKind = "disk-io"
+
 	// KindHostHealth is a Node-scope read of host- and driver-side fault
 	// counters over the test window (xidEvents, pcieReplayErrors,
 	// nicLinkDownEvents, remappedRows, eccErrors).
@@ -216,6 +235,7 @@ var BuiltInKinds = []TestKind{
 	KindGPUDirect,
 	KindTCPBaseline,
 	KindMemoryBW,
+	KindDiskIO,
 	KindHostHealth,
 	KindClockProbe,
 	KindMemoryStress,

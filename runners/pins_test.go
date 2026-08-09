@@ -773,6 +773,7 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 	noAccelerator := map[string]string{
 		"ib-write-bw":   "measures the wire through RDMA verbs; the CUDA variant is gpudirect-rdma",
 		"memory-stress": "exercises HOST memory through stressapptest",
+		"disk-io":       "measures storage through direct I/O against a declared path; no accelerator is involved",
 		"tcp-baseline":  "measures the kernel TCP stack through iperf3; it is the accelerator-free half of the fabric story and runs on nodes with no GPU at all",
 	}
 

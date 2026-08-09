@@ -29,6 +29,7 @@ cover.out
 /clockprobe
 /compute-smoke
 /dcgm-diag
+/disk-io
 /gpu-burn
 /gpudirect-rdma
 /host-health

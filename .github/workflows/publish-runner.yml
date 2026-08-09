@@ -29,6 +29,7 @@ on:
           - nccl
           - gpudirect-rdma
           - tcp-baseline
+          - disk-io
       version:
         description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
         required: true
