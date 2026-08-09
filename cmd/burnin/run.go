@@ -52,6 +52,28 @@ FLAGS
   --retry-on-error  how many times an Error may be retried, per test (default 0)
   --dry-run         resolve and print what would run, then stop
 
+TWO MACHINES (Pair-scope tests)
+
+  A link test needs both ends. Neither has to be in a cluster.
+
+    hostA$ burnin run -f suite.yaml --role server --node spark-a --results-dir r/
+    hostB$ burnin run -f suite.yaml --role client --peer 10.0.0.11 \
+                      --peer-node spark-a --node spark-b --results-dir r/
+
+  --role server     no --peer: the server learns the client's address when the
+                    client connects
+  --role client     --peer <ip|host> is the server's address
+  --peer-node       the peer's name, for messages only — never for addressing
+
+  Start ordering is yours. Start the server first if you can; a client that
+  starts first retries into success rather than reporting a fabric fault. If the
+  test declares a tcpSocket readinessProbe, the server end prints a line when
+  its listener opens.
+
+  THE CLIENT DECIDES. The client's results directory holds the one envelope for
+  the link, naming both nodes; the server writes sidecar/server-record.json,
+  which is a record of that end and not a second verdict.
+
 EXIT CODES
   0  every required test passed
   1  a required test FAILED — measured, and fell short
@@ -67,6 +89,7 @@ type runFlags struct {
 	runtime    string
 	retries    int
 	dryRun     bool
+	pair       pairFlags
 }
 
 type multiFlag []string
@@ -88,6 +111,9 @@ func runRun(args []string) error {
 	fs.StringVar(&f.runtime, "runtime", "auto", "auto|docker|podman|nerdctl")
 	fs.IntVar(&f.retries, "retry-on-error", 0, "retries per test, Error only")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "print the resolved plan and stop")
+	fs.StringVar(&f.pair.role, "role", "", "server|client, for a link test across two machines")
+	fs.StringVar(&f.pair.peer, "peer", "", "the server's address (client only)")
+	fs.StringVar(&f.pair.peerNode, "peer-node", "", "the peer's name, for messages only")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -106,13 +132,27 @@ func runRun(args []string) error {
 		node = h
 	}
 
+	rz, err := f.pair.rendezvous()
+	if err != nil {
+		return exitWith(exitError, err)
+	}
+
 	s, err := loadSuite(f.files)
 	if err != nil {
 		return exitWith(exitError, err)
 	}
-	plan, warnings, err := s.buildPlan(f.profile, node, int32(f.retries))
+	plan, warnings, err := s.buildPlan(f.profile, node, int32(f.retries), rz)
 	if err != nil {
 		return exitWith(exitError, err)
+	}
+
+	// A rendezvous with nothing to rendezvous is refused, not ignored. Someone
+	// who passed --role believes a link is about to be measured, and running a
+	// profile of Node-scope tests instead would answer a question they did not
+	// ask while looking exactly like it answered theirs.
+	if rz != nil && !pairScoped(plan) {
+		return exitWith(exitError, fmt.Errorf(
+			"--role was given but no test in this profile is Pair- or Group-scope; nothing here measures a link"))
 	}
 	for _, w := range warnings {
 		warn("%s", w)
@@ -137,6 +177,9 @@ func runRun(args []string) error {
 	defer stop()
 
 	fmt.Fprintf(os.Stderr, "burnin: %d test(s) on %s via %s\n", len(plan.Tests), node, rt.Name())
+	if rz != nil && rz.Role == localrun.RoleServer {
+		announceServerReady(ctx, os.Stderr, plan)
+	}
 
 	report, runErr := localrun.Run(ctx, plan, rt, Hooks(os.Stderr))
 	if runErr != nil && ctx.Err() == nil {
@@ -144,7 +187,7 @@ func runRun(args []string) error {
 	}
 
 	if f.resultsDir != "" {
-		if err := writeResults(f.resultsDir, report); err != nil {
+		if err := writeResults(f.resultsDir, report, rz); err != nil {
 			// The run happened and its verdict stands; failing to file it is
 			// worth saying loudly and is not a reason to discard the verdict.
 			warn("results were not written: %v", err)
@@ -152,6 +195,13 @@ func runRun(args []string) error {
 	}
 
 	printSummary(report)
+	if !deciding(rz) {
+		// Said every time, because a server-side exit code is the thing most
+		// likely to be mistaken for the link's verdict by whatever script is
+		// reading it.
+		fmt.Printf("\nThis is the SERVER end. The client's result is the link's verdict;\n" +
+			"what is written here is a record of this end, not a second opinion.\n")
+	}
 	if ctx.Err() != nil {
 		return exitWith(exitError, fmt.Errorf("interrupted before every test reached a verdict"))
 	}
@@ -261,7 +311,25 @@ func lintPlan(p localrun.Plan) {
 
 func printPlan(p localrun.Plan) {
 	fmt.Printf("node: %s\n", p.Node)
-	fmt.Printf("failFast: %v   retryOnError: %d\n\n", p.FailFast, p.RetryOnErrorLimit)
+	fmt.Printf("failFast: %v   retryOnError: %d\n", p.FailFast, p.RetryOnErrorLimit)
+	if rz := p.Rendezvous; rz != nil {
+		// Printed before the tests, because it is the thing most worth checking
+		// before walking to the other machine.
+		fmt.Printf("role: %s", rz.Role)
+		if rz.PeerHost != "" {
+			fmt.Printf("   peer: %s", rz.PeerHost)
+		}
+		if rz.PeerNode != "" {
+			fmt.Printf("   peer node: %s", rz.PeerNode)
+		}
+		if deciding(rz) {
+			fmt.Printf("\n(this end decides the link's verdict)")
+		} else {
+			fmt.Printf("\n(the client end decides; this end writes a record)")
+		}
+		fmt.Println()
+	}
+	fmt.Println()
 	for i, t := range p.Tests {
 		spec, err := localrun.Translate(p, t)
 		image := spec.Image
@@ -305,13 +373,11 @@ func printSummary(rep localrun.Report) {
 //
 // The same shape `burnin report --results-dir` reads, so the two halves of the
 // CLI fit together without a format anyone has to remember.
-func writeResults(dir string, rep localrun.Report) error {
-	envDir := filepath.Join(dir, "envelopes")
-	rawDir := filepath.Join(dir, "raw")
-	for _, d := range []string{envDir, rawDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return err
-		}
+func writeResults(dir string, rep localrun.Report, rz *localrun.Rendezvous) error {
+	// raw/ always; the verdict directory only where a verdict is produced. An
+	// empty envelopes/ on a server end reads as a run that lost its results.
+	if err := os.MkdirAll(filepath.Join(dir, "raw"), 0o755); err != nil {
+		return err
 	}
 
 	runFile := map[string]any{
@@ -324,14 +390,39 @@ func writeResults(dir string, rep localrun.Report) error {
 		return err
 	}
 
+	// The SERVER end of a link writes a sidecar, not an envelope.
+	//
+	// Into its own directory, so `burnin report --results-dir <dir>/envelopes`
+	// cannot pick it up: a Pair verdict is about the LINK and there is exactly
+	// one of them. Two envelopes for one measurement would render as two
+	// results, and an engineer comparing them would be comparing a measurement
+	// against its own echo.
+	if !deciding(rz) {
+		rec := map[string]any{
+			"role":     rz.Role,
+			"node":     rep.Node,
+			"peerNode": rz.PeerNode,
+			"phase":    string(rep.Phase),
+			"note": "The server end of a link test. Not a verdict: the client's " +
+				"envelope is the measurement. Kept because a server that failed " +
+				"or never started explains a client result that otherwise looks " +
+				"like a fabric fault.",
+			"results": rep.Results,
+		}
+		return writeJSON(filepath.Join(dir, "sidecar", "server-record.json"), rec)
+	}
+
 	env, err := EnvelopeFor(rep)
 	if err != nil {
 		return err
 	}
-	return writeJSON(filepath.Join(envDir, "001-RunPhaseChanged.json"), env)
+	return writeJSON(filepath.Join(dir, "envelopes", "001-RunPhaseChanged.json"), env)
 }
 
 func writeJSON(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err

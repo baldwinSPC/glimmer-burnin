@@ -61,6 +61,62 @@ type Plan struct {
 	// RetryOnErrorLimit is how many times an Error may be retried, per test.
 	// Zero means no retries, which is the operator's default too.
 	RetryOnErrorLimit int32
+	// Rendezvous is set when this host is ONE END of a multi-host test. Nil for
+	// an ordinary single-machine run, and a Pair-scope test then runs with
+	// BURNIN_ROLE unset — which the runners already treat as "not applicable"
+	// and skip cleanly, rather than half-running a link test against nobody.
+	Rendezvous *Rendezvous
+}
+
+// Rendezvous is where the other end of a multi-host test is.
+//
+// In a cluster the operator supplies a Service DNS name because it has one; the
+// runners never needed it. Their control channel is their own: a server takes
+// conn.RemoteAddr() and never resolves anything, and a client dials whatever
+// address it is handed. So a bare-metal pair is the same protocol with a plain
+// IP substituted for the DNS name, which is why this is a few fields and not a
+// second rendezvous design.
+type Rendezvous struct {
+	// Role is "server" or "client". The CLIENT IS THE DECIDING SIDE, here as at
+	// Pair scope in the operator: it is where perftest and nccl-tests report.
+	Role string
+	// PeerHost is the address the client dials. Empty for a server, which
+	// learns its peer when the peer connects.
+	PeerHost string
+	// PeerNode is the peer's name FOR MESSAGES ONLY. Never for addressing —
+	// a node name is not a route, and treating it as one turns a naming
+	// mismatch into what reads as a fabric fault.
+	PeerNode string
+
+	// The Group variables. Plumbed through the same path even though multi-host
+	// Group orchestration is not wired up yet: the cost is these few lines, and
+	// it keeps ONE env contract across both dispatchers instead of two that
+	// drift until someone notices.
+	Rank     *int32
+	NRanks   int32
+	RootHost string
+	RootNode string
+}
+
+// Roles.
+const (
+	RoleServer = "server"
+	RoleClient = "client"
+)
+
+// pairNodes returns the nodes a link result names, in target order.
+//
+// Target order, not local-first: the operator emits [server, client] and a
+// result that reorders them by which host happened to render it would not
+// compare with the same link measured in a cluster.
+func (r *Rendezvous) pairNodes(local string) []string {
+	if r == nil || r.PeerNode == "" {
+		return []string{local}
+	}
+	if r.Role == RoleClient {
+		return []string{r.PeerNode, local}
+	}
+	return []string{local, r.PeerNode}
 }
 
 // PlannedTest is one test, with its spec pinned.
@@ -207,7 +263,7 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 	res := TestResult{
 		Name:            t.Name,
 		Kind:            string(t.Spec.Kind),
-		Nodes:           []string{p.Node},
+		Nodes:           NodesFor(p, t),
 		StartedAt:       now(),
 		RepeatsRequired: repeatCount(t.Spec),
 	}
@@ -511,4 +567,20 @@ func finalPhase(results []TestResult) api.RunPhase {
 	default:
 		return api.RunSkipped
 	}
+}
+
+// NodesFor attributes a result to the machines it is about.
+//
+// Exported because a dispatcher building a result outside this package must
+// attribute it the same way; there is one rule and it lives here.
+//
+// A Pair verdict is about the LINK, so its result names BOTH nodes — the same
+// single result the operator produces, never one per endpoint. Attributing a
+// point-to-point measurement to one machine sends an engineer to replace the
+// wrong part.
+func NodesFor(p Plan, t PlannedTest) []string {
+	if t.Spec.Scope == api.ScopePair && p.Rendezvous != nil {
+		return p.Rendezvous.pairNodes(p.Node)
+	}
+	return []string{p.Node}
 }

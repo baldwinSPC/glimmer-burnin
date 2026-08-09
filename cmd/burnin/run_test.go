@@ -48,7 +48,7 @@ func TestASuiteIsTheSameYAMLAClusterTakes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSuite: %v", err)
 	}
-	plan, _, err := s.buildPlan("", "n1", 0)
+	plan, _, err := s.buildPlan("", "n1", 0, nil)
 	if err != nil {
 		t.Fatalf("buildPlan: %v", err)
 	}
@@ -99,17 +99,17 @@ spec:
 		t.Fatalf("loadSuite: %v", err)
 	}
 
-	if _, _, err := s.buildPlan("", "n1", 0); err == nil {
+	if _, _, err := s.buildPlan("", "n1", 0, nil); err == nil {
 		t.Fatal("two profiles and no --profile was accepted")
 	} else if !strings.Contains(err.Error(), "--profile") {
 		t.Errorf("the error should say how to choose: %v", err)
 	}
 
 	// Naming one works, and the error for a wrong name lists what exists.
-	if _, _, err := s.buildPlan("soak", "n1", 0); err != nil {
+	if _, _, err := s.buildPlan("soak", "n1", 0, nil); err != nil {
 		t.Errorf("naming a profile should work: %v", err)
 	}
-	_, _, err = s.buildPlan("nope", "n1", 0)
+	_, _, err = s.buildPlan("nope", "n1", 0, nil)
 	if err == nil || !strings.Contains(err.Error(), "acceptance") {
 		t.Errorf("an unknown profile should list the ones that exist: %v", err)
 	}
@@ -129,7 +129,7 @@ spec:
 	if err != nil {
 		t.Fatalf("loadSuite: %v", err)
 	}
-	_, _, err = s.buildPlan("", "n1", 0)
+	_, _, err = s.buildPlan("", "n1", 0, nil)
 	if err == nil {
 		t.Fatal("a dangling testRef was accepted")
 	}
@@ -153,7 +153,7 @@ spec:
         scope: Pair
 `
 	s, _ := loadSuite([]string{writeSuite(t, body)})
-	_, warnings, err := s.buildPlan("", "n1", 0)
+	_, warnings, err := s.buildPlan("", "n1", 0, nil)
 	if err != nil {
 		t.Fatalf("buildPlan: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestTheTwoHalvesOfTheCLIFitTogether(t *testing.T) {
 	// reads. If that ever stops being true the CLI has two halves and no
 	// feature, so it is asserted rather than assumed.
 	dir := t.TempDir()
-	if err := writeResults(dir, sampleReport()); err != nil {
+	if err := writeResults(dir, sampleReport(), nil); err != nil {
 		t.Fatalf("writeResults: %v", err)
 	}
 
@@ -314,7 +314,7 @@ func TestTheTwoHalvesOfTheCLIFitTogether(t *testing.T) {
 
 func TestResultsDirectoryLayoutIsStable(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeResults(dir, sampleReport()); err != nil {
+	if err := writeResults(dir, sampleReport(), nil); err != nil {
 		t.Fatalf("writeResults: %v", err)
 	}
 	for _, want := range []string{"run.json", "envelopes", "raw"} {
