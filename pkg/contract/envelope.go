@@ -104,6 +104,12 @@ type TestResult struct {
 
 	// Artifacts are the non-metric evidence the runner returned, by reference.
 	Artifacts []ArtifactRef `json:"artifacts,omitempty"`
+
+	// VariantAxes are the matrix labels this execution came from — {precision:
+	// fp4}, {class: soak} — or empty for a test with no variants. A consumer
+	// groups a sweep's cells by these rather than by parsing test names, which
+	// stops working the moment a variant is called "fp8-dense".
+	VariantAxes map[string]string `json:"variantAxes,omitempty"`
 }
 
 // Violation is one threshold a test failed.

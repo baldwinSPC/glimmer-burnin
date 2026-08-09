@@ -454,6 +454,17 @@ type TestResult struct {
 	// reason to go and look at the node.
 	Artifacts []ArtifactRef `json:"artifacts,omitempty"`
 
+	// VariantAxes are the matrix labels this execution came from — {precision:
+	// fp4}, {class: soak} — or empty for a test with no variants.
+	//
+	// Echoed so a report can group a sweep's cells without parsing them back out
+	// of test names. Names are result identity and are stable, but they are
+	// STRINGS: recovering "which precision was this" by splitting on a hyphen
+	// works until a variant is called "fp8-dense", and then it works wrongly and
+	// silently.
+	// +optional
+	VariantAxes map[string]string `json:"variantAxes,omitempty"`
+
 	// RepeatsRequired is the resolved BurnInTestSpec.RepeatCount for this run:
 	// how many passing executions this test owes per node. Pinned onto the
 	// result so a verdict stays readable after the BurnInTest is edited.
@@ -561,6 +572,16 @@ type Violation struct {
 }
 
 const (
+	// ConditionPlanExpanded reports how much work the pinned plan actually is,
+	// when variants expanded it beyond the entries the profile lists.
+	//
+	// A profile with one gemm entry and four precision variants across eight
+	// nodes at maxConcurrentNodes 1 is thirty-two sequential executions. That
+	// arithmetic is not visible anywhere in the profile, and the usual way to
+	// discover it is to wait. It is a condition rather than an Event because an
+	// Event expires in an hour and a multi-day sweep does not.
+	ConditionPlanExpanded = "PlanExpanded"
+
 	// ConditionThresholdsSound reports what the threshold linter
 	// (verdict.ValidateThresholds) made of the gates this run is about to
 	// apply, evaluated once against the PINNED plan so it describes the
@@ -588,6 +609,9 @@ const (
 	// that, and the gate this project got most wrong was one it would have
 	// passed clean.
 	ReasonThresholdsReviewed = "Reviewed"
+	// ReasonVariantsExpanded is set when a profile entry became several
+	// executions.
+	ReasonVariantsExpanded = "VariantsExpanded"
 
 	// ReasonUnsoundThresholds means at least one gate evaluates but its verdict
 	// does not mean what its author appears to intend — an exact comparison on a

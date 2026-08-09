@@ -818,6 +818,346 @@ spec:
                     testRef:
                       description: TestRef names an existing BurnInTest.
                       type: string
+                    variants:
+                      description: |-
+                        Variants expands this entry into one execution per cell of a matrix.
+
+                        compute-smoke runs an NVFP4 GEMM. That is one cell of a matrix the API
+                        had no word for: the same kernel at FP8, BF16, TF32 and FP64 answers
+                        different questions about the same silicon, and asking all five meant
+                        authoring five BurnInTest objects differing by one environment variable,
+                        each with its own name, its own thresholds, and its own copy of every
+                        other field. The same shape recurs on every axis worth sweeping — message
+                        size for a fabric test, buffer size for a bandwidth test, duration class
+                        for a soak.
+
+                        Empty means one execution, exactly as before. A profile with no variants
+                        plans identically to one written before variants existed.
+                      items:
+                        description: |-
+                          TestVariant is one cell of a test's matrix.
+
+                          # Why a list and not a cartesian product
+
+                          A `matrix.axes` block that multiplied out was considered and rejected. It
+                          needs exclusion lists for the cells that make no sense, a cell-naming scheme,
+                          and per-cell thresholds anyway — at which point it has collapsed back into
+                          this list with extra machinery in front of it. Variants are the primitive;
+                          cartesian expansion can be layered on later as client-side sugar that emits
+                          them.
+
+                          # Why the controller never reads Axes
+
+                          Axes are OPAQUE labels. The controller injects them and echoes them and does
+                          not interpret them, ever. That is what keeps the vendor seam where it belongs:
+                          a precision, a message size or a duration class means something to a runner
+                          and nothing to a reconciler, and a controller that learned to branch on
+                          `precision: fp4` would be the `if nvidia {}` this project refuses, wearing a
+                          different hat.
+                        properties:
+                          args:
+                            items:
+                              type: string
+                            type: array
+                          axes:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Axes describe what varies, as opaque labels: {precision: fp4},
+                              {class: soak}, {messageBytes: "8"}.
+
+                              Each becomes BURNIN_VARIANT_<AXIS>=<value> in the runner's environment,
+                              upper-cased, and is echoed onto the TestResult and into the delivery
+                              envelope so a report can group a sweep's cells without parsing them back
+                              out of names.
+                            type: object
+                          durationSeconds:
+                            description: |-
+                              The overlays. Nil INHERITS the parent test's value; non-nil REPLACES it.
+
+                              Thresholds replace rather than merge, and that is the one that matters.
+                              An FP4 throughput floor is not an edited FP8 floor. Merging by metric name
+                              would silently retain a gate the author believed they had replaced — and a
+                              node failed against a threshold nobody can find in the profile is the
+                              worst kind of verdict this project can produce, because there is nothing
+                              to read that explains it.
+
+                              A variant that means to apply NO thresholds sets an empty (non-nil) list.
+                            format: int32
+                            type: integer
+                          env:
+                            items:
+                              description: EnvVar represents an environment variable
+                                present in a Container.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name of the environment variable.
+                                    May consist of any printable ASCII characters except '='.
+                                  type: string
+                                value:
+                                  description: |-
+                                    Variable references $(VAR_NAME) are expanded
+                                    using the previously defined environment variables in the container and
+                                    any service environment variables. If a variable cannot be resolved,
+                                    the reference in the input string will be unchanged. Double $$ are reduced
+                                    to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                                    "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                                    Escaped references will never be expanded, regardless of whether the variable
+                                    exists or not.
+                                    Defaults to "".
+                                  type: string
+                                valueFrom:
+                                  description: Source for the environment variable's
+                                    value. Cannot be used if value is not empty.
+                                  properties:
+                                    configMapKeyRef:
+                                      description: Selects a key of a ConfigMap.
+                                      properties:
+                                        key:
+                                          description: The key to select.
+                                          type: string
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                        optional:
+                                          description: Specify whether the ConfigMap
+                                            or its key must be defined
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    fieldRef:
+                                      description: |-
+                                        Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                        spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                                      properties:
+                                        apiVersion:
+                                          description: Version of the schema the FieldPath
+                                            is written in terms of, defaults to "v1".
+                                          type: string
+                                        fieldPath:
+                                          description: Path of the field to select
+                                            in the specified API version.
+                                          type: string
+                                      required:
+                                      - fieldPath
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    fileKeyRef:
+                                      description: |-
+                                        FileKeyRef selects a key of the env file.
+                                        Requires the EnvFiles feature gate to be enabled.
+                                      properties:
+                                        key:
+                                          description: |-
+                                            The key within the env file. An invalid key will prevent the pod from starting.
+                                            The keys defined within a source may consist of any printable ASCII characters except '='.
+                                            During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                          type: string
+                                        optional:
+                                          default: false
+                                          description: |-
+                                            Specify whether the file or its key must be defined. If the file or key
+                                            does not exist, then the env var is not published.
+                                            If optional is set to true and the specified key does not exist,
+                                            the environment variable will not be set in the Pod's containers.
+
+                                            If optional is set to false and the specified key does not exist,
+                                            an error will be returned during Pod creation.
+                                          type: boolean
+                                        path:
+                                          description: |-
+                                            The path within the volume from which to select the file.
+                                            Must be relative and may not contain the '..' path or start with '..'.
+                                          type: string
+                                        volumeName:
+                                          description: The name of the volume mount
+                                            containing the env file.
+                                          type: string
+                                      required:
+                                      - key
+                                      - path
+                                      - volumeName
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    resourceFieldRef:
+                                      description: |-
+                                        Selects a resource of the container: only resources limits and requests
+                                        (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                                      properties:
+                                        containerName:
+                                          description: 'Container name: required for
+                                            volumes, optional for env vars'
+                                          type: string
+                                        divisor:
+                                          anyOf:
+                                          - type: integer
+                                          - type: string
+                                          description: Specifies the output format
+                                            of the exposed resources, defaults to
+                                            "1"
+                                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                          x-kubernetes-int-or-string: true
+                                        resource:
+                                          description: 'Required: resource to select'
+                                          type: string
+                                      required:
+                                      - resource
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    secretKeyRef:
+                                      description: Selects a key of a secret in the
+                                        pod's namespace
+                                      properties:
+                                        key:
+                                          description: The key of the secret to select
+                                            from.  Must be a valid secret key.
+                                          type: string
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                        optional:
+                                          description: Specify whether the Secret
+                                            or its key must be defined
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                  type: object
+                              required:
+                              - name
+                              type: object
+                            type: array
+                          name:
+                            description: |-
+                              Name suffixes the parent test's name and is this variant's RESULT
+                              IDENTITY: the execution is planned as "<test>-<name>".
+
+                              Two variants of one test with the same name are refused at plan time by
+                              the same unique-name check that refuses two tests with the same name,
+                              because the failure is identical — the second would never run and its
+                              verdict would silently overwrite the first's.
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          repeatCount:
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          thresholds:
+                            items:
+                              description: |-
+                                Threshold gates a named metric emitted by the runner's result parser.
+
+                                A threshold naming a metric the runner did not emit is a FAILURE, never a
+                                pass: a missing measurement must not silently satisfy acceptance.
+
+                                Choosing the comparison matters as much as choosing the number — see
+                                Comparison. In short: dimensional metrics (a name ending in a unit suffix)
+                                take GreaterThanOrEqual/LessThanOrEqual; dimensionless counters take Equal or
+                                NotEqual, which are exact.
+                              properties:
+                                applicability:
+                                  default: Required
+                                  description: |-
+                                    Applicability decides what happens when the hardware cannot produce this
+                                    metric. Defaults to Required, which is today's fail-closed behaviour.
+                                  enum:
+                                  - Required
+                                  - RequiredIfMeasurable
+                                  type: string
+                                comparison:
+                                  description: |-
+                                    Comparison is the operator applied by a Threshold. Metric and value are both
+                                    parsed as float64 and compared with NO TOLERANCE — there is no epsilon
+                                    anywhere in this API, and that is what makes each operator right for exactly
+                                    one kind of metric.
+
+                                    GreaterThanOrEqual and LessThanOrEqual are how a MEASUREMENT is gated: a
+                                    floor, a ceiling, or the two together for a band. Anything with a unit —
+                                    bandwidth, temperature, latency, clocks, a percentage — belongs here.
+
+                                    Equal and NotEqual are EXACT, and they exist for DIMENSIONLESS COUNTERS:
+                                    eccErrors Equal 0, throttleEvents Equal 0, miscompares Equal 0. On a counter
+                                    exactness is the whole point, because a tolerance around zero ECC errors is a
+                                    tolerance for ECC errors.
+
+                                    DO NOT use Equal or NotEqual on a continuous measurement.
+                                    `sustainedClockPct Equal 83.22` asks an averaged sample to reproduce a decimal
+                                    string exactly; it will not, so the gate fails on every healthy node forever
+                                    and each failure is reported in the same shape as a hardware verdict. A metric
+                                    whose name ends in a unit suffix (Gbps, GBs, MBs, Us, Ms, S, C, W, Pct, MHz,
+                                    Tflops) is continuous by construction — gate it with GreaterThanOrEqual
+                                    and/or LessThanOrEqual instead. pkg/verdict.ValidateThresholds reports this
+                                    misuse at authoring time, before a run has condemned anything: the operator
+                                    runs it against the pinned plan at run start and records what it found on the
+                                    BurnInRun's ThresholdsSound condition.
+                                  enum:
+                                  - GreaterThanOrEqual
+                                  - LessThanOrEqual
+                                  - Equal
+                                  - NotEqual
+                                  type: string
+                                metric:
+                                  description: |-
+                                    Metric is the canonical metric name to gate, as the runner's result
+                                    parser emits it — e.g. "busBandwidthGBs", "eccErrors", "latencyUs".
+                                    Names are lowerCamelCase and a dimensional metric ends in a unit suffix;
+                                    a name that breaks that grammar is dropped during parsing, so a threshold
+                                    naming one can never be satisfied.
+
+                                    The pattern is the apiserver's half of that rule and it is deliberately
+                                    only the half a regex can express: lowerCamelCase, which is what
+                                    contract.ValidateMetricName checks first. The other half — that a name
+                                    this project OWNS declares the unit it is registered with — needs the
+                                    registry and is enforced at plan time, where a violation refuses the run
+                                    as a config Error rather than condemning a node.
+                                  pattern: ^[a-z][a-zA-Z0-9]*$
+                                  type: string
+                                value:
+                                  description: |-
+                                    Value is the number the metric is compared against, parsed as float64.
+                                    It must be finite: "NaN" and "Inf" parse as numbers but express no bound,
+                                    and NaN in particular compares false against everything, which would turn
+                                    NotEqual into a gate that always passes.
+
+                                    Under Equal/NotEqual the comparison is exact, so this should be a whole
+                                    number counted by a counter. Under GreaterThanOrEqual/LessThanOrEqual it
+                                    is a bound and any finite value is meaningful.
+
+                                    The pattern admits exactly the finite decimal forms ("20", "10.8", "-3",
+                                    "1e9") and refuses the ones that parse as float64 without expressing a
+                                    bound ("NaN", "Inf", "+Inf"), along with the ones that do not parse at all
+                                    ("twenty"). Every one of those is a gate that fails on every node forever
+                                    and reports it in the shape of a hardware verdict, so the apiserver is the
+                                    right place to say no — while the author is still holding the file.
+                                  pattern: ^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$
+                                  type: string
+                              required:
+                              - comparison
+                              - metric
+                              - value
+                              type: object
+                            type: array
+                        required:
+                        - name
+                        type: object
+                      type: array
                   type: object
                 minItems: 1
                 type: array

@@ -794,6 +794,19 @@ spec:
                       items:
                         type: string
                       type: array
+                    variantAxes:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        VariantAxes are the matrix labels this execution came from — {precision:
+                        fp4}, {class: soak} — or empty for a test with no variants.
+
+                        Echoed so a report can group a sweep's cells without parsing them back out
+                        of test names. Names are result identity and are stable, but they are
+                        STRINGS: recovering "which precision was this" by splitting on a hyphen
+                        works until a variant is called "fp8-dense", and then it works wrongly and
+                        silently.
+                      type: object
                     violations:
                       description: |-
                         Violations lists EVERY threshold the deciding attempt did not satisfy, in
