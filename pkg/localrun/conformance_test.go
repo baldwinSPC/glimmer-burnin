@@ -1,0 +1,464 @@
+package localrun
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+)
+
+// The conformance table.
+//
+// This file is the reason pkg/localrun is allowed to exist as a second
+// dispatcher. The promise of the design is that both reach the SAME verdict from
+// the SAME evidence; a divergence would surface as a node that passes on one
+// path and fails on the other, and nobody would know which to believe.
+//
+// Every row below names the controller code it mirrors, so a reviewer changing
+// one can find the other. The controller's own tests assert the same table
+// against internal/controller/burninrun_controller.go — completeAttempt for the
+// repeat/retry rules and attemptOutcome for the phase rules.
+//
+// Extracting a state machine both dispatchers consume is the right long-term
+// answer and is deliberately deferred. This is the cheap thing that catches the
+// drift today, and a cheap thing that runs beats an elegant thing that is
+// planned.
+
+// fakeRuntime replays scripted executions, so the engine can be exercised with
+// no container runtime present.
+type fakeRuntime struct {
+	steps []Execution
+	calls int
+	specs []RunSpec
+}
+
+func (f *fakeRuntime) Name() string { return "fake" }
+
+func (f *fakeRuntime) Run(_ context.Context, spec RunSpec) (Execution, error) {
+	f.specs = append(f.specs, spec)
+	if f.calls >= len(f.steps) {
+		return Execution{}, fmt.Errorf("fake runtime: unexpected call %d", f.calls+1)
+	}
+	e := f.steps[f.calls]
+	f.calls++
+	return e, nil
+}
+
+func exits(code int, stdout string) Execution {
+	return Execution{ExitCode: code, Stdout: stdout}
+}
+
+// testSpec builds a spec whose image resolves without touching the real table.
+func testSpec(thresholds ...api.Threshold) api.BurnInTestSpec {
+	return api.BurnInTestSpec{
+		Kind:       api.KindCustom,
+		Runner:     &api.RunnerSpec{Image: "example.invalid/runner:test"},
+		Thresholds: thresholds,
+	}
+}
+
+func plan(t PlannedTest, retries int32) Plan {
+	return Plan{Node: "n1", Tests: []PlannedTest{t}, RetryOnErrorLimit: retries}
+}
+
+func runOne(t *testing.T, p Plan, rt *fakeRuntime) TestResult {
+	t.Helper()
+	clock := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	rep, err := runWithClock(context.Background(), p, rt, Hooks{}, func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(rep.Results) != 1 {
+		t.Fatalf("got %d results, want 1", len(rep.Results))
+	}
+	return rep.Results[0]
+}
+
+// ─── The phase rules (mirrors attemptOutcome) ────────────────────────────────
+
+func TestConformance_ExitCodeToPhase(t *testing.T) {
+	// runner.VerdictFor: 0 pass, 1 fail, 2 skip, anything else Error.
+	// A skip additionally requires a declared marker; see the next test.
+	rows := []struct {
+		name string
+		exec Execution
+		want api.RunPhase
+		why  string
+	}{
+		{"exit 0 with no thresholds passes", exits(0, "tflops=101\n"), api.RunPassed,
+			"exit 0 is the runner saying it is content, and with no gates there is nothing to overturn it"},
+		{"exit 1 fails", exits(1, "MARKER_FAIL\n"), api.RunFailed,
+			"exit 1 is the runner's OWN assertion that the hardware failed, honoured with or without metrics"},
+		{"exit 2 with a marker skips", exits(2, "CUSTOM_SKIP not applicable\n"), api.RunSkipped,
+			"a declared skip is the runner saying the test does not apply to this part"},
+		{"exit 3 errors", exits(3, "something broke\n"), api.RunError,
+			"anything outside 0/1/2 is machinery, not a hardware verdict"},
+		{"exit 137 errors", exits(137, ""), api.RunError,
+			"an OOM kill is not a hardware verdict"},
+	}
+
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+				&fakeRuntime{steps: []Execution{r.exec}})
+			if got.Phase != r.want {
+				t.Errorf("phase = %s, want %s — %s", got.Phase, r.want, r.why)
+			}
+		})
+	}
+}
+
+func TestConformance_AnUndeclaredSkipIsAnError(t *testing.T) {
+	// pkg/runner sets UndeclaredSkip when a runner exits 2 without printing a
+	// marker. A Go panic exits 2 and prints a stack trace, which is byte-for-byte
+	// the shape of a legitimate skip — whose normal form is no metrics at all.
+	//
+	// Mirrors: attemptOutcome's default arm plus explainUndeclaredSkip.
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+		&fakeRuntime{steps: []Execution{exits(2, "panic: nil map\n/src/main.go:132 +0x1d\n")}})
+
+	if got.Phase != api.RunError {
+		t.Fatalf("phase = %s, want Error — exit 2 with no declaration is a crash, not a skip", got.Phase)
+	}
+	if !strings.Contains(got.Message, "UNJUDGED") {
+		t.Errorf("the message must say the hardware is unjudged rather than out of scope: %q", got.Message)
+	}
+}
+
+func TestConformance_AnEmptyHarvestWithThresholdsIsAnError(t *testing.T) {
+	// Exit 0, no key=value line, and gates to clear. Handing an empty map to
+	// fail-closed evaluation would manufacture a hardware verdict out of an
+	// absence — an evicted or SIGTERMed runner lands exactly here.
+	//
+	// Mirrors: attemptOutcome's ReportedNothing() branch.
+	th := api.Threshold{Metric: "tflops", Comparison: api.GTE, Value: "100"}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+		&fakeRuntime{steps: []Execution{exits(0, "")}})
+
+	if got.Phase != api.RunError {
+		t.Fatalf("phase = %s, want Error", got.Phase)
+	}
+	if got.Phase == api.RunFailed {
+		t.Fatal("an unmeasured node was condemned — fail-closed was applied to an absence")
+	}
+}
+
+func TestConformance_SomeMetricsButAGatedOneMissingStillFails(t *testing.T) {
+	// The empty-harvest rule must NOT be widened. A runner that looked at the
+	// hardware and omitted a measurement it owed is exactly the silence that
+	// must never satisfy acceptance.
+	//
+	// Mirrors: the "THIS DOES NOT RELAX FAIL-CLOSED" comment in attemptOutcome.
+	th := api.Threshold{Metric: "eccErrors", Comparison: api.EQ, Value: "0"}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+		&fakeRuntime{steps: []Execution{exits(0, "tflops=101\n")}})
+
+	if got.Phase != api.RunFailed {
+		t.Fatalf("phase = %s, want Failed — a gated metric the runner did not emit must fail closed", got.Phase)
+	}
+}
+
+func TestConformance_ASkipIsNotSubjectToTheEmptyHarvestRule(t *testing.T) {
+	// Zero metrics is the NORMAL shape of a skip, and no threshold is evaluated
+	// on that path. Applying the empty-harvest rule here would turn every clean
+	// skip into a retried Error.
+	//
+	// Mirrors: attemptOutcome's VerdictSkip arm.
+	th := api.Threshold{Metric: "tflops", Comparison: api.GTE, Value: "100"}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+		&fakeRuntime{steps: []Execution{exits(2, "CUSTOM_SKIP no accelerator visible\n")}})
+
+	if got.Phase != api.RunSkipped {
+		t.Fatalf("phase = %s, want Skipped", got.Phase)
+	}
+}
+
+func TestConformance_AFailKeepsTheRunnersOwnMessage(t *testing.T) {
+	// The runner's words are kept, not replaced. At Node scope that is one
+	// line; the same code path at Pair or Group carries the clause saying the
+	// verdict is about the LINK rather than any one node.
+	//
+	// Mirrors: "THE RUNNER'S OWN MESSAGE IS KEPT" in attemptOutcome.
+	th := api.Threshold{Metric: "tflops", Comparison: api.GTE, Value: "100"}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+		&fakeRuntime{steps: []Execution{exits(0, "tflops=50\nthermal throttling detected\n")}})
+
+	if got.Phase != api.RunFailed {
+		t.Fatalf("phase = %s, want Failed", got.Phase)
+	}
+	if !strings.Contains(got.Message, "thermal throttling detected") {
+		t.Errorf("the runner's own message was dropped: %q", got.Message)
+	}
+	if len(got.Violations) == 0 {
+		t.Error("no violations recorded — the cause of the failure is the decision-relevant part")
+	}
+}
+
+func TestConformance_UnmeasurableIsRecordedOnEveryPhase(t *testing.T) {
+	// "This part cannot produce this measurement" is a claim about the HARDWARE
+	// and is true of a passing run as much as a failing one.
+	//
+	// Mirrors: the loop above the switch in attemptOutcome.
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+		&fakeRuntime{steps: []Execution{exits(0, "eccErrors=n/a\ntflops=101\n")}})
+
+	if got.Phase != api.RunPassed {
+		t.Fatalf("phase = %s, want Passed", got.Phase)
+	}
+	if len(got.Unmeasurable) != 1 || got.Unmeasurable[0] != "eccErrors" {
+		t.Errorf("unmeasurable = %v, want it recorded on a passing run too", got.Unmeasurable)
+	}
+}
+
+// ─── The repeat and retry rules (mirrors completeAttempt) ────────────────────
+
+func TestConformance_OnlyErrorIsRetried(t *testing.T) {
+	// The rule with teeth. retryOnErrorLimit re-runs an Error and nothing else:
+	// a Fail settles where it happened with the budget UNSPENT, because
+	// re-running a measurement until it comes out clean launders a hardware
+	// fault into an acceptance.
+	//
+	// Mirrors: completeAttempt's switch — the RunFailed arm settles, and only
+	// the default (Error) arm consults retryOnErrorLimit.
+	rows := []struct {
+		name      string
+		first     Execution
+		wantCalls int
+		wantPhase api.RunPhase
+		why       string
+	}{
+		{"an Error is retried", exits(3, "broke"), 2, api.RunPassed,
+			"an errored attempt measured nothing, so running it again is not laundering anything"},
+		{"a Fail is NOT retried", exits(1, "MARKER_FAIL"), 1, api.RunFailed,
+			"re-running a measurement until it comes out clean launders a hardware fault into an acceptance"},
+		{"a Skip is NOT retried", exits(2, "CUSTOM_SKIP"), 1, api.RunSkipped,
+			"retrying will not make an inapplicable test start applying"},
+	}
+
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			rt := &fakeRuntime{steps: []Execution{r.first, exits(0, "ok=1\n")}}
+			got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 3), rt)
+
+			if rt.calls != r.wantCalls {
+				t.Errorf("ran %d attempt(s), want %d — %s", rt.calls, r.wantCalls, r.why)
+			}
+			if got.Phase != r.wantPhase {
+				t.Errorf("phase = %s, want %s", got.Phase, r.wantPhase)
+			}
+		})
+	}
+}
+
+func TestConformance_AnErroredAttemptDoesNotConsumeARepeat(t *testing.T) {
+	// RepeatsCompleted is deliberately untouched on the Error path: an attempt
+	// that measured nothing owes its repeat again.
+	//
+	// Mirrors: "RepeatsCompleted is deliberately untouched here" in completeAttempt.
+	three := int32(3)
+	spec := testSpec()
+	spec.RepeatCount = &three
+
+	rt := &fakeRuntime{steps: []Execution{
+		exits(0, "ok=1\n"), // repeat 1
+		exits(3, "broke"),  // error, retried, no repeat consumed
+		exits(0, "ok=1\n"), // repeat 2
+		exits(0, "ok=1\n"), // repeat 3
+	}}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: spec, Required: true}, 1), rt)
+
+	if got.Phase != api.RunPassed {
+		t.Fatalf("phase = %s, want Passed", got.Phase)
+	}
+	if got.RepeatsCompleted != 3 {
+		t.Errorf("RepeatsCompleted = %d, want 3 — the errored attempt must not have counted", got.RepeatsCompleted)
+	}
+	if got.ErrorRetries != 1 {
+		t.Errorf("ErrorRetries = %d, want 1", got.ErrorRetries)
+	}
+	if rt.calls != 4 {
+		t.Errorf("ran %d attempts, want 4", rt.calls)
+	}
+}
+
+func TestConformance_RepeatsAreANDNotOR(t *testing.T) {
+	// Every repeat must pass. One failure settles the test, however many
+	// passes preceded it.
+	//
+	// Mirrors: completeAttempt's RunPassed arm requiring
+	// RepeatsCompleted >= RepeatsRequired before settling.
+	three := int32(3)
+	spec := testSpec()
+	spec.RepeatCount = &three
+
+	rt := &fakeRuntime{steps: []Execution{
+		exits(0, "ok=1\n"),
+		exits(1, "MARKER_FAIL second time"),
+		exits(0, "ok=1\n"), // must never run
+	}}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0), rt)
+
+	if got.Phase != api.RunFailed {
+		t.Fatalf("phase = %s, want Failed — repeats are AND", got.Phase)
+	}
+	if rt.calls != 2 {
+		t.Errorf("ran %d attempts, want 2 — the run should stop at the failure", rt.calls)
+	}
+}
+
+func TestConformance_TheRetryBudgetIsPerTestAndDoesNotReset(t *testing.T) {
+	// Mirrors: ErrorRetries lives on the TestResult and is only ever
+	// incremented.
+	rt := &fakeRuntime{steps: []Execution{
+		exits(3, "broke"), exits(3, "broke"), exits(3, "broke"),
+	}}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 2), rt)
+
+	if got.Phase != api.RunError {
+		t.Fatalf("phase = %s, want Error once the budget is spent", got.Phase)
+	}
+	if rt.calls != 3 {
+		t.Errorf("ran %d attempts, want 3 (initial + 2 retries)", rt.calls)
+	}
+	if got.ErrorRetries != 2 {
+		t.Errorf("ErrorRetries = %d, want 2", got.ErrorRetries)
+	}
+}
+
+func TestConformance_ARetryThatPassesClearsItsPredecessorsEvidence(t *testing.T) {
+	// Violations, NotEvaluated and Unmeasurable are assigned unconditionally on
+	// settle, from the SAME attempt as Metrics, so a retry that passes cannot
+	// keep the gates its predecessor missed.
+	//
+	// Mirrors: the settle closure in completeAttempt.
+	th := api.Threshold{Metric: "tflops", Comparison: api.GTE, Value: "100"}
+	rt := &fakeRuntime{steps: []Execution{
+		exits(3, "broke"),        // Error, retried
+		exits(0, "tflops=101\n"), // passes cleanly
+	}}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 1), rt)
+
+	if got.Phase != api.RunPassed {
+		t.Fatalf("phase = %s, want Passed", got.Phase)
+	}
+	if len(got.Violations) != 0 {
+		t.Errorf("a passing retry kept violations from an earlier attempt: %+v", got.Violations)
+	}
+	if got.Metrics["tflops"] != "101" {
+		t.Errorf("metrics are not from the deciding attempt: %v", got.Metrics)
+	}
+}
+
+func TestConformance_TriggersRecordWhyEachAttemptHappened(t *testing.T) {
+	// So the retry rule is auditable from a stored result long after the run.
+	//
+	// Mirrors: triggerFor in the controller.
+	rt := &fakeRuntime{steps: []Execution{exits(3, "broke"), exits(0, "ok=1\n")}}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 1), rt)
+
+	if len(got.Attempts) != 2 {
+		t.Fatalf("got %d attempts, want 2", len(got.Attempts))
+	}
+	if got.Attempts[0].Trigger != api.AttemptInitial {
+		t.Errorf("first attempt trigger = %s, want Initial", got.Attempts[0].Trigger)
+	}
+	if got.Attempts[1].Trigger != api.AttemptErrorRetry {
+		t.Errorf("second attempt trigger = %s, want ErrorRetry", got.Attempts[1].Trigger)
+	}
+}
+
+// ─── Run-level rules ─────────────────────────────────────────────────────────
+
+func TestConformance_FailFastStopsAndDoesNotInventPhases(t *testing.T) {
+	// A test that did not execute has no verdict. Recording it as Skipped would
+	// claim something about hardware nobody looked at.
+	rt := &fakeRuntime{steps: []Execution{exits(1, "MARKER_FAIL")}}
+	p := Plan{
+		Node:     "n1",
+		FailFast: true,
+		Tests: []PlannedTest{
+			{Name: "first", Spec: testSpec(), Required: true},
+			{Name: "second", Spec: testSpec(), Required: true},
+		},
+	}
+	clock := time.Now()
+	rep, err := runWithClock(context.Background(), p, rt, Hooks{}, func() time.Time { return clock })
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(rep.Results) != 1 {
+		t.Fatalf("got %d results, want only the test that ran", len(rep.Results))
+	}
+	if rt.calls != 1 {
+		t.Errorf("ran %d containers, want 1", rt.calls)
+	}
+}
+
+func TestConformance_TheRunPhasePrefersFailedThenError(t *testing.T) {
+	// Failed outranks Error, which outranks Passed. Skips count toward neither:
+	// a run whose tests all skipped judged nothing, and calling that Passed
+	// would certify hardware the suite never measured.
+	//
+	// Mirrors: the controller's finalize precedence.
+	rows := []struct {
+		name    string
+		results []TestResult
+		want    api.RunPhase
+	}{
+		{"a failure decides", []TestResult{{Phase: api.RunPassed}, {Phase: api.RunError}, {Phase: api.RunFailed}}, api.RunFailed},
+		{"an error outranks a pass", []TestResult{{Phase: api.RunPassed}, {Phase: api.RunError}}, api.RunError},
+		{"all passed", []TestResult{{Phase: api.RunPassed}}, api.RunPassed},
+		{"all skipped is not a pass", []TestResult{{Phase: api.RunSkipped}, {Phase: api.RunSkipped}}, api.RunSkipped},
+	}
+	for _, r := range rows {
+		if got := finalPhase(r.results); got != r.want {
+			t.Errorf("%s: finalPhase = %s, want %s", r.name, got, r.want)
+		}
+	}
+}
+
+func TestConformance_AnUnresolvableImageIsAConfigurationError(t *testing.T) {
+	// The same phase the operator gives a kind with no default image: a
+	// configuration fault, not a hardware verdict.
+	spec := api.BurnInTestSpec{Kind: api.TestKind("nobody-registered-this")}
+	got := runOne(t, plan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0), &fakeRuntime{})
+
+	if got.Phase != api.RunError {
+		t.Fatalf("phase = %s, want Error", got.Phase)
+	}
+	if !strings.Contains(got.Message, "spec.runner.image") {
+		t.Errorf("the message should say what to set: %q", got.Message)
+	}
+}
+
+func TestHooksFireInOrder(t *testing.T) {
+	// OnTestComplete is what lets an embedding agent publish results as they
+	// happen rather than accumulating them, which is what keeps a long profile
+	// inside a dispatch ceiling.
+	var events []string
+	rt := &fakeRuntime{steps: []Execution{exits(0, "ok=1\n"), exits(0, "ok=1\n")}}
+	p := Plan{Node: "n1", Tests: []PlannedTest{
+		{Name: "a", Spec: testSpec(), Required: true},
+		{Name: "b", Spec: testSpec(), Required: true},
+	}}
+	clock := time.Now()
+	_, err := runWithClock(context.Background(), p, rt, Hooks{
+		OnTestStart:    func(name string) { events = append(events, "start:"+name) },
+		OnTestComplete: func(r TestResult) { events = append(events, "done:"+r.Name+"="+string(r.Phase)) },
+	}, func() time.Time { return clock })
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []string{"start:a", "done:a=Passed", "start:b", "done:b=Passed"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Errorf("hook order = %v, want %v", events, want)
+	}
+}
