@@ -1003,7 +1003,7 @@ func (r *BurnInRunReconciler) advance(
 	// After completeAttempt, which is what guarantees the result exists — and
 	// before the pod is deleted, because a container's log is the only copy of
 	// its stdout and the kubelet reclaims it with the pod.
-	r.harvestArtifacts(ctx, run, t.Name, pod.Name, parsed.Artifacts)
+	r.harvestArtifacts(ctx, run, t.Name, nodes, pod.Name, parsed.Artifacts)
 	return advanceHarvested, advanceEffect{dirty: true}, nil
 }
 

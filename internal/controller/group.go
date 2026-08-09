@@ -458,7 +458,7 @@ func (r *BurnInRunReconciler) harvestGroup(
 	// most needs when the collective hung.
 	for _, m := range harvested.members {
 		if m.result != nil {
-			r.harvestArtifacts(ctx, run, t.Name, m.pod, m.result.Artifacts)
+			r.harvestArtifacts(ctx, run, t.Name, nodes, m.pod, m.result.Artifacts)
 		}
 	}
 	return advanceHarvested, advanceEffect{dirty: true}, nil

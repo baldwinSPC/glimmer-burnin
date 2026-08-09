@@ -359,11 +359,33 @@ func (r *BurnInRunReconciler) harvestArtifacts(
 	ctx context.Context,
 	run *burninv1alpha1.BurnInRun,
 	testName string,
+	// nodes is the EXECUTION UNIT's node set — one node at Node scope, both ends
+	// of a Pair, every rank of a Group.
+	//
+	// It has to be threaded through, and the reason is issue #231. This used
+	// resultFor(run, testName, ""), and the empty-node form of resultFor returns
+	// the FIRST result whose name matches — a form its own doc says exists for
+	// node-LESS results (an unsupported scope, a resolution error). At Node scope
+	// every target's result shares the test name, so all N resolved to
+	// Results[0]: one node's verdict accumulated everybody's evidence and the
+	// rest reported none.
+	//
+	// The payloads were stored correctly throughout, since artifactKey embeds the
+	// pod name. Only the attribution was wrong, which is the worse failure —
+	// evidence that LOOKS present against the wrong hardware sends an engineer to
+	// the wrong rack, and is not recoverable from the delivered envelope.
+	nodes []string,
 	podName string,
 	artifacts []runner.Artifact,
 ) {
 	if len(artifacts) == 0 || podName == "" {
 		return
 	}
-	recordArtifacts(resultFor(run, testName, ""), r.storeArtifacts(ctx, run, testName, podName, artifacts))
+	// The empty-node lookup is kept for exactly the case it was written for: a
+	// result that belongs to no node at all.
+	node := ""
+	if len(nodes) > 0 {
+		node = nodes[0]
+	}
+	recordArtifacts(resultFor(run, testName, node), r.storeArtifacts(ctx, run, testName, podName, artifacts))
 }

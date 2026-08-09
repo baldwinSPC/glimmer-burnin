@@ -346,3 +346,79 @@ var errQuota = &quotaError{}
 type quotaError struct{}
 
 func (*quotaError) Error() string { return "exceeded quota: object-counts" }
+
+// Each node's evidence lands on ITS OWN result — issue #231.
+//
+// harvestArtifacts looked the result up with resultFor(run, testName, ""), and
+// the empty-node form of resultFor returns the FIRST result whose name matches —
+// a form its own doc says exists for node-LESS results (an unsupported scope, a
+// resolution error). At Node scope every target's result shares the test name,
+// so all N resolved to Results[0].
+//
+// The payloads were stored correctly the whole time; artifactKey embeds the pod
+// name. Only the attribution was wrong, which is the worse failure: an engineer
+// reading node B's verdict saw "this test produced no evidence" while node B's
+// dcgmi JSON sat in the run's ConfigMap under a key nothing pointed at — and
+// node A's verdict carried evidence about hardware it does not describe.
+//
+// Every existing test in this file used a SINGLE-node run and read Results[0],
+// so all of them passed with the bug present and would pass identically with it
+// fixed. That is why this one asserts per node.
+func TestEachNodesEvidenceLandsOnItsOwnResult(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a", "spark-b"),
+	)
+	// Both nodes at once, so the two harvests happen in one run.
+	run := h.run("run1")
+	run.Spec.MaxConcurrentNodes = int32p(2)
+	if err := h.c.Update(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+
+	h.reconcile("run1")
+	h.reconcile("run1")
+	pods := h.pods("run1")
+	if len(pods) != 2 {
+		t.Fatalf("expected a pod per node, got %d", len(pods))
+	}
+	for node, pod := range pods {
+		h.startPod(pod)
+		h.finishPod(pod, 0, "nonfiniteCount=0\n"+
+			artifactStdout("dcgmi.json", "application/json",
+				`{"node":"`+node+`"}`)+"DONE\n", "")
+	}
+	h.reconcileUntilSettled("run1")
+
+	byNode := map[string]burninv1alpha1.TestResult{}
+	for _, res := range h.run("run1").Status.Results {
+		if len(res.Nodes) == 1 {
+			byNode[res.Nodes[0]] = res
+		}
+	}
+	if len(byNode) != 2 {
+		t.Fatalf("expected one result per node, got %d: %+v", len(byNode), byNode)
+	}
+
+	for _, node := range []string{"spark-a", "spark-b"} {
+		res := byNode[node]
+		if len(res.Artifacts) != 1 {
+			t.Errorf("%s's result carries %d artifact refs, want exactly 1. Its evidence "+
+				"is in the run's ConfigMap either way — but a ref on the wrong result "+
+				"tells an engineer the wrong node produced it, and tells this node's "+
+				"reader there was none.", node, len(res.Artifacts))
+			continue
+		}
+		// And the ref must point at THIS node's payload, not merely be present.
+		cm := h.artifactConfigMap("run1")
+		if cm == nil {
+			t.Fatal("no artifact ConfigMap")
+		}
+		if got := cm.Data[res.Artifacts[0].Key]; !strings.Contains(got, `"`+node+`"`) {
+			t.Errorf("%s's ref points at %q, whose payload is %q — the evidence is "+
+				"attributed to the wrong node", node, res.Artifacts[0].Key, got)
+		}
+	}
+}
