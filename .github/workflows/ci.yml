@@ -177,6 +177,12 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
+      - name: Helm chart lints and renders
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm lint deploy/charts/glimmer-burnin
+          helm template burnin deploy/charts/glimmer-burnin --namespace glimmer-burnin-system >/dev/null
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:

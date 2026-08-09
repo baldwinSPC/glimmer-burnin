@@ -51,6 +51,34 @@ test:
 # `go test ./...`. CI sets BURNIN_ENVTEST=required, which turns that skip into a
 # hard failure — a suite that silently skips in CI has negative value.
 
+.PHONY: deploy
+deploy: manifests ## Deploy the operator into the current kubectl context, from config/.
+	kubectl apply -f config/crd
+	kubectl apply -f config/rbac
+	kubectl apply -f config/manager
+
+.PHONY: undeploy
+undeploy: ## Remove the operator. CRDs are left ALONE: deleting them deletes every
+	## BurnInRun in the cluster, and a verdict is worth more than a tidy uninstall.
+	kubectl delete -f config/manager --ignore-not-found
+	kubectl delete -f config/rbac --ignore-not-found
+
+.PHONY: helm-lint
+helm-lint: ## Lint and render the chart.
+	helm lint deploy/charts/glimmer-burnin
+	helm template burnin deploy/charts/glimmer-burnin --namespace glimmer-burnin-system >/dev/null
+# There must be exactly ONE chart. A stray copy — deploy/deploy/charts, say —
+# lints clean, because linting names the good path and never looks elsewhere, so
+# nothing would report it. What it does instead is rot: a fix lands in one copy,
+# somebody installs the other, and the difference surfaces as an operator that
+# behaves unlike its manifests.
+	@found=$$(find deploy -name Chart.yaml | wc -l | tr -d ' '); \
+	if [ "$$found" != "1" ]; then \
+		echo "expected exactly one Chart.yaml under deploy/, found $$found:"; \
+		find deploy -name Chart.yaml; \
+		exit 1; \
+	fi
+
 .PHONY: licenses
 licenses: ## Enforce the licence policy over the whole Go module graph.
 	go run ./hack/licensecheck

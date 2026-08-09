@@ -196,6 +196,23 @@ The GPU axis is per runner and is documented in each runner's README:
 > published tags are immutable, so it stays that way. Multi-arch starts at the
 > next tag.
 
+## Install
+
+```sh
+helm install burnin oci://ghcr.io/baldwinspc/charts/glimmer-burnin \
+  --namespace glimmer-burnin-system --create-namespace
+```
+
+Or without Helm, from a clone:
+
+```sh
+make deploy
+```
+
+Chart values, the CRD-upgrade caveat and the two things to know before pointing
+this at hardware are in
+[`deploy/charts/glimmer-burnin/README.md`](deploy/charts/glimmer-burnin/README.md).
+
 ## Quick start
 
 ```sh
