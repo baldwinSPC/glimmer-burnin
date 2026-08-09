@@ -17,6 +17,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
@@ -31,6 +32,8 @@ USAGE
   burnin <command> [flags]
 
 COMMANDS
+  plan       resolve a suite and print what would run
+  run        execute a profile on this machine
   report     render a run's results as a document
   version    print the version
 
@@ -45,6 +48,12 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "run":
+		err = runRun(os.Args[2:])
+	case "plan":
+		// A dry run under its own name, because "show me what this would do" is
+		// a question people ask before they trust a tool with their hardware.
+		err = runRun(append([]string{"--dry-run"}, os.Args[2:]...))
 	case "report":
 		err = runReport(os.Args[2:])
 	case "version", "--version", "-v":
@@ -57,6 +66,16 @@ func main() {
 	}
 
 	if err != nil {
+		// A run reports its verdict through the exit code, and those codes are
+		// load-bearing: a CI job has to be able to tell a hardware failure from
+		// a run that never happened.
+		var ex *exitErr
+		if errors.As(err, &ex) {
+			if msg := ex.Error(); msg != "" {
+				fmt.Fprintln(os.Stderr, "burnin:", msg)
+			}
+			os.Exit(ex.code)
+		}
 		fmt.Fprintln(os.Stderr, "burnin:", err)
 		os.Exit(1)
 	}
