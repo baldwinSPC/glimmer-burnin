@@ -305,7 +305,7 @@ func (r *BurnInRunReconciler) gateClientOnServer(
 			logErr, &t.Spec,
 		)
 		r.completeAttempt(ctx, run, p, t, nodes, attempt, serverPod.Name, serverPod, combined)
-		r.harvestArtifacts(ctx, run, t.Name, serverPod.Name, parsed.Artifacts)
+		r.harvestArtifacts(ctx, run, t.Name, nodes, serverPod.Name, parsed.Artifacts)
 		return advanceHarvested, advanceEffect{dirty: true}, nil
 	}
 
@@ -431,9 +431,9 @@ func (r *BurnInRunReconciler) harvestPair(
 	// BOTH ends. A pair is one verdict about a link, but the two pods are two
 	// separate stdouts, and evidence from the server end is exactly what
 	// explains a client-side "connection refused".
-	r.harvestArtifacts(ctx, run, t.Name, clientPod.Name, clientParsed.Artifacts)
+	r.harvestArtifacts(ctx, run, t.Name, nodes, clientPod.Name, clientParsed.Artifacts)
 	if server.result != nil {
-		r.harvestArtifacts(ctx, run, t.Name, serverPod.Name, server.result.Artifacts)
+		r.harvestArtifacts(ctx, run, t.Name, nodes, serverPod.Name, server.result.Artifacts)
 	}
 	return advanceHarvested, advanceEffect{dirty: true}, nil
 }
