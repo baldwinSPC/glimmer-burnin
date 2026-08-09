@@ -1,0 +1,92 @@
+# One test, many cells: sweeping an axis without authoring the test five times.
+#
+# ─── WHAT THIS IS FOR ─────────────────────────────────────────────────────────
+#
+# compute-smoke runs an NVFP4 GEMM. That is ONE cell of a matrix. The same
+# kernel at FP8, BF16, TF32 and FP64 answers different questions about the same
+# silicon — a part that passes FP4 and fails FP64 has a different fault than one
+# that fails both — and before variants the only way to ask all five was to
+# author five BurnInTest objects differing by one environment variable, each with
+# its own name, its own thresholds, and its own copy of every other field.
+#
+# ─── HOW IT EXPANDS ───────────────────────────────────────────────────────────
+#
+# Each variant becomes an ordinary execution named "<test>-<variant>", planned
+# and reported exactly like a test somebody wrote out by hand. Nothing after
+# expansion knows variants exist, which is why a sweep behaves identically to a
+# hand-written suite: same result identity, same verdict rules, same delivery.
+#
+# THE ARITHMETIC IS NOT VISIBLE HERE, so the operator states it. Four variants
+# across eight nodes is thirty-two node-executions, and at maxConcurrentNodes 1
+# they are sequential. The run's PlanExpanded condition says so at start rather
+# than leaving it to be discovered by waiting.
+#
+# ─── THRESHOLDS REPLACE, THEY DO NOT MERGE ────────────────────────────────────
+#
+# An FP4 throughput floor is not an edited FP8 floor — they are different numbers
+# about different hardware paths. A variant that sets `thresholds` REPLACES the
+# parent's list entirely. Merging by metric name would silently retain a gate the
+# author believed they had replaced, and a node failed against a threshold nobody
+# can find in the profile has a verdict with nothing to read that explains it.
+#
+#   thresholds: omitted   → inherit the parent's
+#   thresholds: []        → apply NONE (a legitimate thing for an explore cell)
+#   thresholds: [ ... ]   → these, and only these
+#
+# ─── THE AXES MEAN NOTHING TO THE OPERATOR ────────────────────────────────────
+#
+# `axes` are opaque labels. Each becomes BURNIN_VARIANT_<AXIS> in the runner's
+# environment, and is echoed onto the result and into the delivery envelope so a
+# report can group a sweep's cells. The controller never branches on them:
+# interpreting a precision is the runner's job, and a reconciler that learned to
+# read `precision: fp4` would be the vendor branch this project refuses, wearing
+# a different hat.
+#
+# ─── THIS SAMPLE IS THRESHOLDLESS ON PURPOSE ──────────────────────────────────
+#
+# No measured baselines exist yet for these precisions on any SKU in the fleet,
+# and this repository has already been bitten once by a threshold derived from a
+# spec sheet rather than from hardware. Gather numbers with a baseline run first
+# (spec.baseline on the BurnInRun), then pin the floors.
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: gemm-precision-sweep
+spec:
+  failFast: false
+  tests:
+    - testRef: fp4-compute-smoke
+      variants:
+        # Each cell names itself. The name is result identity, so it is what a
+        # verdict, a delivery key and a report all key off — two variants of one
+        # test may not share one, and the run refuses at plan time if they do.
+        - name: fp4
+          axes: {precision: fp4}
+        - name: fp8
+          axes: {precision: fp8}
+        - name: bf16
+          axes: {precision: bf16}
+        - name: fp64
+          axes: {precision: fp64}
+          # FP64 on a consumer-class part is a fraction of the FP32 rate, so
+          # this cell is given longer. An overlay REPLACES the parent's value;
+          # every other field is inherited.
+          durationSeconds: 300
+
+    # An axis does not have to be a precision. Anything a runner reads is fair
+    # game — message size for a fabric test, buffer size for a bandwidth test,
+    # a duration class for a soak.
+    #
+    # Duration classes are a convention rather than an API enum, matching the
+    # open-world precedent TestKind already sets: the axis carries the name and
+    # the overlay carries the number.
+    - testRef: thermal-soak
+      required: false
+      variants:
+        - name: smoke
+          axes: {class: smoke}
+          durationSeconds: 60
+        - name: standard
+          axes: {class: standard}
+          durationSeconds: 1800

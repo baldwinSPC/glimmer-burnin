@@ -236,7 +236,7 @@ func (r *BurnInRunReconciler) startPair(
 		return advancePending, none, err
 	}
 
-	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, serverNode, run.Spec.Target, &rendezvous{
+	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, serverNode, run.Spec.Target, &rendezvous{
 		scope:    burninv1alpha1.ScopePair,
 		role:     pairRoleServer,
 		service:  svc.Name,
@@ -342,7 +342,7 @@ func (r *BurnInRunReconciler) gateClientOnServer(
 		return advancePending, advanceEffect{dirty: opened}, nil
 	}
 
-	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, clientNode, run.Spec.Target, &rendezvous{
+	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, clientNode, run.Spec.Target, &rendezvous{
 		scope:    burninv1alpha1.ScopePair,
 		role:     pairRoleClient,
 		service:  rendezvousServiceName(run, index, attempt),

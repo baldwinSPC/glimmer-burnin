@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -467,6 +468,10 @@ func podForTest(
 	attempt int32,
 	testName string,
 	spec *burninv1alpha1.BurnInTestSpec,
+	// axes are the variant labels this execution came from; nil for a test with
+	// no variants. Passed separately from spec because they are not part of the
+	// test's definition — they are which CELL of it this pod is.
+	axes map[string]string,
 	node string,
 	target burninv1alpha1.TargetSelector,
 	rv *rendezvous,
@@ -499,6 +504,15 @@ func podForTest(
 			Value: strconv.Itoa(int(attempt)),
 		}},
 	}
+
+	// Variant axes, injected BEFORE the operator's own env so an explicit
+	// setting still wins — the same ordering as everything else here.
+	//
+	// The controller does not read these. It upper-cases the axis name and
+	// passes the value through, because interpreting a precision or a message
+	// size is the runner's job: a reconciler that branched on `precision: fp4`
+	// would be the `if nvidia {}` this project refuses, wearing a different hat.
+	container.Env = append(container.Env, variantEnv(axes)...)
 
 	role := ""
 	if rv != nil {
@@ -811,4 +825,53 @@ func ownedBy(pod *corev1.Pod, run *burninv1alpha1.BurnInRun) bool {
 		}
 	}
 	return false
+}
+
+// variantEnv renders a variant's axes as BURNIN_VARIANT_<AXIS>=<value>.
+//
+// Sorted by axis name so a pod spec is deterministic: an unsorted map would make
+// two identical plans produce two different pod specs, and a diff of a pod
+// against itself is a diff nobody can act on.
+//
+// An axis whose name is not usable as an environment variable is SKIPPED rather
+// than mangled. A mangled name would collide two axes onto one variable, and the
+// runner would read one cell's value while reporting the other's — the same
+// class of error as rewriting an artifact name into a colliding ConfigMap key.
+func variantEnv(axes map[string]string) []corev1.EnvVar {
+	if len(axes) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(axes))
+	for k := range axes {
+		if envSafeAxis(k) {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+
+	out := make([]corev1.EnvVar, 0, len(names))
+	for _, k := range names {
+		out = append(out, corev1.EnvVar{
+			Name:  "BURNIN_VARIANT_" + strings.ToUpper(k),
+			Value: axes[k],
+		})
+	}
+	return out
+}
+
+// envSafeAxis is whether an axis name maps to an environment variable without
+// rewriting. Letters, digits and underscore only, and not leading with a digit.
+func envSafeAxis(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }

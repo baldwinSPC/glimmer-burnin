@@ -131,6 +131,17 @@ type resolvedTest struct {
 	name     string
 	spec     burninv1alpha1.BurnInTestSpec
 	required bool
+	// axes are the variant labels this execution came from, or nil for a test
+	// with no variants. They are carried, echoed and never interpreted.
+	axes map[string]string
+	// parent is the profile entry this cell was expanded from, or empty when the
+	// entry was not expanded at all.
+	//
+	// Recorded rather than recovered from the name. Splitting "<test>-<variant>"
+	// on the last hyphen works until a test is called "gemm-sweep" or a variant
+	// "fp8-dense", and then it is wrong silently — which is the same reason
+	// TestResult.VariantAxes exists instead of asking a consumer to parse names.
+	parent string
 }
 
 // resolveGracePeriod is how long a young run tolerates NotFound on its
@@ -306,6 +317,7 @@ func (r *BurnInRunReconciler) markRunning(ctx context.Context, run *burninv1alph
 	run.Status.Fingerprint = r.captureFingerprint(ctx, p.Targets)
 	run.Status.ObservedGeneration = run.Generation
 	r.applyThresholdsSoundCondition(ctx, run, p)
+	r.applyPlanExpandedCondition(ctx, run, p)
 
 	// Deliver before writing: a crash in between redelivers with the same
 	// derived DeliveryID, which receivers dedupe. The reverse order would
@@ -349,6 +361,40 @@ func (r *BurnInRunReconciler) applyThresholdsSoundCondition(ctx context.Context,
 		log.FromContext(ctx).Info("unsound thresholds in pinned plan", "run", run.Name, "count", len(advice), "detail", cond.Message)
 	}
 	meta.SetStatusCondition(&run.Status.Conditions, cond)
+}
+
+// applyPlanExpandedCondition says how much work this run actually is.
+//
+// Only set when variants expanded something: a run whose profile means what it
+// says needs no note, and a condition that always appears is a condition nobody
+// reads. Like the threshold advisory it never changes the phase and never fails
+// the write it rides on.
+func (r *BurnInRunReconciler) applyPlanExpandedCondition(
+	ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan,
+) {
+	sum := p.variantSummary()
+	if len(sum.Expanded) == 0 {
+		return
+	}
+	perNode := sum.Executions * len(p.Targets)
+	msg := fmt.Sprintf(
+		"variants expanded %d profile entries into %d executions (%s). Across %d target "+
+			"nodes that is %d node-executions; at maxConcurrentNodes %d they are not all "+
+			"concurrent. This arithmetic is not visible in the profile, which is why it "+
+			"is stated here rather than discovered by waiting.",
+		sum.Entries, sum.Executions, strings.Join(sum.Expanded, ", "),
+		len(p.Targets), perNode, maxConcurrentNodes(run))
+
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               burninv1alpha1.ConditionPlanExpanded,
+		Status:             metav1.ConditionTrue,
+		Reason:             burninv1alpha1.ReasonVariantsExpanded,
+		ObservedGeneration: run.Generation,
+		LastTransitionTime: metav1.NewTime(r.now()),
+		Message:            clampConditionMessage(msg),
+	})
+	log.FromContext(ctx).Info("variants expanded the plan",
+		"run", run.Name, "entries", sum.Entries, "executions", sum.Executions)
 }
 
 // isConfigError reports whether a resolution failure is the spec's fault
@@ -396,14 +442,89 @@ func (r *BurnInRunReconciler) resolveProfile(ctx context.Context, run *burninv1a
 			if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: pt.TestRef}, &t); err != nil {
 				return &profile, nil, fmt.Errorf("testRef %q: %w", pt.TestRef, err)
 			}
-			tests = append(tests, resolvedTest{name: t.Name, spec: t.Spec, required: required})
+			tests = append(tests, expandVariants(t.Name, t.Spec, required, pt.Variants)...)
 		case pt.Inline != nil:
-			tests = append(tests, resolvedTest{name: fmt.Sprintf("inline-%d-%s", i, pt.Inline.Kind), spec: *pt.Inline, required: required})
+			tests = append(tests, expandVariants(
+				fmt.Sprintf("inline-%d-%s", i, pt.Inline.Kind), *pt.Inline, required, pt.Variants)...)
 		default:
 			return &profile, nil, fmt.Errorf("profile test %d names no testRef and no inline spec", i)
 		}
 	}
 	return &profile, tests, nil
+}
+
+// expandVariants turns one profile entry into one resolvedTest per cell.
+//
+// This is the whole of the matrix feature, and it is deliberately the whole of
+// it. Expansion happens ONCE, here, before buildPlan — so every stage
+// downstream (the duplicate-name check, Pair and Group topology validation, pod
+// naming, result identity, verdict, delivery keys, TestResult.Nodes) works
+// unchanged, because none of them ever learns variants exist. That is why this
+// is a small change rather than a reconciler rewrite, and it is the property to
+// protect if this is ever extended.
+//
+// With no variants it returns exactly the one test it was given, so a profile
+// written before variants existed plans identically.
+func expandVariants(
+	name string,
+	spec burninv1alpha1.BurnInTestSpec,
+	required bool,
+	variants []burninv1alpha1.TestVariant,
+) []resolvedTest {
+	if len(variants) == 0 {
+		return []resolvedTest{{name: name, spec: spec, required: required}}
+	}
+
+	out := make([]resolvedTest, 0, len(variants))
+	for _, v := range variants {
+		// A deep copy per cell: the overlays below must not reach back into the
+		// parent spec, or the second variant would inherit the first's edits and
+		// a sweep would silently measure the wrong thing in every cell after the
+		// first.
+		cell := *spec.DeepCopy()
+
+		if v.DurationSeconds != nil {
+			cell.DurationSeconds = *v.DurationSeconds
+		}
+		if v.Args != nil {
+			cell.Runner.Args = append([]string(nil), v.Args...)
+		}
+		if v.Env != nil {
+			cell.Runner.Env = append([]corev1.EnvVar(nil), v.Env...)
+		}
+		if v.RepeatCount != nil {
+			cell.RepeatCount = v.RepeatCount
+		}
+		if v.Thresholds != nil {
+			// REPLACE, never merge. See TestVariant.Thresholds: merging by
+			// metric name would silently retain a gate the author believed
+			// replaced, and a node failed against a threshold nobody can find
+			// in the profile has a verdict with nothing to read that explains
+			// it. An empty non-nil list therefore means "no thresholds", which
+			// is a thing a variant may legitimately want.
+			cell.Thresholds = append([]burninv1alpha1.Threshold(nil), v.Thresholds...)
+		}
+
+		out = append(out, resolvedTest{
+			name:     name + "-" + v.Name,
+			spec:     cell,
+			required: required,
+			axes:     copyAxes(v.Axes),
+			parent:   name,
+		})
+	}
+	return out
+}
+
+func copyAxes(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (r *BurnInRunReconciler) resolveTargets(ctx context.Context, sel burninv1alpha1.TargetSelector) ([]string, error) {
@@ -730,7 +851,7 @@ func (r *BurnInRunReconciler) advance(
 		if !busy[node] && len(busy) >= capNodes {
 			return advancePending, none, nil
 		}
-		newPod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, node, run.Spec.Target, nil)
+		newPod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, node, run.Spec.Target, nil)
 		if buildErr != nil {
 			// Unbuildable pod (no image for the kind): machinery error, and
 			// asking again cannot fix it.
@@ -1908,6 +2029,7 @@ func ensureResult(run *burninv1alpha1.BurnInRun, t plannedTest, nodes []string) 
 		Scope:           t.Spec.Scope,
 		Phase:           burninv1alpha1.RunRunning,
 		Nodes:           append([]string(nil), nodes...),
+		VariantAxes:     copyAxes(t.Axes),
 		RepeatsRequired: repeatsRequired(&t.Spec),
 	})
 	return &run.Status.Results[len(run.Status.Results)-1]

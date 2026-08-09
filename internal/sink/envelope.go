@@ -78,6 +78,7 @@ func testResult(r burninv1alpha1.TestResult) contract.TestResult {
 		// English to learn whether a node was implicated, and a run that failed
 		// three gates delivered as one sentence about the first.
 		Unmeasurable: append([]string(nil), r.Unmeasurable...),
+		VariantAxes:  r.VariantAxes,
 	}
 	for _, v := range r.Violations {
 		out.Violations = append(out.Violations, contract.Violation{

@@ -59,14 +59,64 @@ type plan struct {
 	// everything else the verdict is read against, so a consumer reading a stored
 	// run months later cannot be misled by a spec that has since been edited.
 	Baseline bool `json:"baseline,omitempty"`
+	// ProfileEntries is how many tests the profile LISTED, before variant
+	// expansion. Pinned so the plan can say how much it grew without re-reading
+	// a profile that may have changed since.
+	ProfileEntries int `json:"profileEntries,omitempty"`
 	// Tests are the materialised test specs, in execution order.
 	Tests []plannedTest `json:"tests"`
+}
+
+// variantSummary is what the profile ASKED FOR versus what the plan holds.
+//
+// Reported because the arithmetic is invisible in the profile: one entry with
+// four precision variants is four executions, and across eight nodes at a
+// concurrency cap of one it is thirty-two sequential ones. The usual way to
+// discover that is to wait for it.
+type variantSummary struct {
+	// Entries is how many tests the profile lists.
+	Entries int
+	// Executions is how many the plan holds after expansion.
+	Executions int
+	// Expanded names the entries that became more than one, and how many.
+	Expanded []string
+}
+
+func (p *plan) variantSummary() variantSummary {
+	sum := variantSummary{Entries: p.ProfileEntries, Executions: len(p.Tests)}
+	counts := map[string]int{}
+	var order []string
+	for _, t := range p.Tests {
+		// Keyed on Parent, which expansion recorded. Not on Axes: a variant may
+		// legitimately declare none and still be a cell, and not on the name,
+		// because splitting it on a hyphen is wrong the moment a test is called
+		// "gemm-sweep".
+		if t.Parent == "" {
+			continue
+		}
+		if counts[t.Parent] == 0 {
+			order = append(order, t.Parent)
+		}
+		counts[t.Parent]++
+	}
+	for _, name := range order {
+		sum.Expanded = append(sum.Expanded, fmt.Sprintf("%s (%d cells)", name, counts[name]))
+	}
+	return sum
 }
 
 type plannedTest struct {
 	Name     string                        `json:"name"`
 	Required bool                          `json:"required"`
 	Spec     burninv1alpha1.BurnInTestSpec `json:"spec"`
+	// Axes are the variant labels this execution came from, pinned like the rest
+	// of the spec so editing the profile mid-run cannot change what an in-flight
+	// cell reports it was.
+	Axes map[string]string `json:"axes,omitempty"`
+	// Parent is the profile entry this cell was expanded from, empty when the
+	// entry was not expanded. Recorded rather than recovered from Name; see
+	// resolvedTest.parent.
+	Parent string `json:"parent,omitempty"`
 }
 
 // buildPlan materialises a profile against resolved targets, validating the
@@ -90,6 +140,9 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 		Sinks:    profile.Spec.Sinks,
 		FailFast: profile.Spec.FailFast,
 		Baseline: baseline,
+		// Pinned like everything else here: the advisory it feeds describes the
+		// plan this run is executing, not whatever the profile says later.
+		ProfileEntries: len(profile.Spec.Tests),
 	}
 	for _, t := range tests {
 		// Result identity is (test name, node). A duplicate name would make
@@ -105,7 +158,15 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 		if err := validateHostPaths(t); err != nil {
 			return nil, err
 		}
-		p.Tests = append(p.Tests, plannedTest{Name: t.name, Required: t.required, Spec: t.spec})
+		p.Tests = append(p.Tests, plannedTest{
+			Name: t.name, Required: t.required, Spec: t.spec,
+			// COPIED, not shared. The plan is pinned precisely so that editing
+			// the profile mid-run changes nothing in flight, and a map handed
+			// over by reference would leave a live pointer back into the thing
+			// the pinning exists to isolate it from.
+			Axes:   copyAxes(t.axes),
+			Parent: t.parent,
+		})
 	}
 	return p, nil
 }

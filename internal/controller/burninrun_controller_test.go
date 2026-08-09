@@ -4930,7 +4930,7 @@ func TestRunAsUserIsSeparateFromPrivileged(t *testing.T) {
 			Runner: &burninv1alpha1.RunnerSpec{Image: "example.invalid/hh:v1"},
 		}
 		mutate(spec.Runner)
-		pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, "spark-a",
+		pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a",
 			burninv1alpha1.TargetSelector{}, nil)
 		if err != nil {
 			t.Fatalf("podForTest: %v", err)
