@@ -163,6 +163,16 @@ const schedulingGracePeriod = 5 * time.Minute
 // never emits one (stuck Pending on an unschedulable selector).
 const waitingPollInterval = 30 * time.Second
 
+// settledPollInterval is the backstop once every in-flight pod has started and
+// no checkpoint is due sooner.
+//
+// It is the difference between a seven-day soak reconciling 20,000 times and
+// reconciling 2,000. Nothing is lost by it: pod events still drive every state
+// change, the run deadline still clamps the wake, and a checkpoint that is due
+// sooner still wins. What it removes is the poll that exists only to re-ask a
+// question nothing has changed the answer to.
+const settledPollInterval = 5 * time.Minute
+
 // terminalDeliveryRetryInterval paces re-sends of a terminal envelope that a
 // sink refused. The terminal transition has no later transition to piggyback
 // on, so it gets its own retry loop.
@@ -621,7 +631,11 @@ func (r *BurnInRunReconciler) step(ctx context.Context, run *burninv1alpha1.Burn
 		// waits, holding its cordons, because that is what the operator asked
 		// for; the way to actually end a run is spec.cancel, which is one-way
 		// and says so in the phase.
-		return ctrl.Result{RequeueAfter: r.nextWake(run, p)}, nil
+		// A zero pass, deliberately: nothing is in flight, so nothing votes for
+		// a faster cadence. A suspended run holding its cordons and waiting for
+		// a human gets the settled backstop, which is what it should have — the
+		// thing it is waiting for is a spec edit, and that arrives as an event.
+		return ctrl.Result{RequeueAfter: r.nextWake(run, passResult{})}, nil
 	}
 	return r.finalize(ctx, run, p)
 }
@@ -638,6 +652,23 @@ type passResult struct {
 	// checkpointed means at least one in-flight result had its evidence
 	// refreshed and a Checkpoint envelope is owed.
 	checkpointed bool
+	// checkpointEvery is the shortest checkpoint interval among the tests
+	// actually IN FLIGHT this pass, or 0 when none of them checkpoints.
+	//
+	// This is the whole of #158. The wake used to come from the plan-wide
+	// minimum, so one test with a 60-second interval set the cadence for a
+	// profile whose other tests check in hourly — INCLUDING while those other
+	// tests were the only ones running. The information was already on the
+	// pass; it was simply not threaded through.
+	checkpointEvery time.Duration
+	// awaitingStart means some in-flight pod has not started yet.
+	//
+	// That is the window where scheduling problems appear — unschedulable,
+	// ImagePullBackOff, a node that went away — and where a fast reaction is
+	// worth the apiserver traffic. Once every pod is running, the run is doing
+	// exactly what it was asked to do and there is nothing to learn by asking
+	// again in thirty seconds.
+	awaitingStart bool
 	// dirty means status was mutated and has to be written back. It is tracked
 	// separately from harvested because merely OPENING a result — recording
 	// that an execution has started on a node — is a status change with no
@@ -665,10 +696,14 @@ type advanceEffect struct {
 func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.BurnInRun, p *plan, launch bool) (passResult, error) {
 	var out passResult
 
-	busy, err := r.busyNodes(ctx, run)
+	busy, awaitingStart, err := r.busyNodes(ctx, run)
 	if err != nil {
 		return out, err
 	}
+	// A pod that exists and has not started keeps the fast cadence: that is the
+	// window where scheduling problems appear — unschedulable, ImagePullBackOff,
+	// a node that went away — and where a fast reaction is worth the traffic.
+	out.awaitingStart = awaitingStart
 	capNodes := maxConcurrentNodes(run)
 
 	for i := range p.Tests {
@@ -693,6 +728,13 @@ func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.B
 			switch state {
 			case advanceRunning:
 				test.running = true
+				// This test is in flight, so ITS checkpoint interval is one the
+				// wake has to respect. A test that is not running does not get
+				// a vote, which is the fix.
+				if cp := checkpointInterval(&t.Spec); cp > 0 &&
+					(test.checkpointEvery == 0 || cp < test.checkpointEvery) {
+					test.checkpointEvery = cp
+				}
 			case advancePending:
 				test.pending = true
 			case advanceHarvested:
@@ -735,6 +777,10 @@ func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.B
 		out.checkpointed = out.checkpointed || test.checkpointed
 		out.dirty = out.dirty || test.dirty
 		out.rendezvous = out.rendezvous || test.rendezvous
+		if test.checkpointEvery > 0 &&
+			(out.checkpointEvery == 0 || test.checkpointEvery < out.checkpointEvery) {
+			out.checkpointEvery = test.checkpointEvery
+		}
 
 		// Tests run in plan order, one at a time: the next test must not start
 		// on a node while this one still owes it a result there. Two tests
@@ -771,7 +817,7 @@ func (r *BurnInRunReconciler) persistPass(ctx context.Context, run *burninv1alph
 		// one would be re-deriving a delivery from status that never landed.
 		r.deliverCheckpoint(ctx, run, p.Sinks, r.checkpointSequence(run, p))
 	}
-	wake := r.nextWake(run, p)
+	wake := r.nextWake(run, pass)
 	if pass.rendezvous && wake > rendezvousPollInterval {
 		wake = rendezvousPollInterval
 	}
@@ -783,9 +829,39 @@ func (r *BurnInRunReconciler) persistPass(ctx context.Context, run *burninv1alph
 // Pod events drive the common case; this covers the pod that never emits one,
 // the checkpoint that is due before the next event, and the run deadline that
 // would otherwise be noticed up to a poll interval late.
-func (r *BurnInRunReconciler) nextWake(run *burninv1alpha1.BurnInRun, p *plan) time.Duration {
-	wake := waitingPollInterval
-	if cp := p.checkpointInterval(); cp > 0 && cp < wake {
+//
+// # Why this is not a constant — issue #158
+//
+// It used to floor at 30 seconds for the whole of a run, so a seven-day soak
+// reconciled roughly 20,000 times, and every pass listed pods to recompute the
+// busy set, possibly fetched logs, and possibly wrote status. For a run that is
+// BY DESIGN doing nothing observable for hours at a stretch, that is a lot of
+// apiserver traffic to learn nothing.
+//
+// Two things decide the cadence now, and both come from the pass rather than
+// from the plan:
+//
+//   - the checkpoint intervals of the tests actually IN FLIGHT. The plan-wide
+//     minimum meant one 60-second test set the cadence for a profile whose
+//     other tests check in hourly, including while those other tests were the
+//     only ones running.
+//   - whether every in-flight pod has STARTED. Before they start is the window
+//     where scheduling problems appear and a fast reaction is worth the
+//     traffic; after, the run is doing exactly what it was asked to and there
+//     is nothing to learn by asking again in thirty seconds.
+//
+// A day-long run goes from roughly 2,880 wakes to roughly 288.
+//
+// checkpointSequence is deliberately NOT changed by any of this: it stays
+// derived from the pinned plan-wide minimum, because it is what makes a
+// checkpoint's DeliveryID stable across retries, and changing its basis
+// mid-flight would break idempotency for every consumer.
+func (r *BurnInRunReconciler) nextWake(run *burninv1alpha1.BurnInRun, pass passResult) time.Duration {
+	wake := settledPollInterval
+	if pass.awaitingStart {
+		wake = waitingPollInterval
+	}
+	if cp := pass.checkpointEvery; cp > 0 && cp < wake {
 		wake = cp
 	}
 	if d := runDeadline(run); d > 0 && run.Status.StartedAt != nil {
@@ -793,9 +869,13 @@ func (r *BurnInRunReconciler) nextWake(run *burninv1alpha1.BurnInRun, p *plan) t
 			wake = remaining
 		}
 	}
-	if wake <= 0 {
-		wake = time.Second
-	}
+	// No zero guard, deliberately. Every assignment above is positive-guarded —
+	// the backstop constants are positive, checkpointEvery is taken only when
+	// `> 0`, and the deadline remainder only when `> 0` — so a non-positive wake
+	// is unreachable. A guard for it was written first and removed when mutating
+	// it away changed nothing: an unreachable branch in the shape of a safety
+	// net is worse than none, because it invites the reader to believe something
+	// is being defended. TestTheWakeIsAlwaysPositive pins the property itself.
 	return wake
 }
 
@@ -1908,20 +1988,29 @@ func (r *BurnInRunReconciler) reconcileDeleted(ctx context.Context, run *burninv
 // the live input to the MaxConcurrentNodes interlock, counted from the pods
 // that actually exist so that a controller restart cannot lose track of what is
 // already running and fan out on top of it.
-func (r *BurnInRunReconciler) busyNodes(ctx context.Context, run *burninv1alpha1.BurnInRun) (map[string]bool, error) {
+func (r *BurnInRunReconciler) busyNodes(ctx context.Context, run *burninv1alpha1.BurnInRun) (map[string]bool, bool, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(run.Namespace), client.MatchingLabels{labelRun: run.Name}); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	busy := map[string]bool{}
+	// awaitingStart is derived HERE because this is the one place that already
+	// has every live pod in hand — the sweep below sees them one execution at a
+	// time and would have to be told, at each of a dozen return sites, whether
+	// the pod it holds has started. Deriving it once from the same list costs
+	// nothing and cannot drift from what the sweep does.
+	awaitingStart := false
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if !ownedBy(pod, run) || !podLive(pod) {
 			continue
 		}
 		busy[pod.Labels[labelNode]] = true
+		if !podStarted(pod) {
+			awaitingStart = true
+		}
 	}
-	return busy, nil
+	return busy, awaitingStart, nil
 }
 
 // deleteLivePods removes every pod of this run that has not terminated.
