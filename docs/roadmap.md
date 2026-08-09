@@ -74,8 +74,22 @@ Duration classes: **smoke** (≤5 min) · **standard** (~30 min) · **extended**
 (2–8 h) · **soak** (24–72 h) · **marathon** (1–2 weeks). Anything past
 *extended* depends on the segmented-soak engine ([#157]).
 
-"Shipped" means an image is published and has been run on real hardware of at
-least one supported kind. Unverified is tracked as its own state, deliberately.
+Three states, and the middle one is the reason this table is worth reading:
+
+- **shipped** — an image is published and has been run on real hardware of at
+  least one supported kind.
+- **in tree** — the runner, its tests and its image build all exist and are
+  green in CI, but **no image is published and nothing has run on hardware**.
+  The kind is on `pkg/runnerimages.WithoutDefault()`, so a BurnInTest naming it
+  fails at plan time asking for an explicit `spec.runner.image` rather than
+  pull-failing on every targeted node. Each one carries an open verification
+  issue.
+- **planned** — not written.
+
+The middle state exists because publishing is manual and hardware-gated by
+policy: a runner image is executed by a node's readiness gate, so a bad tag
+degrades a whole fleet at once. Collapsing "in tree" into "shipped" would make
+this table claim hardware coverage the project does not have.
 
 | TestKind | Measures | Scope | NVIDIA | AMD | Intel | Status |
 |---|---|---|---|---|---|---|
@@ -96,8 +110,8 @@ least one supported kind. Unverified is tracked as its own state, deliberately.
 | `gpudirect-rdma` | GPU↔NIC peer-memory path | Pair | shipped | — | — | shipped |
 | `nccl` | Collective bandwidth | Pair, Group | shipped | planned | later | shipped · [#118] · [#170] |
 | `fabric-soak` | Iterated collectives over hours | Pair, Group | planned | planned | — | [#162] |
-| `tcp-baseline` | Plain TCP throughput and retransmits | Pair | planned | planned | planned | [#164] |
-| `disk-io` | NVMe throughput and latency | Node | planned | planned | planned | [#165] |
+| `tcp-baseline` | Plain TCP throughput and retransmits | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#237] |
+| `disk-io` | Storage throughput and latency (direct I/O) | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#242] |
 
 Beyond the kinds themselves, the matrix has axes: **variants** ([#155]) express
 one test across precisions, message sizes or duration classes; **baseline mode**
@@ -157,6 +171,10 @@ arrange under `docker run` than under a PodSpec.
 - [#153] Measure a link between two machines that are not in a cluster
 - [#154] Deliver results anywhere, and ship a signed binary
 
+R2 is complete. What remains is a hardware check that a bare-metal link
+measures the same as an in-cluster one ([#225]) — the two dispatchers agreeing
+is the property the whole design rests on, and only two Sparks can confirm it.
+
 ### R3 — Test matrix and soak engine
 
 A seven-day soak is currently one pod. Any eviction, drain or kubelet restart
@@ -178,8 +196,12 @@ ends the week, and a retry starts it over.
 - [#163] `ib-write-bw` reports a latency it cannot be asked for — the tail
   (p99, min, max, message rate) now reaches the result; asking for latency as its
   own gated execution still waits on variants ([#155])
-- [#164] When a fabric test fails, nothing answers whether plain TCP works
-- [#165] Storage is the one subsystem the suite never touches
+- [#164] When a fabric test fails, nothing answers whether plain TCP works — the
+  runner is in tree with its management-path guard; publishing waits on hardware
+  verification ([#237])
+- [#165] Storage is the one subsystem the suite never touches — the runner is in
+  tree, standard-library-only because fio, IOR and elbencho are all GPL;
+  publishing waits on hardware verification ([#242])
 - [#166] Steady load never tests the power path's transients
 
 ### R6 — Heterogeneous fleets
@@ -296,8 +318,6 @@ version, never a re-push.
 [#161]: https://github.com/baldwinSPC/glimmer-burnin/issues/161
 [#162]: https://github.com/baldwinSPC/glimmer-burnin/issues/162
 [#163]: https://github.com/baldwinSPC/glimmer-burnin/issues/163
-[#164]: https://github.com/baldwinSPC/glimmer-burnin/issues/164
-[#165]: https://github.com/baldwinSPC/glimmer-burnin/issues/165
 [#166]: https://github.com/baldwinSPC/glimmer-burnin/issues/166
 [#167]: https://github.com/baldwinSPC/glimmer-burnin/issues/167
 [#168]: https://github.com/baldwinSPC/glimmer-burnin/issues/168
@@ -314,4 +334,9 @@ version, never a re-push.
 [#179]: https://github.com/baldwinSPC/glimmer-burnin/issues/179
 [#180]: https://github.com/baldwinSPC/glimmer-burnin/issues/180
 [#181]: https://github.com/baldwinSPC/glimmer-burnin/issues/181
+[#237]: https://github.com/baldwinSPC/glimmer-burnin/issues/237
+[#242]: https://github.com/baldwinSPC/glimmer-burnin/issues/242
+[#164]: https://github.com/baldwinSPC/glimmer-burnin/issues/164
+[#165]: https://github.com/baldwinSPC/glimmer-burnin/issues/165
+[#225]: https://github.com/baldwinSPC/glimmer-burnin/issues/225
 [docs/dev/new-testkind-playbook.md]: dev/new-testkind-playbook.md
