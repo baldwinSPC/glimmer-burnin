@@ -97,7 +97,30 @@ func categoryFor(kind string) string {
 // every phase. Adding a second argument there would make that guard about two
 // things at once.
 func statusUnder(phase string, baseline bool) string {
-	if baseline {
+	// ONLY A PASS. This said `if baseline` and mapped every phase to Skip,
+	// which was wrong in the one direction that matters — issue #232.
+	//
+	// A baseline carries no thresholds, so a Failed cannot arrive from a gate:
+	// refuseGatedBaseline refuses that combination at plan time. But it can
+	// still arrive from the RUNNER. gpu-burn exits 1 on ECC errors,
+	// memory-stress on miscompares, and completeAttempt settles those Failed
+	// with no reference to baseline anywhere. So under a baseline the ONLY route
+	// to Failed is a runner's own hardware verdict — precisely the signal this
+	// was erasing.
+	//
+	// A GPU reporting 17 ECC errors reached the vendor-schema document as
+	// "Skip": the weakest claim in the vocabulary, which consumers filter as
+	// not-applicable noise. That is the Error/Fail collapse this package exists
+	// to prevent, one step past Not Run, at the schema boundary where nothing
+	// downstream can recover it — and it made this renderer and the JUnit one
+	// disagree about the same record, which is the failure pkg/report was
+	// created to end.
+	//
+	// The reasoning that produced the bug was sound as far as it went and is
+	// unchanged below: a baseline PASS must not read as a certification, because
+	// no criterion was applied for it to have met. It simply says nothing about
+	// a phase that was not a pass.
+	if baseline && phase == phasePassed {
 		return statusSkip
 	}
 	return statusFor(phase)
