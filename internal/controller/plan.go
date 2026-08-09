@@ -1,8 +1,12 @@
 package controller
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -462,36 +466,142 @@ func summariseThresholdAdvice(advice []thresholdAdvice) string {
 		len(advice), gates, strings.Join(parts, "; "))
 }
 
+// maxDecompressedPlanBytes caps what a compressed annotation may expand to.
+//
+// maxPlanBytes bounds the STORED bytes, which is the real annotation budget.
+// This bounds the other end: gzip expands, and a malformed or hostile annotation
+// that decompresses without bound would take the manager down for every run in
+// the cluster, not just the one that carries it. 4 MiB is far above any real
+// plan — a hundred variants of a large spec is a few hundred KiB — and far below
+// anything that matters to a process.
+const maxDecompressedPlanBytes = 4 * 1024 * 1024
+
 // pinPlan serialises the plan into the run's annotations (caller persists).
+//
+// # Why this may compress
+//
+// The pinned plan is what makes a run hermetic: it is written in the same write
+// that adds the finalizer, and everything afterwards reads the pinned copy, so
+// editing a BurnInTest mid-run cannot change what an in-flight attempt does.
+// That property is load-bearing and is not traded away here.
+//
+// It is also a full copy of every test's spec, in an annotation sharing a 256
+// KiB budget with the run's own churn. Variant expansion multiplies that by the
+// number of cells, and the copies are NEARLY IDENTICAL — which is exactly the
+// input a compressor is best at, and why compression is the right first answer
+// rather than a delta format.
+//
+// A small plan is still written raw, so `kubectl get -o yaml` shows something a
+// human can read. Only a plan that would not otherwise fit is compressed.
 func pinPlan(run *burninv1alpha1.BurnInRun, p *plan) error {
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("marshal plan: %w", err)
 	}
+
+	stored := string(raw)
 	if len(raw) > maxPlanBytes {
-		return fmt.Errorf("resolved plan is %d bytes, over the %d limit — split the profile", len(raw), maxPlanBytes)
+		packed, err := compressPlan(raw)
+		if err != nil {
+			return fmt.Errorf("compress plan: %w", err)
+		}
+		if len(packed) > maxPlanBytes {
+			return fmt.Errorf(
+				"resolved plan is %d bytes and %d compressed, over the %d limit — split the "+
+					"profile, or reduce the number of variants", len(raw), len(packed), maxPlanBytes)
+		}
+		stored = packed
 	}
+
 	if run.Annotations == nil {
 		run.Annotations = map[string]string{}
 	}
-	run.Annotations[planAnnotation] = string(raw)
+	run.Annotations[planAnnotation] = stored
 	return nil
 }
 
 // loadPlan reads the pinned plan. Absent means the run has not started.
+//
+// The format is SNIFFED rather than versioned, and deliberately: a value
+// starting with '{' is raw JSON and is parsed exactly as it always was, so a run
+// pinned by an older controller and reconciled by this one is read correctly
+// with no migration and no flag day.
+//
+// The reverse direction does not work, and that is the right way round to fail:
+// a run pinned by THIS controller and then reconciled by an OLDER one gets a
+// JSON parse error, which finalizes the run as Error rather than misreading the
+// plan. A downgrade hazard worth writing down, not a silent one.
 func loadPlan(run *burninv1alpha1.BurnInRun) (*plan, bool, error) {
 	raw, ok := run.Annotations[planAnnotation]
 	if !ok {
 		return nil, false, nil
 	}
+
+	data := []byte(raw)
+	if !isRawJSONPlan(raw) {
+		var err error
+		data, err = decompressPlan(raw)
+		if err != nil {
+			return nil, true, fmt.Errorf("pinned plan does not decode: %w", err)
+		}
+	}
+
 	var p plan
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, true, fmt.Errorf("pinned plan does not decode: %w", err)
 	}
 	if p.Version != 1 {
 		return nil, true, fmt.Errorf("pinned plan has unknown version %d", p.Version)
 	}
 	return &p, true, nil
+}
+
+// isRawJSONPlan is the format sniff: legacy plans are a JSON object, and the
+// compressed form is base64, which never begins with '{'.
+func isRawJSONPlan(s string) bool {
+	return strings.HasPrefix(strings.TrimLeft(s, " \t\r\n"), "{")
+}
+
+func compressPlan(raw []byte) (string, error) {
+	var buf bytes.Buffer
+	// BestCompression, not Default: this runs once per run, and the byte it
+	// saves is a byte of a hard annotation budget.
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return "", err
+	}
+	if _, err := zw.Write(raw); err != nil {
+		return "", err
+	}
+	if err := zw.Close(); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+}
+
+func decompressPlan(s string) ([]byte, error) {
+	packed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("not raw JSON and not base64: %w", err)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(packed))
+	if err != nil {
+		return nil, fmt.Errorf("not gzip: %w", err)
+	}
+	defer func() { _ = zr.Close() }()
+
+	// LimitReader with ONE byte of headroom, so exceeding the cap is detectable
+	// rather than silently truncating a plan into something that parses.
+	out, err := io.ReadAll(io.LimitReader(zr, maxDecompressedPlanBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxDecompressedPlanBytes {
+		return nil, fmt.Errorf(
+			"decompresses to more than %d bytes; refusing to expand it further",
+			maxDecompressedPlanBytes)
+	}
+	return out, nil
 }
 
 // requiredByPlan maps test name to its pinned required flag.
