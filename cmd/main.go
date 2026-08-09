@@ -122,6 +122,10 @@ func main() {
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),
 		Cluster: clusterRef(context.Background(), mgr.GetAPIReader(), clusterName),
+		// The same namespace the NodeFingerprint controller writes to, so a run
+		// can read a node's accelerator vendor and pick that vendor's runner
+		// image. Empty (no downward API) simply means the vendor is never read.
+		FingerprintNamespace: podNamespace,
 		// The uncached reader, for the two node reads whose staleness costs the
 		// fleet a node rather than a reconcile. See BurnInRunReconciler.APIReader.
 		APIReader: mgr.GetAPIReader(),

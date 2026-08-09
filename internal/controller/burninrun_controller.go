@@ -88,6 +88,17 @@ type BurnInRunReconciler struct {
 	// Now is the clock, swappable in tests. Nil means time.Now.
 	Now func() time.Time
 
+	// FingerprintNamespace is where NodeFingerprints live, so a run can read the
+	// accelerator vendor of a node it is about to test and pick that vendor's
+	// runner image.
+	//
+	// The same value the NodeFingerprint controller writes them to, resolved
+	// from the downward API in main rather than guessed here. Empty means the
+	// vendor is never read: every test then resolves its image from an explicit
+	// pin or the kind's default, which is exactly the behaviour that existed
+	// before imagesByVendor and is correct for a single-vendor fleet.
+	FingerprintNamespace string
+
 	// Cluster identifies the cluster in every delivered envelope. Nil emits no
 	// cluster fields at all, which is a valid envelope: an operator that has not
 	// been told its cluster's name must not guess one, because a verdict
@@ -958,7 +969,7 @@ func (r *BurnInRunReconciler) advance(
 		if !busy[node] && len(busy) >= capNodes {
 			return advancePending, none, nil
 		}
-		newPod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, node, run.Spec.Target, nil)
+		newPod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, node, r.vendorFor(ctx, node), run.Spec.Target, nil)
 		if buildErr != nil {
 			// Unbuildable pod (no image for the kind): machinery error, and
 			// asking again cannot fix it.

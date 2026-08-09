@@ -471,7 +471,48 @@ type RunnerSpec struct {
 	// be forced to pin an image it did not want to change, and pinning one to
 	// get a mount is how a fleet ends up on a stale runner tag by accident.
 	// +optional
-	Image   string          `json:"image,omitempty"`
+	Image string `json:"image,omitempty"`
+
+	// ImagesByVendor selects the image by the ACCELERATOR VENDOR of the node the
+	// test lands on, so one profile can serve a mixed fleet.
+	//
+	//	runner:
+	//	  imagesByVendor:
+	//	    - vendor: nvidia
+	//	      image: ghcr.io/.../glimmer-burnin-memory-bw:v1
+	//	    - vendor: amd
+	//	      image: ghcr.io/.../glimmer-burnin-memory-bw-rocm:v1
+	//
+	// This is the project's vendor-neutrality rule expressed in the API rather
+	// than worked around. Heterogeneity is DATA — fingerprints and runner images
+	// — and never a controller branch, and the reconciler still holds that line:
+	// resolution is a lookup, not an `if amd {}`. What changes is that the data
+	// finally has somewhere to go. Before this, `memory-bw` meant nvbandwidth
+	// full stop, and a mixed fleet needed either N profiles that drift apart or
+	// an explicit image that gives up on one profile serving everything.
+	//
+	// Resolution order is explicit > byVendor > the kind's built-in default. A
+	// node whose vendor has neither is a PLAN-TIME error naming the vendor and
+	// this field — never a skip, because a node silently not being tested is how
+	// a fleet gets certified without being measured.
+	//
+	// A LIST OF PAIRS, not a map keyed by vendor, and the reason is worth
+	// recording: Kubernetes cannot validate map KEYS. A structural schema
+	// describes `additionalProperties` — the values — and nothing else, so a
+	// typo'd `nvidai:` would be accepted by the apiserver and resolve to no
+	// image on every NVIDIA node in the fleet. The only way to check keys is a
+	// CEL rule, and a CEL rule over a map whose key length the schema cannot
+	// bound is estimated so expensively that the apiserver REFUSES TO INSTALL
+	// THE ENTIRE CRD — measured, not guessed: 15.3x over budget even with
+	// maxProperties set. As a list, `vendor` is an ordinary enumerated string
+	// the apiserver validates for free, and listMapKey rejects duplicates.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=vendor
+	// +kubebuilder:validation:MaxItems=8
+	ImagesByVendor []VendorImage `json:"imagesByVendor,omitempty"`
+
 	Command []string        `json:"command,omitempty"`
 	Args    []string        `json:"args,omitempty"`
 	Env     []corev1.EnvVar `json:"env,omitempty"`
@@ -575,6 +616,23 @@ type RunnerSpec struct {
 	// It is honoured at every scope; it is only load-bearing at Pair.
 	// +optional
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
+}
+
+// VendorImage pins one accelerator vendor's runner image.
+type VendorImage struct {
+	// Vendor is the accelerator vendor, matching NodeFingerprint's vocabulary.
+	//
+	// Enumerated by the apiserver, which is the whole reason this is a list
+	// rather than a map: a typo here is rejected at apply time rather than
+	// resolving to no image on every node of that vendor at 3am.
+	//
+	// +kubebuilder:validation:Enum=nvidia;amd;intel;tenstorrent
+	Vendor string `json:"vendor"`
+
+	// Image is the runner image for that vendor.
+	//
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
 }
 
 // HostPathMount makes ONE path on the node visible inside the runner container.

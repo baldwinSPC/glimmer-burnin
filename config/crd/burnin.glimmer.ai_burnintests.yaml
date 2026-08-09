@@ -471,6 +471,66 @@ spec:
                       be forced to pin an image it did not want to change, and pinning one to
                       get a mount is how a fleet ends up on a stale runner tag by accident.
                     type: string
+                  imagesByVendor:
+                    description: "ImagesByVendor selects the image by the ACCELERATOR
+                      VENDOR of the node the\ntest lands on, so one profile can serve
+                      a mixed fleet.\n\n\trunner:\n\t  imagesByVendor:\n\t    - vendor:
+                      nvidia\n\t      image: ghcr.io/.../glimmer-burnin-memory-bw:v1\n\t
+                      \   - vendor: amd\n\t      image: ghcr.io/.../glimmer-burnin-memory-bw-rocm:v1\n\nThis
+                      is the project's vendor-neutrality rule expressed in the API
+                      rather\nthan worked around. Heterogeneity is DATA — fingerprints
+                      and runner images\n— and never a controller branch, and the
+                      reconciler still holds that line:\nresolution is a lookup, not
+                      an `if amd {}`. What changes is that the data\nfinally has somewhere
+                      to go. Before this, `memory-bw` meant nvbandwidth\nfull stop,
+                      and a mixed fleet needed either N profiles that drift apart
+                      or\nan explicit image that gives up on one profile serving everything.\n\nResolution
+                      order is explicit > byVendor > the kind's built-in default.
+                      A\nnode whose vendor has neither is a PLAN-TIME error naming
+                      the vendor and\nthis field — never a skip, because a node silently
+                      not being tested is how\na fleet gets certified without being
+                      measured.\n\nA LIST OF PAIRS, not a map keyed by vendor, and
+                      the reason is worth\nrecording: Kubernetes cannot validate map
+                      KEYS. A structural schema\ndescribes `additionalProperties`
+                      — the values — and nothing else, so a\ntypo'd `nvidai:` would
+                      be accepted by the apiserver and resolve to no\nimage on every
+                      NVIDIA node in the fleet. The only way to check keys is a\nCEL
+                      rule, and a CEL rule over a map whose key length the schema
+                      cannot\nbound is estimated so expensively that the apiserver
+                      REFUSES TO INSTALL\nTHE ENTIRE CRD — measured, not guessed:
+                      15.3x over budget even with\nmaxProperties set. As a list, `vendor`
+                      is an ordinary enumerated string\nthe apiserver validates for
+                      free, and listMapKey rejects duplicates."
+                    items:
+                      description: VendorImage pins one accelerator vendor's runner
+                        image.
+                      properties:
+                        image:
+                          description: Image is the runner image for that vendor.
+                          minLength: 1
+                          type: string
+                        vendor:
+                          description: |-
+                            Vendor is the accelerator vendor, matching NodeFingerprint's vocabulary.
+
+                            Enumerated by the apiserver, which is the whole reason this is a list
+                            rather than a map: a typo here is rejected at apply time rather than
+                            resolving to no image on every node of that vendor at 3am.
+                          enum:
+                          - nvidia
+                          - amd
+                          - intel
+                          - tenstorrent
+                          type: string
+                      required:
+                      - image
+                      - vendor
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - vendor
+                    x-kubernetes-list-type: map
                   priorityClassName:
                     description: |-
                       PriorityClassName points this test's pods at a PriorityClass the SITE

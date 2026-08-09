@@ -1,0 +1,40 @@
+# One profile, a fleet with two accelerator vendors in it.
+#
+# The project's rule is that heterogeneity is DATA — fingerprints and runner
+# images — and never a controller branch. Before imagesByVendor the data had
+# nowhere to go: `memory-bw` meant nvbandwidth, full stop, and a mixed fleet
+# needed either one profile per vendor (which drift apart) or an explicit image
+# (which gives up on one profile serving everything).
+#
+# The vendor comes from each node's NodeFingerprint, which derives it from a
+# device label's DNS domain. Nothing here selects nodes by vendor; every node in
+# the target simply pulls the image for what it turns out to be.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: memory-bw-any-vendor
+spec:
+  kind: memory-bw
+  durationSeconds: 60
+  runner:
+    # A LIST, not a map keyed by vendor. Kubernetes cannot validate map keys —
+    # a structural schema describes the values and nothing else — so a typo'd
+    # `nvidai` would be accepted and then resolve to no image on every NVIDIA
+    # node in the fleet. As a list, `vendor` is an ordinary enumerated field the
+    # apiserver checks at apply time.
+    imagesByVendor:
+      - vendor: nvidia
+        image: ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.5.0
+      - vendor: amd
+        # No AMD image is published yet — see the R6 milestone. Named here to
+        # show the shape; a node whose vendor resolves to a missing image fails
+        # at PLAN TIME naming the vendor and this field, rather than being
+        # silently skipped. A node quietly not tested is how a fleet gets
+        # certified without being measured.
+        image: ghcr.io/baldwinspc/glimmer-burnin-memory-bw-rocm:REPLACE-ME
+  thresholds:
+    # Deliberately none. Bandwidth floors are per-SKU and this project pins them
+    # from measured baselines — and a floor that is right for one vendor's part
+    # is meaningless for the other's, which is the deeper reason a mixed-fleet
+    # profile should gate on counters rather than rates.
+    []

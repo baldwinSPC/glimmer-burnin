@@ -262,7 +262,7 @@ func (r *BurnInRunReconciler) startGroup(
 		return advancePending, none, err
 	}
 
-	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, nodes[groupRootRank], run.Spec.Target,
+	pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, nodes[groupRootRank], r.vendorFor(ctx, nodes[groupRootRank]), run.Spec.Target,
 		groupRendezvous(groupRootRank, nodes, svc.Name))
 	if buildErr != nil {
 		// Unbuildable pod (no image for the kind). Asking again cannot fix it,
@@ -369,7 +369,7 @@ func (r *BurnInRunReconciler) gateWorkersOnRoot(
 		if pods[rank] != nil {
 			continue
 		}
-		pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, nodes[rank], run.Spec.Target,
+		pod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, nodes[rank], r.vendorFor(ctx, nodes[rank]), run.Spec.Target,
 			groupRendezvous(rank, nodes, service))
 		if buildErr != nil {
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, root.Name, root,
