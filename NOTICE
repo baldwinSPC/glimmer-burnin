@@ -96,6 +96,10 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - glibc (distroless base)         LGPL-2.1-or-later, dynamically linked and
       unmodified, which LGPL 2.1 section 6 permits without relicensing.
 
+  runners/fingerprint-probe
+    - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
+      standard library (BSD-3-Clause), reading a read-only sysfs mount.
+
   runners/disk-io
     - no third-party component, and deliberately so: fio, IOR and elbencho are
       all GPL, so the measurement is a CGO-free Apache-2.0 Go binary over the Go

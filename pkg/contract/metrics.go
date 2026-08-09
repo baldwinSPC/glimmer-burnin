@@ -565,6 +565,12 @@ var registry = map[string]Metric{
 		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"acceleratorCount": {
+		Name: "acceleratorCount", Unit: UnitNone,
+		Description:  "how many accelerators the node's PCI bus reports. A legitimate acceptance gate, unlike the identity strings beside it: a node that should hold eight cards and reports seven has lost one, and that is a hardware fault rather than a fact about which vendor made it",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
 	"ioErrors": {
 		Name: "ioErrors", Unit: UnitNone,
 		Description:  "count of I/O errors observed during a storage test. A zero here IS a measurement — the run reached the device and counted none — unlike a bandwidth figure, which is omitted when nothing moved rather than reported as zero",
@@ -691,6 +697,36 @@ var registry = map[string]Metric{
 	"tcpMgmtInterface": {
 		Name: "tcpMgmtInterface", Unit: UnitNone,
 		Description:  "the interface carrying this node's default route, which the guard treats as the management path and refuses to load. Reported alongside tcpTestInterface so a reader can see the two were different",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"pciAddresses": {
+		Name: "pciAddresses", Unit: UnitNone,
+		Description:  "PCI slots of the node's accelerators, comma-joined in slot order (\"0000:01:00.0,0000:02:00.0\"). What an engineer walking to the rack needs",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"pciVendorIds": {
+		Name: "pciVendorIds", Unit: UnitNone,
+		Description:  "PCI vendor IDs as the devices report them (\"0x10de\"). Ground truth in a way a label is not: readable on a node with no device plugin, no NFD and no labels at all",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"pciDeviceIds": {
+		Name: "pciDeviceIds", Unit: UnitNone,
+		Description:  "PCI device IDs as the devices report them, in the same order as pciAddresses",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"acceleratorVendors": {
+		Name: "acceleratorVendors", Unit: UnitNone,
+		Description:  "distinct accelerator vendors on the node, resolved from PCI vendor IDs where this project has a name for one and left as the raw hex ID where it does not. A LABEL: gating on it fails a node for being the vendor it is, which is a targeting decision belonging in a node selector",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"acceleratorDrivers": {
+		Name: "acceleratorDrivers", Unit: UnitNone,
+		Description:  "kernel modules bound to the node's accelerators. OMITTED entirely when nothing is bound, because a device the kernel sees and no driver claims is the shape of a node whose plugin never came up — and an empty value would read as absent information rather than an absent driver",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},

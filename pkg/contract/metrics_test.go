@@ -54,6 +54,7 @@ func TestUnitOf(t *testing.T) {
 		{"nicLinkDownEvents", UnitNone},
 		{"tcpRetransmits", UnitNone},
 		{"ioErrors", UnitNone},
+		{"acceleratorCount", UnitNone},
 		{"memoryErrors", UnitNone},
 		{"diagTestsFailed", UnitNone},
 		{"iterationsCompleted", UnitNone},
@@ -188,6 +189,7 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"nicLinkDownEvents":   {UnitNone, ThresholdUseAcceptance},
 		"tcpRetransmits":      {UnitNone, ThresholdUseAcceptance},
 		"ioErrors":            {UnitNone, ThresholdUseAcceptance},
+		"acceleratorCount":    {UnitNone, ThresholdUseAcceptance},
 		"throttleEvents":      {UnitNone, ThresholdUseAcceptance},
 		"throttledSamples":    {UnitNone, ThresholdUseAcceptance},
 		"throttleReasonsMask": {UnitNone, ThresholdUseEvidence},
@@ -208,6 +210,11 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"gpuName":                 {UnitNone, ThresholdUseEvidence},
 		"tcpTestInterface":        {UnitNone, ThresholdUseEvidence},
 		"diskIoPath":              {UnitNone, ThresholdUseEvidence},
+		"pciAddresses":            {UnitNone, ThresholdUseEvidence},
+		"pciVendorIds":            {UnitNone, ThresholdUseEvidence},
+		"pciDeviceIds":            {UnitNone, ThresholdUseEvidence},
+		"acceleratorVendors":      {UnitNone, ThresholdUseEvidence},
+		"acceleratorDrivers":      {UnitNone, ThresholdUseEvidence},
 		"tcpMgmtInterface":        {UnitNone, ThresholdUseEvidence},
 		"computeCap":              {UnitNone, ThresholdUseEvidence},
 		"pciBusId":                {UnitNone, ThresholdUseEvidence},
@@ -357,6 +364,7 @@ func TestAggregationOfTheEasilyMistakenMetrics(t *testing.T) {
 		"nicLinkDownEvents": {AggSum, "differenced over the window"},
 		"tcpRetransmits":    {AggSum, "a per-window count of retransmitted segments"},
 		"ioErrors":          {AggSum, "a per-window count of I/O errors"},
+		"acceleratorCount":  {AggLast, "an inventory fact, not a per-window count"},
 
 		// A floor: the WORST window is the verdict. A soak holding 83% for
 		// eleven hours and 40% for one hour is a part that dropped to 40%, and
