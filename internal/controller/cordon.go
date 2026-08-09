@@ -232,8 +232,20 @@ func (r *BurnInRunReconciler) cordonNode(ctx context.Context, run *burninv1alpha
 		held[n] = true
 	}
 
+	// UNCACHED, for the same reason as releaseNode and with a worse consequence.
+	// Two of the three arms below conclude from this read and DECIDE NOT TO
+	// ACT — "the node does not exist" and "somebody else holds it" — and neither
+	// writes anything, so no resourceVersion check stands behind either. But
+	// unlike the release path, the run does not stop when cordoning declines:
+	// the wave has already admitted this node and the pod is created next. An
+	// informer that has not yet observed a freshly created node answers NotFound,
+	// and one holding a version from before another owner released it answers
+	// with a stamp that is gone. Either way the run puts a full-power runner pod
+	// on a node it never took out of the scheduler, which is the interlock's
+	// whole purpose — and having recorded no hold, it never gives the node back
+	// either.
 	var node corev1.Node
-	if err := r.Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
+	if err := r.uncached().Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Nothing to hold, and nothing owed on the way out. The test
 			// targeting this node will fail to schedule and be recorded as an
@@ -352,17 +364,23 @@ func (r *BurnInRunReconciler) releaseNode(ctx context.Context, run *burninv1alph
 	logger := log.FromContext(ctx)
 	owner := cordonOwnerID(run)
 
-	// Cached, deliberately, and the reason is the rule that decides which reads
-	// go uncached at all. What follows this read is an Update of the SAME
-	// object, so a stale reading cannot become a stale write: the apiserver
-	// refuses it on resourceVersion and the next pass reads again. The reads
-	// that had to move off the cache are the ones whose answer is RECORDED
-	// somewhere else (capturePriorSchedulability, into the run's status) or used
-	// to decide NOT to act (releaseCordons' scan, which finds nothing and
-	// concludes there is nothing to give back). Neither of those has an
-	// optimistic-concurrency check standing behind it.
+	// UNCACHED, because only ONE of the three arms below is an Update. That is
+	// the rule that decides which reads go uncached at all: a stale read whose
+	// only consequence is an Update of the SAME object cannot become a stale
+	// write, since the apiserver refuses it on resourceVersion and the next pass
+	// reads again — but a stale read used to decide NOT to act has no such check
+	// standing behind it, and neither does one whose answer is RECORDED
+	// somewhere else. This read is both. The two non-default arms write nothing
+	// to the node and still drop it from status.CordonedNodes, so an informer
+	// holding the version from before this run stamped the node — or one that
+	// has not observed the node at all, which answers NotFound — makes the run
+	// disown a node it is still holding with its own stamp on it. Nothing owes
+	// that node back until the run cordons it again or reaches teardown, which
+	// for a single-test profile or a long soak is the rest of the run, and
+	// status.CordonedNodes says the fleet has it. Same class as
+	// capturePriorSchedulability and releaseCordons' scan; see issue #245.
 	var node corev1.Node
-	err := r.Get(ctx, types.NamespacedName{Name: name}, &node)
+	err := r.uncached().Get(ctx, types.NamespacedName{Name: name}, &node)
 	switch {
 	case apierrors.IsNotFound(err):
 		// The node is gone; there is nothing to restore and nothing to owe.
