@@ -33,7 +33,7 @@ func TestEveryRunnerPodAtEveryScopeRefusesEviction(t *testing.T) {
 	}
 	for name, rv := range cases {
 		t.Run(name, func(t *testing.T) {
-			pod, err := podForTest(run, 0, 1, "t", &spec, nil, "spark-a",
+			pod, err := podForTest(run, 0, 1, "t", &spec, nil, "spark-a", "",
 				burninv1alpha1.TargetSelector{}, rv)
 			if err != nil {
 				t.Fatal(err)
@@ -56,7 +56,7 @@ func TestNothingInTheSpecCanMakeAPodEvictable(t *testing.T) {
 	spec.HostNetwork = true
 	spec.DurationSeconds = 1
 
-	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a",
+	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a", "",
 		burninv1alpha1.TargetSelector{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestNothingInTheSpecCanMakeAPodEvictable(t *testing.T) {
 // PriorityClassName is plumbed, and defaults to unset.
 func TestPriorityClassIsPassedThroughAndDefaultsToUnset(t *testing.T) {
 	spec := smokeTest("t").Spec
-	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a",
+	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a", "",
 		burninv1alpha1.TargetSelector{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestPriorityClassIsPassedThroughAndDefaultsToUnset(t *testing.T) {
 	}
 
 	spec.Runner = &burninv1alpha1.RunnerSpec{PriorityClassName: "burn-in-high"}
-	pod, err = podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a",
+	pod, err = podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a", "",
 		burninv1alpha1.TargetSelector{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestATestWithNoRunnerBlockStillRefusesEviction(t *testing.T) {
 		Scope:           burninv1alpha1.ScopeNode,
 		DurationSeconds: 60,
 	}
-	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a",
+	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "t", &spec, nil, "spark-a", "",
 		burninv1alpha1.TargetSelector{}, nil)
 	if err != nil {
 		t.Fatal(err)

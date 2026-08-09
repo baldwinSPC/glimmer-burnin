@@ -366,15 +366,75 @@ func hostPathVolumeName(index int, mountPath string) string {
 	return strings.Trim(name, "-")
 }
 
-// runnerImage resolves the container image for a test.
-func runnerImage(spec *burninv1alpha1.BurnInTestSpec) (string, error) {
+// runnerImage resolves the container image for a test on a node of a given
+// accelerator vendor.
+//
+// Three sources, most specific first:
+//
+//	spec.runner.image                 an explicit pin, which means every node
+//	spec.runner.imagesByVendor[v]     this vendor's image
+//	runnerimages.Default(kind)        the kind's built-in
+//
+// The vendor is a LOOKUP KEY and nothing else. There is no branch on its value
+// here or anywhere else in this package — adding support for an accelerator is
+// a new map entry in a BurnInTest, not a new case in the reconciler, and
+// TestTheReconcilerHasNoVendorBranch asserts that stays true.
+//
+// vendor may be empty, which is the ordinary single-vendor case and every case
+// before this field existed: byVendor is simply skipped and the default answers.
+func runnerImage(spec *burninv1alpha1.BurnInTestSpec, vendor string) (string, error) {
 	if spec.Runner != nil && spec.Runner.Image != "" {
 		return spec.Runner.Image, nil
+	}
+	if spec.Runner != nil && len(spec.Runner.ImagesByVendor) > 0 {
+		for _, vi := range spec.Runner.ImagesByVendor {
+			if vi.Vendor == vendor && vi.Image != "" {
+				return vi.Image, nil
+			}
+		}
+		// The field is set and this node's vendor is not among its entries.
+		// Reported separately from the no-default case because the fix is
+		// different and the author has already shown they know about the field:
+		// they listed some vendors and not this one, which on a mixed fleet is
+		// far more likely to be an oversight than a decision.
+		//
+		// An ERROR, not a skip. A node silently not being tested is how a fleet
+		// gets certified without being measured.
+		if _, hasDefault := runnerimages.Default(spec.Kind); !hasDefault {
+			return "", fmt.Errorf(
+				"no image for vendor %q on kind %q: spec.runner.imagesByVendor lists %s, and this kind has "+
+					"no built-in default to fall back to. Add a %q entry, or set spec.runner.image to pin "+
+					"one image for every node",
+				vendorOrUnknown(vendor), spec.Kind, listVendors(spec.Runner.ImagesByVendor), vendorOrUnknown(vendor))
+		}
 	}
 	if img, ok := runnerimages.Default(spec.Kind); ok {
 		return img, nil
 	}
 	return "", fmt.Errorf("no default runner image for kind %q — set spec.runner.image", spec.Kind)
+}
+
+// vendorOrUnknown names a vendor for a message.
+//
+// An empty vendor means the fingerprint could not establish one, which is a
+// different problem from a vendor that is simply absent from the map, and the
+// message has to be able to say so — "no image for vendor \"\"" sends the
+// reader looking for a typo in their YAML.
+func vendorOrUnknown(vendor string) string {
+	if vendor == "" {
+		return "unknown (no accelerator vendor on this node's fingerprint)"
+	}
+	return vendor
+}
+
+// listVendors renders the declared vendors in a stable order for a message.
+func listVendors(list []burninv1alpha1.VendorImage) string {
+	names := make([]string, 0, len(list))
+	for _, vi := range list {
+		names = append(names, vi.Vendor)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // podForTest builds the pod that executes one attempt of one test on one node.
@@ -392,10 +452,14 @@ func podForTest(
 	// test's definition — they are which CELL of it this pod is.
 	axes map[string]string,
 	node string,
+	// vendor is the accelerator vendor of `node`, from its NodeFingerprint. It
+	// selects an image from spec.runner.imagesByVendor and is used for NOTHING
+	// else — no behaviour in this function branches on it.
+	vendor string,
 	target burninv1alpha1.TargetSelector,
 	rv *rendezvous,
 ) (*corev1.Pod, error) {
-	image, err := runnerImage(spec)
+	image, err := runnerImage(spec, vendor)
 	if err != nil {
 		return nil, err
 	}

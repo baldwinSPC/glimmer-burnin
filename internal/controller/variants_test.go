@@ -155,7 +155,8 @@ func TestAxesReachTheRunnerAndNothingInterpretsThem(t *testing.T) {
 	spec := variantSpec(burninv1alpha1.KindComputeSmoke)
 	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "gemm-fp4", &spec,
 		map[string]string{"precision": "fp4", "layout": "nt"},
-		"spark-a", burninv1alpha1.TargetSelector{}, nil)
+		"spark-a", "",
+		burninv1alpha1.TargetSelector{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

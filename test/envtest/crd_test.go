@@ -143,6 +143,22 @@ func TestApiserverRejectsWhatTheSchemaForbids(t *testing.T) {
 		},
 		want: "path",
 	}, {
+		name: "an imagesByVendor key that is not a vendor",
+		// The keys are validated by a CEL rule, which is worth exercising
+		// against a real apiserver rather than trusting: a subtly wrong CEL
+		// expression does not fail loudly, it accepts everything. A typo'd
+		// vendor that reached the cluster would resolve to no image on every
+		// node of that vendor — and the operator would only say so at plan
+		// time, per node, long after the profile was written.
+		obj: func() *unstructured.Unstructured {
+			return rawTest(ns, "bad-vendor-key", map[string]any{
+				"runner": map[string]any{
+					"imagesByVendor": []any{map[string]any{"vendor": "nvidai", "image": "example.invalid/x:v1"}},
+				},
+			})
+		},
+		want: "vendor",
+	}, {
 		name: "hostPath type the kubelet would CREATE",
 		// The enum admits only assert-only types. An operator sent to MEASURE a
 		// fleet must never be able to mutate it.

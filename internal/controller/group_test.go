@@ -677,7 +677,8 @@ func TestNodeAndPairDeadlinesAreUnchanged(t *testing.T) {
 	run := newRun("run1", "p", "spark-a")
 	want := int64(300 + deadlineGraceSeconds)
 
-	node, err := podForTest(run, 0, 1, "t", spec, nil, "spark-a", run.Spec.Target, nil)
+	node, err := podForTest(run, 0, 1, "t", spec, nil, "spark-a", "",
+		run.Spec.Target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,9 +687,10 @@ func TestNodeAndPairDeadlinesAreUnchanged(t *testing.T) {
 	}
 
 	for _, role := range []string{pairRoleServer, pairRoleClient} {
-		pair, err := podForTest(run, 0, 1, "t", spec, nil, "spark-a", run.Spec.Target, &rendezvous{
-			scope: burninv1alpha1.ScopePair, role: role, service: "svc", peerRole: "other",
-		})
+		pair, err := podForTest(run, 0, 1, "t", spec, nil, "spark-a", "",
+			run.Spec.Target, &rendezvous{
+				scope: burninv1alpha1.ScopePair, role: role, service: "svc", peerRole: "other",
+			})
 		if err != nil {
 			t.Fatal(err)
 		}
