@@ -12,6 +12,8 @@ func TestUnitOf(t *testing.T) {
 	}{
 		// The two that motivated the convention. They must stay distinguishable.
 		{"bandwidthGbps", UnitGigabitsPerSecond},
+		{"tcpThroughputGbps", UnitGigabitsPerSecond},
+		{"tcpRttUs", UnitMicroseconds},
 		{"busBandwidthGBs", UnitGigabytesPerSecond},
 
 		{"latencyUs", UnitMicroseconds},
@@ -50,6 +52,7 @@ func TestUnitOf(t *testing.T) {
 		{"remappedRows", UnitNone},
 		{"pcieReplayErrors", UnitNone},
 		{"nicLinkDownEvents", UnitNone},
+		{"tcpRetransmits", UnitNone},
 		{"memoryErrors", UnitNone},
 		{"diagTestsFailed", UnitNone},
 		{"iterationsCompleted", UnitNone},
@@ -130,6 +133,8 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"deviceToDeviceBandwidthGBs": {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"memoryBandwidthGBs":         {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"bandwidthGbps":              {UnitGigabitsPerSecond, ThresholdUseAcceptance},
+		"tcpThroughputGbps":          {UnitGigabitsPerSecond, ThresholdUseAcceptance},
+		"tcpRttUs":                   {UnitMicroseconds, ThresholdUseAcceptance},
 		"peakBandwidthGbps":          {UnitGigabitsPerSecond, ThresholdUseAcceptance},
 		"readBandwidthMBs":           {UnitMegabytesPerSecond, ThresholdUseAcceptance},
 		"writeBandwidthMBs":          {UnitMegabytesPerSecond, ThresholdUseAcceptance},
@@ -180,6 +185,7 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"remappedRows":        {UnitNone, ThresholdUseAcceptance},
 		"pcieReplayErrors":    {UnitNone, ThresholdUseAcceptance},
 		"nicLinkDownEvents":   {UnitNone, ThresholdUseAcceptance},
+		"tcpRetransmits":      {UnitNone, ThresholdUseAcceptance},
 		"throttleEvents":      {UnitNone, ThresholdUseAcceptance},
 		"throttledSamples":    {UnitNone, ThresholdUseAcceptance},
 		"throttleReasonsMask": {UnitNone, ThresholdUseEvidence},
@@ -198,6 +204,8 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		// Acceptance would re-open exactly that hole, which is why they are
 		// asserted here by name rather than left to review.
 		"gpuName":                 {UnitNone, ThresholdUseEvidence},
+		"tcpTestInterface":        {UnitNone, ThresholdUseEvidence},
+		"tcpMgmtInterface":        {UnitNone, ThresholdUseEvidence},
 		"computeCap":              {UnitNone, ThresholdUseEvidence},
 		"pciBusId":                {UnitNone, ThresholdUseEvidence},
 		"driverVersion":           {UnitNone, ThresholdUseEvidence},
@@ -344,12 +352,15 @@ func TestAggregationOfTheEasilyMistakenMetrics(t *testing.T) {
 		"xidEvents":         {AggSum, "counted from the kernel log over the window"},
 		"pcieReplayErrors":  {AggSum, "differenced over the window"},
 		"nicLinkDownEvents": {AggSum, "differenced over the window"},
+		"tcpRetransmits":    {AggSum, "a per-window count of retransmitted segments"},
 
 		// A floor: the WORST window is the verdict. A soak holding 83% for
 		// eleven hours and 40% for one hour is a part that dropped to 40%, and
 		// Max or Last would certify the drop away.
 		"sustainedClockPct": {AggMin, "the worst window describes the part"},
 		"bandwidthGbps":     {AggMin, "likewise — the slowest window is the link"},
+		"tcpThroughputGbps": {AggMin, "the slowest window is the path"},
+		"tcpRttUs":          {AggMax, "the worst round-trip is the one that hurts a collective"},
 
 		// A ceiling, the same reasoning inverted.
 		"gpuTempC":  {AggMax, "peak across the whole soak, not the last segment"},

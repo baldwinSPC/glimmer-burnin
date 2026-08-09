@@ -1,0 +1,49 @@
+# tcp-baseline: is the fabric broken, or is this node's networking broken?
+#
+# The natural first test in a profile. It needs no accelerator and no RDMA
+# hardware, so it runs everywhere, and when a later ib-write-bw fails this is
+# what says whether the node can move packets at all.
+#
+# NOTE ON THE IMAGE. There is no published tcp-baseline image yet, so
+# spec.runner.image is REQUIRED here and this sample names a placeholder.
+# Publishing is manual and follows verification on real hardware. Without a
+# default, a run fails at plan time naming the problem, rather than
+# ImagePullBackOff-ing on every targeted node.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: tcp-baseline
+spec:
+  kind: tcp-baseline
+  scope: Pair
+  durationSeconds: 30
+  # The guard reads /proc/net/route and enumerates host interfaces. Without the
+  # host namespace it fails closed and the test reports an Error — it will not
+  # measure a path it cannot classify.
+  hostNetwork: true
+  runner:
+    image: ghcr.io/baldwinspc/glimmer-burnin-tcp-baseline:REPLACE-ME
+    env:
+      # REQUIRED on the server end, which has no peer address to route towards
+      # and therefore nothing for the management-path guard to compare. Set this
+      # to the FABRIC interface — naming the default-route interface is refused.
+      - name: TCP_BASELINE_INTERFACE
+        value: enp1s0f0
+    # Without a probe, "Ready" only means the container started, and a client
+    # that connects before iperf3 has bound reports a connection error that
+    # reads as a fabric fault.
+    readinessProbe:
+      tcpSocket:
+        port: 5201
+      periodSeconds: 2
+  thresholds:
+    # Deliberately no throughput floor. This project pins thresholds from
+    # MEASURED baselines, never from a spec sheet — the fabric on this fleet
+    # sustains ~99.6 Gb/s against optics labelled 200. Measure first, then gate.
+    #
+    # Retransmits are gateable from day one, because the target is not a rate:
+    # a healthy path retransmits nothing, and Equal 0 on a dimensionless counter
+    # is exactly what exact comparison is for.
+    - metric: tcpRetransmits
+      comparison: Equal
+      value: "0"

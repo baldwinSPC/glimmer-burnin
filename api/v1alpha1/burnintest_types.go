@@ -97,6 +97,25 @@ const (
 	KindIBWriteBW   TestKind = "ib-write-bw"    // Pair: perftest ib_write_bw across the RDMA link
 	KindGPUDirect   TestKind = "gpudirect-rdma" // Pair: GPUDirect RDMA path validation
 
+	// KindTCPBaseline is a Pair-scope plain-TCP throughput measurement.
+	//
+	// It exists to answer the question that always follows an RDMA failure: is
+	// the FABRIC broken, or is this node's networking broken in general? The
+	// RDMA runners need /dev/infiniband, memlock headroom and a working verbs
+	// stack, and a misconfiguration in any of those reports a fabric fault that
+	// is really a configuration fault. A plain TCP test over the same pair
+	// separates the two in seconds.
+	//
+	// It is the only fabric-adjacent kind that needs no accelerator and no RDMA
+	// hardware at all, which makes it the natural first test in a profile and
+	// the natural thing to reach for when something else fails.
+	//
+	// Its runner carries a MANAGEMENT-PATH GUARD and will skip or error rather
+	// than load the interface carrying the node's default route: a burn-in that
+	// saturates the path the cluster is managed through takes the fleet out
+	// while measuring it.
+	KindTCPBaseline TestKind = "tcp-baseline"
+
 	// KindMemoryBW is a Node-scope memory-bandwidth measurement: device-local
 	// STREAM-style bandwidth plus the host<->device and device<->device copy
 	// paths (memoryBandwidthGBs, hostToDeviceBandwidthGBs,
@@ -195,6 +214,7 @@ var BuiltInKinds = []TestKind{
 	KindNCCL,
 	KindIBWriteBW,
 	KindGPUDirect,
+	KindTCPBaseline,
 	KindMemoryBW,
 	KindHostHealth,
 	KindClockProbe,

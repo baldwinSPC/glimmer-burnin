@@ -87,6 +87,15 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - glibc (distroless base)         LGPL-2.1-or-later, dynamically linked and
       unmodified, which LGPL 2.1 section 6 permits without relicensing.
 
+  runners/tcp-baseline
+    - iperf3 3.19.1                   BSD-3-Clause (Lawrence Berkeley National
+      Laboratory), built from source at a pinned commit and shipped with its
+      LICENSE at /licenses. The build asserts BOTH the licence text and the
+      licensor, so a relicensed fork that kept the BSD wording would fail the
+      check rather than ship.
+    - glibc (distroless base)         LGPL-2.1-or-later, dynamically linked and
+      unmodified, which LGPL 2.1 section 6 permits without relicensing.
+
   runners/host-health
     - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
       standard library (BSD-3-Clause).
