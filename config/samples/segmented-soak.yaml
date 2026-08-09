@@ -73,12 +73,12 @@ spec:
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInRun
 metadata:
-  name: week-long-soak-spark-01
+  name: week-long-soak
 spec:
   profileRef: week-long-soak
   target:
     nodeNames:
-      - spark-01
+      - node-a
   # The facility interlock. One node at full power for seven days.
   maxConcurrentNodes: 1
   # Retries apply to the Error phase ONLY, and on a segmented soak an Error

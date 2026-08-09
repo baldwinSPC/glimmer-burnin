@@ -246,6 +246,17 @@ disagree about the same hardware. One brain, two dispatchers.
 
 ## Conventions
 
+> **The invariants below are also published, for humans, at
+> [`docs/dev/invariants.md`](docs/dev/invariants.md).** That page is the
+> canonical PUBLIC text: a stranger evaluating this project should not have to
+> read a file addressed to AI assistants to find the design rationale.
+>
+> What is here is the same set, written as instructions to a session. When one
+> changes, change both — `hack/invariants` fails if the public page loses an
+> invariant this file still asserts, because two copies that drift are two
+> different rules and the one somebody reads is whichever they found first.
+
+
 - **Vendor neutrality lives in the reconciler.** Accelerator- and
   vendor-specific behaviour belongs in *runner images*, never in controller
   branches. Adding support for a vendor should mean adding a runner, not adding

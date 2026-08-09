@@ -63,10 +63,6 @@ indict the whole group for one node's fault. The report names the ranks that
   `Fail` are honoured from any rank, but neither `Skip` nor `Pass` may be
   concluded from a subset — both of them let the run settle `Passed`, so
   concluding either from one rank would certify nodes that never had a pod.
-- **A `Skip` needs every rank to have reported**, as `Pass` does. `Error` and
-  `Fail` are honoured from any rank, but neither `Skip` nor `Pass` may be
-  concluded from a subset — both let the run settle `Passed`, so concluding
-  either from one rank would certify nodes that never had a pod.
 - Every rank is waited for, unlike a Pair — a collective is synchronous, so its
   ranks finish together, and a rank that has not finished is one the collective
   is still waiting on. A genuine hang becomes an `Error` naming the ranks that
@@ -119,7 +115,7 @@ different run — so a live run's node is never released out from under it.
 
 **All eleven kinds ship a runner image, and every one is published and public**
 under `ghcr.io/baldwinspc/glimmer-burnin-<kind>:<version>`; the tags the operator
-defaults to live in `internal/controller/pods.go`, which is the source of truth
+defaults to live in `pkg/runnerimages/images.go`, which is the source of truth
 and states what each release was and was not verified against. A test that names no
 `spec.runner.image` gets the built-in default for its kind; `spec.runner.image`
 overrides it, which is the seam new hardware arrives through.
@@ -192,9 +188,24 @@ The GPU axis is per runner and is documented in each runner's README:
 | `nccl` | **one gencode, and you may need to change it.** Defaults `sm_121` on arm64, `sm_90` on amd64; a B200 or L40S fleet must rebuild with `--build-arg NCCL_GENCODE=…` |
 | `ib-write-bw`, `gpudirect-rdma`, `memory-stress`, `host-health`, `dcgm-diag` | no gencode — nothing to choose |
 
-> The already-published `compute-smoke:v0.1.0` tag is **`linux/arm64` only**, and
-> published tags are immutable, so it stays that way. Multi-arch starts at the
-> next tag.
+> **The `v0.1.0` and `v0.2.x` runner tags are `linux/arm64` only.** Published
+> tags are immutable, so they stay that way; multi-arch begins at `v0.3.0`. The
+> operator pins `v0.5.0` for every runner — `pkg/runnerimages/images.go` is the
+> source of truth, not this table.
+
+## Documentation
+
+| | |
+|---|---|
+| [`docs/concepts.md`](docs/concepts.md) | the CRDs, the three scopes, and how a run actually proceeds |
+| [`docs/runner-contract.md`](docs/runner-contract.md) | **the extension point** — exit codes, metrics, the `BURNIN_*` environment, host access |
+| [`docs/thresholds.md`](docs/thresholds.md) | authoring gates, applicability, the linter, and measure-then-pin |
+| [`docs/sinks.md`](docs/sinks.md) | the delivery envelope, idempotency, the three sinks |
+| [`docs/reports.md`](docs/reports.md) | JUnit, HTML, markdown and the NVVS-compatible document |
+| [`docs/soaks.md`](docs/soaks.md) | running a soak, and the capacity it costs |
+| [`docs/verifying-images.md`](docs/verifying-images.md) | verifying the cosign signature on what you pulled |
+| [`docs/dev/invariants.md`](docs/dev/invariants.md) | **the design rationale** — the rules and the failures each prevents |
+| [`docs/dev/new-testkind-playbook.md`](docs/dev/new-testkind-playbook.md) | adding a TestKind, step by step, with the guard for each |
 
 ## Install
 
@@ -342,7 +353,7 @@ peer-memory provider).
 
 > **That exercise measured the `v0.2.0` build of these sources, published as the
 > `v0.3.0` tags.** Later tags are not covered by it. What stands behind a tag is
-> recorded next to the pins in `internal/controller/pods.go` rather than here,
+> recorded next to the pins in `pkg/runnerimages/images.go` rather than here,
 > because the pins are what a fleet actually runs — and a release cut without a
 > GPU available says so there in as many words. Do not read this section as a
 > claim about whichever tag is newest.

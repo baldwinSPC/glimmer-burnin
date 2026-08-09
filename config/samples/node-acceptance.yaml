@@ -5,7 +5,7 @@
 # ─── RUNNER IMAGES ────────────────────────────────────────────────────────────
 #
 # Only compute-smoke has a published image. The other kinds below have runner
-# source, Dockerfiles and tests in this repo, and internal/controller/pods.go
+# source, Dockerfiles and tests in this repo, and pkg/runnerimages/images.go
 # names the tag each WILL be published under, but those tags are not in the
 # registry yet. Applying this file today runs fp4-compute-smoke and reports an
 # infrastructure Error (never a hardware verdict) for the rest, once their pods
@@ -299,7 +299,10 @@ spec:
   profileRef: node-acceptance
   target:
     nodeNames:
-      - spark-example
+      # Your own node names. A nodeSelector works too and is re-resolved at
+      # each run; docs/concepts.md explains how a target list becomes a wave of
+      # cordons rather than one cordon of everything.
+      - node-a
   # DEFAULT 1, and this is a facility power/cooling interlock rather than a
   # performance knob. Raising it multiplies real electrical load and real heat
   # in a real room. Read the field documentation on BurnInRunSpec first.
