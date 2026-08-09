@@ -635,10 +635,29 @@ func TestABaselineRunNeverReportsAnAdmission(t *testing.T) {
 // shape of a guard is worse than no code, so it was removed and the rule lives
 // in one place, tested directly.
 func TestStatusUnderIsWhereTheBaselineRuleLives(t *testing.T) {
-	for _, phase := range []string{phasePassed, phaseFailed, phaseSkipped, phaseError} {
-		if got := statusUnder(phase, true); got != statusSkip {
-			t.Errorf("statusUnder(%q, baseline=true) = %q, want %q — no threshold was "+
-				"applied to any of them, so none met a criterion", phase, got, statusSkip)
+	// THE RULE IS ABOUT A PASS, and only about a pass.
+	//
+	// This test originally required EVERY phase to map to Skip under baseline,
+	// which is what the code did — so the test agreed with the code and both
+	// were wrong (#232). A baseline can still carry a runner's own exit-1
+	// hardware verdict, and mapping that to Skip put 17 ECC errors into a
+	// vendor-schema document as "not applicable".
+	//
+	// A test that encodes the same mistake as the code under it is not a guard;
+	// it is a second copy of the bug that makes the first one look deliberate.
+	if got := statusUnder(phasePassed, true); got != statusSkip {
+		t.Errorf("statusUnder(Passed, baseline=true) = %q, want %q — no threshold was "+
+			"applied, so nothing met a criterion", got, statusSkip)
+	}
+	for _, tc := range []struct{ phase, want string }{
+		{phaseFailed, statusFail},
+		{phaseError, statusNotRun},
+		{phaseSkipped, statusSkip},
+	} {
+		if got := statusUnder(tc.phase, true); got != tc.want {
+			t.Errorf("statusUnder(%q, baseline=true) = %q, want %q — a baseline applies no "+
+				"gates, but it does not stop a runner reporting what it measured",
+				tc.phase, got, tc.want)
 		}
 	}
 	// With the flag off it is the plain mapping again, so the rule is about the
@@ -855,4 +874,86 @@ func rawOf(t *testing.T, e *contract.Envelope, nodes ...report.NodeInfo) string 
 		b.Write(o.Data)
 	}
 	return b.String()
+}
+
+// A baseline run still reports a hardware Fail as a Fail — issue #232.
+//
+// statusUnder mapped EVERY phase to Skip under baseline, including Failed and
+// Error. A baseline carries no thresholds, so Failed cannot arrive from a gate —
+// refuseGatedBaseline refuses that at plan time — but it can still arrive from
+// the RUNNER: gpu-burn exits 1 on ECC errors, memory-stress on miscompares. So
+// under baseline the only route to Failed is a runner's own hardware verdict,
+// which is precisely the signal the mapping erased.
+//
+// A GPU reporting 17 ECC errors reached the vendor-schema document as "Skip" —
+// the weakest claim in the vocabulary, which consumers filter as
+// not-applicable noise. That is the Error/Fail collapse this package exists to
+// prevent, one step past Not Run, at the schema boundary where it cannot be
+// recovered.
+func TestABaselineStillReportsAHardwareFail(t *testing.T) {
+	e := envelope(phaseFailed,
+		contract.TestResult{
+			Name: "burn", Kind: "gpu-burn", Phase: phaseFailed, Nodes: []string{"n1"},
+			Message: "runner reported failure (exit 1): 17 ECC errors",
+			Metrics: map[string]string{"eccErrors": "17"},
+		},
+		contract.TestResult{
+			Name: "fp4", Kind: "compute-smoke", Phase: phaseError, Nodes: []string{"n1"},
+			Message: "image pull failed",
+		},
+	)
+	e.Baseline = true
+	e.Summary = contract.Summary{Failed: 1, Errored: 1}
+
+	docs := render(t, input(e))
+	d := docs["diag-n1.json"]
+
+	if got := find(t, d, "burn"); got != statusFail {
+		t.Errorf("a runner's exit-1 hardware verdict rendered %q under baseline, want %q. "+
+			"17 ECC errors reaching a vendor-schema document as anything weaker than "+
+			"Fail is the collapse this package exists to prevent.", got, statusFail)
+	}
+	if got := find(t, d, "fp4"); got != statusNotRun {
+		t.Errorf("an Error rendered %q under baseline, want %q", got, statusNotRun)
+	}
+	if d.OverallResult != statusFail {
+		t.Errorf("Overall Result = %q with a failed test present, want %q",
+			d.OverallResult, statusFail)
+	}
+}
+
+// And the #209 property is unchanged: a baseline whose results all PASSED still
+// renders Skip and still refuses an admission.
+//
+// That is the whole point of the baseline rule and it must survive this fix —
+// a thresholdless sweep must never read as a certification.
+func TestABaselinePassIsStillNotACertification(t *testing.T) {
+	e := envelope(phasePassed,
+		contract.TestResult{Name: "sweep", Kind: "thermal-soak", Phase: phasePassed,
+			Nodes: []string{"n1"}},
+	)
+	e.Baseline = true
+
+	d := render(t, input(e))["diag-n1.json"]
+	if got := find(t, d, "sweep"); got != statusSkip {
+		t.Errorf("a baseline PASS rendered %q, want %q — no threshold was applied, so "+
+			"nothing met a criterion", got, statusSkip)
+	}
+	if d.OverallResult == statusPass {
+		t.Error("a baseline run reported an admission")
+	}
+}
+
+// find returns the status of the named test in this document.
+func find(t *testing.T, d Document, name string) string {
+	t.Helper()
+	for _, c := range d.Diagnostic.Categories {
+		for _, tst := range c.Tests {
+			if strings.Contains(tst.Name, name) && len(tst.Results) > 0 {
+				return tst.Results[0].Status
+			}
+		}
+	}
+	t.Fatalf("no test named %q in the document", name)
+	return ""
 }
