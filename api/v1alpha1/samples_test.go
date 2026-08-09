@@ -171,6 +171,41 @@ func TestNoSampleRequestsADurationARunnerIgnores(t *testing.T) {
 	})
 }
 
+// TestNoSampleSegmentsASoakItCannotDivide is the segmentation counterpart of the
+// guard above, and it is here for the same reason: a sample is documentation,
+// and the reader copies it.
+//
+// The operator refuses every one of these at plan time, so nothing here protects
+// a cluster. What it protects is the example — a shipped sample that the operator
+// would refuse teaches a newcomer a shape that does not work, and they find out
+// after cordoning a node.
+func TestNoSampleSegmentsASoakItCannotDivide(t *testing.T) {
+	forEachSampleTest(t, func(t *testing.T, file string, i int, spec burninv1alpha1.BurnInTestSpec) {
+		if spec.Soak == nil {
+			return
+		}
+		name := filepath.Base(file)
+		if spec.Kind.BurstOnly() {
+			t.Errorf("%s document %d: kind %q is burst-only — its runner ignores the duration entirely, "+
+				"so segmenting it would run the same short measurement over and over and call it a soak",
+				name, i, spec.Kind)
+		}
+		if spec.DurationSeconds <= 0 {
+			t.Errorf("%s document %d: sets spec.soak but no durationSeconds — there is nothing to divide",
+				name, i)
+		} else if spec.Soak.SegmentSeconds > spec.DurationSeconds {
+			t.Errorf("%s document %d: asks for %ds segments of a %ds soak — a segment longer than the "+
+				"soak burns the fleet longer than it was asked to",
+				name, i, spec.Soak.SegmentSeconds, spec.DurationSeconds)
+		}
+		if n := spec.RepeatCount; n != nil && *n > 1 {
+			t.Errorf("%s document %d: sets both spec.soak and repeatCount %d — a repeat re-runs a whole "+
+				"test and ANDs the verdicts, while a segment is one window of a single verdict",
+				name, i, *n)
+		}
+	})
+}
+
 // forEachSampleTest decodes every BurnInTest document in config/samples and
 // hands its spec to fn. Non-BurnInTest documents are skipped;
 // TestSamplesDecodeStrictly is what asserts they all decode at all.

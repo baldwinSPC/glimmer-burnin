@@ -309,6 +309,13 @@ type BurnInTestSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	CheckpointIntervalSeconds *int32 `json:"checkpointIntervalSeconds,omitempty"`
 
+	// Soak divides this test's DurationSeconds into a sequence of shorter pod
+	// executions. Unset means one pod for the whole duration, which is what
+	// every test did before this field existed.
+	//
+	// +optional
+	Soak *SoakSpec `json:"soak,omitempty"`
+
 	// Runner overrides the image/command for this test. When empty the operator
 	// uses the built-in image for Kind. This is the vendor/heterogeneity seam:
 	// a new accelerator or NIC ships a runner image, not a controller change.
@@ -325,6 +332,92 @@ type BurnInTestSpec struct {
 	// HostNetwork runs the test pod on the host network (needed for direct host
 	// RDMA in some fabrics). Defaults false.
 	HostNetwork bool `json:"hostNetwork,omitempty"`
+}
+
+// SoakSpec turns ONE long execution into a SEQUENCE of shorter ones.
+//
+// A seven-day soak used to be a single 604,920-second pod, and everything that
+// normally happens to a pod over a week is fatal to one: a kubelet restart, a
+// drain, an eviction, an image-GC pass, a reboot. Each of those ended the run as
+// an Error, and with retryOnErrorLimit set the retry started the week over from
+// zero. Segmenting costs ONE SEGMENT instead.
+//
+// It is OPT-IN PER TEST and that is not negotiable, because whether a duration
+// means anything at all is the RUNNER's property and only the test's author
+// knows it. host-health clamps its window to 30 seconds and compute-smoke is
+// declared burst-only (see TestKind.BurstOnly); segmenting either produces a
+// sequence of identical short measurements and calls it a week. A default-on
+// version of this field would do exactly that to every profile in the fleet.
+//
+// # What changes about the verdict, and it is the whole feature
+//
+// THE VERDICT IS RENDERED ONCE, OVER THE AGGREGATE. Per segment only the exit
+// code decides: 0 folds the segment's metrics into TestResult.AggregatedMetrics
+// and the test stays open, 1 settles the test Failed immediately, 2 settles it
+// Skipped, and anything else is an Error that consumes retryOnErrorLimit,
+// re-runs THE SAME segment index and contributes nothing. Thresholds are
+// evaluated once, on the last segment, against the accumulated aggregate —
+// never per segment, because a soak's gate is a statement about the soak.
+//
+// How each metric combines is declared beside its NAME in
+// pkg/contract.Metric.Aggregation, never here and never in the reconciler: Sum
+// for a per-window counter, Min for a floor, Max for a ceiling, Last for a
+// nameplate or a lifetime total the runner already reports absolutely. An
+// unregistered name combines Last, because inventing Sum semantics for somebody
+// else's measurement would be this operator deciding what it means.
+//
+// elapsedS sums, which is what makes `elapsedS >= 0.95 * durationSeconds` an
+// honest gate on whether the soak actually soaked.
+type SoakSpec struct {
+	// SegmentSeconds is one pod's window. Each segment gets
+	// BURNIN_DURATION_SECONDS=<segmentSeconds> and its own
+	// activeDeadlineSeconds, so an eviction or a reboot costs one segment
+	// rather than the whole run.
+	//
+	// The floor is five minutes and it is a real bound rather than a round
+	// number: a segment boundary costs a pod teardown, a pod creation and a
+	// scheduling round-trip, and below five minutes the run spends more time
+	// changing pods than it spends measuring hardware.
+	//
+	// EVERY SEGMENT IS A FULL WINDOW, including the last, so a soak runs at
+	// least its DurationSeconds and may overrun by up to one segment. A short
+	// remainder segment would be the worse choice twice over: it is below the
+	// floor this field exists to enforce, and a counter summed over a
+	// ten-second window is not comparable to the same counter summed over a
+	// fifteen-minute one, which is precisely what the aggregation rules assume.
+	//
+	// It must not exceed DurationSeconds — a segment longer than the soak is a
+	// soak that burns longer than it was asked to — and the run is refused at
+	// start if it does.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=300
+	SegmentSeconds int32 `json:"segmentSeconds"`
+
+	// AbortEarly stops the soak as Failed the moment the aggregate so far
+	// PROVABLY violates a gate. Default false.
+	//
+	// "Provably" is the whole of it, and it is narrower than it sounds. It fires
+	// only where the aggregation is monotone IN THE GATED DIRECTION, so that no
+	// later segment could retract the violation: a Sum counter under
+	// LessThanOrEqual (or under Equal, once the sum has passed the value), a Min
+	// under a GreaterThanOrEqual floor, a Max under a LessThanOrEqual ceiling.
+	// Everywhere else it stays silent — a Min under a ceiling can be pulled back
+	// under it by a later segment, and aborting a week of burn-in on a violation
+	// the next fifteen minutes would have retracted is the wrong trade.
+	//
+	// It is evaluated at SEGMENT BOUNDARIES ONLY, from harvested metrics, and
+	// never from a checkpoint's parse of a bounded log tail. A checkpoint is
+	// evidence and never a verdict; ending a soak on a truncated read would make
+	// it one.
+	//
+	// A metric that has not been reported by any segment yet never aborts
+	// anything. Fail-closed still applies at the end — a gated metric no segment
+	// ever emitted fails the test — but absence mid-soak is not yet an absence.
+	//
+	// +kubebuilder:default=false
+	// +optional
+	AbortEarly *bool `json:"abortEarly,omitempty"`
 }
 
 // RunnerSpec is an explicit test container.

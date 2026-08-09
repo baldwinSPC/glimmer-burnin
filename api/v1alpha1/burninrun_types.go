@@ -296,7 +296,7 @@ type BurnInRunSpec struct {
 
 // AttemptTrigger says why an execution happened. It is what keeps the repeat
 // rule and the retry rule from being confused for one another after the fact.
-// +kubebuilder:validation:Enum=Initial;Repeat;ErrorRetry
+// +kubebuilder:validation:Enum=Initial;Repeat;ErrorRetry;Segment
 type AttemptTrigger string
 
 const (
@@ -305,6 +305,13 @@ const (
 	// AttemptRepeat is an execution demanded by BurnInTestSpec.RepeatCount.
 	// Repeats make the gate STRICTER: every one must pass.
 	AttemptRepeat AttemptTrigger = "Repeat"
+	// AttemptSegment is the next window of a soak divided by
+	// BurnInTestSpec.Soak. It is neither a repeat nor a retry, and recording it
+	// as either would misstate the history: the previous execution succeeded
+	// AND contributed to the aggregate the verdict will be read from, where a
+	// repeat is a whole test run again and a retry is a measurement that never
+	// happened.
+	AttemptSegment AttemptTrigger = "Segment"
 	// AttemptErrorRetry is an execution granted by
 	// BurnInRunSpec.RetryOnErrorLimit after a previous attempt ended in Error.
 	// A retry may only ever follow an Error. If a retry is ever seen following
@@ -483,6 +490,52 @@ type TestResult struct {
 	// therefore owes its repeat again.
 	// +kubebuilder:validation:Minimum=0
 	ErrorRetries int32 `json:"errorRetries,omitempty"`
+
+	// SegmentsRequired is how many pod executions this test's soak was divided
+	// into, resolved from BurnInTestSpec.Soak at run start and pinned here.
+	// Zero means the test is not segmented and ran as one pod, which is every
+	// test that does not set spec.soak.
+	//
+	// It is also the flag the reconciler branches on: a result with a positive
+	// SegmentsRequired renders its verdict over AggregatedMetrics rather than
+	// over any one attempt.
+	// +kubebuilder:validation:Minimum=0
+	SegmentsRequired int32 `json:"segmentsRequired,omitempty"`
+
+	// SegmentsCompleted is how many segments have finished CLEANLY and
+	// contributed to AggregatedMetrics.
+	//
+	// It does not advance for an errored segment, and that is the property the
+	// whole design rests on: an Error means the segment measured nothing, so it
+	// re-runs the SAME index and contributes nothing. A counter that advanced on
+	// an error would silently shorten the soak by every interruption it suffered
+	// — which is the failure this feature exists to prevent, reintroduced as
+	// bookkeeping.
+	// +kubebuilder:validation:Minimum=0
+	SegmentsCompleted int32 `json:"segmentsCompleted,omitempty"`
+
+	// AggregatedMetrics is the running combination of every clean segment's
+	// metrics, folded by the per-metric rule in pkg/contract.AggregationFor.
+	//
+	// IT IS PERSISTED, and that is what makes attempt truncation and controller
+	// restarts safe: the verdict is read from here and never from the attempt
+	// list, so attempts may be capped and a manager may die at any point without
+	// the soak losing what it measured. A metric no segment reported is absent
+	// from it — a soak must never manufacture a number it did not measure, and
+	// fail-closed evaluation of the absence at the end is the correct outcome.
+	AggregatedMetrics map[string]string `json:"aggregatedMetrics,omitempty"`
+
+	// TruncatedAttempts counts the passing segments dropped from Attempts to
+	// keep the status writable.
+	//
+	// A 72-hour soak at 15-minute segments is 288 attempt records, each with a
+	// metrics map, in a status that lives in etcd and is copied into a
+	// 900 KiB-capped ConfigMap sink. Attempts keeps the first, every
+	// non-passing one, and the most recent passing ones; this says how many
+	// uneventful segments are not shown, so an elided history is visible as
+	// elided rather than as a soak that ran fewer segments than it did.
+	// +kubebuilder:validation:Minimum=0
+	TruncatedAttempts int32 `json:"truncatedAttempts,omitempty"`
 
 	// Attempts is the per-execution history, in order.
 	Attempts []TestAttempt `json:"attempts,omitempty"`

@@ -164,7 +164,9 @@ ends the week, and a retry starts it over.
 
 - [#155] One test, many cells: the matrix has no word in the API
 - [#156] The pinned plan cannot hold a matrix
-- [#157] A week-long soak is one pod, and one eviction ends the week
+- [#157] A week-long soak is one pod, and one eviction ends the week — `spec.soak.segmentSeconds`
+  now runs it as a sequence of shorter pods, with the verdict rendered once over the
+  aggregate; see [docs/soaks.md](./soaks.md)
 - [#158] A quiet run still wakes every 30 seconds for a week
 - [#159] A multi-day run is one autoscaler decision away from Error
 

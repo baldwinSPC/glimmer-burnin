@@ -1,0 +1,957 @@
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/internal/sink"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
+)
+
+// ─── Fixtures ─────────────────────────────────────────────────────────────────
+
+// soakTest is a thermal soak divided into segments. thermal-soak is used
+// throughout this file rather than compute-smoke because it is a kind that
+// actually honours a duration — segmenting a burst kind is refused at plan time,
+// and TestSoak_PlanRefusals is where that is asserted.
+func soakTest(name string, duration, segment int32, thresholds ...burninv1alpha1.Threshold) *burninv1alpha1.BurnInTest {
+	return &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: name},
+		Spec: burninv1alpha1.BurnInTestSpec{
+			Kind:            burninv1alpha1.KindThermalSoak,
+			Scope:           burninv1alpha1.ScopeNode,
+			DurationSeconds: duration,
+			Soak:            &burninv1alpha1.SoakSpec{SegmentSeconds: segment},
+			Thresholds:      thresholds,
+		},
+	}
+}
+
+func withAbortEarly(bt *burninv1alpha1.BurnInTest) *burninv1alpha1.BurnInTest {
+	bt.Spec.Soak.AbortEarly = boolp(true)
+	return bt
+}
+
+// thermalSegmentStdout is one window of a soak in the shape the shipped runner
+// prints it, with the keys the thermal-soak alias table maps
+// (soak_seconds → elapsedS, peak_temp_c → gpuTempC).
+func thermalSegmentStdout(elapsedS, peakTempC, sustainedPct, xidEvents string) string {
+	return strings.Join([]string{
+		"gpu_name=NVIDIA GB10",
+		"soak_seconds=" + elapsedS,
+		"peak_temp_c=" + peakTempC,
+		"sustained_clock_pct=" + sustainedPct,
+		"xid_events=" + xidEvents,
+		"throttle_count=0",
+		"THERMAL_SOAK_PASS",
+	}, "\n") + "\n"
+}
+
+// cleanSegment is a healthy fifteen-minute window.
+func cleanSegment() string { return thermalSegmentStdout("900", "71.5", "83.2", "0") }
+
+// attemptPod finds the pod carrying one attempt number.
+//
+// The harness's own pods() picks the highest attempt label as a STRING, which
+// orders "10" before "9". A soak runs hundreds of attempts, so it needs a
+// numeric lookup or every assertion past attempt 9 would be about the wrong pod.
+func (h *harness) attemptPod(runName string, attempt int) *corev1.Pod {
+	h.t.Helper()
+	want := strconv.Itoa(attempt)
+	for _, pod := range h.allPods(runName) {
+		if pod.Labels[labelAttempt] == want {
+			return pod
+		}
+	}
+	return nil
+}
+
+// awaitSegmentPod reconciles until the pod for one segment exists.
+func (h *harness) awaitSegmentPod(runName string, attempt int) *corev1.Pod {
+	h.t.Helper()
+	for i := 0; i < 6; i++ {
+		if pod := h.attemptPod(runName, attempt); pod != nil {
+			return pod
+		}
+		h.reconcile(runName)
+	}
+	h.t.Fatalf("segment %d never got a pod", attempt)
+	return nil
+}
+
+// burnSegment drives one whole segment: launch the pod, start it, finish it with
+// the given exit code and stdout, and let the operator harvest it.
+func (h *harness) burnSegment(runName string, attempt, exit int, stdout string) {
+	h.t.Helper()
+	pod := h.awaitSegmentPod(runName, attempt)
+	h.startPod(pod)
+	h.reconcile(runName)
+	reason := "Completed"
+	if exit != 0 {
+		reason = "Error"
+	}
+	h.finishPod(pod, exit, stdout, reason)
+	h.reconcile(runName)
+}
+
+func soakResult(t *testing.T, run *burninv1alpha1.BurnInRun) *burninv1alpha1.TestResult {
+	t.Helper()
+	if len(run.Status.Results) != 1 {
+		t.Fatalf("expected exactly one result, got %d: %+v", len(run.Status.Results), run.Status.Results)
+	}
+	return &run.Status.Results[0]
+}
+
+// ─── The folding rules ────────────────────────────────────────────────────────
+
+// The aggregation table. Each row states the rule it expects INDEPENDENTLY of
+// the registry and then asserts the registry agrees, so a row cannot silently
+// start testing a different rule because somebody re-declared a metric — and the
+// expected value is written out rather than derived, so the test cannot agree
+// with a broken fold by computing it the same broken way.
+//
+// The Last rows are the ones with teeth. eccErrors and remappedRows are NVML
+// aggregates SINCE RESET, so summing them multiplies them by the number of
+// windows: a node with four remapped rows would read as 1,152 after a
+// 288-segment soak and be condemned for damage it does not have.
+func TestFoldMetrics_CombinesByTheDeclaredAggregation(t *testing.T) {
+	cases := []struct {
+		name     string
+		metric   string
+		rule     contract.Aggregation
+		segments []string
+		want     string
+	}{
+		{"a per-window counter sums", "xidEvents", contract.AggSum, []string{"1", "0", "2"}, "3"},
+		{"elapsedS sums, which is what makes a duration gate honest",
+			"elapsedS", contract.AggSum, []string{"900", "900", "900"}, "2700"},
+		{"a floor keeps the WORST window", "sustainedClockPct", contract.AggMin,
+			[]string{"83.2", "40.5", "81"}, "40.5"},
+		{"a floor is not improved by a later good window", "sustainedClockPct", contract.AggMin,
+			[]string{"40.5", "83.2", "81"}, "40.5"},
+		{"a ceiling keeps the HIGHEST window", "gpuTempC", contract.AggMax,
+			[]string{"71", "88.5", "70"}, "88.5"},
+		{"a lifetime total takes the last reading, never the sum", "eccErrors", contract.AggLast,
+			[]string{"4", "4", "4"}, "4"},
+		{"a remapped-row count is a lifetime total too", "remappedRows", contract.AggLast,
+			[]string{"4", "4", "4"}, "4"},
+		{"an unregistered name takes the last reading", "vendorWidgetCount", contract.AggLast,
+			[]string{"7", "9", "2"}, "2"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := contract.AggregationFor(c.metric); got != c.rule {
+				t.Fatalf("this row is written for %s but the registry declares %q as %s — "+
+					"the row is now testing a rule it does not describe", c.rule, c.metric, got)
+			}
+			var agg map[string]string
+			for _, v := range c.segments {
+				agg = foldMetrics(agg, map[string]string{c.metric: v})
+			}
+			if got := agg[c.metric]; got != c.want {
+				t.Errorf("%s over %v = %q, want %q", c.rule, c.segments, got, c.want)
+			}
+		})
+	}
+}
+
+// A metric no segment reported stays absent. Fail-closed evaluation of that
+// absence at the end of the soak is the correct outcome; inventing a zero for it
+// would certify hardware nobody measured.
+func TestFoldMetrics_NeverInventsAMeasurement(t *testing.T) {
+	agg := foldMetrics(nil, map[string]string{"elapsedS": "900"})
+	agg = foldMetrics(agg, map[string]string{"elapsedS": "900"})
+	if _, present := agg["xidEvents"]; present {
+		t.Errorf("aggregate invented a metric no segment reported: %v", agg)
+	}
+	if len(agg) != 1 {
+		t.Errorf("aggregate = %v, want only the one metric that was actually reported", agg)
+	}
+}
+
+// A reading nothing can add or order poisons its metric for the rest of the
+// soak, and a later clean window must not launder it away. verdict.Evaluate
+// fails a non-finite value closed under every comparison, which is where the
+// poison is meant to land.
+func TestFoldMetrics_NonFiniteReadingIsStickyAndFailsClosed(t *testing.T) {
+	agg := foldMetrics(nil, map[string]string{"sustainedClockPct": "83.2"})
+	agg = foldMetrics(agg, map[string]string{"sustainedClockPct": "NaN"})
+	agg = foldMetrics(agg, map[string]string{"sustainedClockPct": "84.0"})
+	if got := agg["sustainedClockPct"]; got != "NaN" {
+		t.Fatalf("aggregate = %q, want the poisoned reading to survive a later clean window", got)
+	}
+
+	out := verdict.Evaluate(agg, nil, []burninv1alpha1.Threshold{
+		{Metric: "sustainedClockPct", Comparison: burninv1alpha1.GTE, Value: "60"},
+	})
+	if out.Passed {
+		t.Error("a soak whose gauge went non-finite passed its floor — that is an acceptance nobody measured")
+	}
+}
+
+// A metric one window could not measure and another one did IS measurable, and
+// the gate applies to the aggregate. Keeping both claims would make
+// verdict.Evaluate report the runner as self-contradictory, which would be this
+// operator inventing a contradiction out of two honest readings.
+func TestFoldUnmeasurable_AMeasuredMetricLeavesTheDeclaration(t *testing.T) {
+	agg := map[string]string{}
+	names := foldUnmeasurable(nil, map[string]bool{"eccErrors": true, "remappedRows": true}, agg)
+	if len(names) != 2 {
+		t.Fatalf("declaration lost: %v", names)
+	}
+
+	agg = foldMetrics(agg, map[string]string{"eccErrors": "0"})
+	names = foldUnmeasurable(names, nil, agg)
+	if len(names) != 1 || names[0] != "remappedRows" {
+		t.Errorf("unmeasurable = %v, want only remappedRows — eccErrors was measured in a later window", names)
+	}
+}
+
+// ─── The crux: one verdict, over the aggregate ────────────────────────────────
+
+// THE PROPERTY THIS WHOLE CHANGE EXISTS FOR. The gate is on the SUM of the
+// soak's windows, and no single window can satisfy it: evaluated per segment it
+// fails at segment one and condemns the node fifteen minutes into a
+// forty-five-minute soak. Evaluated once, over the aggregate, it passes.
+func TestSoak_ThresholdsAreEvaluatedOnceOverTheAggregate(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 2700, 900,
+			burninv1alpha1.Threshold{Metric: "elapsedS", Comparison: burninv1alpha1.GTE, Value: "2565"}),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	h.burnSegment("run1", 1, 0, cleanSegment())
+	res := soakResult(t, h.run("run1"))
+	if res.Phase != burninv1alpha1.RunRunning {
+		t.Fatalf("result phase after segment 1 = %q, want Running — a gate on the whole soak "+
+			"must not be applied to one window (message: %q)", res.Phase, res.Message)
+	}
+	if res.SegmentsCompleted != 1 || res.SegmentsRequired != 3 {
+		t.Fatalf("segments = %d/%d, want 1/3", res.SegmentsCompleted, res.SegmentsRequired)
+	}
+	if got := res.AggregatedMetrics["elapsedS"]; got != "900" {
+		t.Errorf("aggregate elapsedS after one segment = %q, want 900", got)
+	}
+
+	h.burnSegment("run1", 2, 0, cleanSegment())
+	h.burnSegment("run1", 3, 0, cleanSegment())
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("run phase = %q, want Passed (results: %+v)", run.Status.Phase, run.Status.Results)
+	}
+	res = soakResult(t, run)
+	if got := res.AggregatedMetrics["elapsedS"]; got != "2700" {
+		t.Errorf("aggregate elapsedS = %q, want 2700 — the gate is on the whole soak", got)
+	}
+	if got := res.Metrics["elapsedS"]; got != "2700" {
+		t.Errorf("result metrics elapsedS = %q, want the aggregate the verdict was read from", got)
+	}
+	if res.SegmentsCompleted != 3 {
+		t.Errorf("segmentsCompleted = %d, want 3", res.SegmentsCompleted)
+	}
+}
+
+// The same soak against a gate the aggregate does NOT clear still fails, so the
+// test above is not passing merely because thresholds stopped being applied at
+// all. The aggregate falls two seconds short and the run says so.
+func TestSoak_TheAggregateStillFailsClosed(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 2700, 900,
+			burninv1alpha1.Threshold{Metric: "elapsedS", Comparison: burninv1alpha1.GTE, Value: "2702"},
+			// A gate on a metric no segment reports must still fail closed at the
+			// end of a soak, exactly as it does for an unsegmented test.
+			burninv1alpha1.Threshold{Metric: "miscompares", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	for i := 1; i <= 3; i++ {
+		h.burnSegment("run1", i, 0, cleanSegment())
+	}
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("run phase = %q, want Failed", run.Status.Phase)
+	}
+	res := soakResult(t, run)
+	if !strings.Contains(res.Message, "elapsedS") {
+		t.Errorf("message does not name the gate the aggregate missed: %q", res.Message)
+	}
+	var sawMissing bool
+	for _, v := range res.Violations {
+		if v.Metric == "miscompares" && v.Cause == string(verdict.CauseEvidence) {
+			sawMissing = true
+		}
+	}
+	if !sawMissing {
+		t.Errorf("a gated metric no segment reported did not fail closed: %+v", res.Violations)
+	}
+}
+
+// ─── Acceptance: a lost segment costs one segment ─────────────────────────────
+
+// A soak whose segment pod is deleted mid-run loses that segment and no more.
+// The operator relaunches the same segment, the aggregate is untouched by the
+// interruption, and the run reaches a verdict.
+func TestSoak_ADeletedSegmentPodCostsOneSegmentAndNoMore(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 2700, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	h.burnSegment("run1", 1, 0, cleanSegment())
+
+	// Segment 2 is evicted: the pod is running and then simply gone.
+	pod := h.awaitSegmentPod("run1", 2)
+	h.startPod(pod)
+	h.reconcile("run1")
+	if err := h.c.Delete(context.Background(), pod); err != nil {
+		t.Fatalf("delete segment pod: %v", err)
+	}
+
+	res := soakResult(t, h.run("run1"))
+	if res.SegmentsCompleted != 1 {
+		t.Fatalf("segmentsCompleted = %d after losing segment 2, want 1", res.SegmentsCompleted)
+	}
+	if got := res.AggregatedMetrics["elapsedS"]; got != "900" {
+		t.Fatalf("aggregate elapsedS = %q, want the one segment that finished", got)
+	}
+
+	// The operator relaunches segment 2 and the soak carries on from there.
+	h.burnSegment("run1", 2, 0, cleanSegment())
+	h.burnSegment("run1", 3, 0, cleanSegment())
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("run phase = %q, want Passed — an evicted segment must not end the soak (results: %+v)",
+			run.Status.Phase, run.Status.Results)
+	}
+	res = soakResult(t, run)
+	if got := res.AggregatedMetrics["elapsedS"]; got != "2700" {
+		t.Errorf("aggregate elapsedS = %q, want 2700 — three windows were measured, no more and no less", got)
+	}
+}
+
+// ─── Acceptance: an errored segment retries the same index ────────────────────
+
+// The errored segment PRINTS metrics before it dies, which is what makes this
+// discriminating: if an errored window contributed, the aggregate would read
+// 2250 rather than 1800, and the soak would settle having burned less than it
+// claims.
+func TestSoak_AnErroredSegmentRetriesTheSameIndexAndContributesNothing(t *testing.T) {
+	run := newRun("run1", "acceptance", "spark-a")
+	run.Spec.RetryOnErrorLimit = int32p(1)
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 1800, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		run,
+	)
+
+	h.burnSegment("run1", 1, 0, cleanSegment())
+	// Segment 2 is killed 450 seconds in, having already printed that far.
+	h.burnSegment("run1", 2, 137, thermalSegmentStdout("450", "70.0", "82.0", "0"))
+
+	res := soakResult(t, h.run("run1"))
+	if res.SegmentsCompleted != 1 {
+		t.Errorf("segmentsCompleted = %d after an errored segment, want 1 — an error measured nothing",
+			res.SegmentsCompleted)
+	}
+	if got := res.AggregatedMetrics["elapsedS"]; got != "900" {
+		t.Errorf("aggregate elapsedS = %q, want 900 — an errored window must not contribute", got)
+	}
+	if res.ErrorRetries != 1 {
+		t.Errorf("errorRetries = %d, want 1 — an errored segment spends the retry budget", res.ErrorRetries)
+	}
+	if res.Phase != burninv1alpha1.RunRunning {
+		t.Fatalf("result phase = %q, want Running", res.Phase)
+	}
+
+	// The retry re-runs segment 2, not segment 3.
+	h.burnSegment("run1", 3, 0, cleanSegment())
+	res = soakResult(t, h.run("run1"))
+	if res.SegmentsCompleted != 2 {
+		t.Fatalf("segmentsCompleted = %d after the retry, want 2", res.SegmentsCompleted)
+	}
+	h.reconcileUntilSettled("run1")
+
+	run = h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("run phase = %q, want Passed (results: %+v)", run.Status.Phase, run.Status.Results)
+	}
+	res = soakResult(t, run)
+	if got := res.AggregatedMetrics["elapsedS"]; got != "1800" {
+		t.Errorf("aggregate elapsedS = %q, want 1800 — two windows were measured", got)
+	}
+	if got := res.Attempts[1].Trigger; got != burninv1alpha1.AttemptSegment {
+		t.Errorf("attempt 2 trigger = %q, want Segment", got)
+	}
+	if got := res.Attempts[2].Trigger; got != burninv1alpha1.AttemptErrorRetry {
+		t.Errorf("attempt 3 trigger = %q, want ErrorRetry — it followed an Error", got)
+	}
+}
+
+// ─── Acceptance: exit 1 settles the soak now ──────────────────────────────────
+
+// A fault observed at hour six is a fault. The soak settles Failed on the spot,
+// with the retry budget unspent — Failed is the one phase that is never retried
+// — and nothing launches segment three.
+func TestSoak_ASegmentExitingOneSettlesTheTestImmediately(t *testing.T) {
+	run := newRun("run1", "acceptance", "spark-a")
+	run.Spec.RetryOnErrorLimit = int32p(2)
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 2700, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		run,
+	)
+
+	h.burnSegment("run1", 1, 0, cleanSegment())
+	h.burnSegment("run1", 2, 1, "gpu_name=NVIDIA GB10\nxid_events=3\nTHERMAL_SOAK_FAIL: Xid 79 during the soak\n")
+	h.reconcileUntilSettled("run1")
+
+	got := h.run("run1")
+	if got.Status.Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("run phase = %q, want Failed (results: %+v)", got.Status.Phase, got.Status.Results)
+	}
+	res := soakResult(t, got)
+	if res.SegmentsCompleted != 1 {
+		t.Errorf("segmentsCompleted = %d, want 1 — a failing window does not complete", res.SegmentsCompleted)
+	}
+	if res.ErrorRetries != 0 {
+		t.Errorf("errorRetries = %d, want 0 — a Fail is never retried, whatever budget is left", res.ErrorRetries)
+	}
+	if pod := h.attemptPod("run1", 3); pod != nil {
+		t.Errorf("segment 3 was launched after a hardware failure: %s", pod.Name)
+	}
+	if !strings.Contains(res.Message, "Xid 79") {
+		t.Errorf("result message lost the runner's own assertion: %q", res.Message)
+	}
+}
+
+// ─── Acceptance: AbortEarly ───────────────────────────────────────────────────
+
+// A Sum counter under `Equal 0` is monotone in the gated direction: once the sum
+// has passed zero it can never return to it, so the remaining windows cannot
+// change the answer and burning them would be hoping rather than measuring.
+func TestSoak_AbortEarlyFiresOnAMonotoneCounterBreach(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		withAbortEarly(soakTest("soak", 3600, 900,
+			burninv1alpha1.Threshold{Metric: "xidEvents", Comparison: burninv1alpha1.EQ, Value: "0"})),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	h.burnSegment("run1", 1, 0, cleanSegment())
+	if res := soakResult(t, h.run("run1")); res.Phase != burninv1alpha1.RunRunning {
+		t.Fatalf("phase after a clean segment = %q, want Running", res.Phase)
+	}
+
+	// Two Xids in window two. The sum is 2 and no later window can bring it back.
+	h.burnSegment("run1", 2, 0, thermalSegmentStdout("900", "72.0", "83.0", "2"))
+	h.reconcileUntilSettled("run1")
+
+	got := h.run("run1")
+	if got.Status.Phase != burninv1alpha1.RunFailed {
+		t.Fatalf("run phase = %q, want Failed (results: %+v)", got.Status.Phase, got.Status.Results)
+	}
+	res := soakResult(t, got)
+	if pod := h.attemptPod("run1", 3); pod != nil {
+		t.Errorf("segment 3 was burned after the soak was already decided: %s", pod.Name)
+	}
+	if !strings.Contains(res.Message, "aborted after segment 2 of 4") {
+		t.Errorf("message does not say the soak was cut short: %q", res.Message)
+	}
+	if len(res.Violations) != 1 || res.Violations[0].Metric != "xidEvents" {
+		t.Errorf("violations = %+v, want the gate that ended it", res.Violations)
+	}
+	if got := res.AggregatedMetrics["xidEvents"]; got != "2" {
+		t.Errorf("aggregate xidEvents = %q, want 2", got)
+	}
+}
+
+// The counterpart, and the reason AbortEarly is narrow. sustainedClockPct
+// aggregates Min, so a gauge that reads high in the first window and low later
+// RETRACTS a ceiling violation: the aggregate at segment one violates the gate
+// and the aggregate at the end does not. Aborting on that would end a soak on a
+// reading the next fifteen minutes overturned.
+func TestSoak_AbortEarlyDoesNotFireOnARetractableViolation(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		withAbortEarly(soakTest("soak", 2700, 900,
+			burninv1alpha1.Threshold{Metric: "sustainedClockPct", Comparison: burninv1alpha1.LTE, Value: "50"})),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	// Segment 1: the aggregate is 83.2, which is over the ceiling.
+	h.burnSegment("run1", 1, 0, cleanSegment())
+	res := soakResult(t, h.run("run1"))
+	if res.Phase != burninv1alpha1.RunRunning {
+		t.Fatalf("phase = %q, want Running — a Min under a ceiling can still be pulled under it "+
+			"by a later window, so this violation was not provable (message: %q)", res.Phase, res.Message)
+	}
+	if got := verdict.Evaluate(res.AggregatedMetrics, nil, []burninv1alpha1.Threshold{
+		{Metric: "sustainedClockPct", Comparison: burninv1alpha1.LTE, Value: "50"},
+	}); got.Passed {
+		t.Fatal("the aggregate at segment 1 does not violate the gate, so this test is not " +
+			"exercising the case it describes")
+	}
+
+	// Segment 2 retracts it, and the soak reaches its real verdict.
+	h.burnSegment("run1", 2, 0, thermalSegmentStdout("900", "70.0", "40.0", "0"))
+	h.burnSegment("run1", 3, 0, cleanSegment())
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("run phase = %q, want Passed — the violation was retracted (results: %+v)",
+			run.Status.Phase, run.Status.Results)
+	}
+	if got := soakResult(t, run).AggregatedMetrics["sustainedClockPct"]; got != "40.0" {
+		t.Errorf("aggregate sustainedClockPct = %q, want the worst window", got)
+	}
+}
+
+// A soak that does not ask to abort never does, however provable the breach.
+// The gate is still applied once, at the end.
+func TestSoak_AbortEarlyIsOptIn(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 1800, 900,
+			burninv1alpha1.Threshold{Metric: "xidEvents", Comparison: burninv1alpha1.EQ, Value: "0"}),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	h.burnSegment("run1", 1, 0, thermalSegmentStdout("900", "72.0", "83.0", "2"))
+	if res := soakResult(t, h.run("run1")); res.Phase != burninv1alpha1.RunRunning {
+		t.Fatalf("phase = %q, want Running — this test never opted into aborting early", res.Phase)
+	}
+	h.burnSegment("run1", 2, 0, cleanSegment())
+	h.reconcileUntilSettled("run1")
+
+	if got := h.run("run1").Status.Phase; got != burninv1alpha1.RunFailed {
+		t.Fatalf("run phase = %q, want Failed — the gate still decides at the end", got)
+	}
+}
+
+// The monotonicity rule itself, stated as a table so every combination is named
+// rather than inferred from whichever two the end-to-end tests happened to use.
+func TestProvableViolations_OnlyWhereNoLaterSegmentCouldRetract(t *testing.T) {
+	cases := []struct {
+		name       string
+		metric     string
+		comparison burninv1alpha1.Comparison
+		value      string
+		aggregate  string
+		want       bool
+	}{
+		{"a sum over its ceiling only grows", "xidEvents", burninv1alpha1.LTE, "1", "4", true},
+		{"a sum past an exact value can never return to it", "xidEvents", burninv1alpha1.EQ, "0", "2", true},
+		{"a sum short of an exact value can still reach it", "elapsedS", burninv1alpha1.EQ, "2700", "900", false},
+		{"a sum short of a floor can still reach it", "elapsedS", burninv1alpha1.GTE, "2700", "900", false},
+		{"a minimum below its floor only falls further", "sustainedClockPct", burninv1alpha1.GTE, "60", "40", true},
+		{"a minimum over a ceiling can be pulled under it", "sustainedClockPct", burninv1alpha1.LTE, "50", "83", false},
+		{"a maximum over its ceiling only rises", "gpuTempC", burninv1alpha1.LTE, "85", "91", true},
+		{"a maximum below a floor can still rise to it", "gpuTempC", burninv1alpha1.GTE, "40", "30", false},
+		{"a lifetime total can move either way", "eccErrors", burninv1alpha1.EQ, "0", "3", false},
+		{"an unregistered name aggregates Last and is never provable",
+			"vendorWidgetCount", burninv1alpha1.LTE, "1", "9", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			thresholds := []burninv1alpha1.Threshold{
+				{Metric: c.metric, Comparison: c.comparison, Value: c.value},
+			}
+			agg := map[string]string{c.metric: c.aggregate}
+			out := verdict.Evaluate(agg, nil, thresholds)
+			if out.Passed {
+				t.Fatalf("this row's aggregate does not violate its gate, so it proves nothing")
+			}
+			got := len(provableViolations(agg, out, thresholds)) == 1
+			if got != c.want {
+				t.Errorf("provable = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A gate on a metric no segment has reported YET must never abort a soak: the
+// next window may well report it. Fail-closed still applies at the end, where
+// the absence really is final — TestSoak_TheAggregateStillFailsClosed is that
+// half.
+// The comparison is deliberately LessThanOrEqual on a Sum, which is the one
+// combination the monotonicity rule would otherwise call provable: it is the
+// CAUSE that has to stop this, not the arithmetic, and an `Equal 0` gate would
+// let the test pass by the wrong route.
+func TestProvableViolations_AnUnreportedMetricNeverAborts(t *testing.T) {
+	thresholds := []burninv1alpha1.Threshold{
+		{Metric: "xidEvents", Comparison: burninv1alpha1.LTE, Value: "1"},
+	}
+	agg := map[string]string{"elapsedS": "900"}
+	out := verdict.Evaluate(agg, nil, thresholds)
+	if out.Passed {
+		t.Fatal("a gated metric that was not reported must not pass")
+	}
+	if got := provableViolations(agg, out, thresholds); len(got) != 0 {
+		t.Errorf("provable = %+v, want none — a metric the next window may report is not a verdict", got)
+	}
+}
+
+// A checkpoint is a PARTIAL window, and folding one would count the same seconds
+// twice when the segment finishes — a soak certifying a duration it never ran.
+// The checkpoint still publishes its evidence onto the result, which is what it
+// is for; it simply never touches the aggregate.
+func TestSoak_ACheckpointNeverFoldsIntoTheAggregate(t *testing.T) {
+	bt := soakTest("soak", 1800, 900)
+	bt.Spec.CheckpointIntervalSeconds = int32p(60)
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	pod := h.awaitSegmentPod("run1", 1)
+	h.startPod(pod)
+	h.reconcile("run1")
+	// Half a window in, the runner has printed 450 seconds so far.
+	h.logs[pod.Name] = thermalSegmentStdout("450", "70.0", "82.0", "0")
+	h.nowVal = h.nowVal.Add(90 * time.Second)
+	h.reconcile("run1")
+
+	res := soakResult(t, h.run("run1"))
+	if res.LastCheckpointAt == nil {
+		t.Fatal("no checkpoint was taken, so this test is not exercising the case it describes")
+	}
+	if got := res.Metrics["elapsedS"]; got != "450" {
+		t.Errorf("checkpoint evidence = %q, want the partial window's own reading", got)
+	}
+	if got, present := res.AggregatedMetrics["elapsedS"]; present {
+		t.Fatalf("a checkpoint folded %q into the aggregate — the same seconds will be counted "+
+			"again when the segment finishes", got)
+	}
+
+	h.finishPod(pod, 0, cleanSegment(), "Completed")
+	h.reconcile("run1")
+	if got := soakResult(t, h.run("run1")).AggregatedMetrics["elapsedS"]; got != "900" {
+		t.Fatalf("aggregate elapsedS = %q after one window, want 900", got)
+	}
+
+	h.burnSegment("run1", 2, 0, cleanSegment())
+	h.reconcileUntilSettled("run1")
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("run phase = %q, want Passed (results: %+v)", run.Status.Phase, run.Status.Results)
+	}
+	if got := soakResult(t, run).AggregatedMetrics["elapsedS"]; got != "1800" {
+		t.Errorf("aggregate elapsedS = %q, want 1800 — two windows were measured", got)
+	}
+}
+
+// ─── The pod's window is the segment ──────────────────────────────────────────
+
+// Both halves of it, because they are two different consumers of the same
+// answer: the runner's own budget and the pod's deadline come from
+// executionDurationSeconds, and the operator's reap window does too.
+func TestSoak_ThePodWindowIsTheSegmentAndNotTheWholeSoak(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 604800, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	pod := h.awaitSegmentPod("run1", 1)
+
+	if got := envOf(pod, "BURNIN_DURATION_SECONDS"); got != "900" {
+		t.Errorf("BURNIN_DURATION_SECONDS = %q, want 900 — the runner is asked for one window", got)
+	}
+	want := int64(900 + deadlineGraceSeconds)
+	if pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds != want {
+		t.Errorf("activeDeadlineSeconds = %v, want %d — a pod that outlives its segment is a pod "+
+			"an eviction still costs the whole week", pod.Spec.ActiveDeadlineSeconds, want)
+	}
+}
+
+// The operator-side window too. An unschedulable segment pod is reaped after ONE
+// segment plus the graces; sized from the whole soak it would sit there for a
+// week while the run held a cordoned node.
+func TestSoak_AnUnschedulableSegmentIsReapedOnTheSegmentWindow(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 604800, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	pod := h.awaitSegmentPod("run1", 1)
+	pod.CreationTimestamp = metav1.NewTime(h.nowVal)
+	if err := h.c.Update(context.Background(), pod); err != nil {
+		t.Fatalf("stamp pod creation: %v", err)
+	}
+
+	// Just past ONE segment's window. Sized from the whole soak this is not even
+	// close — a week-long deadline would leave the pod sitting there, holding a
+	// cordoned node, for six more days.
+	h.nowVal = h.nowVal.Add(time.Duration(900+deadlineGraceSeconds)*time.Second + schedulingGracePeriod + time.Second)
+	h.reconcile("run1")
+
+	res := soakResult(t, h.run("run1"))
+	if len(res.Attempts) != 1 || res.Attempts[0].Phase != burninv1alpha1.RunError {
+		t.Fatalf("attempts = %+v, want one Error — a segment that never ran must be reaped on the "+
+			"segment's window, not the soak's", res.Attempts)
+	}
+	if res.SegmentsCompleted != 0 {
+		t.Errorf("segmentsCompleted = %d, want 0 — a pod that never started measured nothing", res.SegmentsCompleted)
+	}
+}
+
+// ─── Acceptance: 288 segments stay writable and still render a verdict ────────
+
+// A 72-hour soak at fifteen-minute segments. It is driven through completeAttempt
+// rather than through 288 pod lifecycles because what is under test is the
+// bookkeeping, and it is the same bookkeeping either way — the pod lifecycle has
+// its own tests above.
+//
+// The load-bearing assertions are the attempt count and TruncatedAttempts. The
+// delivery is executed rather than described: the real ConfigMap sink applies the
+// real cap to the real envelope, so a status that had grown unwritable would fail
+// here rather than in a fleet.
+func TestSoak_ManySegmentsStayWritableAndStillRenderTheVerdict(t *testing.T) {
+	const segments = 288
+
+	h := newHarness(t, gb10Node("spark-a"))
+	run := newRun("run1", "acceptance", "spark-a")
+	run.Status.Phase = burninv1alpha1.RunRunning
+
+	bt := soakTest("soak", segments*900, 900,
+		burninv1alpha1.Threshold{Metric: "elapsedS", Comparison: burninv1alpha1.GTE, Value: "246240"},
+		burninv1alpha1.Threshold{Metric: "xidEvents", Comparison: burninv1alpha1.EQ, Value: "0"})
+	pt := plannedTest{Name: "soak", Required: true, Spec: bt.Spec}
+	p := &plan{Version: 1, Targets: []string{"spark-a"}, Tests: []plannedTest{pt}}
+
+	for i := 1; i <= segments; i++ {
+		h.r.completeAttempt(context.Background(), run, p, pt, []string{"spark-a"},
+			int32(i), fmt.Sprintf("run1-soak-%d", i), nil,
+			runner.Parse(string(bt.Spec.Kind), cleanSegment(), 0))
+	}
+
+	res := soakResult(t, run)
+	if res.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("phase = %q, want Passed after %d clean segments (message: %q)", res.Phase, segments, res.Message)
+	}
+	if res.SegmentsCompleted != segments {
+		t.Errorf("segmentsCompleted = %d, want %d", res.SegmentsCompleted, segments)
+	}
+	if got := res.AggregatedMetrics["elapsedS"]; got != strconv.Itoa(segments*900) {
+		t.Errorf("aggregate elapsedS = %q, want %d — truncating the history must not lose the verdict's input",
+			got, segments*900)
+	}
+
+	wantKept := keptPassingSegments + 1
+	if len(res.Attempts) != wantKept {
+		t.Errorf("kept %d attempts, want %d (the first plus the last %d passing)",
+			len(res.Attempts), wantKept, keptPassingSegments)
+	}
+	if got, want := res.TruncatedAttempts, int32(segments-wantKept); got != want {
+		t.Errorf("truncatedAttempts = %d, want %d — an elided history must say how much it elided", got, want)
+	}
+	if res.Attempts[0].Attempt != 1 {
+		t.Errorf("the first attempt was dropped: %+v", res.Attempts[0])
+	}
+	if last := res.Attempts[len(res.Attempts)-1]; last.Attempt != segments {
+		t.Errorf("the last attempt is %d, want %d — nextAttempt reads it to decide which segment "+
+			"comes next, so dropping it restarts the soak", last.Attempt, segments)
+	}
+
+	// The status has to fit in etcd, and the envelope has to fit in the sink.
+	body, err := json.Marshal(run.Status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	const statusBudget = 32 * 1024
+	if len(body) > statusBudget {
+		t.Errorf("status is %d bytes, over the %d-byte budget a segmented soak is held to", len(body), statusBudget)
+	}
+
+	cm := &sink.ConfigMap{Client: h.c, Namespace: "burnin", Name: "burnin-results"}
+	env := sink.EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, sink.PhaseKey(burninv1alpha1.RunPassed),
+		h.nowVal, nil)
+	if err := cm.Deliver(context.Background(), env); err != nil {
+		t.Fatalf("the ConfigMap sink refused a %d-segment soak's verdict: %v", segments, err)
+	}
+	if len(env.Results) != 1 || env.Results[0].Metrics["elapsedS"] != strconv.Itoa(segments*900) {
+		t.Errorf("delivered envelope does not carry the aggregate the verdict was read from: %+v", env.Results)
+	}
+}
+
+// ─── Acceptance: a controller restart resumes at the right segment ────────────
+
+// Driven far enough that the attempt history has already been truncated, because
+// that is the interaction with teeth: nextAttempt reads the LAST attempt to
+// decide which segment comes next, and a cap that dropped it would restart a
+// seven-day soak at segment one after every manager rollout.
+func TestSoak_AControllerRestartResumesAtTheRightSegment(t *testing.T) {
+	const before = 20
+
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		soakTest("soak", 25*900, 900),
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	for i := 1; i <= before; i++ {
+		h.burnSegment("run1", i, 0, cleanSegment())
+	}
+	res := soakResult(t, h.run("run1"))
+	if res.TruncatedAttempts == 0 {
+		t.Fatalf("no attempt was truncated after %d segments, so this test is not exercising the "+
+			"interaction it describes", before)
+	}
+
+	// A manager restart: a brand-new reconciler, holding nothing, re-deriving
+	// everything it knows from the persisted run.
+	h.r = h.newReconciler()
+	h.reconcile("run1")
+
+	if pod := h.attemptPod("run1", before+1); pod == nil {
+		t.Fatalf("no pod for segment %d after a restart; pods so far: %d", before+1, len(h.allPods("run1")))
+	}
+	if pod := h.attemptPod("run1", 1); pod != nil && pod.Status.Phase != corev1.PodSucceeded {
+		t.Errorf("segment 1 was relaunched after a restart: %+v", pod.Status.Phase)
+	}
+	res = soakResult(t, h.run("run1"))
+	if res.SegmentsCompleted != before {
+		t.Errorf("segmentsCompleted = %d after a restart, want %d", res.SegmentsCompleted, before)
+	}
+	if got := res.AggregatedMetrics["elapsedS"]; got != strconv.Itoa(before*900) {
+		t.Errorf("aggregate elapsedS = %q after a restart, want %d", got, before*900)
+	}
+
+	for i := before + 1; i <= 25; i++ {
+		h.burnSegment("run1", i, 0, cleanSegment())
+	}
+	h.reconcileUntilSettled("run1")
+	if got := h.run("run1").Status.Phase; got != burninv1alpha1.RunPassed {
+		t.Fatalf("run phase = %q, want Passed", got)
+	}
+}
+
+// ─── Plan-time refusals ───────────────────────────────────────────────────────
+
+func TestSoak_PlanRefusals(t *testing.T) {
+	cases := []struct {
+		name string
+		spec func(*burninv1alpha1.BurnInTestSpec)
+		want string
+	}{
+		{
+			name: "a burst kind has no duration to divide",
+			spec: func(s *burninv1alpha1.BurnInTestSpec) { s.Kind = burninv1alpha1.KindComputeSmoke },
+			want: "burst-only",
+		},
+		{
+			name: "a segment below the floor spends its time changing pods",
+			spec: func(s *burninv1alpha1.BurnInTestSpec) { s.Soak.SegmentSeconds = 60 },
+			want: "below the 300-second floor",
+		},
+		{
+			name: "a soak has to say how long it soaks",
+			spec: func(s *burninv1alpha1.BurnInTestSpec) { s.DurationSeconds = 0 },
+			want: "no spec.durationSeconds",
+		},
+		{
+			name: "a segment longer than the soak burns longer than asked",
+			spec: func(s *burninv1alpha1.BurnInTestSpec) { s.Soak.SegmentSeconds = 3600 },
+			want: "longer than the soak",
+		},
+		{
+			name: "a repeat and a segment are different claims about the verdict",
+			spec: func(s *burninv1alpha1.BurnInTestSpec) { s.RepeatCount = int32p(3) },
+			want: "repeatCount",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := soakTest("soak", 2700, 900).Spec
+			c.spec(&spec)
+			_, err := buildPlan(&burninv1alpha1.BurnInProfile{},
+				[]resolvedTest{{name: "soak", spec: spec, required: true}},
+				[]string{"spark-a"}, 1, false)
+			if err == nil {
+				t.Fatalf("buildPlan accepted a soak it should have refused")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("refusal %q does not explain %q", err.Error(), c.want)
+			}
+		})
+	}
+}
+
+// A test that does not set spec.soak is untouched by any of this: one pod, the
+// whole duration, thresholds on that one execution. Segmentation is opt-in, and
+// this is what "opt-in" has to mean.
+func TestSoak_AnUnsegmentedTestIsUnchanged(t *testing.T) {
+	bt := &burninv1alpha1.BurnInTest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "soak"},
+		Spec: burninv1alpha1.BurnInTestSpec{
+			Kind:            burninv1alpha1.KindThermalSoak,
+			Scope:           burninv1alpha1.ScopeNode,
+			DurationSeconds: 2700,
+			Thresholds: []burninv1alpha1.Threshold{
+				{Metric: "elapsedS", Comparison: burninv1alpha1.GTE, Value: "2565"},
+			},
+		},
+	}
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("soak")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+
+	pod := h.awaitSegmentPod("run1", 1)
+	if got := envOf(pod, "BURNIN_DURATION_SECONDS"); got != "2700" {
+		t.Errorf("BURNIN_DURATION_SECONDS = %q, want the whole duration", got)
+	}
+	h.startPod(pod)
+	h.reconcile("run1")
+	h.finishPod(pod, 0, thermalSegmentStdout("2700", "71.5", "83.2", "0"), "Completed")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("run phase = %q, want Passed (results: %+v)", run.Status.Phase, run.Status.Results)
+	}
+	res := soakResult(t, run)
+	if res.SegmentsRequired != 0 || res.SegmentsCompleted != 0 || len(res.AggregatedMetrics) != 0 {
+		t.Errorf("an unsegmented result grew segment bookkeeping: %+v", res)
+	}
+	if len(res.Attempts) != 1 || res.Attempts[0].Trigger != burninv1alpha1.AttemptInitial {
+		t.Errorf("attempts = %+v, want one Initial attempt", res.Attempts)
+	}
+}

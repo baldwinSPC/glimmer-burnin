@@ -162,6 +162,9 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 		if err := validateHostPaths(t); err != nil {
 			return nil, err
 		}
+		if err := validateSoak(t); err != nil {
+			return nil, err
+		}
 		p.Tests = append(p.Tests, plannedTest{
 			Name: t.name, Required: t.required, Spec: t.spec,
 			// COPIED, not shared. The plan is pinned precisely so that editing

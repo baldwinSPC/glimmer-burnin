@@ -1095,10 +1095,10 @@ func (r *BurnInRunReconciler) podOverdue(pod *corev1.Pod, spec *burninv1alpha1.B
 	if pod.CreationTimestamp.IsZero() {
 		return false
 	}
-	duration := spec.DurationSeconds
-	if duration <= 0 {
-		duration = defaultDurationSeconds
-	}
+	// One SEGMENT's window for a segmented soak; podForTest sized the pod's own
+	// deadline from the same function, and the two must not disagree about the
+	// same pod.
+	duration := executionDurationSeconds(spec)
 	window := time.Duration(duration+deadlineGraceSeconds)*time.Second + schedulingGracePeriod
 	return r.now().Sub(pod.CreationTimestamp.Time) > window
 }
@@ -1166,6 +1166,7 @@ func (r *BurnInRunReconciler) beginAttempt(
 //     The first Failed attempt settles the test as Failed and no further pass
 //     can retract it, because the point of a repeat is to catch the fault that
 //     does not reproduce every time.
+//
 //   - A RETRY ONLY EVER FOLLOWS AN ERROR. An Error means the machinery
 //     malfunctioned and the hardware was never judged, so running it again is
 //     the correct response. A Failed attempt is a measurement, and re-running a
@@ -1173,10 +1174,25 @@ func (r *BurnInRunReconciler) beginAttempt(
 //     acceptance — marginal hardware is precisely the hardware that passes on
 //     the second try.
 //
+//   - A SEGMENT IS NEITHER. When the test is a segmented soak
+//     (TestResult.SegmentsRequired > 0), the exit code alone decides what one
+//     window means and THE VERDICT IS RENDERED ONCE, over the accumulated
+//     aggregate, on the last segment. That separation is the whole of issue
+//     #157: a threshold evaluated per segment would gate fifteen minutes of a
+//     week and fail a soak on a window, and it would also make the run's own
+//     answer depend on how finely it happened to be sliced.
+//
 // The switch below is exhaustive over the attempt phases and only the Error arm
 // consults the retry budget. That is not an accident of structure; it is the
 // rule, and TestAttempt.Trigger records enough history to audit it after the
-// fact.
+// fact — including for segments, which is why AttemptSegment exists rather than
+// being reported as a repeat.
+//
+// This stays the ONLY place a verdict is decided, for Node, Pair and Group scope
+// and for segmented and unsegmented tests alike. attemptOutcome and gateOutcome
+// are called from here and from nowhere else; a second decision point would be
+// two answers to one question, and the answer that matters is which hardware
+// gets shipped.
 func (r *BurnInRunReconciler) completeAttempt(
 	ctx context.Context,
 	run *burninv1alpha1.BurnInRun,
@@ -1203,24 +1219,29 @@ func (r *BurnInRunReconciler) completeAttempt(
 		a.PodName = podName
 	}
 
+	// Only ever grows the history it is given, so it must run after the last
+	// write through `a` above and before anything can return.
+	truncateAttempts(res)
+
 	// The in-progress result carries the latest evidence; on settle it is
 	// overwritten by the metrics of the attempt that decided the verdict.
 	if len(parsed.Metrics) > 0 {
 		res.Metrics = parsed.Metrics
 	}
 
-	settle := func(final burninv1alpha1.RunPhase) {
+	// settle takes its evidence as arguments rather than closing over the
+	// attempt's, because a segmented soak's verdict is read from the AGGREGATE
+	// and not from the window that happened to be last. The three fields still
+	// travel together and are still written unconditionally, which is the rule
+	// that matters: a settle that is not a threshold failure passes a zero
+	// attemptEvidence, which CLEARS any violations left by an earlier errored
+	// attempt — a retry that then passes must not keep the gates its predecessor
+	// missed.
+	settle := func(final burninv1alpha1.RunPhase, msg string, metrics map[string]string, ev attemptEvidence) {
 		res.Phase = final
 		res.FinishedAt = &now
-		res.Message = message
-		res.Metrics = parsed.Metrics
-		// Assigned unconditionally, alongside Metrics and from the same attempt,
-		// so the two always explain the same execution. A settle that is not a
-		// threshold failure assigns nil, which CLEARS any violations left by an
-		// earlier errored attempt — a retry that then passes must not keep the
-		// gates its predecessor missed.
-		// All three assigned unconditionally and from the SAME attempt, so a
-		// retry that passes cannot keep its predecessor's evidence.
+		res.Message = msg
+		res.Metrics = metrics
 		res.Violations = ev.violations
 		res.NotEvaluated = ev.notEvaluated
 		res.Unmeasurable = ev.unmeasurable
@@ -1233,9 +1254,22 @@ func (r *BurnInRunReconciler) completeAttempt(
 
 	switch phase {
 	case burninv1alpha1.RunPassed:
+		if res.SegmentsRequired > 0 {
+			foldSegment(res, parsed)
+			if done, final, msg, aggEv := segmentVerdict(t, res, parsed); done {
+				if final == burninv1alpha1.RunPassed {
+					// The one repeat a segmented test owes is the soak itself.
+					res.RepeatsCompleted = res.RepeatsRequired
+				}
+				settle(final, msg, res.AggregatedMetrics, aggEv)
+				return
+			}
+			res.Message = fmt.Sprintf("segment %d/%d complete", res.SegmentsCompleted, res.SegmentsRequired)
+			break
+		}
 		res.RepeatsCompleted++
 		if res.RepeatsCompleted >= res.RepeatsRequired {
-			settle(burninv1alpha1.RunPassed)
+			settle(burninv1alpha1.RunPassed, message, parsed.Metrics, ev)
 			return
 		}
 		// More repeats owed. The test stays open and the next pass starts the
@@ -1244,24 +1278,107 @@ func (r *BurnInRunReconciler) completeAttempt(
 		res.Message = fmt.Sprintf("attempt %d/%d passed", res.RepeatsCompleted, res.RepeatsRequired)
 
 	case burninv1alpha1.RunFailed:
-		settle(burninv1alpha1.RunFailed)
+		// A SEGMENT THAT EXITS 1 SETTLES THE SOAK, at whatever hour it happened.
+		// A fault observed at hour six is a fault; continuing to burn is not
+		// evidence-gathering, it is hoping. Nothing folds it into the aggregate
+		// either — the verdict is the runner's own assertion about the hardware,
+		// and the metrics that explain it are this window's.
+		settle(burninv1alpha1.RunFailed, message, parsed.Metrics, ev)
 
 	case burninv1alpha1.RunSkipped:
 		// The test does not apply to this hardware. Repeating it will not make
-		// it start applying, and retrying it will not either.
-		settle(burninv1alpha1.RunSkipped)
+		// it start applying, retrying it will not either, and neither will
+		// burning another 287 windows of it.
+		settle(burninv1alpha1.RunSkipped, message, parsed.Metrics, ev)
 
 	default:
 		if res.ErrorRetries < retryOnErrorLimit(run) {
 			res.ErrorRetries++
-			// An errored attempt measured nothing, so it does not consume a
-			// repeat: RepeatsCompleted is deliberately untouched here.
+			// An errored attempt measured nothing, so it consumes neither a
+			// repeat nor a segment: RepeatsCompleted and SegmentsCompleted are
+			// both deliberately untouched here, which is what makes the retry
+			// re-run THE SAME segment index and contribute nothing to the
+			// aggregate.
 			res.Message = fmt.Sprintf("attempt %d errored (%s); retrying", attempt, message)
 			return
 		}
-		settle(burninv1alpha1.RunError)
+		settle(burninv1alpha1.RunError, message, parsed.Metrics, ev)
 	}
 	recount(run)
+}
+
+// foldSegment records one CLEAN segment against the soak's running aggregate.
+//
+// Only a segment that exited 0 reaches here, and that is the rule: an errored
+// segment measured nothing and a failed one is the verdict itself, so neither
+// contributes. The aggregate is persisted on the result, which is what makes
+// attempt truncation and a controller restart mid-soak safe.
+func foldSegment(res *burninv1alpha1.TestResult, parsed runner.Result) {
+	res.SegmentsCompleted++
+	res.AggregatedMetrics = foldMetrics(res.AggregatedMetrics, parsed.Metrics)
+	res.Unmeasurable = foldUnmeasurable(res.Unmeasurable, parsed.Unmeasurable, res.AggregatedMetrics)
+	// A reader mid-soak wants the accumulated numbers, not the last window's:
+	// the soak is the thing being measured, and the window is an implementation
+	// detail of how it survives an eviction.
+	if len(res.AggregatedMetrics) > 0 {
+		res.Metrics = res.AggregatedMetrics
+	}
+}
+
+// segmentVerdict says whether a segmented soak is over, and with what.
+//
+// It is the only caller of gateOutcome on the aggregate, and it is reached only
+// from completeAttempt. Two ways a soak ends here and they are not the same
+// thing: the LAST segment, where every gate is applied once to everything that
+// was measured; and AbortEarly, where the aggregate already violates a gate no
+// later segment could retract. Everything else keeps the test open.
+func segmentVerdict(
+	t plannedTest,
+	res *burninv1alpha1.TestResult,
+	parsed runner.Result,
+) (bool, burninv1alpha1.RunPhase, string, attemptEvidence) {
+	declared := unmeasurableSet(res.Unmeasurable)
+
+	if res.SegmentsCompleted >= res.SegmentsRequired {
+		phase, message, ev := gateOutcome(res.AggregatedMetrics, declared, t.Spec.Thresholds, parsed.Message)
+		ev.unmeasurable = append([]string(nil), res.Unmeasurable...)
+		// How much was actually burned in leads the message, because it is the
+		// first thing anyone reading a soak's verdict wants and the only place
+		// it is stated in words.
+		prefix := fmt.Sprintf("%d segment(s) of %ds completed",
+			res.SegmentsCompleted, segmentSeconds(&t.Spec))
+		if rest := strings.TrimSpace(message); rest != "" {
+			prefix += "; " + rest
+		}
+		return true, phase, prefix, ev
+	}
+
+	if !abortEarly(&t.Spec) {
+		return false, "", "", attemptEvidence{}
+	}
+	out := verdict.Evaluate(res.AggregatedMetrics, declared, t.Spec.Thresholds)
+	provable := provableViolations(res.AggregatedMetrics, out, t.Spec.Thresholds)
+	if len(provable) == 0 {
+		return false, "", "", attemptEvidence{}
+	}
+
+	ev := attemptEvidence{
+		// The PROVABLE ones only. A violation a later segment could still
+		// retract did not end this soak and must not be recorded as though it
+		// had — a report naming a gate that was still moving would send an
+		// engineer after a part the soak never actually condemned.
+		violations:   violationsFor(verdict.Outcome{Violations: provable}),
+		unmeasurable: append([]string(nil), res.Unmeasurable...),
+	}
+	message := fmt.Sprintf(
+		"soak aborted after segment %d of %d: %s. The aggregate already violates a gate no later segment could "+
+			"retract, so the remaining %d segment(s) were not burned",
+		res.SegmentsCompleted, res.SegmentsRequired, provable[0].Reason,
+		res.SegmentsRequired-res.SegmentsCompleted)
+	if more := (verdict.Outcome{Violations: provable}).ViolationSummary(); more != "" {
+		message = strings.TrimSpace(message + " [" + more + "]")
+	}
+	return true, burninv1alpha1.RunFailed, message, ev
 }
 
 // emptyHarvestMessage is what an execution that produced no runner output at
@@ -1315,6 +1432,16 @@ const emptyHarvestMessage = "runner exited 0 but reported no metrics at all — 
 // Thresholds are evaluated HERE, once, against a completed execution — never
 // against a checkpoint. A mid-run sample that dips below a bar is not a
 // failure, because the run is not over.
+//
+// EXCEPT FOR A SEGMENTED SOAK, where they are not evaluated here at all. One
+// segment is one window of a test, not a test, and gating a window would fail a
+// week-long soak on fifteen minutes — while also making the answer depend on how
+// finely the soak happened to be sliced, which is a scheduling decision and not
+// a property of the hardware. completeAttempt applies them once, to the
+// aggregate, through gateOutcome. Note that the EMPTY-HARVEST rule below still
+// reads the test's real thresholds and still fires: a segment that exits 0
+// having printed nothing measured nothing, and counting it as a completed
+// segment would quietly shorten the soak by every interruption it suffered.
 //
 // This is the single choke point where a runner.Result becomes a phase, for
 // Node and Pair scope alike, which is why the empty-harvest rule below lives
@@ -1375,52 +1502,16 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 
 		default:
 			// Exit 0 says the runner is content; the thresholds are the
-			// profile's own acceptance bar, evaluated fail-closed — a threshold
-			// naming a metric the runner never emitted is a failure, not a pass.
-			out := verdict.Evaluate(parsed.Metrics, parsed.Unmeasurable, t.Spec.Thresholds)
-			if out.Passed {
-				phase = burninv1alpha1.RunPassed
-			} else {
-				phase = burninv1alpha1.RunFailed
-				// THE RUNNER'S OWN MESSAGE IS KEPT, not replaced. Overwriting it
-				// was invisible at Node scope, where parsed.Message is one
-				// runner's last line — but a Pair or Group result's message is
-				// CONSTRUCTED by this operator and carries things nothing else
-				// says: the clause stating that the verdict is about the LINK or
-				// the COLLECTIVE rather than about any one node, each end's or
-				// each rank's own report, and the note that ranks disagreed about
-				// a metric. An 8-rank group failing a bandwidth gate lost all of
-				// it and stored a bare threshold line beside eight node names,
-				// which is exactly the misattribution the lead clause exists to
-				// prevent.
-				message = out.Message
-				if prior := strings.TrimSpace(parsed.Message); prior != "" {
-					message = strings.TrimSpace(message + " [" + prior + "]")
-				}
-				ev.violations = violationsFor(out)
-				// Message names the first gate only, and that field is frozen.
-				// Without this tail a node that missed three gates reads as a
-				// node that missed one, and an engineer replaces one part per
-				// burn-in cycle. The summary names the CAUSE of each, because a
-				// broken threshold and a thermal ceiling arrive here as the same
-				// Failed test and only one is a reason to walk to a rack.
-				if more := out.ViolationSummary(); more != "" {
-					message = strings.TrimSpace(message + " [" + more + "]")
-				}
+			// profile's own acceptance bar. A segmented soak passes none here —
+			// gateOutcome is called once, later, on the aggregate.
+			gates := t.Spec.Thresholds
+			if segmentSeconds(&t.Spec) > 0 {
+				gates = nil
 			}
-			// A RequiredIfMeasurable gate the hardware cannot measure was not
-			// applied, and the report has to say so. Appending it to the message
-			// puts it on the TestResult and therefore in the delivered envelope: a
-			// Passed test whose ECC gate never ran must never be indistinguishable
-			// from one whose ECC gate ran and was satisfied.
-			for _, n := range out.NotEvaluated {
-				ev.notEvaluated = append(ev.notEvaluated, burninv1alpha1.NotEvaluated{
-					Metric: n.Metric, Reason: n.Reason,
-				})
-			}
-			if why := out.NotEvaluatedMessage(); why != "" {
-				message = strings.TrimSpace(message + " [" + why + "]")
-			}
+			var gateEv attemptEvidence
+			phase, message, gateEv = gateOutcome(parsed.Metrics, parsed.Unmeasurable, gates, parsed.Message)
+			ev.violations = gateEv.violations
+			ev.notEvaluated = gateEv.notEvaluated
 		}
 
 	case runner.VerdictFail:
@@ -1462,6 +1553,74 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 		message = strings.TrimSpace(message + fmt.Sprintf(
 			" [runner emitted %d metric name(s) the contract rejects: %s%s]",
 			len(parsed.InvalidNames), strings.Join(shown, ", "), suffix))
+	}
+	return phase, message, ev
+}
+
+// gateOutcome applies a set of thresholds to a set of metrics and returns the
+// phase they decide, the message that explains it, and the structured evidence.
+//
+// It is the ONE place a threshold becomes a phase, and it has exactly two
+// callers, both of which arrive through completeAttempt: attemptOutcome, with
+// one execution's own metrics, and segmentVerdict, with a soak's accumulated
+// aggregate. Keeping them on the same function is what guarantees that a
+// segmented soak and an unsegmented one report a shortfall in the same words,
+// with the same violations, the same not-evaluated notes and the same
+// truncation — a consumer must not be able to tell how a test was scheduled
+// from how its verdict reads.
+//
+// Evaluation is fail-closed: a threshold naming a metric the runner never
+// emitted is a failure, not a pass. runnerSaid is the runner's own last line,
+// kept as context rather than replaced.
+func gateOutcome(
+	metrics map[string]string,
+	unmeasurable map[string]bool,
+	thresholds []burninv1alpha1.Threshold,
+	runnerSaid string,
+) (burninv1alpha1.RunPhase, string, attemptEvidence) {
+	var ev attemptEvidence
+	phase := burninv1alpha1.RunPassed
+	message := runnerSaid
+
+	out := verdict.Evaluate(metrics, unmeasurable, thresholds)
+	if !out.Passed {
+		phase = burninv1alpha1.RunFailed
+		// THE RUNNER'S OWN MESSAGE IS KEPT, not replaced. Overwriting it was
+		// invisible at Node scope, where runnerSaid is one runner's last line —
+		// but a Pair or Group result's message is CONSTRUCTED by this operator
+		// and carries things nothing else says: the clause stating that the
+		// verdict is about the LINK or the COLLECTIVE rather than about any one
+		// node, each end's or each rank's own report, and the note that ranks
+		// disagreed about a metric. An 8-rank group failing a bandwidth gate lost
+		// all of it and stored a bare threshold line beside eight node names,
+		// which is exactly the misattribution the lead clause exists to prevent.
+		message = out.Message
+		if prior := strings.TrimSpace(runnerSaid); prior != "" {
+			message = strings.TrimSpace(message + " [" + prior + "]")
+		}
+		ev.violations = violationsFor(out)
+		// Message names the first gate only, and that field is frozen. Without
+		// this tail a node that missed three gates reads as a node that missed
+		// one, and an engineer replaces one part per burn-in cycle. The summary
+		// names the CAUSE of each, because a broken threshold and a thermal
+		// ceiling arrive here as the same Failed test and only one is a reason to
+		// walk to a rack.
+		if more := out.ViolationSummary(); more != "" {
+			message = strings.TrimSpace(message + " [" + more + "]")
+		}
+	}
+	// A RequiredIfMeasurable gate the hardware cannot measure was not applied,
+	// and the report has to say so. Appending it to the message puts it on the
+	// TestResult and therefore in the delivered envelope: a Passed test whose ECC
+	// gate never ran must never be indistinguishable from one whose ECC gate ran
+	// and was satisfied.
+	for _, n := range out.NotEvaluated {
+		ev.notEvaluated = append(ev.notEvaluated, burninv1alpha1.NotEvaluated{
+			Metric: n.Metric, Reason: n.Reason,
+		})
+	}
+	if why := out.NotEvaluatedMessage(); why != "" {
+		message = strings.TrimSpace(message + " [" + why + "]")
 	}
 	return phase, message, ev
 }
@@ -1509,6 +1668,14 @@ func triggerFor(res *burninv1alpha1.TestResult) burninv1alpha1.AttemptTrigger {
 	if res.Attempts[len(res.Attempts)-1].Phase == burninv1alpha1.RunError {
 		return burninv1alpha1.AttemptErrorRetry
 	}
+	// A soak's next window, not a repeat. The distinction is the point of the
+	// field: the previous execution succeeded AND folded into the aggregate this
+	// test's one verdict will be read from, where a repeat is the whole test run
+	// again for a verdict of its own. Derived from SegmentsRequired, which is
+	// pinned onto the result, so the history cannot disagree with the plan.
+	if res.SegmentsRequired > 0 {
+		return burninv1alpha1.AttemptSegment
+	}
 	return burninv1alpha1.AttemptRepeat
 }
 
@@ -1552,6 +1719,13 @@ func podNameOf(pod *corev1.Pod) string {
 //
 // A log read that fails is not a failure of anything: the next checkpoint, or
 // the terminal harvest, carries the same cumulative state.
+//
+// IT MUST NEVER FOLD INTO TestResult.AggregatedMetrics, and the temptation is
+// real because it already writes TestResult.Metrics. A checkpoint is a partial
+// window: folding its elapsedS into a Sum would count the same seconds again
+// when the segment finishes, and a soak would certify a duration it never ran.
+// Only a segment that EXITED CLEANLY contributes, which is completeAttempt's
+// business and not this function's.
 func (r *BurnInRunReconciler) checkpoint(
 	ctx context.Context,
 	run *burninv1alpha1.BurnInRun,
@@ -2120,6 +2294,13 @@ func ensureResult(run *burninv1alpha1.BurnInRun, t plannedTest, nodes []string) 
 		Nodes:           append([]string(nil), nodes...),
 		VariantAxes:     copyAxes(t.Axes),
 		RepeatsRequired: repeatsRequired(&t.Spec),
+		// Pinned from the plan's copy of the spec for the same reason as
+		// RepeatsRequired, and additionally because it is what the reconciler
+		// branches on: a positive value here is what makes this result's verdict
+		// a statement about the aggregate rather than about one attempt. Zero
+		// for every test that does not set spec.soak, which is the behaviour
+		// every result had before segments existed.
+		SegmentsRequired: segmentsRequired(&t.Spec),
 	})
 	return &run.Status.Results[len(run.Status.Results)-1]
 }

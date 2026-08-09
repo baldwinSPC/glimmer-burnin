@@ -216,8 +216,8 @@ rejects C++ sources outside cgo — which is why the sweep lives in `runners/`.
 api/v1alpha1/        CRD types: BurnInTest, BurnInProfile, BurnInRun,
                      BurnInSchedule, BurnInSink, NodeFingerprint
 internal/controller/ the reconcilers: BurnInRun (run core, cordon, plan,
-                     pods, Pair + Group rendezvous, delivery), BurnInSchedule,
-                     NodeFingerprint
+                     pods, Pair + Group rendezvous, segmented soaks, delivery),
+                     BurnInSchedule, NodeFingerprint
 internal/sink/       sink delivery engine: webhook, ConfigMap, Prometheus
                      selection, retry and idempotency
 internal/metrics/    Prometheus exposition of run state, registered on
@@ -328,11 +328,12 @@ disagree about the same hardware. One brain, two dispatchers.
   stops applying to it. Writing a threshold is what promotes a name from
   incidental evidence to acceptance-deciding, which is why registration is owed
   at that point and not before.
-- **A metric declares HOW IT COMBINES, because a soak will eventually run in
-  segments.** `pkg/contract.Metric.Aggregation` is `Sum`, `Min`, `Max` or `Last`,
+- **A metric declares HOW IT COMBINES, because a soak runs in segments.**
+  `pkg/contract.Metric.Aggregation` is `Sum`, `Min`, `Max` or `Last`,
   it is required on every registered metric (the registry self-consistency test
-  refuses `Unspecified`, same discipline as `ThresholdUse`), and nothing consumes
-  it yet. It exists so the answer lives beside the NAME rather than in a
+  refuses `Unspecified`, same discipline as `ThresholdUse`), and
+  `internal/controller.foldMetrics` is what consumes it, once per clean segment.
+  It exists so the answer lives beside the NAME rather than in a
   per-metric switch inside the reconciler, which is exactly the contract-shaped
   knowledge this file keeps out of it. The rule that is wrong in a way nothing
   else catches is LIFETIME versus WINDOWED, and host-health has both: `xidEvents`
@@ -470,6 +471,40 @@ disagree about the same hardware. One brain, two dispatchers.
   (`completeAttempt`), shared by Node and Pair scope; keep it that way.
   `TestAttempt.Trigger` records why every attempt happened, so the rule is
   auditable from a stored result long after the run.
+- **A SEGMENTED SOAK IS ONE VERDICT OVER MANY WINDOWS, and the threshold moves
+  to the end.** `spec.soak.segmentSeconds` divides a long test into a sequence of
+  shorter pods, each sized to the segment, so an eviction or a reboot costs one
+  segment instead of the week — a seven-day soak used to be a single 604,920-second
+  pod, and with `retryOnErrorLimit` set the retry started the week over from zero.
+  The crux is not the pods, it is that thresholds are NO LONGER evaluated per
+  attempt for such a test. `attemptOutcome` applies none of them; the exit code
+  alone decides what one window means, and `completeAttempt` applies them ONCE, on
+  the last segment, to the persisted `TestResult.AggregatedMetrics`, through
+  `gateOutcome` — which is the same function the unsegmented path uses, so a
+  consumer cannot tell from a verdict how the test was scheduled. Gating a window
+  would fail a week on fifteen minutes AND make the answer depend on how finely
+  the soak was sliced, which is a scheduling decision and not a property of the
+  part. Five rules hold it up and none may be relaxed. An ERRORED segment
+  contributes nothing and does not advance `SegmentsCompleted`, so the retry
+  re-runs THE SAME index — a counter that advanced on an error would silently
+  shorten the soak by every interruption it suffered, which is the failure this
+  feature exists to prevent, reintroduced as bookkeeping. A segment exiting 1
+  settles the test `Failed` immediately, because a fault observed at hour six is a
+  fault and continuing to burn is hoping. A metric no segment reported stays
+  ABSENT from the aggregate and fails closed at the end. `AbortEarly` may fire only
+  where the aggregation is monotone IN THE GATED DIRECTION (`Sum` under `LTE`, or
+  under `EQ` once the sum has passed the value; `Min` under a `GTE` floor; `Max`
+  under an `LTE` ceiling) and only on a `Measurement` violation — a `Min` under a
+  ceiling can be pulled back under it by the next window, and a metric nothing has
+  reported yet may be reported next window. And it is OPT-IN PER TEST, refused at
+  plan time on a burst-only kind, because whether a duration means anything is the
+  runner's property: `host-health` clamps its window to 30 seconds, so segmenting
+  it would run the same short measurement 672 times and call it a week. Attempt
+  history is capped for a segmented result (first + every non-passing + last 16
+  passing, remainder in `TruncatedAttempts`), which is safe only because the
+  verdict reads the persisted aggregate and never the attempt list — and the LAST
+  attempt is never dropped, since `nextAttempt` reads it to decide which segment
+  comes next. `docs/soaks.md` is the operator-facing version.
 - **A Group verdict is about the COLLECTIVE, and Group needs neither JobSet nor
   OpenMPI.** Group scope runs one rank per target node — target *i* is rank *i*,
   pinned in the plan — all rendezvous'd through one headless Service, producing

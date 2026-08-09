@@ -400,10 +400,11 @@ func podForTest(
 		return nil, err
 	}
 
-	duration := spec.DurationSeconds
-	if duration <= 0 {
-		duration = defaultDurationSeconds
-	}
+	// The SEGMENT's window for a segmented soak, and the whole duration
+	// otherwise. Both the runner's budget and the pod's deadline come from it,
+	// because a pod that outlives its segment is a pod an eviction still costs
+	// the whole run. See executionDurationSeconds.
+	duration := executionDurationSeconds(spec)
 	deadline := int64(duration + deadlineGraceSeconds + rendezvousGraceSeconds(rv))
 
 	container := corev1.Container{
