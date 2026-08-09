@@ -106,6 +106,19 @@ e2e-clean:
 build:
 	go build -o bin/manager ./cmd
 
+# The user-facing CLI, built separately from the manager on purpose: this is a
+# thing a person runs on a laptop against files, not a controller that runs in
+# a cluster under a service account.
+#
+# It is also installed as kubectl-burnin, which is all `kubectl burnin report`
+# requires — that is how kubectl discovers plugins.
+CLI_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "(devel)")
+
+.PHONY: build-cli
+build-cli: ## Build the burnin CLI (also as kubectl-burnin).
+	go build -ldflags="-X main.version=$(CLI_VERSION)" -o bin/burnin ./cmd/burnin
+	cp bin/burnin bin/kubectl-burnin
+
 .PHONY: run
 run: manifests generate
 	go run ./cmd
