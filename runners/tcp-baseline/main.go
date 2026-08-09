@@ -30,6 +30,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -222,6 +223,26 @@ const serverGraceSeconds = 60
 func runClient(peerHost, peerNode string, port, duration int) int {
 	logf("tcp-baseline: client → %s:%d (node %s) for %ds", peerHost, port, peerNode, duration)
 
+	// Wait for the server's listener before measuring anything.
+	//
+	// THIS is the retry, and it has to be here rather than in iperf3's own
+	// flags: --connect-timeout bounds ONE attempt, and a connection to a port
+	// nothing is listening on is refused immediately with an RST, so the
+	// timeout never elapses and iperf3 exits at once. Without this loop a
+	// client that starts before its server dies instantly with "unable to
+	// connect" — the exact failure mode this design exists to avoid, and one
+	// that reads to an operator like a fabric fault.
+	//
+	// Start ordering is not guaranteed on either dispatcher: in a cluster the
+	// operator gates on the server pod being Ready, which without a
+	// readinessProbe only means the container started, and on bare metal the
+	// ordering is whatever a human or a script did.
+	if err := waitForListener(peerHost, port, time.Duration(connectWaitSeconds)*time.Second); err != nil {
+		return fin(exitError, "no listener on %s:%d after %ds (node %s): %v — the server end never came up, "+
+			"which is a statement about this run and not about the link",
+			peerHost, port, connectWaitSeconds, peerNode, err)
+	}
+
 	out, err := runIperf(peerHost, port, duration)
 	if len(out) > 0 {
 		// Echoed to stderr so a failure is diagnosable from pod logs without
@@ -267,9 +288,9 @@ func runIperf(peerHost string, port, duration int) (string, error) {
 		"--port", strconv.Itoa(port),
 		"--time", strconv.Itoa(duration),
 		"--json",
-		// Retry into success rather than reporting a fabric fault when the
-		// client starts first. The same rule the RDMA runners follow, and the
-		// reason a readinessProbe is an affordance rather than the gate.
+		// Bounds the connection attempt itself. The RETRY that lets a client
+		// survive starting first is waitForListener, above — see the note
+		// there for why a flag cannot do that job.
 		"--connect-timeout", strconv.Itoa(connectTimeoutMs),
 	}
 	cmd := exec.Command("iperf3", args...)
@@ -296,6 +317,42 @@ func runIperf(peerHost string, port, duration int) (string, error) {
 
 // connectTimeoutMs bounds one connection attempt.
 const connectTimeoutMs = 30000
+
+// connectWaitSeconds is how long a client waits for its server's listener.
+//
+// Generous on purpose. The cost of waiting too long is a slower run; the cost
+// of waiting too briefly is a healthy link recorded as unreachable, and this
+// runner exists precisely to stop people misreading connection failures as
+// fabric faults.
+const connectWaitSeconds = 120
+
+// waitForListener polls until the peer accepts a TCP connection.
+//
+// A dial and an immediate close: it proves a listener is bound without sending
+// anything iperf3 would have to interpret. The polling interval is short
+// because the wait is usually near-zero — the server is normally already up,
+// and this loop is here for the case where it is not.
+func waitForListener(host string, port int, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+	var last error
+	for attempt := 1; ; attempt++ {
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err == nil {
+			conn.Close()
+			if attempt > 1 {
+				logf("tcp-baseline: listener on %s appeared after %d attempt(s)", addr, attempt)
+			}
+			return nil
+		}
+		last = err
+		if time.Now().After(deadline) {
+			return last
+		}
+		time.Sleep(time.Second)
+	}
+}
 
 // iperfResult is the part of iperf3's JSON this runner reads.
 type iperfResult struct {

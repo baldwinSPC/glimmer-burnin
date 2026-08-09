@@ -5,8 +5,11 @@ package main
 
 import (
 	"math"
+	"net"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A real iperf3 3.16 --json summary, trimmed to the objects this runner reads.
@@ -119,5 +122,57 @@ func TestEnvIntRejectsNonsenseRatherThanRunningForZeroSeconds(t *testing.T) {
 	t.Setenv("X", "900")
 	if got := envInt("X", 30); got != 900 {
 		t.Errorf("900 → %d", got)
+	}
+}
+
+func TestAClientThatStartsFirstWaitsInsteadOfDying(t *testing.T) {
+	// The failure mode this whole design exists to avoid. iperf3's own
+	// --connect-timeout cannot do this job: a connection to a port nothing is
+	// listening on is REFUSED immediately with an RST, so the timeout never
+	// elapses and the client exits at once with "unable to connect" — which
+	// reads to an operator like a fabric fault.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close() // nothing is listening yet
+
+	// The listener appears while the client is already waiting.
+	ready := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		late, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			close(ready)
+			return
+		}
+		close(ready)
+		time.Sleep(3 * time.Second)
+		late.Close()
+	}()
+
+	start := time.Now()
+	if err := waitForListener("127.0.0.1", port, 10*time.Second); err != nil {
+		t.Fatalf("a listener that appeared after 300ms was not waited for: %v", err)
+	}
+	if time.Since(start) < 200*time.Millisecond {
+		t.Error("returned before the listener could possibly have been up")
+	}
+	<-ready
+}
+
+func TestWaitingGivesUpEventuallyRatherThanHanging(t *testing.T) {
+	// A server that never comes up must end the run, not hold a node forever.
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	start := time.Now()
+	if err := waitForListener("127.0.0.1", port, 1500*time.Millisecond); err == nil {
+		t.Fatal("waiting on a port nobody listens to succeeded")
+	}
+	if elapsed := time.Since(start); elapsed > 8*time.Second {
+		t.Errorf("gave up after %v, far past the deadline it was given", elapsed)
 	}
 }

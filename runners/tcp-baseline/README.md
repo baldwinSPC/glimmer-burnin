@@ -96,9 +96,20 @@ Standard Pair rendezvous: `BURNIN_ROLE`, `BURNIN_PEER_HOST`, `BURNIN_PEER_NODE`,
 | `TCP_BASELINE_PORT` | iperf3 port (default 5201) |
 | `TCP_BASELINE_INTERFACE` | fabric interface to test. **Required on the server**, which has no peer address to route towards and therefore nothing for the guard to compare |
 
-Declare a `readinessProbe` on the server naming the same port. The operator will
-not start the client until the server pod is Ready, but without a probe "Ready"
-only means the container started.
+## Start ordering
+
+The client **waits up to 120s for the server's listener** before measuring
+anything, and that wait is in the runner rather than in an iperf3 flag on
+purpose: `--connect-timeout` bounds a single attempt, and a connection to a port
+nothing is listening on is refused immediately with an RST, so the timeout never
+elapses and iperf3 exits at once. Without the wait, a client that starts first
+dies instantly with "unable to connect" — which reads to an operator like a
+fabric fault, and is exactly what this runner exists to stop people misreading.
+
+Declare a `readinessProbe` on the server naming the same port as well. The
+operator will not start the client until the server pod is Ready, but without a
+probe "Ready" only means the container started. The probe narrows the window;
+the wait is what survives it.
 
 `hostNetwork: true` is required: the guard reads `/proc/net/route` and
 enumerates the host's interfaces, and a fabric test wants the host namespace
