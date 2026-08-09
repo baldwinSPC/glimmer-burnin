@@ -2,6 +2,7 @@ package sink
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -402,5 +403,78 @@ func TestEnvelopeCarriesBaseline(t *testing.T) {
 		if mk(unset).Baseline {
 			t.Error("an ordinary acceptance run was delivered as a baseline")
 		}
+	}
+}
+
+// A segmented soak must be legible from the envelope alone — issue #229.
+//
+// "40 of 288 segments" and "288 of 288" are different statements about a node,
+// and before this they arrived looking identical: the envelope carried Metrics
+// and nothing about how the test was executed. A consumer could not tell a fold
+// from a single reading, nor a soak that completed from one that stopped a
+// seventh of the way in — and the elapsedS >= 0.95 x duration gate in
+// docs/soaks.md exists precisely because that difference matters.
+//
+// Attempts compound it: a segmented result's attempt history is capped, so a
+// consumer counting attempts silently undercounts unless something says how many
+// were dropped.
+func TestEnvelopeDescribesASegmentedSoak(t *testing.T) {
+	run := &burninv1alpha1.BurnInRun{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "run1", UID: "uid-1"},
+		Status: burninv1alpha1.BurnInRunStatus{
+			Phase: burninv1alpha1.RunError,
+			Results: []burninv1alpha1.TestResult{{
+				Name: "soak", Kind: "thermal-soak", Phase: burninv1alpha1.RunError,
+				Nodes:             []string{"spark-a"},
+				Metrics:           map[string]string{"elapsedS": "36000", "gpuTempC": "71.5"},
+				SegmentsRequired:  288,
+				SegmentsCompleted: 40,
+				TruncatedAttempts: 23,
+				AggregatedMetrics: map[string]string{"elapsedS": "36000", "gpuTempC": "71.5"},
+			}},
+		},
+	}
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil)
+	r := env.Results[0]
+
+	if r.Segments == nil {
+		t.Fatalf("a 288-segment soak delivered with no segment description: a consumer cannot tell it "+
+			"from a single execution, nor 40/288 from 288/288 (result: %+v)", r)
+	}
+	if r.Segments.Completed != 40 || r.Segments.Required != 288 {
+		t.Errorf("segments = %d/%d, want 40/288", r.Segments.Completed, r.Segments.Required)
+	}
+	if r.Segments.TruncatedAttempts != 23 {
+		t.Errorf("truncatedAttempts = %d, want 23 — without it a consumer counting the delivered "+
+			"attempts undercounts and never learns that it did", r.Segments.TruncatedAttempts)
+	}
+}
+
+// Absence is the signal: an ordinary execution carries no segment block at all,
+// so a consumer reads `segments == null` as "this was one pod" rather than
+// having to compare a zero against a sentinel.
+func TestAnUnsegmentedResultCarriesNoSegmentBlock(t *testing.T) {
+	run := &burninv1alpha1.BurnInRun{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "run1", UID: "uid-1"},
+		Status: burninv1alpha1.BurnInRunStatus{
+			Phase: burninv1alpha1.RunPassed,
+			Results: []burninv1alpha1.TestResult{{
+				Name: "smoke", Kind: "compute-smoke", Phase: burninv1alpha1.RunPassed,
+				Nodes: []string{"spark-a"}, Metrics: map[string]string{"tflops": "31.2"},
+			}},
+		},
+	}
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil)
+	if env.Results[0].Segments != nil {
+		t.Errorf("an unsegmented result grew a segment block: %+v", env.Results[0].Segments)
+	}
+	// And it must not appear in the JSON either, or `omitempty` is not doing the
+	// work the contract's "present only where it means something" posture needs.
+	blob, err := json.Marshal(env.Results[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(blob), "segments") {
+		t.Errorf("an unsegmented result serialised a segments key: %s", blob)
 	}
 }

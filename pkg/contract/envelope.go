@@ -110,6 +110,17 @@ type TestResult struct {
 	// groups a sweep's cells by these rather than by parsing test names, which
 	// stops working the moment a variant is called "fp8-dense".
 	VariantAxes map[string]string `json:"variantAxes,omitempty"`
+
+	// Segments describes a SEGMENTED SOAK, and is absent for an ordinary
+	// execution — absence is the signal, so a consumer reads `null` as "this was
+	// one pod" rather than comparing a zero against a sentinel.
+	//
+	// Without it, "40 of 288 segments" and "288 of 288" arrive looking identical,
+	// and they are different statements about a node. Metrics alone cannot
+	// separate them: the same map is a fold across 288 windows in one case and a
+	// single reading in the other, and a consumer has no way to know which it is
+	// holding.
+	Segments *SegmentSummary `json:"segments,omitempty"`
 }
 
 // Violation is one threshold a test failed.
@@ -148,6 +159,43 @@ type ArtifactRef struct {
 	ConfigMap string `json:"configMap,omitempty"`
 	Key       string `json:"key,omitempty"`
 	Dropped   string `json:"dropped,omitempty"`
+}
+
+// SegmentSummary says how a segmented soak was executed, and how much of it
+// actually burned.
+//
+// A soak is divided into a sequence of shorter pods so that an eviction costs
+// one window instead of the week. That is a SCHEDULING decision and it
+// deliberately does not change the verdict — thresholds are applied once, at the
+// end, to the fold — so a consumer cannot tell from Phase or Metrics how a test
+// was run. This is where it is told.
+//
+// HOW THE METRICS COMBINED is not repeated here. Each metric's rule is declared
+// beside its name in the registry and answered by AggregationFor, which is a
+// single source of truth a consumer can query; copying 40 rules onto every
+// result would let the envelope and the registry disagree about the same name.
+// A consumer reading a result whose Segments is non-nil should treat Metrics as
+// a FOLD and call AggregationFor to learn how each key was combined.
+type SegmentSummary struct {
+	// Completed counts only the segments that finished CLEANLY and contributed to
+	// the fold. It does not advance for an interruption, so
+	// Completed < Required on a terminal result means the soak was cut short —
+	// which is the fact this whole type exists to make reachable.
+	Completed int32 `json:"completed"`
+	// Required is how many segments the declared duration was divided into.
+	Required int32 `json:"required"`
+	// SegmentSeconds is the length of one window. Present so a consumer can
+	// reconstruct how much time Completed represents without knowing the run's
+	// spec, which it does not receive.
+	SegmentSeconds int32 `json:"segmentSeconds,omitempty"`
+	// TruncatedAttempts is how many passing segments were dropped from the
+	// attempt history to keep the status writable.
+	//
+	// Without it a consumer counting delivered attempts silently undercounts, and
+	// never learns that it did. The verdict is unaffected — it is read from the
+	// persisted fold and never from the attempt list — but "there were 288 of
+	// these and you are seeing 17" is something only the operator can say.
+	TruncatedAttempts int32 `json:"truncatedAttempts,omitempty"`
 }
 
 // NotEvaluated is a threshold that was neither satisfied nor violated because it

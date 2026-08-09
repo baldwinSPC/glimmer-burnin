@@ -514,6 +514,16 @@ type TestResult struct {
 	// +kubebuilder:validation:Minimum=0
 	SegmentsCompleted int32 `json:"segmentsCompleted,omitempty"`
 
+	// SegmentSeconds is the length of one window, pinned from the plan alongside
+	// SegmentsRequired.
+	//
+	// Recorded because SegmentsCompleted is a count and a count is not a
+	// duration: "40 of 288" says how far a soak got only if the reader also knows
+	// how long a window is, and neither this status nor the delivery envelope
+	// carries the run's spec. Zero for an unsegmented test.
+	// +kubebuilder:validation:Minimum=0
+	SegmentSeconds int32 `json:"segmentSeconds,omitempty"`
+
 	// AggregatedMetrics is the running combination of every clean segment's
 	// metrics, folded by the per-metric rule in pkg/contract.AggregationFor.
 	//
