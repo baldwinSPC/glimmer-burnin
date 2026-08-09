@@ -584,7 +584,23 @@ disagree about the same hardware. One brain, two dispatchers.
   instead of the size of its target list. Both nodes of a pair are cordoned
   together, before either pod exists. Cordoning every target up front took a
   two-node cluster entirely out of scheduling and hollowed out the interlock,
-  whose whole premise is that only N nodes are occupied at once.
+  whose whole premise is that only N nodes are occupied at once. **A WAVE CAN BE
+  MANY PODS LONG, and "holding" is read from the RESULT and not from a live
+  pod.** A segmented soak, a repeat and an error-retry each have a moment between
+  pods where nothing is running, and reading the interlock from live pods alone
+  made that gap look like released capacity: a second target took the slot and
+  the first node's cordon came off halfway through a multi-day acceptance. Both
+  halves of that are severe — the soak stops being a soak (at cap 1 over two
+  targets each node runs one window then idles for one, and a part allowed to
+  cool for as long as it was loaded never reaches the thermal steady state the
+  test exists to hold it at), and the cordon is the only thing keeping FOREIGN
+  workload off a node under burn-in, since runner pods tolerate
+  `node.kubernetes.io/unschedulable` and it therefore never protected against
+  this operator to begin with. `holdingNodes` seeds the busy set from every
+  non-terminal result's nodes — every node of the unit, so a pair holds both ends
+  and a group holds every rank — and it SEEDS rather than replaces, so the
+  live-pod count stays the floor and a controller restart still cannot lose track
+  of what is already running.
 - **What the run FOUND is captured once, at start, and never re-derived.**
   Because a node is cordoned and released per wave, "was this node already
   cordoned when I got here?" would otherwise be re-asked several times per run

@@ -1132,3 +1132,121 @@ func TestAnUnsegmentedResultRecordsNoWindowLength(t *testing.T) {
 			res.SegmentSeconds, res.SegmentsRequired)
 	}
 }
+
+// A segmented soak must hold its node for the WHOLE soak, not one window at a
+// time.
+//
+// busyNodes counts LIVE PODS, and between segment N and segment N+1 there is no
+// pod: the previous one has terminated and the next has not been created. In
+// that gap the node was neither busy nor held, so a second target took the
+// concurrency slot and releaseHeldNodes gave the first node's cordon back.
+//
+// Two consequences, both severe:
+//
+//   - THE SOAK STOPS BEING A SOAK. At cap 1 over two targets, each node runs one
+//     window, then idles for a window while the other node runs, forever. A
+//     thermal soak exists to drive a part to thermal steady state and HOLD it
+//     there; a part allowed to cool for as long as it was loaded never reaches
+//     the condition being tested, so throttling and heat-dependent faults are
+//     exactly what this schedule cannot find.
+//   - THE CORDON COMES OFF MID-SOAK. Runner pods tolerate
+//     node.kubernetes.io/unschedulable, so the cordon is the only thing keeping
+//     FOREIGN workload off a node under burn-in. Dropping it halfway through a
+//     multi-day acceptance lets ordinary fleet work land beside the measurement.
+func TestSoak_ANodeIsHeldForTheWholeSoakAndNotOneSegmentAtATime(t *testing.T) {
+	run := newRun("run1", "acceptance", "spark-a", "spark-b")
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		soakTest("soak", 2700, 900), // three segments
+		profile("acceptance", nil, false, testRef("soak")),
+		run,
+	)
+
+	// Segment 1 on whichever node the wave admitted first.
+	pod := h.awaitSegmentPod("run1", 1)
+	first := pod.Spec.NodeSelector[corev1.LabelHostname]
+	h.startPod(pod)
+	h.reconcile("run1")
+	h.finishPod(pod, 0, cleanSegment(), "Completed")
+	h.reconcile("run1")
+
+	// The soak owes two more windows on `first`. Nothing else may have taken its
+	// slot, and its cordon must still be on.
+	got := h.run("run1")
+	held := false
+	for _, n := range got.Status.CordonedNodes {
+		if n == first {
+			held = true
+		}
+	}
+	if !held {
+		t.Errorf("status.cordonedNodes = %v: %s was released between segments, with two of its three "+
+			"windows still owed — the cordon is the only thing keeping foreign workload off a node "+
+			"under burn-in", got.Status.CordonedNodes, first)
+	}
+	if !h.node(first).Spec.Unschedulable {
+		t.Errorf("%s is schedulable again mid-soak", first)
+	}
+
+	// And the next pod must be the SAME node's segment 2, not the other node's
+	// segment 1 — at cap 1 the second target cannot start until this soak is done.
+	next := h.awaitSegmentPod("run1", 2)
+	if got := next.Spec.NodeSelector[corev1.LabelHostname]; got != first {
+		t.Errorf("segment 2 landed on %s, but %s's soak is only 1/3 done: the slot was handed away at "+
+			"the segment boundary, so each node runs one window then idles for one", got, first)
+	}
+}
+
+// A PAIR holds BOTH of its nodes across the gap between executions, not just the
+// first one.
+//
+// A pair is one indivisible unit of load costing two slots, and admission
+// already applies that rule when the unit STARTS. It has to hold across the
+// pause between one execution and the next too: releasing the second endpoint
+// would uncordon a node that is half of a link measurement still in progress,
+// and the same reasoning covers a Group, where every rank is held for the life
+// of the collective.
+//
+// Observable through the cordon rather than through a competing target, because
+// a Pair consumes every node this run has: if only Nodes[0] were held, the
+// client's node would be handed back to the scheduler between repeats while the
+// link test is still running.
+func TestPair_HoldsBothEndpointsBetweenRepeats(t *testing.T) {
+	bt := pairTest("ib")
+	bt.Spec.RepeatCount = int32p(2)
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		bt,
+		profile("fabric", nil, false, testRef("ib")),
+		pairRun("run1", "fabric", "spark-a", "spark-b"),
+	)
+
+	server, client := runPairToStart(h)
+	h.finishPod(server, 0, "", "Completed")
+	h.finishPod(client, 0, ibClientStdout, "Completed")
+	h.reconcile("run1")
+
+	res := &h.run("run1").Status.Results[0]
+	if res.Phase.IsTerminal() {
+		t.Fatalf("the pair settled after one repeat of two (phase %q); this test needs the gap "+
+			"between executions to exist at all", res.Phase)
+	}
+
+	got := h.run("run1")
+	for _, want := range []string{"spark-a", "spark-b"} {
+		held := false
+		for _, n := range got.Status.CordonedNodes {
+			if n == want {
+				held = true
+			}
+		}
+		if !held {
+			t.Errorf("status.cordonedNodes = %v: %s was released between repeats, but the pair owes "+
+				"another execution and a link measured from one end is not measured",
+				got.Status.CordonedNodes, want)
+		}
+		if !h.node(want).Spec.Unschedulable {
+			t.Errorf("%s is schedulable again while its pair test is still running", want)
+		}
+	}
+}
