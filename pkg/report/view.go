@@ -153,6 +153,27 @@ func BuildView(in Input) View {
 		nv.Results = append(nv.Results, r)
 	}
 
+	// A node that took part in a LINK is a node this run touched, even if it
+	// produced no Node-scope result of its own.
+	//
+	// Without this a run of nothing but Pair or Group tests has no nodes at all,
+	// and a renderer whose granularity is per-node — the NVVS one — emits ZERO
+	// documents for it. Every verdict in the run silently disappears. Found by
+	// a test, not by reading: the link results were all present in View.Links
+	// and the only thing missing was somewhere to put them.
+	//
+	// Their Results stay EMPTY. That is the structural guarantee that keeps a
+	// link verdict unreachable through the per-node axis, which is what stops a
+	// renderer attributing a point-to-point measurement to one endpoint.
+	for _, l := range v.Links {
+		for _, n := range l.Endpoints {
+			if _, ok := byNode[n]; !ok {
+				byNode[n] = &NodeView{Name: n}
+				order = append(order, n)
+			}
+		}
+	}
+
 	// Nodes the caller has inventory for but which produced no result still
 	// appear: a node that was targeted and reported nothing is a fact, and a
 	// report that omitted it would read as a fleet that was fully measured.

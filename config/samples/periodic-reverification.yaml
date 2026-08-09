@@ -26,7 +26,7 @@ spec:
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInSchedule
 metadata:
-  name: weekly-spark-reverification
+  name: weekly-reverification
 spec:
   # Pick a window the fleet can afford to lose these nodes in: every tick
   # cordons them and drives them to their power and thermal limits for the
@@ -35,13 +35,20 @@ spec:
   # Maintenance windows and the facility staff who can respond to a power event
   # are local. Without this the schedule drifts by an hour twice a year and can
   # put a full-power sweep outside the window it was agreed for.
-  timeZone: America/Los_Angeles
+  # SET THIS TO YOUR SITE'S ZONE. Etc/UTC is what this sample ships, and it is
+  # an easy thing to be surprised by: "03:00" then lands mid-afternoon for half
+  # the world, which is exactly the drift the note above warns about.
+  timeZone: Etc/UTC
   profileRef: weekly-reverification
   target:
     # Re-resolved at each tick, so nodes added since this was written are
     # covered automatically. That is the point of scheduling by selector.
     nodeSelector:
-      glimmer.ai/accelerator: gb10
+      # Whatever labels your accelerator nodes. A device plugin usually sets
+      # one; feature-discovery sets several. This operator does not care which
+      # — vendor neutrality lives in the reconciler, so selecting nodes is a
+      # label question and never a vendor branch.
+      accelerator: example
   # Forbid is the default and it is the node-busy guard. Two runs on one node
   # fight for the accelerators, the memory bandwidth and the fabric each is
   # trying to measure: both report degraded numbers and a healthy node gets a
