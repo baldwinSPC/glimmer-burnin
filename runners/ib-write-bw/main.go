@@ -187,15 +187,34 @@ func run() int {
 	logf("RLIMIT_MEMLOCK = %s; this runner will register at most %s of RDMA buffers",
 		humanBytes(soft), humanBytes(budgetFor(soft)))
 
+	measurand, mErr := measurandFrom(os.Getenv("BURNIN_VARIANT_MEASURAND"))
+	if mErr != nil {
+		// Exit 3, not a verdict. An unrecognised measurand means this pod was
+		// asked for a measurement it does not know how to take, and reporting
+		// anything about the link on that basis would be inventing evidence.
+		// Fail-closed on an unknown axis value is the same rule as fail-closed
+		// on an unknown phase: a runner may only declare what it established.
+		return fin(exitError, "%v", mErr)
+	}
+	logf("measurand=%s (from BURNIN_VARIANT_MEASURAND; unset means both)", measurand)
+
 	cfg := plan{
 		memlock:      soft,
+		measurand:    measurand,
 		healthPort:   envInt("BURNIN_HEALTH_PORT", defaultHealthPort),
 		perftestPort: envInt("BURNIN_PERFTEST_PORT", defaultPerftestPort),
 		messageBytes: envInt("BURNIN_MESSAGE_BYTES", defaultMessageBytes),
 		qps:          envInt("BURNIN_QPS", defaultQPs),
 		latIters:     envInt("BURNIN_LATENCY_ITERATIONS", defaultLatencyIterations),
 	}
-	cfg.bwSeconds = duration - latencyBudgetSeconds
+	// The bandwidth window is the run's duration less the slice carved out for
+	// latency — unless latency is not being measured at all, in which case there
+	// is nothing to carve out and the whole window is bandwidth. A latency-only
+	// execution does not use bwSeconds.
+	cfg.bwSeconds = duration
+	if measurand.measuresLatency() {
+		cfg.bwSeconds = duration - latencyBudgetSeconds
+	}
 	if cfg.bwSeconds < minBandwidthSeconds {
 		cfg.bwSeconds = minBandwidthSeconds
 	}
@@ -216,7 +235,71 @@ func run() int {
 // over the control channel; the client never invents a value, which is what
 // makes a parameter mismatch — perftest's most confusing failure mode —
 // unreachable.
+// measurand is which property of the link this execution measures.
+//
+// It comes from the `measurand` variant axis, which the operator injects as
+// BURNIN_VARIANT_MEASURAND. Expressing latency as a VARIANT of this kind rather
+// than as a new TestKind keeps one image, one rendezvous and one alias table:
+// bandwidth and latency are two properties of the same link measured by two
+// binaries that already ship in this image, not two different tests.
+type measurand string
+
+const (
+	// measurandBoth is the historical behaviour and what an execution with no
+	// variant axis gets: measure bandwidth, then latency, and report both.
+	measurandBoth measurand = "both"
+	// measurandBandwidth skips the latency phase.
+	measurandBandwidth measurand = "bandwidth"
+	// measurandLatency skips the bandwidth phase.
+	//
+	// Latency is the property that matters for small-message collectives: the
+	// all-reduce at the end of every training step is latency-bound long before
+	// it is bandwidth-bound. Asking for it on its own means it can carry its own
+	// thresholds, instead of being a number that happens to come along with a
+	// bandwidth test.
+	measurandLatency measurand = "latency"
+)
+
+func (m measurand) measuresBandwidth() bool {
+	return m == measurandBoth || m == measurandBandwidth
+}
+
+func (m measurand) measuresLatency() bool {
+	return m == measurandBoth || m == measurandLatency
+}
+
+// measurandFrom reads the axis value, and REFUSES one it does not recognise.
+//
+// Defaulting an unknown value to "both" would silently give an author the
+// measurement they did not ask for, with thresholds written for the one they
+// did — so a latency gate would be applied to a bandwidth run, fail every link
+// forever, and read as a fabric verdict. Empty is the only value that means
+// "both", because empty is what an execution with no variants has.
+func measurandFrom(v string) (measurand, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return measurandBoth, nil
+	case string(measurandBoth):
+		return measurandBoth, nil
+	case string(measurandBandwidth):
+		return measurandBandwidth, nil
+	case string(measurandLatency):
+		return measurandLatency, nil
+	default:
+		return "", fmt.Errorf(
+			"BURNIN_VARIANT_MEASURAND=%q is not a measurand this runner knows "+
+				"(bandwidth, latency, or both) — refusing rather than guessing, because "+
+				"measuring the wrong property would be gated by thresholds written for "+
+				"the other one", v)
+	}
+}
+
 type plan struct {
+	// measurand is which property of the link this execution measures. The
+	// SERVER owns it and sends the phase list, so both ends run the same phases
+	// without the client having to be told the axis separately.
+	measurand measurand
+
 	// memlock is this process's RLIMIT_MEMLOCK soft limit, in bytes. It bounds
 	// how much the test may register, and it is the single most common reason a
 	// fabric test that passes on the host fails in a pod.
@@ -286,17 +369,28 @@ func runServer(ports []rdmaPort, cfg plan) int {
 	logf("plan: %d-byte messages across %d queue pairs = %s registered (budget %s)",
 		cfg.messageBytes, cfg.qps, humanBytes(pinnedBytes(cfg.messageBytes, cfg.qps)), humanBytes(budget))
 
-	for _, ph := range []struct {
+	// The SERVER owns the phase list, and the client runs whatever phases it is
+	// sent. That is why the measurand needs no separate wire field: both ends
+	// stay in step because only one of them decides.
+	type phaseSpec struct {
 		name string
 		msg  message
 		args func() []string
-	}{
-		{phaseBandwidth, message{Kind: kindPhase, Phase: phaseBandwidth, Port: cfg.perftestPort,
-			Bytes: cfg.messageBytes, QPs: cfg.qps, Seconds: cfg.bwSeconds},
-			func() []string { return bwArgs(port, cfg, "") }},
-		{phaseLatency, message{Kind: kindPhase, Phase: phaseLatency, Port: cfg.latPort(), Iters: cfg.latIters},
-			func() []string { return latArgs(port, cfg, "") }},
-	} {
+	}
+	var phases []phaseSpec
+	if cfg.measurand.measuresBandwidth() {
+		phases = append(phases, phaseSpec{phaseBandwidth,
+			message{Kind: kindPhase, Phase: phaseBandwidth, Port: cfg.perftestPort,
+				Bytes: cfg.messageBytes, QPs: cfg.qps, Seconds: cfg.bwSeconds},
+			func() []string { return bwArgs(port, cfg, "") }})
+	}
+	if cfg.measurand.measuresLatency() {
+		phases = append(phases, phaseSpec{phaseLatency,
+			message{Kind: kindPhase, Phase: phaseLatency, Port: cfg.latPort(), Iters: cfg.latIters},
+			func() []string { return latArgs(port, cfg, "") }})
+	}
+
+	for _, ph := range phases {
 		listenPort := ph.msg.Port
 		out, waitErr, startErr := startAndAnnounce(ph.name, ph.args(), listenPort, ch, ph.msg)
 		if startErr != nil {
@@ -485,7 +579,16 @@ phases:
 	}
 
 	// ── metrics, before the decision ──────────────────────────────────────────
-	metric("bw_average", strconv.FormatFloat(bw.AverageGbps, 'f', 2, 64))
+	//
+	// A latency-only execution emits NO bandwidth metrics. Emitting bw_average=0
+	// from a phase that never ran would be a fabricated measurement, and a
+	// bandwidth threshold would then fail the link on a number nobody took —
+	// exactly the "never emit a 0 you did not measure" rule. Omitting it means
+	// such a threshold fails closed instead, which is the honest outcome: the
+	// gate was written for a measurand this execution did not measure.
+	if cfg.measurand.measuresBandwidth() {
+		metric("bw_average", strconv.FormatFloat(bw.AverageGbps, 'f', 2, 64))
+	}
 	// bw_peak is deliberately NOT emitted. perftest measures a peak only in
 	// ITERATION mode; in duration mode (-D), which is the mode a burn-in runs
 	// in, it prints 0.00 and warns that the peak was not measured. Emitting that
@@ -494,7 +597,7 @@ phases:
 	// sentinel declares that the HARDWARE cannot produce the measurement, and
 	// this is a property of the mode this runner chose. A threshold on
 	// peakBandwidthGbps therefore fails closed, which is correct — see README.
-	if bw.MsgRateMpps > 0 {
+	if cfg.measurand.measuresBandwidth() && bw.MsgRateMpps > 0 {
 		// Message rate is a SEPARATE finding from bandwidth, not a restatement
 		// of it. A link can carry its rated bytes while delivering far fewer
 		// messages per second than its class — a small-message regression that
@@ -525,15 +628,38 @@ phases:
 		}
 	}
 
-	logf("%d bytes x %d iterations over %s to %s", bw.Bytes, bw.Iterations, port.Device, dest)
+	if cfg.measurand.measuresBandwidth() {
+		logf("%d bytes x %d iterations over %s to %s", bw.Bytes, bw.Iterations, port.Device, dest)
+	}
 	if haveLat {
 		logf("latency min/typical/avg/max = %.2f/%.2f/%.2f/%.2f us over %d iterations",
 			lat.MinUs, lat.TypicalUs, lat.AvgUs, lat.MaxUs, lat.Iterations)
 	}
 
-	if bw.AverageGbps <= 0 {
+	// THE VERDICT IS ABOUT WHAT THIS EXECUTION MEASURED, and nothing else.
+	//
+	// A latency-only run must never be failed on bandwidth: it did not run the
+	// bandwidth phase, so bw.AverageGbps is a zero value rather than a
+	// measurement, and failing on it would permanently indict a link over a
+	// phase that was deliberately not executed. Fail is the one phase the
+	// operator never retries.
+	if cfg.measurand.measuresBandwidth() && bw.AverageGbps <= 0 {
 		return fin(exitFail, "the link completed the test carrying no traffic (bandwidthGbps=%.2f) over %s to %s",
 			bw.AverageGbps, port.Device, dest)
+	}
+	if !cfg.measurand.measuresBandwidth() {
+		// Latency-only. The latency phase is deliberately non-fatal above — it
+		// is secondary evidence when it rides alongside bandwidth — but when it
+		// is the WHOLE measurement, losing it means nothing was measured at all,
+		// and that is an Error rather than a pass.
+		if !haveLat {
+			return fin(exitError, "the latency phase produced no reading over %s to %s, "+
+				"and this execution measured nothing else — the link is unjudged",
+				port.Device, dest)
+		}
+		return fin(exitPass, "measured %.2f us average round trip over %s to %s over %d iterations; "+
+			"acceptance is the profile's thresholds to decide",
+			lat.AvgUs, port.Device, dest, lat.Iterations)
 	}
 	return fin(exitPass, "measured %.2f Gb/s average over %s to %s with %d QPs at %d-byte messages; "+
 		"acceptance is the profile's thresholds to decide",
