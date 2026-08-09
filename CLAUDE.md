@@ -614,6 +614,11 @@ disagree about the same hardware. One brain, two dispatchers.
 
 ### Runner images
 
+**Adding a kind? Read `docs/dev/new-testkind-playbook.md` first.** It is the
+ordered checklist — every step names the file to touch and the guard that catches
+the mistake — and it is what the `new-runner` skill loads. The rules below are
+the invariants; the playbook is the procedure, and it does not restate them.
+
 - A runner's contract is its **exit code plus `key=value` metrics on stdout**.
   Exit 0 = pass, 1 = fail, 2 = skip (not applicable to this hardware), **3 =
   error** (the runner could not measure; the hardware is unjudged). Anything
