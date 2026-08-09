@@ -27,13 +27,16 @@ func TestApiserverAppliesTheCRDDefaults(t *testing.T) {
 	ctx := context.Background()
 
 	test := customTest(ns, "defaults", func(bt *burninv1alpha1.BurnInTest) {
-		// Deliberately unset: Scope, RepeatCount, and the readOnly of a mount.
+		// Deliberately unset: Scope, RepeatCount, the readOnly of a mount, and
+		// a soak's abortEarly.
 		bt.Spec.Runner.HostPaths = []burninv1alpha1.HostPathMount{
 			{Path: "/dev/kmsg", MountPath: "/dev/kmsg"},
 		}
 		bt.Spec.Thresholds = []burninv1alpha1.Threshold{
 			{Metric: "eccErrors", Comparison: burninv1alpha1.EQ, Value: "0"},
 		}
+		bt.Spec.DurationSeconds = 3600
+		bt.Spec.Soak = &burninv1alpha1.SoakSpec{SegmentSeconds: 900}
 	})
 	create(t, test)
 
@@ -55,6 +58,12 @@ func TestApiserverAppliesTheCRDDefaults(t *testing.T) {
 	if got.Spec.Thresholds[0].Applicability != burninv1alpha1.Required {
 		t.Errorf("threshold applicability defaulted to %q, want Required",
 			got.Spec.Thresholds[0].Applicability)
+	}
+	// Ending a soak early is a decision an author makes, never a default: a nil
+	// that fell through as "true" would cut soaks short across the fleet on the
+	// first window that looked bad.
+	if ae := got.Spec.Soak.AbortEarly; ae == nil || *ae {
+		t.Errorf("soak.abortEarly defaulted to %v, want false", ae)
 	}
 
 	prof := profile(ns, "defaults", nil, burninv1alpha1.ProfileTest{TestRef: "defaults"})
@@ -184,6 +193,28 @@ func TestApiserverRejectsWhatTheSchemaForbids(t *testing.T) {
 		},
 		want: "durationSeconds",
 	}, {
+		name: "soak segment below the five-minute floor",
+		// A one-minute segment on a seven-day soak is 10,080 pod creations, and
+		// most of the wall clock goes to scheduling round-trips rather than to
+		// burning hardware in. plan.go refuses it too, but only after the run
+		// has started and the author has gone home.
+		obj: func() *unstructured.Unstructured {
+			return rawTest(ns, "short-segment", map[string]any{
+				"durationSeconds": int64(3600),
+				"soak":            map[string]any{"segmentSeconds": int64(60)},
+			})
+		},
+		want: "segmentSeconds",
+	}, {
+		name: "soak with no segmentSeconds at all",
+		obj: func() *unstructured.Unstructured {
+			return rawTest(ns, "no-segment", map[string]any{
+				"durationSeconds": int64(3600),
+				"soak":            map[string]any{},
+			})
+		},
+		want: "segmentSeconds",
+	}, {
 		name: "maxConcurrentNodes below the interlock floor",
 		obj: func() *unstructured.Unstructured {
 			return rawRun(ns, "zero-cap", map[string]any{"maxConcurrentNodes": int64(0)})
@@ -266,6 +297,65 @@ func TestStatusIsARealSubresource(t *testing.T) {
 	if after.Spec.CancelReason != "" {
 		t.Errorf("a spec field rode along on a status update (%q) — the subresource is not isolating spec",
 			after.Spec.CancelReason)
+	}
+}
+
+// TestSegmentedSoakStatusSurvivesTheApiserver writes a segmented soak's
+// bookkeeping through the status subresource and reads it back.
+//
+// The risk this covers is specific and the fake client cannot see it: AttemptTrigger
+// carries a +kubebuilder:validation:Enum, and it is on a STATUS field. A value
+// the manifest's enum does not list is not a cosmetic problem — the apiserver
+// refuses the whole status write, which wedges the run that discovered it and
+// loses the verdict rather than one word of it. Adding "Segment" to the Go
+// constants without regenerating the CRD would look perfectly fine in every unit
+// test in this repository.
+//
+// AggregatedMetrics is asserted for the other half: it is the field the verdict
+// is read from, so a map the schema silently pruned would leave a soak deciding
+// against nothing at all.
+func TestSegmentedSoakStatusSurvivesTheApiserver(t *testing.T) {
+	ns := newNamespace(t)
+	ctx := context.Background()
+
+	run := runFor(ns, "segmented", "nothing", []string{"node-a"}, nil)
+	create(t, run)
+
+	got := getRun(t, ns, "segmented")
+	got.Status.Phase = burninv1alpha1.RunRunning
+	got.Status.Results = []burninv1alpha1.TestResult{{
+		Name:              "soak",
+		Kind:              burninv1alpha1.KindThermalSoak,
+		Scope:             burninv1alpha1.ScopeNode,
+		Phase:             burninv1alpha1.RunRunning,
+		Nodes:             []string{"node-a"},
+		SegmentsRequired:  288,
+		SegmentsCompleted: 3,
+		TruncatedAttempts: 1,
+		AggregatedMetrics: map[string]string{"elapsedS": "2700", "xidEvents": "0"},
+		Attempts: []burninv1alpha1.TestAttempt{
+			{Attempt: 1, Trigger: burninv1alpha1.AttemptInitial, Phase: burninv1alpha1.RunPassed},
+			{Attempt: 2, Trigger: burninv1alpha1.AttemptSegment, Phase: burninv1alpha1.RunPassed},
+		},
+	}}
+	if err := admin.Status().Update(ctx, got); err != nil {
+		t.Fatalf("the apiserver refused a segmented soak's status: %v", err)
+	}
+
+	after := getRun(t, ns, "segmented")
+	if len(after.Status.Results) != 1 {
+		t.Fatalf("results = %+v", after.Status.Results)
+	}
+	res := after.Status.Results[0]
+	if res.SegmentsRequired != 288 || res.SegmentsCompleted != 3 || res.TruncatedAttempts != 1 {
+		t.Errorf("segment bookkeeping did not survive the round trip: %+v", res)
+	}
+	if got := res.AggregatedMetrics["elapsedS"]; got != "2700" {
+		t.Errorf("aggregatedMetrics did not survive the round trip (%q) — the verdict is read from it",
+			got)
+	}
+	if len(res.Attempts) != 2 || res.Attempts[1].Trigger != burninv1alpha1.AttemptSegment {
+		t.Errorf("attempts = %+v, want the Segment trigger preserved", res.Attempts)
 	}
 }
 

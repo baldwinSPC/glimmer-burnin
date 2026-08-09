@@ -221,6 +221,22 @@ const deadlineGraceSeconds = 120
 // operator's default.
 const defaultDurationSeconds = 600
 
+// durationSeconds is the WHOLE duration, and it deliberately ignores spec.soak.
+//
+// The operator divides a soak into segments so that an eviction, a drain or a
+// kubelet restart costs one window instead of the week — and every one of those
+// is a thing a cluster does. There is no cluster here: this path runs one
+// container per test, on a box somebody is sitting in front of, so segmenting it
+// would buy nothing and cost a pod-shaped restart the runtime never needed.
+//
+// The two dispatchers still reach the same verdict from the same evidence, which
+// is the promise pkg/localrun exists under, and the aggregation rules are exactly
+// what make that true: elapsedS SUMS, so 672 windows of 900 seconds is the same
+// 604,800 as one; a floor takes the worst window and a ceiling the highest, which
+// is what a single full-length runner reports anyway; and a lifetime total takes
+// the last reading either way. A segmented soak and one long execution are the
+// same measurement, which is the property that made segmenting safe in the first
+// place.
 func durationSeconds(spec api.BurnInTestSpec) int32 {
 	if spec.DurationSeconds > 0 {
 		return spec.DurationSeconds

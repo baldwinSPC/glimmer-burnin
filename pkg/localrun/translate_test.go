@@ -166,6 +166,39 @@ func TestTheDeadlineMatchesTheOperatorsGrace(t *testing.T) {
 	}
 }
 
+// A segmented soak runs here as ONE execution of the whole duration, and that is
+// a decision rather than an oversight.
+//
+// spec.soak exists so a cluster's own housekeeping — an eviction, a drain, a
+// kubelet restart — costs one window instead of the week. None of that exists on
+// a bare box, so segmenting here would buy nothing and add a restart the runtime
+// never needed. The verdict stays comparable because the aggregation rules make
+// N windows and one long window the same measurement: elapsedS sums, a floor
+// keeps the worst reading, a ceiling the highest, and a lifetime total the last.
+//
+// It is asserted rather than assumed because the operator's own podForTest now
+// sizes its pod from the SEGMENT, and a reader comparing the two dispatchers
+// would otherwise have to guess whether this one had simply been forgotten.
+func TestASegmentedSoakRunsAsOneLocalExecution(t *testing.T) {
+	spec := api.BurnInTestSpec{
+		Kind:            api.KindCustom,
+		DurationSeconds: 3600,
+		Soak:            &api.SoakSpec{SegmentSeconds: 900},
+		Runner:          &api.RunnerSpec{Image: "x:1"},
+	}
+	got, err := Translate(Plan{Node: "n1"}, PlannedTest{Name: "t", Spec: spec})
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if got.Env["BURNIN_DURATION_SECONDS"] != "3600" {
+		t.Errorf("BURNIN_DURATION_SECONDS = %q, want the whole soak — there is no cluster "+
+			"here to survive", got.Env["BURNIN_DURATION_SECONDS"])
+	}
+	if want := (3600 + deadlineGraceSeconds) * time.Second; got.Timeout != want {
+		t.Errorf("Timeout = %s, want %s", got.Timeout, want)
+	}
+}
+
 func TestImageResolutionFollowsTheOperatorsOrder(t *testing.T) {
 	// Explicit image beats the default table, and a kind with neither is a
 	// configuration error naming the field to set.

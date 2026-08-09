@@ -1,0 +1,100 @@
+# A week-long soak that survives the week.
+#
+# Without spec.soak, `durationSeconds: 604800` is ONE POD with an
+# activeDeadlineSeconds of 604920. Everything that normally happens to a pod over
+# a week is fatal to it — a kubelet restart, a drain, an eviction, an image-GC
+# pass, a reboot — and with retryOnErrorLimit set the retry starts the week over
+# from zero.
+#
+# Segmenting makes each of those cost fifteen minutes. Every segment is its own
+# pod, sized to the segment; the verdict is still rendered ONCE, over the
+# aggregate of the clean segments.
+#
+# See docs/soaks.md for the capacity arithmetic before applying this: it holds
+# one node out of the fleet for seven days.
+
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: week-long-thermal-soak
+spec:
+  kind: thermal-soak
+  scope: Node
+  durationSeconds: 604800 # seven days
+  soak:
+    # One pod's window. The floor is 300: below five minutes the run spends more
+    # time changing pods than measuring hardware. This soak is 672 segments.
+    segmentSeconds: 900
+    # Left at its default of false. Turning it on ends the soak the moment the
+    # aggregate PROVABLY violates a gate — which here would be xidEvents, a Sum
+    # under Equal 0, since a count that has left zero can never return to it.
+    # sustainedClockPct would not trigger it: it aggregates Min under a floor,
+    # which is monotone, but the temperature ceiling below is a Max and only
+    # rises. Read the abortEarly section of docs/soaks.md before setting it.
+    abortEarly: false
+  # Mid-flight evidence, so a soak that is lost at hour eighty still says what
+  # the temperatures were doing. A checkpoint is EVIDENCE and never a verdict:
+  # no threshold is applied to one, and abortEarly does not read one either.
+  checkpointIntervalSeconds: 900
+  thresholds:
+    # elapsedS SUMS across segments, which is what makes this an honest gate on
+    # whether the soak actually soaked rather than on what it was asked to do.
+    # 0.95 x 604800 leaves room for the segment boundaries themselves.
+    - metric: elapsedS
+      comparison: GreaterThanOrEqual
+      value: "574560"
+    # A per-window count, summed. Exact comparison because it is a dimensionless
+    # counter, and a tolerance around zero Xids is a tolerance for Xids.
+    - metric: xidEvents
+      comparison: Equal
+      value: "0"
+    # A ceiling on a Max-aggregated metric: the peak across the WHOLE soak, not
+    # the peak of the last window.
+    - metric: gpuTempC
+      comparison: LessThanOrEqual
+      value: "87"
+    # A floor on a Min-aggregated metric: the WORST window is the verdict. A part
+    # that held 83% for six days and 40% for one is a part that dropped to 40%.
+    - metric: sustainedClockPct
+      comparison: GreaterThanOrEqual
+      value: "60"
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: week-long-soak
+spec:
+  failFast: false
+  tests:
+    - testRef: week-long-thermal-soak
+  sinks:
+    - soak-results
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: week-long-soak-spark-01
+spec:
+  profileRef: week-long-soak
+  target:
+    nodeNames:
+      - spark-01
+  # The facility interlock. One node at full power for seven days.
+  maxConcurrentNodes: 1
+  # Retries apply to the Error phase ONLY, and on a segmented soak an Error
+  # re-runs THE SEGMENT that errored — not the week. That is what makes a
+  # non-trivial budget reasonable here; on an unsegmented soak each retry would
+  # buy another seven days.
+  retryOnErrorLimit: 3
+  # The outer bound, and it has to leave room for the retries above plus the
+  # per-segment scheduling round-trips: eight days for a seven-day soak.
+  deadlineSeconds: 691200
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInSink
+metadata:
+  name: soak-results
+spec:
+  type: ConfigMap
+  configMap:
+    name: burnin-results

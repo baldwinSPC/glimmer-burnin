@@ -723,6 +723,64 @@ spec:
                           - Pair
                           - Group
                           type: string
+                        soak:
+                          description: |-
+                            Soak divides this test's DurationSeconds into a sequence of shorter pod
+                            executions. Unset means one pod for the whole duration, which is what
+                            every test did before this field existed.
+                          properties:
+                            abortEarly:
+                              default: false
+                              description: |-
+                                AbortEarly stops the soak as Failed the moment the aggregate so far
+                                PROVABLY violates a gate. Default false.
+
+                                "Provably" is the whole of it, and it is narrower than it sounds. It fires
+                                only where the aggregation is monotone IN THE GATED DIRECTION, so that no
+                                later segment could retract the violation: a Sum counter under
+                                LessThanOrEqual (or under Equal, once the sum has passed the value), a Min
+                                under a GreaterThanOrEqual floor, a Max under a LessThanOrEqual ceiling.
+                                Everywhere else it stays silent — a Min under a ceiling can be pulled back
+                                under it by a later segment, and aborting a week of burn-in on a violation
+                                the next fifteen minutes would have retracted is the wrong trade.
+
+                                It is evaluated at SEGMENT BOUNDARIES ONLY, from harvested metrics, and
+                                never from a checkpoint's parse of a bounded log tail. A checkpoint is
+                                evidence and never a verdict; ending a soak on a truncated read would make
+                                it one.
+
+                                A metric that has not been reported by any segment yet never aborts
+                                anything. Fail-closed still applies at the end — a gated metric no segment
+                                ever emitted fails the test — but absence mid-soak is not yet an absence.
+                              type: boolean
+                            segmentSeconds:
+                              description: |-
+                                SegmentSeconds is one pod's window. Each segment gets
+                                BURNIN_DURATION_SECONDS=<segmentSeconds> and its own
+                                activeDeadlineSeconds, so an eviction or a reboot costs one segment
+                                rather than the whole run.
+
+                                The floor is five minutes and it is a real bound rather than a round
+                                number: a segment boundary costs a pod teardown, a pod creation and a
+                                scheduling round-trip, and below five minutes the run spends more time
+                                changing pods than it spends measuring hardware.
+
+                                EVERY SEGMENT IS A FULL WINDOW, including the last, so a soak runs at
+                                least its DurationSeconds and may overrun by up to one segment. A short
+                                remainder segment would be the worse choice twice over: it is below the
+                                floor this field exists to enforce, and a counter summed over a
+                                ten-second window is not comparable to the same counter summed over a
+                                fifteen-minute one, which is precisely what the aggregation rules assume.
+
+                                It must not exceed DurationSeconds — a segment longer than the soak is a
+                                soak that burns longer than it was asked to — and the run is refused at
+                                start if it does.
+                              format: int32
+                              minimum: 300
+                              type: integer
+                          required:
+                          - segmentSeconds
+                          type: object
                         thresholds:
                           description: |-
                             Thresholds are pass/fail gates evaluated against parsed metrics

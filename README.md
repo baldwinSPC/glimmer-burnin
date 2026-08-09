@@ -320,9 +320,17 @@ still fails closed.
 
 Working end to end for **Node-, Pair- and Group-scope** tests: CRDs, manager, run
 reconciler (pinned plan, wave cordoning, concurrency interlock, repeats,
-error-retry, checkpointing, two-pod Pair rendezvous), schedule and fingerprint
-reconcilers, threshold evaluation, and sink delivery over webhook / ConfigMap /
-Prometheus. All eleven runner images are published and public.
+error-retry, checkpointing, two-pod Pair rendezvous, segmented soaks), schedule
+and fingerprint reconcilers, threshold evaluation, and sink delivery over
+webhook / ConfigMap / Prometheus. All eleven runner images are published and
+public.
+
+A long soak should set **`spec.soak.segmentSeconds`**, which runs it as a
+sequence of shorter pods so that an eviction, a drain or a reboot costs one
+segment rather than the whole run. The verdict is still rendered once, over the
+aggregate of the clean segments, using the per-metric combining rule each metric
+declares in `pkg/contract`. See [docs/soaks.md](./docs/soaks.md) and
+[config/samples/segmented-soak.yaml](./config/samples/segmented-soak.yaml).
 
 ### Qualified on hardware — and which tags that covers
 
