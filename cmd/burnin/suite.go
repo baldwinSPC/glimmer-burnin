@@ -121,7 +121,7 @@ func (s *suite) readAll(r io.Reader, name string) error {
 }
 
 // buildPlan resolves a profile into something localrun can execute.
-func (s *suite) buildPlan(profileName, node string, retries int32) (localrun.Plan, []string, error) {
+func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.Rendezvous) (localrun.Plan, []string, error) {
 	profile, err := s.profile(profileName)
 	if err != nil {
 		return localrun.Plan{}, nil, err
@@ -131,6 +131,7 @@ func (s *suite) buildPlan(profileName, node string, retries int32) (localrun.Pla
 		Node:              node,
 		FailFast:          profile.Spec.FailFast,
 		RetryOnErrorLimit: retries,
+		Rendezvous:        rz,
 	}
 
 	var warnings []string
@@ -150,7 +151,7 @@ func (s *suite) buildPlan(profileName, node string, retries int32) (localrun.Pla
 		}
 		seen[name] = true
 
-		warnings = append(warnings, clusterOnlyFields(name, spec)...)
+		warnings = append(warnings, clusterOnlyFields(name, spec, rz)...)
 
 		p.Tests = append(p.Tests, localrun.PlannedTest{
 			Name:     name,
@@ -223,17 +224,33 @@ func (s *suite) profileNames() []string {
 // Warned about rather than silently ignored: a user whose profile sets a
 // nodeSelector has a belief about where this runs, and letting that pass without
 // a word would leave the belief intact and wrong.
-func clusterOnlyFields(name string, spec api.BurnInTestSpec) []string {
+func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendezvous) []string {
 	var out []string
+
 	switch spec.Scope {
-	case api.ScopePair, api.ScopeGroup:
+	case api.ScopePair:
+		if rz == nil {
+			out = append(out, fmt.Sprintf(
+				"%s is Pair-scope and no --role was given: it will run with BURNIN_ROLE unset, "+
+					"which a runner treats as not-applicable and skips — pass --role server here and "+
+					"--role client --peer <ip> on the other machine to actually measure the link", name))
+		}
+	case api.ScopeGroup:
+		// Group needs N hosts started together against one root, which is real
+		// orchestration and is not wired up. Warned about specifically rather
+		// than lumped in with Pair: the fix for Pair is two flags, and telling
+		// someone the same thing here would send them somewhere that does not
+		// exist.
 		out = append(out, fmt.Sprintf(
-			"%s is %s-scope: it needs a peer, which this command cannot arrange yet — run it with --role and --peer once that lands, or in a cluster",
-			name, spec.Scope))
+			"%s is Group-scope: multi-host Group orchestration is not wired up in this command yet, "+
+				"so it will skip; run it in a cluster", name))
 	}
-	if spec.Runner != nil && spec.Runner.ReadinessProbe != nil {
+
+	if spec.Runner != nil && spec.Runner.ReadinessProbe != nil && spec.Scope != api.ScopePair {
+		// A probe on a Pair test is honoured here — the server end watches it to
+		// announce its listener. Anywhere else there is nothing to gate.
 		out = append(out, fmt.Sprintf(
-			"%s declares a readinessProbe, which only a kubelet acts on; the runner's own rendezvous still applies", name))
+			"%s declares a readinessProbe, which nothing here acts on outside a Pair-scope server", name))
 	}
 	return out
 }

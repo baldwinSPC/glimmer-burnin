@@ -143,6 +143,38 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 		}
 	}
 
+	// Rendezvous, for a test whose scope actually has one.
+	//
+	// Gated on SCOPE, not merely on the flag being present: a Node-scope test in
+	// a profile run with --role must not receive BURNIN_ROLE. A runner reading
+	// that variable concludes it is one end of a link, and a single-machine test
+	// told it is half of a pair will wait for a peer that does not exist.
+	if p.Rendezvous != nil {
+		switch t.Spec.Scope {
+		case api.ScopePair:
+			spec.Env["BURNIN_ROLE"] = p.Rendezvous.Role
+			setIf(spec.Env, "BURNIN_PEER_HOST", p.Rendezvous.PeerHost)
+			setIf(spec.Env, "BURNIN_PEER_NODE", p.Rendezvous.PeerNode)
+		case api.ScopeGroup:
+			if p.Rendezvous.Rank != nil {
+				spec.Env["BURNIN_RANK"] = fmt.Sprint(*p.Rendezvous.Rank)
+			}
+			if p.Rendezvous.NRanks > 0 {
+				spec.Env["BURNIN_NRANKS"] = fmt.Sprint(p.Rendezvous.NRanks)
+			}
+			setIf(spec.Env, "BURNIN_ROOT_HOST", p.Rendezvous.RootHost)
+			setIf(spec.Env, "BURNIN_ROOT_NODE", p.Rendezvous.RootNode)
+		}
+
+		// hostNetwork for a fabric test on bare metal, unless the test already
+		// asked for it. The RDMA runners want it, and it takes port mapping out
+		// of the picture entirely — a NAT'd control channel is a connection
+		// error that reads as a bad link.
+		if t.Spec.Scope == api.ScopePair || t.Spec.Scope == api.ScopeGroup {
+			spec.HostNetwork = true
+		}
+	}
+
 	// Accelerator access from the resource request, so a profile written for the
 	// cluster asks for a device the same way here.
 	for name := range t.Spec.Resources.Limits {
@@ -205,4 +237,14 @@ func resolveImage(spec api.BurnInTestSpec) (string, error) {
 		return img, nil
 	}
 	return "", fmt.Errorf("no default runner image for kind %q — set spec.runner.image", spec.Kind)
+}
+
+// setIf sets a variable only when there is a value.
+//
+// An empty BURNIN_PEER_HOST is worse than none: a runner that checks presence
+// rather than content would dial the empty string.
+func setIf(env map[string]string, k, v string) {
+	if v != "" {
+		env[k] = v
+	}
 }
