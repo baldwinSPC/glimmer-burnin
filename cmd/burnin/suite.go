@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/hostinfo"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
 )
 
@@ -129,6 +130,7 @@ func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.
 
 	p := localrun.Plan{
 		Node:              node,
+		Vendor:            hostVendor(),
 		FailFast:          profile.Spec.FailFast,
 		RetryOnErrorLimit: retries,
 		Rendezvous:        rz,
@@ -253,4 +255,27 @@ func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendez
 			"%s declares a readinessProbe, which nothing here acts on outside a Pair-scope server", name))
 	}
 	return out
+}
+
+// hostVendor is this machine's accelerator vendor, read off the PCI bus.
+//
+// It decides which image a test resolves to, so the operator and this path must
+// answer the same question from equally authoritative sources: the operator asks
+// a NodeFingerprint, which derives the vendor from the DNS domain of a device
+// plugin's label or resource; here there is no apiserver, so it is read from the
+// hardware itself.
+//
+// EMPTY IS THE HONEST ANSWER when nothing is found, and it is not a mismatch —
+// pkg/runnerimages.Resolve treats an unknown vendor exactly as it did before
+// vendors existed. Only the FIRST accelerator is consulted, matching the
+// operator's own vendorOf; a host with two vendors' cards in it is a case
+// neither side handles yet and neither should pretend to.
+func hostVendor() string {
+	h := hostinfo.Probe(hostinfo.Options{})
+	for _, a := range h.Accelerators {
+		if a.Vendor != "" {
+			return a.Vendor
+		}
+	}
+	return ""
 }
