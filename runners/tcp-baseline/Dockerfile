@@ -60,6 +60,11 @@ WORKDIR /src
 RUN got="$(git rev-parse HEAD)"; \
     if [ "${got}" != "${IPERF_SHA}" ]; then \
       echo "refusing to build: ${IPERF_REF} is ${got}, expected ${IPERF_SHA}" >&2; \
+      if [ "$(git cat-file -t "${IPERF_SHA}" 2>/dev/null)" = "tag" ]; then \
+        echo "  ${IPERF_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
+        echo "  Use the peeled value: $(git rev-parse "${IPERF_SHA}^{commit}")" >&2; \
+        echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
+      fi; \
       exit 1; \
     fi
 

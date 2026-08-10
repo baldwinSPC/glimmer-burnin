@@ -43,7 +43,12 @@ ARG NVBANDWIDTH_REF=v0.10.0
 # publishes, so a moved tag would make that line a false statement about which
 # code produced the measurement. Bumping NVBANDWIDTH_REF means bumping
 # NVBANDWIDTH_SHA with it; resolve it with
-# `git ls-remote https://github.com/NVIDIA/nvbandwidth.git refs/tags/<ref>`.
+# `git ls-remote https://github.com/NVIDIA/nvbandwidth.git 'refs/tags/<ref>' 'refs/tags/<ref>^{}'`,
+# taking the PEELED `^{}` value where the tag is annotated — that is the commit
+# a shallow clone leaves at HEAD, and therefore what the assertion compares
+# against. nvbandwidth's tags happen to be lightweight, so the unpeeled form
+# gives the right answer here by luck; it is the wrong command to learn, and the
+# build below diagnoses the mistake if you make it.
 ARG NVBANDWIDTH_SHA=82fc4e8c6afa0babb8687793678f615b3b8d793e
 
 # Empty means "use nvbandwidth's own architecture list", which is what its
@@ -76,6 +81,11 @@ RUN git clone --depth 1 -b ${NVBANDWIDTH_REF} https://github.com/NVIDIA/nvbandwi
 RUN got="$(git -C /nvbandwidth rev-parse HEAD)"; \
     if [ "${got}" != "${NVBANDWIDTH_SHA}" ]; then \
       echo "refusing to build: ${NVBANDWIDTH_REF} is ${got}, expected ${NVBANDWIDTH_SHA}" >&2; \
+      if [ "$(git cat-file -t "${NVBANDWIDTH_SHA}" 2>/dev/null)" = "tag" ]; then \
+        echo "  ${NVBANDWIDTH_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
+        echo "  Use the peeled value: $(git rev-parse "${NVBANDWIDTH_SHA}^{commit}")" >&2; \
+        echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
+      fi; \
       exit 1; \
     fi; \
     echo "nvbandwidth ${NVBANDWIDTH_REF} = ${got}: OK"
