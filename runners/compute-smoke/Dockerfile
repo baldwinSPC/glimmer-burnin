@@ -93,9 +93,9 @@ RUN git clone --depth 1 -b ${CUTLASS_REF} https://github.com/NVIDIA/cutlass.git 
 RUN got="$(git -C /cutlass rev-parse HEAD)"; \
     if [ "${got}" != "${CUTLASS_SHA}" ]; then \
       echo "refusing to build: ${CUTLASS_REF} is ${got}, expected ${CUTLASS_SHA}" >&2; \
-      if [ "$(git cat-file -t "${CUTLASS_SHA}" 2>/dev/null)" = "tag" ]; then \
+      if [ "$(cd /cutlass && git cat-file -t "${CUTLASS_SHA}" 2>/dev/null)" = "tag" ]; then \
         echo "  ${CUTLASS_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
-        echo "  Use the peeled value: $(git rev-parse "${CUTLASS_SHA}^{commit}")" >&2; \
+        echo "  Use the peeled value: $(cd /cutlass && git rev-parse "${CUTLASS_SHA}^{commit}")" >&2; \
         echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
       fi; \
       exit 1; \

@@ -81,9 +81,9 @@ RUN git clone --depth 1 -b ${NVBANDWIDTH_REF} https://github.com/NVIDIA/nvbandwi
 RUN got="$(git -C /nvbandwidth rev-parse HEAD)"; \
     if [ "${got}" != "${NVBANDWIDTH_SHA}" ]; then \
       echo "refusing to build: ${NVBANDWIDTH_REF} is ${got}, expected ${NVBANDWIDTH_SHA}" >&2; \
-      if [ "$(git cat-file -t "${NVBANDWIDTH_SHA}" 2>/dev/null)" = "tag" ]; then \
+      if [ "$(cd /nvbandwidth && git cat-file -t "${NVBANDWIDTH_SHA}" 2>/dev/null)" = "tag" ]; then \
         echo "  ${NVBANDWIDTH_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
-        echo "  Use the peeled value: $(git rev-parse "${NVBANDWIDTH_SHA}^{commit}")" >&2; \
+        echo "  Use the peeled value: $(cd /nvbandwidth && git rev-parse "${NVBANDWIDTH_SHA}^{commit}")" >&2; \
         echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
       fi; \
       exit 1; \

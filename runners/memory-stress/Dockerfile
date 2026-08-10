@@ -54,9 +54,9 @@ WORKDIR /src
 RUN got="$(git rev-parse HEAD)"; \
     if [ "${got}" != "${STRESSAPPTEST_SHA}" ]; then \
       echo "refusing to build: ${STRESSAPPTEST_REF} is ${got}, expected ${STRESSAPPTEST_SHA}" >&2; \
-      if [ "$(git cat-file -t "${STRESSAPPTEST_SHA}" 2>/dev/null)" = "tag" ]; then \
+      if [ "$(cd /src && git cat-file -t "${STRESSAPPTEST_SHA}" 2>/dev/null)" = "tag" ]; then \
         echo "  ${STRESSAPPTEST_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
-        echo "  Use the peeled value: $(git rev-parse "${STRESSAPPTEST_SHA}^{commit}")" >&2; \
+        echo "  Use the peeled value: $(cd /src && git rev-parse "${STRESSAPPTEST_SHA}^{commit}")" >&2; \
         echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
       fi; \
       exit 1; \

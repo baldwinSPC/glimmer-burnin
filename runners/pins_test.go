@@ -918,6 +918,20 @@ func TestGroupCapableRunnersReallyReadTheGroupContract(t *testing.T) {
 // Docker build context and COPY cannot reach outside it — the same reason
 // soak_core.cuh and the fabric sources are physically duplicated. Duplication
 // that cannot be removed is duplication that has to be checked.
+//
+// The diagnosis has a silent failure mode of its own, and the sweep checks for
+// it: both of its git commands must run INSIDE the clone. The pin assertion
+// addresses the repository explicitly (`git -C <dir>`, or a WORKDIR set to the
+// clone), but a diagnosis pasted without `cd <clonedir> &&` runs wherever the
+// RUN step happens to be — against no repository `git cat-file` errors,
+// `2>/dev/null` eats the complaint, the `= "tag"` test is false, and the one
+// message the block exists to print is the one that never appears: the exact
+// silence #238 was filed about, reintroduced inside its own fix. Three of the
+// eight copies shipped that way, distinguishable from the five working ones
+// only by whether a WORKDIR happened to sit in the clone. So the shape is
+// uniform and checked: every diagnosis command cd's into a directory this
+// Dockerfile actually `git clone`s into, which keeps the snippet correct
+// independent of whatever WORKDIR is in effect when a later edit moves it.
 func TestAPinRefusalDiagnosesTheAnnotatedTagTrap(t *testing.T) {
 	checked := 0
 	for _, d := range runnerDirs(t) {
@@ -944,6 +958,41 @@ func TestAPinRefusalDiagnosesTheAnnotatedTagTrap(t *testing.T) {
 			t.Errorf("%s detects the tag object but never prints the peeled commit, which is the "+
 				"whole point — the reader is left to work out the right value themselves", d)
 		}
+
+		dests := cloneDestinations(body)
+		if len(dests) == 0 {
+			t.Errorf("%s asserts a pinned SHA but no `git clone` destination could be parsed from "+
+				"its Dockerfile, so this test cannot tell whether the diagnosis runs inside the "+
+				"clone. If the clone moved into a form this parser does not recognise, teach "+
+				"cloneDestinations the new shape rather than skipping the check.", d)
+			continue
+		}
+		for i, line := range strings.Split(body, "\n") {
+			var re *regexp.Regexp
+			var what string
+			switch {
+			case strings.Contains(line, "git cat-file -t"):
+				re, what = catFileInClone, "the tag-object probe (git cat-file -t)"
+			case strings.Contains(line, "git rev-parse") && strings.Contains(line, "^{commit}"):
+				re, what = peelInClone, "the peel (git rev-parse ...^{commit})"
+			default:
+				continue
+			}
+			m := re.FindStringSubmatch(line)
+			if m == nil {
+				t.Errorf("%s/Dockerfile:%d: %s has no `cd <clonedir> && ` in front of it, so it "+
+					"runs wherever the RUN step happens to be — outside a repository git errors, "+
+					"2>/dev/null eats the complaint, the tag test is false, and the diagnosis "+
+					"silently does not print: the silence of #238, inside its own fix. Use the "+
+					"$(cd <clonedir> && git ...) form.", d, i+1, what)
+				continue
+			}
+			if !dests[m[1]] {
+				t.Errorf("%s/Dockerfile:%d: %s cd's into %q, which is not a directory this "+
+					"Dockerfile clones into %v. A cd into the wrong directory fails exactly like "+
+					"no cd at all: silently.", d, i+1, what, m[1], sortedKeys(dests))
+			}
+		}
 	}
 
 	// Asserted rather than assumed: a refactor that renamed the refusal message
@@ -951,4 +1000,45 @@ func TestAPinRefusalDiagnosesTheAnnotatedTagTrap(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("found no runner asserting a pinned SHA, which cannot be right")
 	}
+}
+
+// The two commands of the annotated-tag diagnosis, each required to enter the
+// clone explicitly. The `cd` form is deliberate over `git -C`: it keeps the
+// literal `git cat-file -t` intact for the presence check above, and it reads
+// as what it is — a command that must be somewhere in particular to work.
+var (
+	catFileInClone = regexp.MustCompile(`cd\s+(\S+)\s+&&\s+git cat-file -t`)
+	peelInClone    = regexp.MustCompile(`cd\s+(\S+)\s+&&\s+git rev-parse`)
+)
+
+// cloneDestinations parses the directory argument of every `git clone` in a
+// Dockerfile body. It is how TestAPinRefusalDiagnosesTheAnnotatedTagTrap knows
+// which directories actually contain the repository a diagnosis could run in —
+// a `cd` into any other directory fails the same way as no `cd` at all.
+func cloneDestinations(body string) map[string]bool {
+	dests := map[string]bool{}
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.Contains(line, "git clone") {
+			continue
+		}
+		// A clone line may end in a shell continuation (`; \`); the destination
+		// is the last real token.
+		line = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), `\`))
+		line = strings.TrimSuffix(line, ";")
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		dests[strings.Trim(fields[len(fields)-1], `"'`)] = true
+	}
+	return dests
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
