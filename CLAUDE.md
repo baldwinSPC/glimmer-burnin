@@ -229,13 +229,31 @@ test/envtest/        controller invariants against a real apiserver + etcd
 test/e2e/            the shipped manifests on a real kind cluster (tag `e2e`)
 ```
 
-Public packages — importable by other projects, free of Kubernetes types:
+Public packages — importable by other projects:
 
 ```
-pkg/verdict/         pure threshold evaluation (no k8s, no I/O)
-pkg/runner/          runner exit-code + key=value stdout parsing
 pkg/contract/        versioned delivery envelope + metric-name registry
+                     NO Kubernetes dependency. Measured: 0 k8s modules.
+pkg/runner/          runner exit-code + key=value stdout parsing
+                     NO Kubernetes dependency. Measured: 0 k8s modules.
+pkg/verdict/         threshold evaluation, no I/O
+                     DEPENDS ON api/v1alpha1, and so on apimachinery and
+                     controller-runtime — nine modules a consumer links.
 ```
+
+**`pkg/verdict` is not Kubernetes-free, and this file used to say it was.**
+`Evaluate` takes `[]burninv1alpha1.Threshold`, so the CRD package is in its
+signature and travels with it. That is measurable rather than arguable: a fresh
+module importing each package alone and running `go mod tidy` gets 0, 0 and 9
+(issue #274). Say what is true here — an adopter reads this before depending on
+the project, and the cost falls hardest on the bare-metal dispatcher, which
+links controller-runtime it cannot use.
+
+Whether to FIX it — by moving the threshold types down into `pkg/contract` so
+`pkg/verdict` becomes genuinely standalone — is open in #274. It breaks every
+caller that constructs `Evaluate`'s arguments today, Glimmer included, so it
+needs a deprecation path rather than a rename. Until then, the description above
+is the honest one.
 
 `pkg/verdict` and `pkg/runner` are public because Glimmer's pre-Kubernetes
 burn-in path runs the same runner images: if the two dispatchers derived

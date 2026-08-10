@@ -120,7 +120,7 @@ rule 12.
 A threshold naming a metric the runner did not emit is a **failure**, not a pass.
 A missing measurement must never silently satisfy acceptance.
 
-`pkg/verdict` is deliberately pure — no Kubernetes types, no I/O — so this is
+`pkg/verdict` performs no I/O, so this is
 testable in isolation and so the bare-metal dispatcher reaches the same verdict
 from the same output. It fails closed on all of:
 
