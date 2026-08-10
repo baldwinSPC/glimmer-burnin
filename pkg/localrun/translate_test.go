@@ -1,6 +1,7 @@
 package localrun
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -265,3 +266,88 @@ func TestAnAMDTestGetsBothDeviceNodes(t *testing.T) {
 		t.Errorf("AMD access needs both device nodes: %s", args)
 	}
 }
+
+// Every character device inside a mounted DIRECTORY is granted, not just a
+// hostPath declared CharDevice — issue #289.
+//
+// `/dev/infiniband` is a directory of devices, and this project's own
+// pair-network-acceptance.yaml declares it as `type: Directory` because uverbs
+// numbering is per-node and not symmetric across a cable. Bind-mounting it left
+// uverbs0-3 visible and unopenable ("Operation not permitted"), so perftest
+// reported "Couldn't get context for the device" and no fabric test could run on
+// bare metal — while the identical BurnInTest worked in-cluster.
+func TestCharDevicesInsideAMountedDirectoryAreGranted(t *testing.T) {
+	dir := t.TempDir()
+	restore := statDir
+	t.Cleanup(func() { statDir = restore })
+	statDir = func(p string) ([]os.DirEntry, error) {
+		if p != "/dev/infiniband" {
+			return nil, os.ErrNotExist
+		}
+		return []os.DirEntry{
+			fakeEntry{name: "uverbs0", mode: os.ModeCharDevice},
+			fakeEntry{name: "uverbs1", mode: os.ModeCharDevice},
+			fakeEntry{name: "rdma_cm", mode: os.ModeCharDevice},
+			fakeEntry{name: "by-ibdev", mode: os.ModeDir}, // a directory of symlinks
+			fakeEntry{name: "notes.txt", mode: 0},         // an ordinary file
+		}, nil
+	}
+	_ = dir
+
+	dirType := corev1.HostPathDirectory
+	spec, err := Translate(Plan{Node: "n1"}, PlannedTest{Spec: api.BurnInTestSpec{
+		Kind:  api.KindIBWriteBW,
+		Scope: api.ScopePair,
+		Runner: &api.RunnerSpec{
+			Image: "example.invalid/ib:v1",
+			HostPaths: []api.HostPathMount{
+				{Path: "/dev/infiniband", MountPath: "/dev/infiniband", Type: &dirType},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, d := range spec.Devices {
+		got[d] = true
+	}
+	for _, want := range []string{"/dev/infiniband/uverbs0", "/dev/infiniband/uverbs1", "/dev/infiniband/rdma_cm"} {
+		if !got[want] {
+			t.Errorf("%s was not granted: a bind mount makes a character device visible and leaves it "+
+				"unopenable, so the runner reports a fabric fault for a permission problem (devices=%v)",
+				want, spec.Devices)
+		}
+	}
+	// A directory and an ordinary file are not devices and must not be granted.
+	for _, unwanted := range []string{"/dev/infiniband/by-ibdev", "/dev/infiniband/notes.txt"} {
+		if got[unwanted] {
+			t.Errorf("%s was granted as a device", unwanted)
+		}
+	}
+	// The bind mount itself is still there — the grant is in addition to it.
+	if len(spec.Mounts) == 0 {
+		t.Error("the directory is no longer bind-mounted")
+	}
+}
+
+// fakeEntry is a minimal os.DirEntry for the seam above.
+type fakeEntry struct {
+	name string
+	mode os.FileMode
+}
+
+func (f fakeEntry) Name() string               { return f.name }
+func (f fakeEntry) IsDir() bool                { return f.mode.IsDir() }
+func (f fakeEntry) Type() os.FileMode          { return f.mode }
+func (f fakeEntry) Info() (os.FileInfo, error) { return fakeInfo{f}, nil }
+
+type fakeInfo struct{ e fakeEntry }
+
+func (i fakeInfo) Name() string       { return i.e.name }
+func (i fakeInfo) Size() int64        { return 0 }
+func (i fakeInfo) Mode() os.FileMode  { return i.e.mode }
+func (i fakeInfo) ModTime() time.Time { return time.Time{} }
+func (i fakeInfo) IsDir() bool        { return i.e.mode.IsDir() }
+func (i fakeInfo) Sys() any           { return nil }
