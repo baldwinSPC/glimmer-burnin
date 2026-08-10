@@ -143,8 +143,21 @@ func run() int {
 	if role != pairRoleServer && role != pairRoleClient {
 		return fin(exitError, "BURNIN_ROLE=%q is neither %q nor %q", role, pairRoleServer, pairRoleClient)
 	}
-	if peerHost == "" {
-		return fin(exitError, "BURNIN_ROLE=%s but BURNIN_PEER_HOST is empty — there is no peer to rendezvous with", role)
+	// ONLY THE CLIENT NEEDS IT. The server learns its peer from the accepted
+	// connection (conn.RemoteAddr) — see rendezvous.go, which explains why it
+	// MUST: the server starts first, and in-cluster its peer's DNS name does not
+	// resolve until the operator creates the client, which the operator will not
+	// do until the server is Ready. So the server has never read this value.
+	//
+	// Requiring it anyway made the variable a presence token, and that broke the
+	// bare-metal dispatcher outright: `burnin run --role server` correctly does
+	// not set a peer it knows the server cannot use, so every Pair test errored
+	// before the server bound its socket (#287). The operator sets it for both
+	// roles, so in-cluster hid this completely.
+	//
+	// tcp-baseline already had the right shape and is the model.
+	if role == pairRoleClient && peerHost == "" {
+		return fin(exitError, "BURNIN_ROLE=%s is the deciding side but BURNIN_PEER_HOST is empty — there is no peer to dial", role)
 	}
 
 	// ── THE APPLICABILITY GATE ────────────────────────────────────────────────
