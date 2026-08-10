@@ -15,7 +15,40 @@
 package runnerimages
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+)
+
+// image is a default runner image and the vendor's hardware it can measure.
+//
+// THE VENDOR IS NOT DECORATION. Every image this project ships is an NVIDIA
+// image except the two that touch no accelerator at all, so "fall through to the
+// kind's default" is a claim about hardware — and on a mixed fleet, usually a
+// false one. Recording it here makes the claim checkable instead of assumed,
+// which is the same discipline pkg/contract applies by refusing a metric with an
+// Unspecified Aggregation: the answer lives beside the name.
+type image struct {
+	Ref string
+	// Vendor is VendorAny where the image measures no accelerator and therefore
+	// runs on any node. Never empty; TestEveryDefaultDeclaresItsVendor refuses
+	// that, because an undeclared vendor would silently read as "serves
+	// everything" — the fail-open this column exists to close.
+	Vendor string
+}
+
+// Vendor names, matching NodeFingerprint's own vocabulary, which is derived from
+// the DNS domain of the label or resource that published the fact. They are
+// LOOKUP KEYS: nothing in this package or in internal/controller branches on
+// their values.
+const (
+	VendorNVIDIA = "nvidia"
+	// VendorAny marks an image that measures no accelerator and so runs
+	// anywhere. Deliberately a character no DNS domain can produce, so it can
+	// never collide with a real vendor name.
+	VendorAny = "*"
 )
 
 // defaults maps a TestKind to its default runner image. A kind
@@ -75,7 +108,7 @@ import (
 // ghcr.io/<owner lowercased>/glimmer-burnin-<kind>:<version> — so an entry here
 // and a workflow_dispatch of publish-runner with the same version agree by
 // construction rather than by anyone remembering to keep them in step.
-var defaults = map[api.TestKind]string{
+var defaults = map[api.TestKind]image{
 	// compute-smoke moves off v0.1.0 deliberately. That tag is public and
 	// immutable and stays exactly as it is, but it reports "no usable CUDA
 	// device", a wrong-arch image, and every CUDA runtime error as exit 1 —
@@ -83,18 +116,18 @@ var defaults = map[api.TestKind]string{
 	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
 	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
 	// repushed ones.
-	api.KindComputeSmoke: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.5.0",
+	api.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.5.0", Vendor: VendorNVIDIA},
 
-	api.KindClockProbe:   "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.5.0",
-	api.KindDCGMDiag:     "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.5.0",
-	api.KindHostHealth:   "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.5.0",
-	api.KindMemoryBW:     "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.5.0",
-	api.KindMemoryStress: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.5.0",
-	api.KindThermalSoak:  "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.5.0",
-	api.KindGPUBurn:      "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.5.0",
-	api.KindIBWriteBW:    "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.5.0",
-	api.KindNCCL:         "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.5.0",
-	api.KindGPUDirect:    "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.5.0",
+	api.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.5.0", Vendor: VendorAny},
+	api.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.5.0", Vendor: VendorAny},
+	api.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.5.0", Vendor: VendorNVIDIA},
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
@@ -107,8 +140,16 @@ var defaults = map[api.TestKind]string{
 // far better than scheduling a pod with no image and getting an
 // ImagePullBackOff that reads as a hardware fault.
 func Default(kind api.TestKind) (string, bool) {
-	img, ok := defaults[kind]
-	return img, ok
+	e, ok := defaults[kind]
+	return e.Ref, ok
+}
+
+// VendorOf reports which vendor's hardware a kind's default image can measure.
+//
+// VendorAny means it measures no accelerator at all and therefore runs anywhere.
+func VendorOf(kind api.TestKind) (string, bool) {
+	e, ok := defaults[kind]
+	return e.Vendor, ok
 }
 
 // All returns every default, copied so a caller cannot edit the table.
@@ -118,7 +159,7 @@ func Default(kind api.TestKind) (string, bool) {
 func All() map[api.TestKind]string {
 	out := make(map[api.TestKind]string, len(defaults))
 	for k, v := range defaults {
-		out[k] = v
+		out[k] = v.Ref
 	}
 	return out
 }
@@ -138,4 +179,116 @@ func All() map[api.TestKind]string {
 // paragraph with it.
 func WithoutDefault() []api.TestKind {
 	return []api.TestKind{api.KindCustom, api.KindTCPBaseline, api.KindDiskIO, api.KindFingerprintProbe}
+}
+
+// Resolve picks the image that runs a test on a node of a given vendor.
+//
+// THIS IS THE ONE LADDER, and it is here rather than in either dispatcher for
+// the reason this whole package exists: the operator is not the only thing that
+// runs these images. A bare-metal path runs the same runners on a host that is
+// not a cluster member, and when it kept its own copy of the resolution it
+// resolved a DIFFERENT image for the same test on the same hardware — the exact
+// failure the package comment above already records once, reintroduced through
+// imagesByVendor. Two dispatchers, one ladder.
+//
+// vendor is what the node said about itself: NodeFingerprint's derived vendor in
+// the cluster, hostinfo's PCI-derived vendor on bare metal. EMPTY MEANS UNKNOWN
+// and is not a mismatch — a node nothing has fingerprinted declared nothing, and
+// absence is not a declaration. That case is every cluster before this field
+// existed and it resolves exactly as it did then.
+//
+// The order is: an explicit image, then the vendor's own entry, then the kind's
+// default — but only if the default can actually measure this node.
+func Resolve(kind api.TestKind, runner *api.RunnerSpec, vendor string) (string, error) {
+	if runner != nil && runner.Image != "" {
+		// Pinned by the author for every node. Their call, including on a mixed
+		// fleet, and no vendor check applies: naming an image IS the declaration.
+		return runner.Image, nil
+	}
+	if runner != nil {
+		for _, vi := range runner.ImagesByVendor {
+			if vi.Vendor == vendor && vi.Image != "" {
+				return vi.Image, nil
+			}
+		}
+	}
+
+	// THE FALL-THROUGH IS A CLAIM ABOUT HARDWARE, so it is checked.
+	//
+	// Before the vendor column this branch was unconditional, and since every
+	// built-in default is an NVIDIA image, `imagesByVendor: [{nvidia: ...}]` on
+	// an AMD node quietly pulled the NVIDIA one. What happens next belongs to the
+	// runner and ranges from wasteful to catastrophic: a well-behaved runner
+	// exits 3 (Error, unjudged, retryable — fine); compute-smoke v0.1.0 is on
+	// record exiting 1 for exactly "no usable CUDA device", which is a permanent
+	// hardware indictment with the retry budget unspent; and a runner exiting 2
+	// with a declared _SKIP marker reports acceptance as not-applicable to
+	// hardware nobody measured.
+	//
+	// UNKNOWN VENDOR IS NOT A MISMATCH. A node nothing has fingerprinted declared
+	// nothing, and absence is not a declaration — that case is every cluster
+	// before this field existed and resolves exactly as it did then. The refusal
+	// fires only where the node positively declared a vendor and the image
+	// positively declared it cannot measure it. Two declarations, not an
+	// inference.
+	e, hasDefault := defaults[kind]
+	if hasDefault && (e.Vendor == VendorAny || vendor == "" || e.Vendor == vendor) {
+		return e.Ref, nil
+	}
+
+	// Unresolvable. An ERROR — machinery, hardware unjudged, retryable — and
+	// never a Fail, and never a skip: a node silently not being tested is how a
+	// fleet gets certified without being measured.
+	if runner != nil && len(runner.ImagesByVendor) > 0 {
+		// The author has already shown they know about the field: they listed
+		// some vendors and not this one, which on a mixed fleet is far more
+		// likely to be an oversight than a decision. Reported separately because
+		// the fix is different.
+		return "", fmt.Errorf(
+			"no image for vendor %s on kind %q: spec.runner.imagesByVendor lists %s, and %s. "+
+				"Add a %s entry, or set spec.runner.image to pin one image for every node",
+			vendorOrUnknown(vendor), kind, listVendors(runner.ImagesByVendor),
+			defaultClause(e, hasDefault), vendorOrUnknown(vendor))
+	}
+	if !hasDefault {
+		return "", fmt.Errorf("no default runner image for kind %q — set spec.runner.image", kind)
+	}
+	return "", fmt.Errorf(
+		"no image for vendor %s on kind %q: %s, and spec.runner.imagesByVendor is not set. "+
+			"Add a %s entry to it, or set spec.runner.image to pin one image for every node",
+		vendorOrUnknown(vendor), kind, defaultClause(e, hasDefault), vendorOrUnknown(vendor))
+}
+
+// defaultClause says what the built-in default can do for this node, which is
+// the half of the message that tells the reader whether adding an entry is
+// even necessary.
+func defaultClause(e image, hasDefault bool) string {
+	if !hasDefault {
+		return "this kind has no built-in default to fall back to"
+	}
+	return fmt.Sprintf("the built-in default measures %q hardware", e.Vendor)
+}
+
+// vendorOrUnknown keeps an empty vendor from rendering as `vendor ""`, which
+// sends the reader looking for a typo in their YAML. The real problem is that
+// nothing established what this node is.
+//
+// Worded for BOTH dispatchers, because both call this: in a cluster the vendor
+// comes from a NodeFingerprint, on bare metal from the PCI bus.
+func vendorOrUnknown(vendor string) string {
+	if vendor == "" {
+		return `"unknown" (nothing established an accelerator vendor for this node — ` +
+			`no fingerprint in-cluster, no PCI vendor match on bare metal)`
+	}
+	return `"` + vendor + `"`
+}
+
+// listVendors renders the declared vendors in a stable order for a message.
+func listVendors(list []api.VendorImage) string {
+	names := make([]string, 0, len(list))
+	for _, vi := range list {
+		names = append(names, vi.Vendor)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }

@@ -53,6 +53,17 @@ import (
 type Plan struct {
 	// Node is the machine's name, used to attribute results.
 	Node string
+	// Vendor is this host's accelerator vendor — nvidia, amd, intel,
+	// tenstorrent — as pkg/hostinfo derives it from PCI IDs. Empty where nothing
+	// established one, which is not a mismatch: absence is not a declaration, and
+	// an unknown vendor resolves exactly as it did before the field existed.
+	//
+	// It is here because IMAGE SELECTION DEPENDS ON IT. The operator reads the
+	// same fact from a NodeFingerprint; this path reads it from the PCI bus. Two
+	// sources for one question, and the same ladder consuming them, so the two
+	// dispatchers cannot resolve different images for the same test on the same
+	// hardware.
+	Vendor string
 	// Tests run in order. A profile is an ordered list, and the order is part of
 	// what it means: a smoke test that gates a soak has to run first.
 	Tests []PlannedTest

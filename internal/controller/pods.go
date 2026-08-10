@@ -383,58 +383,15 @@ func hostPathVolumeName(index int, mountPath string) string {
 // vendor may be empty, which is the ordinary single-vendor case and every case
 // before this field existed: byVendor is simply skipped and the default answers.
 func runnerImage(spec *burninv1alpha1.BurnInTestSpec, vendor string) (string, error) {
-	if spec.Runner != nil && spec.Runner.Image != "" {
-		return spec.Runner.Image, nil
-	}
-	if spec.Runner != nil && len(spec.Runner.ImagesByVendor) > 0 {
-		for _, vi := range spec.Runner.ImagesByVendor {
-			if vi.Vendor == vendor && vi.Image != "" {
-				return vi.Image, nil
-			}
-		}
-		// The field is set and this node's vendor is not among its entries.
-		// Reported separately from the no-default case because the fix is
-		// different and the author has already shown they know about the field:
-		// they listed some vendors and not this one, which on a mixed fleet is
-		// far more likely to be an oversight than a decision.
-		//
-		// An ERROR, not a skip. A node silently not being tested is how a fleet
-		// gets certified without being measured.
-		if _, hasDefault := runnerimages.Default(spec.Kind); !hasDefault {
-			return "", fmt.Errorf(
-				"no image for vendor %q on kind %q: spec.runner.imagesByVendor lists %s, and this kind has "+
-					"no built-in default to fall back to. Add a %q entry, or set spec.runner.image to pin "+
-					"one image for every node",
-				vendorOrUnknown(vendor), spec.Kind, listVendors(spec.Runner.ImagesByVendor), vendorOrUnknown(vendor))
-		}
-	}
-	if img, ok := runnerimages.Default(spec.Kind); ok {
-		return img, nil
-	}
-	return "", fmt.Errorf("no default runner image for kind %q — set spec.runner.image", spec.Kind)
-}
-
-// vendorOrUnknown names a vendor for a message.
-//
-// An empty vendor means the fingerprint could not establish one, which is a
-// different problem from a vendor that is simply absent from the map, and the
-// message has to be able to say so — "no image for vendor \"\"" sends the
-// reader looking for a typo in their YAML.
-func vendorOrUnknown(vendor string) string {
-	if vendor == "" {
-		return "unknown (no accelerator vendor on this node's fingerprint)"
-	}
-	return vendor
-}
-
-// listVendors renders the declared vendors in a stable order for a message.
-func listVendors(list []burninv1alpha1.VendorImage) string {
-	names := make([]string, 0, len(list))
-	for _, vi := range list {
-		names = append(names, vi.Vendor)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
+	// THE LADDER LIVES IN pkg/runnerimages, not here, and that is the point.
+	//
+	// The bare-metal dispatcher runs the same runner images on hosts that are not
+	// cluster members. When it kept its own copy of this resolution it went on
+	// answering with the kind's default while the operator correctly answered
+	// with the vendor's — the same TestKind resolving to a DIFFERENT image on the
+	// same hardware, which is precisely the drift pkg/runnerimages exists to
+	// prevent and which its own package comment already records once.
+	return runnerimages.Resolve(spec.Kind, spec.Runner, vendor)
 }
 
 // podForTest builds the pod that executes one attempt of one test on one node.

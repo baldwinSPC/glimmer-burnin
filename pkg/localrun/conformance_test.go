@@ -8,6 +8,7 @@ import (
 	"time"
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runnerimages"
 )
 
 // The conformance table.
@@ -460,5 +461,72 @@ func TestHooksFireInOrder(t *testing.T) {
 	want := []string{"start:a", "done:a=Passed", "start:b", "done:b=Passed"}
 	if strings.Join(events, ",") != strings.Join(want, ",") {
 		t.Errorf("hook order = %v, want %v", events, want)
+	}
+}
+
+// THE TWO DISPATCHERS RESOLVE THE SAME IMAGE, and this is the guard that makes
+// the drift impossible to land again rather than merely unlikely.
+//
+// pkg/runnerimages exists because a bare-metal path runs these same images on
+// hosts that are not cluster members, and its own package comment records that
+// this solution ALREADY has one instance of two implementations running a
+// different test under the same TestKind name. `imagesByVendor` reintroduced it:
+// the operator learned to resolve per vendor and this package's resolveImage was
+// left on the old three-line ladder, so a host the operator would have sent to a
+// ROCm image ran the NVIDIA default instead — silently, and reported under the
+// same kind.
+//
+// Asserting "both call Resolve" would be a test of the source text. This asserts
+// the ANSWERS agree, over the cases where they could differ.
+func TestConformance_ImageResolutionAgreesWithTheOperator(t *testing.T) {
+	rocm := api.VendorImage{Vendor: "amd", Image: "example.invalid/rocm:v1"}
+
+	for _, tc := range []struct {
+		name   string
+		spec   api.BurnInTestSpec
+		vendor string
+	}{
+		{name: "explicit image", vendor: "amd", spec: api.BurnInTestSpec{
+			Kind: api.KindMemoryBW, Runner: &api.RunnerSpec{Image: "example.invalid/pinned:v9"}}},
+		{name: "the vendor's own entry", vendor: "amd", spec: api.BurnInTestSpec{
+			Kind: api.KindMemoryBW, Runner: &api.RunnerSpec{ImagesByVendor: []api.VendorImage{rocm}}}},
+		{name: "an unlisted vendor the default can serve", vendor: "nvidia", spec: api.BurnInTestSpec{
+			Kind: api.KindMemoryBW, Runner: &api.RunnerSpec{ImagesByVendor: []api.VendorImage{rocm}}}},
+		{name: "an unlisted vendor the default cannot serve", vendor: "amd", spec: api.BurnInTestSpec{
+			Kind: api.KindMemoryBW, Runner: &api.RunnerSpec{ImagesByVendor: []api.VendorImage{
+				{Vendor: "intel", Image: "example.invalid/xe:v1"}}}}},
+		{name: "no map at all on an amd node", vendor: "amd", spec: api.BurnInTestSpec{
+			Kind: api.KindMemoryBW}},
+		{name: "a vendor-neutral kind", vendor: "amd", spec: api.BurnInTestSpec{
+			Kind: api.KindIBWriteBW}},
+		{name: "an unknown vendor", vendor: "", spec: api.BurnInTestSpec{
+			Kind: api.KindMemoryBW}},
+		{name: "a kind with no default", vendor: "nvidia", spec: api.BurnInTestSpec{
+			Kind: api.KindCustom}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The operator's answer, through the same function podForTest calls.
+			wantImg, wantErr := runnerimages.Resolve(tc.spec.Kind, tc.spec.Runner, tc.vendor)
+
+			// This dispatcher's answer, through Translate — the real path, not a
+			// helper, so a Translate that stopped consulting the vendor would be
+			// caught here even if resolveImage itself were right.
+			got, err := Translate(
+				Plan{Node: "host-1", Vendor: tc.vendor},
+				PlannedTest{Name: "t", Spec: tc.spec},
+			)
+
+			if (wantErr == nil) != (err == nil) {
+				t.Fatalf("operator err=%v, bare-metal err=%v — the two dispatchers disagree about "+
+					"whether this test can run at all", wantErr, err)
+			}
+			if wantErr != nil {
+				return
+			}
+			if got.Image != wantImg {
+				t.Errorf("bare-metal resolved %q, operator resolved %q — the same TestKind on the "+
+					"same hardware is running two different images", got.Image, wantImg)
+			}
+		})
 	}
 }

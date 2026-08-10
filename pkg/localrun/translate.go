@@ -89,7 +89,7 @@ var memlockTriggers = []string{"/dev/infiniband"}
 // a cluster must get /dev/kmsg read-only here, or the two dispatchers are
 // measuring different things.
 func Translate(p Plan, t PlannedTest) (RunSpec, error) {
-	image, err := resolveImage(t.Spec)
+	image, err := resolveImage(t.Spec, p.Vendor)
 	if err != nil {
 		return RunSpec{}, err
 	}
@@ -245,14 +245,15 @@ func durationSeconds(spec api.BurnInTestSpec) int32 {
 }
 
 // resolveImage picks the image, in the operator's own order.
-func resolveImage(spec api.BurnInTestSpec) (string, error) {
-	if spec.Runner != nil && spec.Runner.Image != "" {
-		return spec.Runner.Image, nil
-	}
-	if img, ok := runnerimages.Default(spec.Kind); ok {
-		return img, nil
-	}
-	return "", fmt.Errorf("no default runner image for kind %q — set spec.runner.image", spec.Kind)
+// resolveImage picks this test's image for THIS HOST's accelerator vendor.
+//
+// It calls the same pkg/runnerimages.Resolve the operator calls, with the same
+// arguments, because the alternative is what shipped: this function ignored
+// spec.runner.imagesByVendor entirely, so a host the operator would have sent to
+// a ROCm image ran the NVIDIA default instead. One brain, two dispatchers — and
+// image selection is part of the brain.
+func resolveImage(spec api.BurnInTestSpec, vendor string) (string, error) {
+	return runnerimages.Resolve(spec.Kind, spec.Runner, vendor)
 }
 
 // setIf sets a variable only when there is a value.
