@@ -1,0 +1,51 @@
+# fabric-soak: run the link for hours, not for a minute.
+#
+# NOTE ON THE IMAGE. Not published yet, so spec.runner.image is REQUIRED and this
+# names a placeholder. Publishing follows verification on real hardware.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: fabric-soak
+spec:
+  kind: fabric-soak
+  scope: Pair
+  durationSeconds: 14400   # four hours
+  hostNetwork: true
+  runner:
+    image: ghcr.io/baldwinspc/glimmer-burnin-fabric-soak:REPLACE-ME
+    hostPaths:
+      # The verbs devices. Without them the runner fails loudly at
+      # `Couldn't create CQ` rather than reporting a number.
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        readOnly: false
+        type: Directory
+      # The port error counters, read-only. Without this mount linkErrorEvents
+      # is declared n/a rather than reported as a zero nobody measured.
+      - path: /sys
+        mountPath: /sys
+        readOnly: true
+        type: Directory
+    env:
+      - name: FABRIC_SOAK_SYSFS
+        value: /sys
+    # The server must be listening before the client connects, or the client
+    # dies with a connection error that reads as a fabric fault.
+    readinessProbe:
+      tcpSocket:
+        port: 18515
+      periodSeconds: 2
+  thresholds:
+    # A counter: a healthy soak fails no windows, so Equal 0 is safe on day one.
+    - metric: soakFailedIterations
+      comparison: Equal
+      value: "0"
+    # Also a counter, but it can be genuinely unmeasurable — no sysfs mount, or
+    # a port reset mid-soak — so it is gated only where it could be measured.
+    - metric: linkErrorEvents
+      comparison: Equal
+      value: "0"
+      applicability: RequiredIfMeasurable
+    # NO bandwidth floor yet. This fleet's fabric sustains ~99.6 Gb/s against
+    # optics labelled 200; a threshold from the label fails every healthy node.
+    # Soak thresholdless, read minBandwidthGbps off the fleet, then gate.

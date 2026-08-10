@@ -180,6 +180,7 @@ func All() map[api.TestKind]string {
 func WithoutDefault() []api.TestKind {
 	return []api.TestKind{
 		api.KindCustom, api.KindTCPBaseline, api.KindDiskIO, api.KindFingerprintProbe,
+		api.KindFabricSoak,
 		api.KindGemmSweep,
 	}
 }

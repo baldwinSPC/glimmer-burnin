@@ -147,6 +147,20 @@ const (
 	// write that would leave the filesystem near full.
 	KindDiskIO TestKind = "disk-io"
 
+	// KindFabricSoak is a Pair-scope RDMA link soak: the same measurement
+	// ib-write-bw takes, iterated over hours.
+	//
+	// ib-write-bw answers "does this link work right now" and passes on a link
+	// with a marginal optic, a badly seated cable, or a transceiver that fails
+	// once it is warm. Those present in production as a slow training job or an
+	// occasional collective timeout rather than as a link that is down, and they
+	// are found by running the fabric for hours.
+	//
+	// What it reports is not the peak: the WORST window, the spread across
+	// windows, the count of iterations that failed, and the port error-counter
+	// delta measured across the run rather than the NIC's lifetime total.
+	KindFabricSoak TestKind = "fabric-soak"
+
 	// KindFingerprintProbe reports what the hardware says about itself: PCI
 	// vendor and device IDs read from a read-only sysfs mount.
 	//
@@ -273,6 +287,7 @@ var BuiltInKinds = []TestKind{
 	KindTCPBaseline,
 	KindMemoryBW,
 	KindDiskIO,
+	KindFabricSoak,
 	KindFingerprintProbe,
 	KindHostHealth,
 	KindClockProbe,

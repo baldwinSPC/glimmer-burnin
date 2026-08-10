@@ -57,6 +57,22 @@ linters:
       - path: zz_generated\..*\.go
         linters: [staticcheck, govet, unused, ineffassign]
 
+      # A SHARED source carries the union of what its runners need.
+      #
+      # runners/*/perftest.go is byte-identical across the fabric runners, and
+      # runners/sharedsource_test.go enforces that: each runner is its own
+      # Docker build context, COPY cannot reach outside it, so the duplication
+      # cannot be factored out and the copies are held in step instead.
+      #
+      # fabric-soak measures BANDWIDTH only, so the latency half of that file is
+      # unused there — and trimming it would break the guard and let the copies
+      # drift, which is a far worse trade than two suppressed findings.
+      #
+      # This comes off if fabric-soak grows a latency measurand, or if the
+      # sharing model changes so the file can be split.
+      - path: runners/fabric-soak/perftest\.go
+        linters: [unused]
+
 # NOT ENABLED YET, and why — so the next person does not have to re-derive it:
 #
 #   errcheck — 22 findings today, and every one is either fmt.Fprintf to a

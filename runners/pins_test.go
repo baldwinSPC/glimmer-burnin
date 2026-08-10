@@ -788,6 +788,7 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 	// runner never opens a CUDA context and never executes nvidia-smi; check the
 	// source before making it.
 	noAccelerator := map[string]string{
+		"fabric-soak":       "iterates ib_write_bw over the wire through RDMA verbs; no accelerator, same as ib-write-bw",
 		"ib-write-bw":       "measures the wire through RDMA verbs; the CUDA variant is gpudirect-rdma",
 		"memory-stress":     "exercises HOST memory through stressapptest",
 		"fingerprint-probe": "READS ABOUT accelerators over a read-only sysfs mount and never opens one; it must work on a node whose device plugin never came up",
