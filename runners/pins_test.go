@@ -1043,3 +1043,60 @@ func sortedKeys(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// A PAIR SERVER MUST NOT REQUIRE BURNIN_PEER_HOST — issue #287.
+//
+// Every fabric runner learns its peer differently depending on which end it is.
+// The CLIENT dials BURNIN_PEER_HOST. The SERVER cannot use it and never reads
+// it: it starts first, and in-cluster its peer's DNS name does not resolve until
+// the operator creates the client, which the operator will not do until the
+// server is Ready. That is a deadlock, and the way out — documented at length in
+// ib-write-bw's rendezvous.go — is that the server takes its peer's address from
+// the accepted connection.
+//
+// Four runners nonetheless REQUIRED the variable for both roles, which turned it
+// into a presence token. In-cluster that was invisible, because the operator
+// sets it for both roles. On bare metal the CLI correctly declines to invent a
+// peer the server cannot use, so `burnin run --role server` errored before
+// binding and NO Pair test could run outside Kubernetes at all.
+//
+// This asserts the SHAPE rather than the message: a guard on an empty peer host
+// must be qualified by the client role. tcp-baseline always had it right.
+func TestPairServerDoesNotRequireAPeerHost(t *testing.T) {
+	// Runners that speak the Pair rendezvous. A runner that refuses Pair
+	// entirely has no peer host to guard and is not listed.
+	pairRunners := []string{"ib-write-bw", "gpudirect-rdma", "nccl", "fabric-soak", "tcp-baseline"}
+
+	checked := 0
+	for _, r := range pairRunners {
+		path := filepath.Join(r, "main.go")
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+			continue
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "if ") || !strings.Contains(trimmed, `peerHost == ""`) {
+				continue
+			}
+			checked++
+			if !strings.Contains(trimmed, "RoleClient") && !strings.Contains(trimmed, "roleClient") {
+				t.Errorf("%s:%d guards an empty BURNIN_PEER_HOST without qualifying it by the CLIENT "+
+					"role:\n    %s\nThe server never reads that variable — it learns its peer from the "+
+					"accepted connection — so requiring it makes the bare-metal dispatcher unable to "+
+					"start a Pair server at all (#287).", path, i+1, trimmed)
+			}
+		}
+	}
+	// A rename or a shortened list would make this sweep pass while checking
+	// nothing, which is the failure mode every guard in this file is written
+	// against. The floor is a LITERAL and not len(pairRunners): comparing the
+	// count against the list's own length is vacuous the moment the list is
+	// emptied, which is exactly how this assertion first failed to bite.
+	const minGuards = 5
+	if checked < minGuards {
+		t.Fatalf("found %d peer-host guards across %d Pair runners, want at least %d — the sweep is "+
+			"not reading what it thinks it is", checked, len(pairRunners), minGuards)
+	}
+}
