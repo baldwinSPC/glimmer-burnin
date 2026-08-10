@@ -510,3 +510,74 @@ func TestRun_ATerminalRunSweepsAPodItsCleanupFailedToStop(t *testing.T) {
 func reqFor(name string) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "burnin", Name: name}}
 }
+
+// TestRun_CordonsANodeTheInformerHasNotSeen is the cordonNode half of #245,
+// and it exists because the fix for that half shipped UNGUARDED — issue #255.
+//
+// `cordonNode` has two arms that conclude from the read and DECLINE TO ACT:
+// `IsNotFound` ("nothing to hold") and `existing != ""` ("somebody else holds
+// it"). Neither writes anything, so no resourceVersion check stands behind
+// either, and a stale answer means the run puts a full-power runner pod on a
+// node it never took out of the scheduler — with no hold recorded, so it never
+// gives the node back either.
+//
+// The case that reaches it is not exotic: a node CREATED MOMENTS BEFORE THE RUN
+// is one the informer has not observed at all, and a List or Get through that
+// cache answers NotFound. That is the only way to produce a NotFound which is a
+// cache artefact rather than a real absence.
+//
+// TWO THINGS ABOUT THIS TEST ARE LOAD-BEARING, and the version deleted during
+// #253 got both wrong:
+//
+//   - `sc.hidden` and not an empty `sc.nodes`. An empty override map reads as
+//     "no overrides" and falls through to the truthful client, so the cached Get
+//     SUCCEEDS and the IsNotFound arm is never reached. That is what made the
+//     first attempt pass against the unfixed code.
+//   - The assertion happens BEFORE `thaw()`. After the thaw a later pass cordons
+//     correctly and the assertion passes either way, which would make this
+//     guard vacuous in the same silent fashion.
+func TestRun_CordonsANodeTheInformerHasNotSeen(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	sc := h.throughCache()
+
+	// Pending → Running. The capture reads uncached already, so this pass is
+	// unaffected by what the informer can see.
+	h.reconcile("run1")
+
+	// From here the informer has never observed spark-a — the state it is in
+	// between the node's creation and the watch event carrying it.
+	sc.hidden = map[string]bool{"spark-a": true}
+
+	// The wave that puts load on spark-a.
+	h.reconcile("run1")
+
+	// ASSERTED BEFORE THE THAW. This is the moment the pod is created, and the
+	// question is whether the node was held first.
+	node := h.node("spark-a")
+	pod := h.pods("run1")["spark-a"]
+
+	if pod != nil && !node.Spec.Unschedulable {
+		t.Error("a runner pod was created on spark-a while the node was still schedulable — " +
+			"the informer had not observed the node, cordonNode read NotFound and declined to hold it, " +
+			"and nothing in the cluster now says the node is under a burn-in")
+	}
+	if pod != nil {
+		var held bool
+		for _, n := range h.run("run1").Status.CordonedNodes {
+			if n == "spark-a" {
+				held = true
+			}
+		}
+		if !held {
+			t.Error("the run created a pod on spark-a without recording a hold on it, so teardown " +
+				"will never give the node back")
+		}
+	}
+
+	sc.thaw()
+}
