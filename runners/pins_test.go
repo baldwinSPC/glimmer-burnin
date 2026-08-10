@@ -900,3 +900,55 @@ func TestGroupCapableRunnersReallyReadTheGroupContract(t *testing.T) {
 		}
 	}
 }
+
+// TestAPinRefusalDiagnosesTheAnnotatedTagTrap holds every pin assertion to the
+// same shape.
+//
+// The assertion itself has always worked — it caught a bad pin on tcp-baseline
+// and, before that, on dcgm-diag. What it did not do is say WHY, and the reason
+// has now been the same one twice: an annotated tag has two SHAs, `ls-remote`
+// answers with the tag OBJECT, and `git rev-parse HEAD` after a shallow clone
+// is the COMMIT. Record the unpeeled value and every build fails with a message
+// that looks like the upstream moved.
+//
+// A shallow clone retains the tag object, so the build can tell the two apart
+// and print the right one. This asserts every runner does.
+//
+// It is a guard rather than a shared snippet because each runner is its own
+// Docker build context and COPY cannot reach outside it — the same reason
+// soak_core.cuh and the fabric sources are physically duplicated. Duplication
+// that cannot be removed is duplication that has to be checked.
+func TestAPinRefusalDiagnosesTheAnnotatedTagTrap(t *testing.T) {
+	checked := 0
+	for _, d := range runnerDirs(t) {
+		raw, err := os.ReadFile(filepath.Join(d, "Dockerfile"))
+		if err != nil {
+			t.Fatalf("reading %s/Dockerfile: %v", d, err)
+		}
+		body := string(raw)
+		if !strings.Contains(body, "refusing to build:") || !strings.Contains(body, "_SHA}") {
+			// No upstream pinned here; nothing to diagnose.
+			continue
+		}
+		checked++
+
+		if !strings.Contains(body, `git cat-file -t`) {
+			t.Errorf("%s asserts a pinned SHA but does not diagnose the annotated-tag trap. "+
+				"A shallow clone retains the tag object, so the refusal can tell the tag object from "+
+				"the commit and print the peeled value; without it the message reads as though the "+
+				"upstream moved. See issue #238", d)
+			continue
+		}
+		// The diagnosis is only useful if it hands over the value to use.
+		if !strings.Contains(body, `^{commit}`) {
+			t.Errorf("%s detects the tag object but never prints the peeled commit, which is the "+
+				"whole point — the reader is left to work out the right value themselves", d)
+		}
+	}
+
+	// Asserted rather than assumed: a refactor that renamed the refusal message
+	// would empty this sweep and leave it passing while checking nothing.
+	if checked == 0 {
+		t.Fatal("found no runner asserting a pinned SHA, which cannot be right")
+	}
+}
