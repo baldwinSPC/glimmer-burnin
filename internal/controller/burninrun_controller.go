@@ -2578,11 +2578,16 @@ func clampPodDetail(s string) string {
 
 // killPods destroys pods whose fate is already recorded durably.
 //
+// A TERMINATED pod is left alone: it is drawing no power, and its logs are the
+// post-mortem. That rule came from deletePods and deletePairPods, which this
+// replaced — losing it would delete the evidence for the very Error just
+// recorded.
+//
 // NotFound is success: the pod may have finished on its own between the
 // decision and the write, and that is the ordinary case rather than an error.
 func (r *BurnInRunReconciler) killPods(ctx context.Context, pods []*corev1.Pod) error {
 	for _, pod := range pods {
-		if pod == nil {
+		if pod == nil || !podLive(pod) {
 			continue
 		}
 		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {

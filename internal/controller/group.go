@@ -526,20 +526,6 @@ func (r *BurnInRunReconciler) groupPods(
 	return pods, nil
 }
 
-// deletePods removes every live pod it is given. Terminated pods are left alone:
-// their logs are the post-mortem.
-func (r *BurnInRunReconciler) deletePods(ctx context.Context, pods ...*corev1.Pod) error {
-	for _, pod := range pods {
-		if pod == nil || !podLive(pod) {
-			continue
-		}
-		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
-
 // groupRendezvous builds one rank's half of the rendezvous contract.
 func groupRendezvous(rank int, nodes []string, service string) *rendezvous {
 	return &rendezvous{

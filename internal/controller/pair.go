@@ -436,18 +436,6 @@ func (r *BurnInRunReconciler) harvestPair(
 	return advanceHarvested, advanceEffect{dirty: true}, nil
 }
 
-func (r *BurnInRunReconciler) deletePairPods(ctx context.Context, pods ...*corev1.Pod) error {
-	for _, pod := range pods {
-		if pod == nil || !podLive(pod) {
-			continue
-		}
-		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
-
 // pairPod fetches one endpoint's pod. A missing pod is (nil, nil): not existing
 // yet is the normal state of half a rendezvous, not an error.
 func (r *BurnInRunReconciler) pairPod(
