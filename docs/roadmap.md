@@ -94,13 +94,13 @@ this table claim hardware coverage the project does not have.
 | TestKind | Measures | Scope | NVIDIA | AMD | Intel | Status |
 |---|---|---|---|---|---|---|
 | `compute-smoke` | FP4 block-scaled GEMM, exact instruction path | Node | shipped | — | — | shipped (burst-only) |
-| `gemm-sweep` | GEMM across FP64→FP4/INT8 | Node | planned | later | — | [#160] |
+| `gemm-sweep` | GEMM across FP64→FP4/INT8 | Node | in tree | later | — | in tree · verify [#265] |
 | `gpu-burn` | Sustained compute, SDC detection | Node | shipped | later | — | shipped |
 | `thermal-soak` | Power and thermal behaviour, throttling | Node | shipped | later | — | shipped |
 | `clockprobe` | Sustained clock under load | Node | shipped | later | — | shipped |
 | `power-swing` | Load transients, VRM/PSU behaviour | Node | planned | — | — | [#166] |
 | `memory-bw` | Host↔device and device-local bandwidth | Node | shipped | planned | — | shipped · [#170] |
-| *(p2p cases)* | All-pairs peer bandwidth | Node | planned | planned | — | [#161] |
+| *(p2p cases)* | All-pairs peer bandwidth | Node | in tree | later | — | in `memory-bw` · verify [#279] |
 | `memory-stress` | Host DIMM stress | Node | shipped | shipped | shipped | shipped (vendor-free) |
 | `host-health` | Xid, ECC, PCIe AER, NIC counters | Node | shipped | planned | — | shipped · [#171] |
 | `dcgm-diag` | Vendor diagnostic suite | Node | shipped | — | — | shipped (site-supplied DCGM) |
@@ -109,7 +109,7 @@ this table claim hardware coverage the project does not have.
 | `ib-write-bw` | RDMA write bandwidth (and latency) | Pair | shipped | shipped | shipped | shipped · [#163] |
 | `gpudirect-rdma` | GPU↔NIC peer-memory path | Pair | shipped | — | — | shipped |
 | `nccl` | Collective bandwidth | Pair, Group | shipped | planned | later | shipped · [#118] · [#170] |
-| `fabric-soak` | Iterated collectives over hours | Pair, Group | planned | planned | — | [#162] |
+| `fabric-soak` | Iterated RDMA writes over hours | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#283] |
 | `tcp-baseline` | Plain TCP throughput and retransmits | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#237] |
 | `disk-io` | Storage throughput and latency (direct I/O) | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#242] |
 
@@ -190,9 +190,15 @@ ends the week, and a retry starts it over.
 
 ### R5 — Suite expansion
 
-- [#160] One precision is not a compute verdict: sweep the GEMM
-- [#161] `memory-bw` never measures the links between devices
-- [#162] A minute of clean traffic does not find a flapping optic
+- [#160] One precision is not a compute verdict: sweep the GEMM — the runner is
+  in tree across five precisions; publishing waits on hardware ([#265])
+- [#161] `memory-bw` never measures the links between devices — the all-pairs
+  peer matrix is in tree, reporting the worst cell; unmeasurable (`n/a`) on a
+  single-GPU node rather than absent, so a gate does not condemn a Spark
+  ([#279])
+- [#162] A minute of clean traffic does not find a flapping optic — `fabric-soak`
+  is in tree: worst window, spread, failed iterations, and a port error-counter
+  DELTA rather than a lifetime total ([#283])
 - [#163] `ib-write-bw` reports a latency it cannot be asked for — the tail
   (p99, min, max, message rate) now reaches the result; asking for latency as its
   own gated execution still waits on variants ([#155])
@@ -339,4 +345,7 @@ version, never a re-push.
 [#164]: https://github.com/baldwinSPC/glimmer-burnin/issues/164
 [#165]: https://github.com/baldwinSPC/glimmer-burnin/issues/165
 [#225]: https://github.com/baldwinSPC/glimmer-burnin/issues/225
+[#283]: https://github.com/baldwinSPC/glimmer-burnin/issues/283
+[#279]: https://github.com/baldwinSPC/glimmer-burnin/issues/279
+[#265]: https://github.com/baldwinSPC/glimmer-burnin/issues/265
 [docs/dev/new-testkind-playbook.md]: dev/new-testkind-playbook.md
