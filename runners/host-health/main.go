@@ -277,6 +277,7 @@ func run(cfg config, w io.Writer) (code int) {
 	gpu0 := probeGPU(cfg)
 	aer0 := probeAER(cfg.sysfsRoot)
 	nic0 := probeNIC(cfg.sysfsRoot)
+	amd0 := probeAMD(cfg.sysfsRoot)
 
 	// The window that was actually observed, which is not always the one that
 	// was asked for: the runner's own deadline can cut it short, and every
@@ -288,6 +289,7 @@ func run(cfg config, w io.Writer) (code int) {
 	gpu1 := probeGPU(cfg)
 	aer1 := probeAER(cfg.sysfsRoot)
 	nic1 := probeNIC(cfg.sysfsRoot)
+	amd1 := probeAMD(cfg.sysfsRoot)
 
 	st.reached(stageKernlogCollect)
 	klog.collect()
@@ -295,6 +297,7 @@ func run(cfg config, w io.Writer) (code int) {
 	st.reached(stageEmit)
 	klog.emit(out)
 	emitGPU(out, gpu0, gpu1)
+	emitAMD(out, amd0, amd1)
 	emitAER(out, aer0, aer1)
 	emitNIC(out, nic0, nic1)
 	emitFabricCounters(out, nic0, nic1)
