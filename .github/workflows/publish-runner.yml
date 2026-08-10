@@ -30,6 +30,7 @@ on:
           - gpudirect-rdma
           - tcp-baseline
           - disk-io
+          - fabric-soak
           - fingerprint-probe
           - gemm-sweep
       version:

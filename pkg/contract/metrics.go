@@ -229,6 +229,30 @@ var registry = map[string]Metric{
 		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"minBandwidthGbps": {
+		Name: "minBandwidthGbps", Unit: UnitGigabitsPerSecond,
+		Description:  "the WORST window of a fabric soak. The figure a link is accepted on: a soak that averaged fine and spent ninety seconds at a third of line rate has found a marginal optic, and the mean hides it completely",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"meanBandwidthGbps": {
+		Name: "meanBandwidthGbps", Unit: UnitGigabitsPerSecond,
+		Description:  "mean across a fabric soak's windows. Evidence: its distance from minBandwidthGbps is what says whether a link is steadily slow or intermittently bad, which are different repairs",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"p1BandwidthGbps": {
+		Name: "p1BandwidthGbps", Unit: UnitGigabitsPerSecond,
+		Description:  "1st percentile across a fabric soak's windows, nearest-rank. On a long soak a better floor than the single minimum, which one scheduling hiccup can drag down",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"bandwidthStdDevGbps": {
+		Name: "bandwidthStdDevGbps", Unit: UnitGigabitsPerSecond,
+		Description:  "spread across a fabric soak's windows. A flapping link and a steadily slow one both have a low minimum; only the flapping one has a wide spread, and telling them apart decides whether an optic or a cable budget is at fault",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"peakBandwidthGbps": {
 		Name: "peakBandwidthGbps", Unit: UnitGigabitsPerSecond,
 		Description:  "best single-iteration RDMA write throughput on a link; the average (bandwidthGbps) is the figure a link is accepted on, since one good iteration does not survive a marginal cable",
@@ -655,6 +679,30 @@ var registry = map[string]Metric{
 	"nicLinkDownEvents": {
 		Name: "nicLinkDownEvents", Unit: UnitNone,
 		Description:  "count of link-down transitions on the node's fabric NICs during the test window",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"soakIterations": {
+		Name: "soakIterations", Unit: UnitNone,
+		Description:  "windows a fabric soak attempted. Context for soakFailedIterations: two failures in ten is a different link from two in a thousand",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"soakFailedIterations": {
+		Name: "soakFailedIterations", Unit: UnitNone,
+		Description:  "windows that failed or timed out during a fabric soak. A counter, so a healthy soak reports exactly zero and Equal 0 is safe from day one — unlike the bandwidth figures, which need a measured baseline first",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"soakServerRestarts": {
+		Name: "soakServerRestarts", Unit: UnitNone,
+		Description:  "how many times the server end restarted its listener during a soak. Evidence from the non-deciding end: perftest's server exits when its client disconnects, so this should track the client's iteration count and a large gap means windows never reached it",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"linkErrorEvents": {
+		Name: "linkErrorEvents", Unit: UnitNone,
+		Description:  "sum of the port error counters that MOVED during the soak — symbol errors, link recoveries, link-downs, receive errors. A DELTA, never a lifetime total: a NIC up for two hundred days carries a large count that says nothing about the last four hours. Unmeasurable (n/a) when no sysfs counter could be read, or when a counter went backwards because the port was reset mid-soak",
 		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},

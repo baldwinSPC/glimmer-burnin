@@ -30,6 +30,7 @@ cover.out
 /compute-smoke
 /dcgm-diag
 /disk-io
+/fabric-soak
 /fingerprint-probe
 /gemm-sweep
 /gpu-burn
