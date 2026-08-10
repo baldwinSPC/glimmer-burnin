@@ -225,10 +225,15 @@ var aliases = map[string]map[string]string{
 	},
 
 	"memory-bw": {
-		"h2d_bandwidth_gbs":    "hostToDeviceBandwidthGBs",
-		"d2h_bandwidth_gbs":    "deviceToHostBandwidthGBs",
-		"d2d_bandwidth_gbs":    "deviceToDeviceBandwidthGBs",
-		"memory_bandwidth_gbs": "memoryBandwidthGBs",
+		"h2d_bandwidth_gbs": "hostToDeviceBandwidthGBs",
+		"d2h_bandwidth_gbs": "deviceToHostBandwidthGBs",
+		"d2d_bandwidth_gbs": "deviceToDeviceBandwidthGBs",
+		// The peer matrix. Aliased for the same reason as the three above: the
+		// runner spells its unit "gbs", and normalisation would produce "Gbs"
+		// — gigaBITS — for a figure that is gigaBYTES.
+		"peer_read_bandwidth_gbs":  "peerReadBandwidthGBs",
+		"peer_write_bandwidth_gbs": "peerWriteBandwidthGBs",
+		"memory_bandwidth_gbs":     "memoryBandwidthGBs",
 	},
 
 	"host-health": {
