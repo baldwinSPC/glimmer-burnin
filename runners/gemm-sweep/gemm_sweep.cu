@@ -295,16 +295,28 @@ double hostReference(TensorA &A, TensorB &B, std::vector<double> &ref) {
 // ── the 2.x cells: bf16, tf32, fp64 ──────────────────────────────────────────
 //
 // One template, three instantiations; the differences are exactly the element
-// types and the op class, which is the whole claim of a sweep — same question,
-// different silicon.
+// types, the op class and the TILE SHAPES, which are spelled out per cell
+// below rather than left to DefaultGemmConfiguration. Two measured reasons:
+//
+//   1. The generic Sm80 tensor-op default hardcodes InstructionShape<16,8,16>,
+//      a 16-bit-operand mma that does not exist for tf32 — there is no tf32
+//      specialization at all, so the tf32 cell died as an incomplete
+//      arch::Mma on both CI platforms, twice (once through float, once
+//      through tfloat32_t).
+//   2. The generic ThreadblockShape<128,256,64> at three stages needs ~144 KB
+//      of shared memory — sized for A100-class parts. The SM12x consumer
+//      parts this image targets have ~99 KB per block, so a cell built on the
+//      default COMPILES everywhere and then errors at runtime on the exact
+//      fleet it exists to measure. The tiles below stay under 64 KB.
 
-template <class ElementAB, class ElementCD, class ElementAcc, class OpClass, class Arch>
+template <class Gemm>
 int runDense2x(long windowSeconds) {
-  using LayoutA = cutlass::layout::RowMajor;
-  using LayoutB = cutlass::layout::ColumnMajor;
-  using LayoutC = cutlass::layout::RowMajor;
-  using Gemm = cutlass::gemm::device::Gemm<ElementAB, LayoutA, ElementAB, LayoutB, ElementCD,
-                                           LayoutC, ElementAcc, OpClass, Arch>;
+  using ElementAB = typename Gemm::ElementA;
+  using ElementCD = typename Gemm::ElementC;
+  using ElementAcc = typename Gemm::ElementAccumulator;
+  using LayoutA = typename Gemm::LayoutA;
+  using LayoutB = typename Gemm::LayoutB;
+  using LayoutC = typename Gemm::LayoutC;
 
   cutlass::gemm::GemmCoord problem(kM, kN, kK);
   cutlass::HostTensor<ElementAB, LayoutA> A(problem.mk());
@@ -736,24 +748,47 @@ int main() {
           "this binary was not compiled with SM120/SM121 tensor-core MMA support (need CUTLASS "
           ">= v4.5.0 and -arch=sm_120a/sm_120f/sm_121a); the part is in scope and UNJUDGED");
 #endif
-    case Precision::BF16:
-      return runDense2x<cutlass::bfloat16_t, float, float, cutlass::arch::OpClassTensorOp,
-                        cutlass::arch::Sm80>(windowSeconds);
-    case Precision::TF32:
+    case Precision::BF16: {
+      // 128x128x32 / 64x64x32 / 16x8x16 at the default three stages: ~48 KB of
+      // shared memory, comfortably inside the consumer budget (see the
+      // runDense2x comment for why the library default is not usable here).
+      using Bf16Gemm = cutlass::gemm::device::Gemm<
+          cutlass::bfloat16_t, cutlass::layout::RowMajor,
+          cutlass::bfloat16_t, cutlass::layout::ColumnMajor,
+          float, cutlass::layout::RowMajor, float,
+          cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+          cutlass::gemm::GemmShape<128, 128, 32>, cutlass::gemm::GemmShape<64, 64, 32>,
+          cutlass::gemm::GemmShape<16, 8, 16>>;
+      return runDense2x<Bf16Gemm>(windowSeconds);
+    }
+    case Precision::TF32: {
       // The tf32 cell feeds the tensor cores tf32 OPERANDS directly (stored in
-      // 32-bit containers). Passing float and expecting the mainloop to
-      // truncate leaves the element type f32 all the way down to the
-      // instruction, for which no mma.sync exists — measured as an
-      // incomplete-type build failure on CUDA 13.0.1 / CUTLASS v4.6.1, twenty
-      // errors, all in this cell. Integer operands are exact in tf32's 10-bit
-      // mantissa, so the exact-match property is unchanged, and the claim —
-      // the tf32 instruction path computes correct numbers — is precisely what
-      // storing tf32 asserts.
-      return runDense2x<cutlass::tfloat32_t, float, float, cutlass::arch::OpClassTensorOp,
-                        cutlass::arch::Sm80>(windowSeconds);
-    case Precision::FP64:
-      return runDense2x<double, double, double, cutlass::arch::OpClassSimt,
-                        cutlass::arch::Sm80>(windowSeconds);
+      // 32-bit containers): passing float leaves the element type f32 all the
+      // way down to the instruction, for which no mma.sync exists. Integer
+      // operands are exact in tf32's 10-bit mantissa, so the exact-match
+      // property is unchanged, and the claim — the tf32 instruction path
+      // computes correct numbers — is precisely what storing tf32 asserts.
+      // 16x8x8 is the tf32 mma; 128x128x16 at three stages is ~49 KB.
+      using Tf32Gemm = cutlass::gemm::device::Gemm<
+          cutlass::tfloat32_t, cutlass::layout::RowMajor,
+          cutlass::tfloat32_t, cutlass::layout::ColumnMajor,
+          float, cutlass::layout::RowMajor, float,
+          cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+          cutlass::gemm::GemmShape<128, 128, 16>, cutlass::gemm::GemmShape<64, 64, 16>,
+          cutlass::gemm::GemmShape<16, 8, 8>>;
+      return runDense2x<Tf32Gemm>(windowSeconds);
+    }
+    case Precision::FP64: {
+      // SIMT double takes the generic SIMT configuration (128x128x8, two
+      // stages, ~32 KB): the CUDA cores are the native double path on every
+      // part this image can land on, and the SIMT defaults are element-size
+      // aware in a way the tensor-op ones are not.
+      using Fp64Gemm = cutlass::gemm::device::Gemm<
+          double, cutlass::layout::RowMajor, double, cutlass::layout::ColumnMajor,
+          double, cutlass::layout::RowMajor, double,
+          cutlass::arch::OpClassSimt, cutlass::arch::Sm80>;
+      return runDense2x<Fp64Gemm>(windowSeconds);
+    }
     case Precision::Unknown:
       break;  // unreachable: refused above, before the device was touched
   }
