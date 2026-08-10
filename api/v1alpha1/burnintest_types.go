@@ -220,6 +220,27 @@ const (
 	// CLAUDE.md before substituting a tool here.
 	KindMemoryStress TestKind = "memory-stress"
 
+	// KindGemmSweep is a Node-scope GEMM across PRECISIONS, one execution per
+	// precision, selected by the `precision` variant axis.
+	//
+	// compute-smoke proves one thing precisely: that a GB10's NVFP4
+	// block-scaled path executes and produces correct numbers. That narrowness
+	// is deliberate and stays — but it leaves the rest of the compute surface
+	// unmeasured. A part can pass FP4 and fail FP64. Tensor-core paths and
+	// CUDA-core paths are different silicon and fail independently, and
+	// precision-specific defects are exactly what an acceptance suite should
+	// find before a training run does.
+	//
+	// It is ONE kind with a variant axis rather than five kinds, because the
+	// question "does this part compute correctly at precision X" is one question
+	// asked five times. The runner reads BURNIN_VARIANT_PRECISION; the
+	// controller never interprets it.
+	//
+	// Thresholds are PER VARIANT and are not interchangeable: an FP4 throughput
+	// floor and an FP64 throughput floor are different numbers about different
+	// hardware paths, and a single floor across them would be meaningless.
+	KindGemmSweep TestKind = "gemm-sweep"
+
 	KindCustom TestKind = "custom" // any image; no built-in parsing
 )
 
@@ -243,6 +264,7 @@ const (
 var BuiltInKinds = []TestKind{
 	KindGPUBurn,
 	KindComputeSmoke,
+	KindGemmSweep,
 	KindDCGMDiag,
 	KindThermalSoak,
 	KindNCCL,

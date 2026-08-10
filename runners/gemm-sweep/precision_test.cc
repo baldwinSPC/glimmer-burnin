@@ -1,0 +1,312 @@
+// precision_test.cc — the decisions in precision.h, driven exhaustively.
+//
+// SPDX-License-Identifier: Apache-2.0
+// Copyright the Glimmer authors.
+//
+// Compiled and run by runners/cxxtests_test.go under `make test`. No GPU, no
+// CUDA toolchain, no hardware — which is the point: every branch here can
+// produce a wrong VERDICT about somebody's hardware, and none of them needs
+// silicon to be wrong.
+
+#include "precision.h"
+
+#include <cmath>
+#include <cstdio>
+#include <string>
+
+static int failures = 0;
+
+static void check(bool ok, const std::string& what) {
+  if (!ok) {
+    std::printf("FAIL: %s\n", what.c_str());
+    ++failures;
+  }
+}
+
+using burnin::Precision;
+using burnin::Scope;
+
+// Every spelling an author might reasonably write resolves.
+static void testParsing() {
+  struct Case { const char* in; Precision want; };
+  const Case cases[] = {
+      {"fp4", Precision::FP4},     {"nvfp4", Precision::FP4},
+      {"FP4", Precision::FP4},     {"  fp4  ", Precision::FP4},
+      {"fp8", Precision::FP8},     {"e4m3", Precision::FP8},
+      {"bf16", Precision::BF16},   {"bfloat16", Precision::BF16},
+      {"BF16", Precision::BF16},
+      {"tf32", Precision::TF32},   {"TF32", Precision::TF32},
+      {"fp64", Precision::FP64},   {"double", Precision::FP64},
+  };
+  for (const auto& c : cases) {
+    check(burnin::parsePrecision(c.in) == c.want,
+          std::string("parsePrecision(\"") + c.in + "\")");
+  }
+}
+
+// Anything else is Unknown, and Unknown is NEVER a guess at a precision.
+//
+// Guessing would produce a measurement gated by thresholds written for the
+// precision that was actually asked for: an fp4 tolerance accepts a broken part
+// at fp64, and an fp64 tolerance condemns a working one at fp4.
+static void testUnrecognisedIsNeverGuessed() {
+  const char* bad[] = {"", "fp16", "half", "int8", "fp32", "float", "f p 4",
+                       "fp4x", "4", "true", "precision"};
+  for (const char* in : bad) {
+    check(burnin::parsePrecision(in) == Precision::Unknown,
+          std::string("parsePrecision(\"") + in + "\") should be Unknown");
+  }
+}
+
+// An unrecognised precision is REFUSED, not skipped.
+//
+// "We do not know what you asked for" is true whatever silicon is in the box.
+// Reporting Skip would tell the operator the test does not apply to this
+// hardware, which is a claim about the part that nobody established.
+static void testUnknownRefusesBeforeLookingAtTheHardware() {
+  const int caps[] = {0, 60, 80, 90, 100, 121, 999};
+  for (int cap : caps) {
+    check(burnin::scopeOf(Precision::Unknown, cap) == Scope::Refuse,
+          "Unknown precision must Refuse at cc " + std::to_string(cap));
+  }
+}
+
+// A capability we could not read is not a capability of zero.
+//
+// Zero compares below every minimum and would report Skip on every part, which
+// reads as "this fleet does not support fp8" when what happened is that the
+// runtime query failed.
+static void testAnUnreadableCapabilityRefusesRatherThanSkips() {
+  for (Precision p : burnin::everyPrecision()) {
+    for (int cap : {0, -1, -100}) {
+      check(burnin::scopeOf(p, cap) == Scope::Refuse,
+            std::string("cc ") + std::to_string(cap) + " with " +
+                burnin::precisionName(p) + " must Refuse, not Skip");
+    }
+  }
+}
+
+// The support matrix, stated exhaustively. Each row is a claim about NVIDIA
+// silicon, so each is written out rather than derived from the same table the
+// code uses.
+static void testTheSupportMatrix() {
+  struct Row { int cc; bool fp4, fp8, bf16, tf32, fp64; };
+  const Row rows[] = {
+      // Pascal / Volta / Turing: doubles only, from this sweep's point of view.
+      {60, false, false, false, false, true},
+      {70, false, false, false, false, true},
+      {75, false, false, false, false, true},
+      // Ampere brings BF16 and TF32.
+      {80, false, false, true, true, true},
+      {86, false, false, true, true, true},
+      // Ada.
+      {89, false, false, true, true, true},
+      // Hopper brings FP8.
+      {90, false, true, true, true, true},
+      // Blackwell brings block-scaled NVFP4.
+      {100, true, true, true, true, true},
+      {120, true, true, true, true, true},
+      {121, true, true, true, true, true},
+  };
+  for (const auto& r : rows) {
+    const std::string at = " at cc " + std::to_string(r.cc);
+    check((burnin::scopeOf(Precision::FP4, r.cc) == Scope::Run) == r.fp4, "fp4" + at);
+    check((burnin::scopeOf(Precision::FP8, r.cc) == Scope::Run) == r.fp8, "fp8" + at);
+    check((burnin::scopeOf(Precision::BF16, r.cc) == Scope::Run) == r.bf16, "bf16" + at);
+    check((burnin::scopeOf(Precision::TF32, r.cc) == Scope::Run) == r.tf32, "tf32" + at);
+    check((burnin::scopeOf(Precision::FP64, r.cc) == Scope::Run) == r.fp64, "fp64" + at);
+  }
+}
+
+// FP64 applies everywhere, and must never skip on a real part.
+//
+// Its RATE varies enormously between datacentre and consumer silicon, which is a
+// threshold-authoring problem and not a support question. The instruction
+// exists, so the test applies — skipping it would report "does not apply" about
+// a part that computes doubles perfectly well, just slowly.
+static void testFP64NeverSkipsOnARealPart() {
+  for (int cc = 50; cc <= 130; ++cc) {
+    check(burnin::scopeOf(Precision::FP64, cc) == Scope::Run,
+          "fp64 must Run at cc " + std::to_string(cc));
+  }
+}
+
+// A skip is only ever reported for a part we positively established is out of
+// scope — never for one we could not read.
+static void testSkipIsOnlyForAnEstablishedShortfall() {
+  check(burnin::scopeOf(Precision::FP4, 90) == Scope::Skip, "fp4 skips on Hopper");
+  check(burnin::scopeOf(Precision::FP8, 80) == Scope::Skip, "fp8 skips on Ampere");
+  check(burnin::scopeOf(Precision::BF16, 70) == Scope::Skip, "bf16 skips on Volta");
+  // And the boundary is inclusive: the first supporting arch runs.
+  check(burnin::scopeOf(Precision::FP4, 100) == Scope::Run, "fp4 runs on the first Blackwell");
+  check(burnin::scopeOf(Precision::FP8, 90) == Scope::Run, "fp8 runs on the first Hopper");
+  check(burnin::scopeOf(Precision::BF16, 80) == Scope::Run, "bf16 runs on the first Ampere");
+}
+
+// The messages carry what a reader months later cannot otherwise recover.
+static void testMessagesAreActionable() {
+  const std::string skip = burnin::skipMessage(Precision::FP4, 90);
+  check(skip.rfind("GEMM_SWEEP_SKIP:", 0) == 0,
+        "a skip must start with the marker, or the operator records it as an Error");
+  check(skip.find("fp4") != std::string::npos, "the skip names the precision");
+  check(skip.find("9.0") != std::string::npos, "the skip names what the part reports");
+  check(skip.find("10.0") != std::string::npos, "the skip names what the precision needs");
+  check(skip.find("NOT failed") != std::string::npos,
+        "the skip says the part is not being failed");
+
+  const std::string bad = burnin::refuseMessage(Precision::Unknown, "fp16", 121);
+  check(bad.rfind("GEMM_SWEEP_ERROR:", 0) == 0, "an error says so");
+  check(bad.find("fp16") != std::string::npos, "the refusal quotes what was asked for");
+  check(bad.find("fp4") != std::string::npos && bad.find("fp64") != std::string::npos,
+        "the refusal lists what IS accepted");
+
+  const std::string unread = burnin::refuseMessage(Precision::FP8, "fp8", 0);
+  check(unread.find("UNJUDGED") != std::string::npos,
+        "an unreadable capability leaves the part unjudged, and says so");
+}
+
+// The image gate: the direction the loader refuses was always caught, so the
+// rows that matter here are the ones it does NOT refuse.
+static void testArchCoversTheBinaryCompatTrap() {
+  using burnin::ArchCover;
+  // The measured trap: an sm_120a image LOADS on a CC 12.1 GB10 and asserts
+  // inside the kernel. This gate is the only thing that names it.
+  check(burnin::archCovers("sm_120a", 121) == ArchCover::Mismatch,
+        "sm_120a on CC 12.1 is the device-side-assert trap and must be a Mismatch");
+  check(burnin::archCovers("sm_121a", 120) == ArchCover::Mismatch,
+        "sm_121a on CC 12.0 (the loader would refuse it anyway, but we say why)");
+  check(burnin::archCovers("sm_121a", 121) == ArchCover::Covers, "sm_121a on CC 12.1");
+  check(burnin::archCovers("sm_120a", 120) == ArchCover::Covers, "sm_120a on CC 12.0");
+  // B200 with this image: the part supports every precision here, and the image
+  // still has no code for it. Error, never Skip — issue #10's lesson.
+  check(burnin::archCovers("sm_121a", 100) == ArchCover::Mismatch, "sm_121a on CC 10.0");
+  check(burnin::archCovers("sm_121a", 90) == ArchCover::Mismatch, "sm_121a on CC 9.0");
+
+  // The family form covers its major from that minor up, and nothing else.
+  check(burnin::archCovers("sm_120f", 120) == ArchCover::Covers, "sm_120f on CC 12.0");
+  check(burnin::archCovers("sm_120f", 121) == ArchCover::Covers, "sm_120f on CC 12.1");
+  check(burnin::archCovers("sm_121f", 120) == ArchCover::Mismatch, "sm_121f on CC 12.0");
+  check(burnin::archCovers("sm_120f", 90) == ArchCover::Mismatch, "sm_120f on CC 9.0");
+
+  // A plain cubin is binary-compatible forward within its major only.
+  check(burnin::archCovers("sm_90", 90) == ArchCover::Covers, "sm_90 on CC 9.0");
+  check(burnin::archCovers("sm_120", 121) == ArchCover::Covers, "sm_120 cubin runs on CC 12.1");
+  check(burnin::archCovers("sm_90", 100) == ArchCover::Mismatch,
+        "sm_90 on CC 10.0: binary compat does not cross a major");
+  check(burnin::archCovers("sm_121", 120) == ArchCover::Mismatch, "sm_121 on CC 12.0");
+}
+
+// The gate may only refuse on what it positively established.
+static void testArchCoversNeverGuesses() {
+  using burnin::ArchCover;
+  // A hand-built binary carries "unknown"; it runs on and the runtime speaks.
+  check(burnin::archCovers("unknown", 121) == ArchCover::Unknown, "arch \"unknown\"");
+  check(burnin::archCovers("", 121) == ArchCover::Unknown, "empty arch string");
+  check(burnin::archCovers("sm_", 121) == ArchCover::Unknown, "sm_ with no digits");
+  check(burnin::archCovers("sm_9", 90) == ArchCover::Unknown, "one digit names no part");
+  check(burnin::archCovers("sm_1210", 121) == ArchCover::Unknown, "four digits names no part");
+  check(burnin::archCovers("sm_121x", 121) == ArchCover::Unknown, "a suffix we do not know");
+  check(burnin::archCovers("gfx90a", 90) == ArchCover::Unknown, "not an sm_ string at all");
+  // A capability that was never read is not a capability this gate can match
+  // anything against; scopeOf refuses that case before this gate is consulted.
+  check(burnin::archCovers("sm_121a", 0) == ArchCover::Unknown, "cc 0 answers Unknown");
+  check(burnin::archCovers("sm_121a", -1) == ArchCover::Unknown, "cc -1 answers Unknown");
+}
+
+static void testMismatchMessageIsActionable() {
+  const std::string msg = burnin::mismatchMessage("sm_120a", 121);
+  check(msg.rfind("GEMM_SWEEP_ERROR:", 0) == 0, "a mismatch is an error and says so");
+  check(msg.find("sm_120a") != std::string::npos, "the message names the image's arch");
+  check(msg.find("12.1") != std::string::npos, "the message names what the part reports");
+  check(msg.find("UNJUDGED") != std::string::npos, "the message says nothing was measured");
+  check(msg.find("never about the hardware") != std::string::npos,
+        "the message says this is not a hardware verdict");
+}
+
+// The window verdict: the one place exit 0 and exit 1 are told apart.
+static void testJudgeWindow() {
+  using burnin::Judgement;
+  // A clean window passes.
+  check(burnin::judgeWindow(0, 100.0, 50.0, 1e-9, 1e-6) == Judgement::Pass, "clean window passes");
+
+  // Nonfinite device output outranks everything — including a degenerate
+  // reference, because it is a measurement of the part that needs no reference.
+  check(burnin::judgeWindow(1, 100.0, 50.0, 1e-9, 1e-6) == Judgement::FailNonfinite,
+        "one NaN fails the part");
+  check(burnin::judgeWindow(1, 0.0, 0.0, INFINITY, 1e-6) == Judgement::FailNonfinite,
+        "nonfinite outranks the degenerate reference");
+
+  // A degenerate reference is OUR failure and must be an Error, checked before
+  // the two verdicts that rely on it: the same inputs would otherwise read as
+  // an all-zeros or out-of-tolerance hardware Fail.
+  check(burnin::judgeWindow(0, 0.0, 0.0, INFINITY, 1e-6) == Judgement::ErrorNoYardstick,
+        "no yardstick is an Error, not a Fail");
+  check(burnin::judgeWindow(0, -1.0, 50.0, 1e-9, 1e-6) == Judgement::ErrorNoYardstick,
+        "a negative max|ref| is equally degenerate");
+
+  check(burnin::judgeWindow(0, 100.0, 0.0, 0.0, 1e-6) == Judgement::FailAllZeros,
+        "an all-zero device output is a measured Fail");
+  check(burnin::judgeWindow(0, 100.0, 50.0, 1e-3, 1e-6) == Judgement::FailMismatch,
+        "outside tolerance is a measured Fail");
+  check(burnin::judgeWindow(0, 100.0, 50.0, 1e-6, 1e-6) == Judgement::Pass,
+        "the tolerance bound is inclusive");
+
+  // A NaN relative error FAILS CLOSED. NaN compares false against everything,
+  // so the (x > tol) spelling would wave it through as a pass — this row is the
+  // reason the check is written !(x <= tol).
+  check(burnin::judgeWindow(0, 100.0, 50.0, NAN, 1e-6) == Judgement::FailMismatch,
+        "a NaN relative error must fail closed, never pass");
+}
+
+// The exit contract is load-bearing for the operator; a renumbering here would
+// silently remap verdicts fleet-wide.
+static void testExitCodesMatchTheRunnerContract() {
+  check(burnin::kExitPass == 0, "pass is exit 0");
+  check(burnin::kExitFail == 1, "fail is exit 1");
+  check(burnin::kExitSkip == 2, "skip is exit 2");
+  check(burnin::kExitError == 3, "error is exit 3");
+}
+
+// Every precision has a name, and no two share one.
+static void testNamesAreDistinct() {
+  for (Precision a : burnin::everyPrecision()) {
+    check(std::string(burnin::precisionName(a)) != "unknown",
+          "a real precision must not be named \"unknown\"");
+    for (Precision b : burnin::everyPrecision()) {
+      if (a == b) continue;
+      check(std::string(burnin::precisionName(a)) != burnin::precisionName(b),
+            "two precisions share a name, so a stored result cannot say which ran");
+    }
+  }
+  // And every name round-trips back through the parser, so the label a result
+  // carries is one a profile could have asked for.
+  for (Precision p : burnin::everyPrecision()) {
+    check(burnin::parsePrecision(burnin::precisionName(p)) == p,
+          std::string("precisionName/parsePrecision do not round-trip for ") +
+              burnin::precisionName(p));
+  }
+}
+
+int main() {
+  testParsing();
+  testUnrecognisedIsNeverGuessed();
+  testUnknownRefusesBeforeLookingAtTheHardware();
+  testAnUnreadableCapabilityRefusesRatherThanSkips();
+  testTheSupportMatrix();
+  testFP64NeverSkipsOnARealPart();
+  testSkipIsOnlyForAnEstablishedShortfall();
+  testMessagesAreActionable();
+  testArchCoversTheBinaryCompatTrap();
+  testArchCoversNeverGuesses();
+  testMismatchMessageIsActionable();
+  testJudgeWindow();
+  testExitCodesMatchTheRunnerContract();
+  testNamesAreDistinct();
+
+  if (failures != 0) {
+    std::printf("%d check(s) failed\n", failures);
+    return 1;
+  }
+  std::printf("all precision checks passed\n");
+  return 0;
+}

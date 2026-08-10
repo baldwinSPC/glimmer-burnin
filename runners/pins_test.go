@@ -168,9 +168,20 @@ func TestDurationIsHonouredOrDeclaredBurstOnly(t *testing.T) {
 // unspent and nothing in the result reading as wrong. The macros are
 // deliberately compile-time so no environment variable can reach them; this
 // makes sure no Dockerfile in the repository can bake one in either.
-var faultInjectionMacros = []string{
-	"BURNIN_FP4_FORCE_CC_MAJOR",
-	"BURNIN_FP4_FORCE_CC_MINOR",
+// Keyed by the source file that implements each pair, because the two guards
+// below read the structure differently: the Dockerfile guard flattens it (no
+// image may define ANY of them), while the announce guard visits each file and
+// demands ITS macros and ITS marker — a flat list would have demanded
+// compute-smoke's file mention gemm-sweep's switches.
+var faultInjectionMacros = map[string][]string{
+	filepath.Join("compute-smoke", "fp4_smoke.cu"): {
+		"BURNIN_FP4_FORCE_CC_MAJOR",
+		"BURNIN_FP4_FORCE_CC_MINOR",
+	},
+	filepath.Join("gemm-sweep", "gemm_sweep.cu"): {
+		"BURNIN_GEMM_FORCE_CC_MAJOR",
+		"BURNIN_GEMM_FORCE_CC_MINOR",
+	},
 }
 
 // TestNoDockerfileDefinesAFaultInjectionMacro keeps the test-only switches out
@@ -186,12 +197,14 @@ func TestNoDockerfileDefinesAFaultInjectionMacro(t *testing.T) {
 		if err != nil {
 			continue // TestEveryRunnerDirectoryHasADockerfile reports this.
 		}
-		for _, macro := range faultInjectionMacros {
-			if strings.Contains(string(src), macro) {
-				t.Errorf("%s defines the fault-injection macro %s; an image built with it would "+
-					"report a fabricated verdict for every node it ran on. Build such a binary by "+
-					"hand for a one-off experiment, never from a Dockerfile that can be published",
-					path, macro)
+		for _, macros := range faultInjectionMacros {
+			for _, macro := range macros {
+				if strings.Contains(string(src), macro) {
+					t.Errorf("%s defines the fault-injection macro %s; an image built with it would "+
+						"report a fabricated verdict for every node it ran on. Build such a binary by "+
+						"hand for a one-off experiment, never from a Dockerfile that can be published",
+						path, macro)
+				}
 			}
 		}
 	}
@@ -207,20 +220,24 @@ func TestNoDockerfileDefinesAFaultInjectionMacro(t *testing.T) {
 // stored TestResult and in the delivered envelope, and any verdict such a build
 // produced stays self-identifying for as long as the result exists.
 func TestFaultInjectionMacrosAnnounceThemselves(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("compute-smoke", "fp4_smoke.cu"))
-	if err != nil {
-		t.Fatalf("reading compute-smoke/fp4_smoke.cu: %v", err)
-	}
-	text := string(src)
-	for _, macro := range faultInjectionMacros {
-		if !strings.Contains(text, macro) {
-			t.Errorf("fp4_smoke.cu no longer mentions %s; if the switch was removed, remove it from "+
-				"faultInjectionMacros too rather than leaving a guard over nothing", macro)
+	for path, macros := range faultInjectionMacros {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("reading %s: %v", path, err)
+			continue
 		}
-	}
-	if !strings.Contains(text, `printf("forced_compute_cap=`) {
-		t.Error("fp4_smoke.cu does not print a forced_compute_cap= marker; a fault-injected build " +
-			"must announce itself in its own output, or its verdicts are indistinguishable from real ones")
+		text := string(src)
+		for _, macro := range macros {
+			if !strings.Contains(text, macro) {
+				t.Errorf("%s no longer mentions %s; if the switch was removed, remove it from "+
+					"faultInjectionMacros too rather than leaving a guard over nothing", path, macro)
+			}
+		}
+		if !strings.Contains(text, `printf("forced_compute_cap=`) {
+			t.Errorf("%s does not print a forced_compute_cap= marker; a fault-injected build "+
+				"must announce itself in its own output, or its verdicts are indistinguishable "+
+				"from real ones", path)
+		}
 	}
 }
 

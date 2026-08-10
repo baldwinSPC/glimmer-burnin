@@ -193,6 +193,15 @@ Required for every new kind. Assert against **captured real output** where you
 have it: an audit of `clockprobe`'s source missed nine metrics and a capture
 could not.
 
+Where the runner has never executed — a kernel awaiting its first hardware
+session — there is nothing to capture, and the parser test **waits for the
+capture**. Do not write it against stdout you invented: a test asserting output
+you imagined is "a test that passes against broken code" wearing a different
+hat, and it manufactures confidence in exactly the layer CI cannot check. File
+the hardware-verification issue instead (the shape of #237, #242, #265: what to
+run, what to capture, what would falsify the design), write the parser test
+against those fixtures, and only then publish a tag.
+
 > **Guards:** the registry self-consistency test refuses `Unspecified` for either
 > `Aggregation` or `ThresholdUse`; `TestAliasTargetsAreRegistered` refuses an
 > alias pointing at an unregistered name;

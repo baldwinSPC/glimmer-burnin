@@ -170,15 +170,18 @@ func All() map[api.TestKind]string {
 // KindCustom exists so a user can point any image at the runner contract;
 // inventing a default for it would defeat the point.
 //
-// KindTCPBaseline, KindDiskIO and KindFingerprintProbe have runner source in
-// this repo but NO PUBLISHED IMAGE yet.
+// KindTCPBaseline, KindDiskIO, KindFingerprintProbe and KindGemmSweep have
+// runner source in this repo but NO PUBLISHED IMAGE yet.
 // Publishing is manual and hardware-gated by policy, and a default pointing at
 // a tag that does not exist is worse than no default at all: it turns a
 // plan-time error that names the problem into an ImagePullBackOff on every
 // targeted node. Add it here the moment the tag is published, and delete this
 // paragraph with it.
 func WithoutDefault() []api.TestKind {
-	return []api.TestKind{api.KindCustom, api.KindTCPBaseline, api.KindDiskIO, api.KindFingerprintProbe}
+	return []api.TestKind{
+		api.KindCustom, api.KindTCPBaseline, api.KindDiskIO, api.KindFingerprintProbe,
+		api.KindGemmSweep,
+	}
 }
 
 // Resolve picks the image that runs a test on a node of a given vendor.
