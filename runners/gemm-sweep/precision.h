@@ -46,6 +46,31 @@ enum class Scope {
   Refuse,
 };
 
+// The exit contract, written where a test can reach it and gemm_sweep.cu can
+// consume it. The full mapping, and why each row is what it is:
+//
+//   | exit | meaning                                                        |
+//   |------|----------------------------------------------------------------|
+//   |  0   | measured, and the part met the bar                             |
+//   |  1   | MEASURED AND FELL SHORT — a hardware verdict, NEVER retried    |
+//   |  2   | does not apply, ONLY with a GEMM_SWEEP_SKIP: marker on stdout  |
+//   |  3   | the measurement did not happen; the part is UNJUDGED, retried  |
+//
+// Exit 1 permanently indicts a node with the retry budget unspent, so it
+// belongs ONLY to something this test measured about the silicon: NaN/Inf in
+// the device output, an all-zero device output, a result outside tolerance.
+// Everything that stopped the measurement from happening — no usable device, a
+// wrong-arch image, a CUDA runtime error, an allocation failure, a failure to
+// build the reference — is exit 3, or a DECLARED exit 2 where the shortfall is
+// a positively established property of the part. compute-smoke shipped v0.1.0
+// reporting three failures-to-measure as exit 1; a sweep has strictly more
+// error surface per precision, so the mapping is pinned here where collapsing
+// it means editing a table rather than mis-picking a return in one call site.
+constexpr int kExitPass = 0;
+constexpr int kExitFail = 1;
+constexpr int kExitSkip = 2;
+constexpr int kExitError = 3;
+
 // parsePrecision reads the `precision` variant axis.
 //
 // It NEVER guesses. An unrecognised value returns Unknown, which the caller
@@ -178,6 +203,73 @@ inline std::string refuseMessage(Precision p, const std::string& raw, int comput
          std::to_string(computeCapability) +
          "), so whether " + precisionName(p) +
          " applies to it is unknown — the part is UNJUDGED rather than skipped";
+}
+
+// ── does the arch this binary was built for cover the part in front of it? ───
+//
+// The CUDA runtime does not answer this reliably, and the direction it misses
+// is the dangerous one. The loader refuses an sm_121a cubin on a CC 12.0 part
+// outright — that direction was always caught. But SM121 is binary-compatible
+// with SM120, so an sm_120a image LOADS on a CC 12.1 GB10 and trips a
+// device-side assert inside the kernel, which reaches the operator as a bare
+// "device-side assert triggered" under several hundred lines of CUTLASS
+// template text. compute-smoke measured exactly that on real hardware, which is
+// why the question is answered HERE, from the arch string baked in at build
+// time and the capability the device reported, BEFORE anything is launched.
+//
+// Mismatch is an ERROR, never a Skip: reporting it as out-of-scope hardware
+// would tell a whole fleet that acceptance does not apply to it when the truth
+// is that somebody pinned the wrong tag.
+enum class ArchCover {
+  Covers,
+  Mismatch,  // positively established: this binary has no code for this part
+  Unknown,   // the arch string is not one we can reason about; run on and let
+             // the runtime speak, exactly as a hand-built binary always did
+};
+
+// archCovers reads a gencode string ("sm_121a", "sm_120f", "sm_90") against a
+// compute capability as (major*10 + minor).
+//
+//   sm_NNNa  — a cubin for that capability ONLY, no PTX: exact match required.
+//   sm_NNNf  — the family form: same major, that minor or newer.
+//   sm_NNN   — a plain cubin: binary-compatible forward within the major.
+//
+// Conservative by construction: a string it cannot parse, or a capability that
+// was never read, answers Unknown rather than Mismatch — this gate may only
+// refuse on what it positively established.
+inline ArchCover archCovers(const std::string& builtArch, int computeCapability) {
+  if (computeCapability <= 0) return ArchCover::Unknown;
+  if (builtArch.rfind("sm_", 0) != 0) return ArchCover::Unknown;
+  std::size_t i = 3;
+  int built = 0, digits = 0;
+  while (i < builtArch.size() && builtArch[i] >= '0' && builtArch[i] <= '9') {
+    built = built * 10 + (builtArch[i] - '0');
+    ++i;
+    ++digits;
+  }
+  // A capability below 2 digits ("sm_9") names no real part; do not guess.
+  if (digits < 2 || digits > 3) return ArchCover::Unknown;
+  const std::string suffix = builtArch.substr(i);
+  if (suffix == "a") {
+    return computeCapability == built ? ArchCover::Covers : ArchCover::Mismatch;
+  }
+  if (suffix == "f" || suffix.empty()) {
+    const bool sameMajor = computeCapability / 10 == built / 10;
+    return (sameMajor && computeCapability >= built) ? ArchCover::Covers : ArchCover::Mismatch;
+  }
+  return ArchCover::Unknown;
+}
+
+// mismatchMessage names the image, the part, and the fix — because the reader
+// of a stored Error months later has none of that context, and the runtime's
+// own "no kernel image" (or worse, a device-side assert) names neither.
+inline std::string mismatchMessage(const std::string& builtArch, int computeCapability) {
+  return std::string("GEMM_SWEEP_ERROR: this image was built for ") + builtArch +
+         " and the device reports compute capability " +
+         std::to_string(computeCapability / 10) + "." + std::to_string(computeCapability % 10) +
+         " — this binary has no kernel for that part, so nothing was measured and the part is "
+         "UNJUDGED. Pin the gemm-sweep tag built for this part (or rebuild with the matching "
+         "CUDA_ARCH); this is a statement about which image was pinned, never about the hardware";
 }
 
 }  // namespace burnin

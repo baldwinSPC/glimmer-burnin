@@ -2,12 +2,19 @@
 #
 # ─── WHAT THIS IS FOR ─────────────────────────────────────────────────────────
 #
-# compute-smoke runs an NVFP4 GEMM. That is ONE cell of a matrix. The same
-# kernel at FP8, BF16, TF32 and FP64 answers different questions about the same
-# silicon — a part that passes FP4 and fails FP64 has a different fault than one
-# that fails both — and before variants the only way to ask all five was to
-# author five BurnInTest objects differing by one environment variable, each with
-# its own name, its own thresholds, and its own copy of every other field.
+# gemm-sweep runs one GEMM at ONE precision per execution, read from
+# BURNIN_VARIANT_PRECISION. A precision is ONE cell of a matrix: the same
+# question at FP4, FP8, BF16, TF32 and FP64 answers different things about the
+# same silicon — a part that passes FP4 and fails FP64 has a different fault
+# than one that fails both — and before variants the only way to ask all five
+# was to author five BurnInTest objects differing by one environment variable,
+# each with its own name, its own thresholds, and its own copy of every other
+# field.
+#
+# The axis must point at a runner that READS it. compute-smoke deliberately does
+# not: it is the fixed FP4 burst gate, and a precision axis on it would label
+# cells fp8/bf16/fp64 while every one of them ran FP4 — a sweep certified
+# against measurements nobody took.
 #
 # ─── HOW IT EXPANDS ───────────────────────────────────────────────────────────
 #
@@ -49,6 +56,32 @@
 # spec sheet rather than from hardware. Gather numbers with a baseline run first
 # (spec.baseline on the BurnInRun), then pin the floors.
 ---
+# The runner behind the sweep. There is no published gemm-sweep image yet, so
+# spec.runner.image is REQUIRED here and this sample names a placeholder:
+# publishing is manual and follows verification on real hardware, and without a
+# default the run fails at plan time naming the problem rather than
+# ImagePullBackOff-ing on every targeted node.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: gemm-sweep
+spec:
+  kind: gemm-sweep
+  # The window each cell runs for: the same GEMM is launched repeatedly and
+  # every iteration is checked against the host reference, so the duration buys
+  # repeated correctness trials and a stable TFLOP/s figure. It is NOT a
+  # thermal soak — thermal-soak and gpu-burn own sustained load.
+  durationSeconds: 60
+  runner:
+    image: ghcr.io/baldwinspc/glimmer-burnin-gemm-sweep:REPLACE-ME
+  # No thresholds. Every number in this repo is measured, never taken from a
+  # spec sheet; no measured baselines exist yet for these precisions on any SKU
+  # in the fleet. When they do, remember thresholds are PER VARIANT: an FP4
+  # throughput floor and an FP64 throughput floor are different numbers about
+  # different silicon, and a variant that sets `thresholds` REPLACES the
+  # parent's list entirely.
+
+---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInProfile
 metadata:
@@ -56,17 +89,24 @@ metadata:
 spec:
   failFast: false
   tests:
-    - testRef: fp4-compute-smoke
+    - testRef: gemm-sweep
       variants:
         # Each cell names itself. The name is result identity, so it is what a
         # verdict, a delivery key and a report all key off — two variants of one
         # test may not share one, and the run refuses at plan time if they do.
+        #
+        # A precision the part does not have skips cleanly and visibly: the
+        # runner declares it with a GEMM_SWEEP_SKIP marker, per cell, so a
+        # Hopper fleet running this exact profile records fp4 as out of scope
+        # rather than failed.
         - name: fp4
           axes: {precision: fp4}
         - name: fp8
           axes: {precision: fp8}
         - name: bf16
           axes: {precision: bf16}
+        - name: tf32
+          axes: {precision: tf32}
         - name: fp64
           axes: {precision: fp64}
           # FP64 on a consumer-class part is a fraction of the FP32 rate, so

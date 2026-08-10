@@ -164,6 +164,73 @@ static void testMessagesAreActionable() {
         "an unreadable capability leaves the part unjudged, and says so");
 }
 
+// The image gate: the direction the loader refuses was always caught, so the
+// rows that matter here are the ones it does NOT refuse.
+static void testArchCoversTheBinaryCompatTrap() {
+  using burnin::ArchCover;
+  // The measured trap: an sm_120a image LOADS on a CC 12.1 GB10 and asserts
+  // inside the kernel. This gate is the only thing that names it.
+  check(burnin::archCovers("sm_120a", 121) == ArchCover::Mismatch,
+        "sm_120a on CC 12.1 is the device-side-assert trap and must be a Mismatch");
+  check(burnin::archCovers("sm_121a", 120) == ArchCover::Mismatch,
+        "sm_121a on CC 12.0 (the loader would refuse it anyway, but we say why)");
+  check(burnin::archCovers("sm_121a", 121) == ArchCover::Covers, "sm_121a on CC 12.1");
+  check(burnin::archCovers("sm_120a", 120) == ArchCover::Covers, "sm_120a on CC 12.0");
+  // B200 with this image: the part supports every precision here, and the image
+  // still has no code for it. Error, never Skip — issue #10's lesson.
+  check(burnin::archCovers("sm_121a", 100) == ArchCover::Mismatch, "sm_121a on CC 10.0");
+  check(burnin::archCovers("sm_121a", 90) == ArchCover::Mismatch, "sm_121a on CC 9.0");
+
+  // The family form covers its major from that minor up, and nothing else.
+  check(burnin::archCovers("sm_120f", 120) == ArchCover::Covers, "sm_120f on CC 12.0");
+  check(burnin::archCovers("sm_120f", 121) == ArchCover::Covers, "sm_120f on CC 12.1");
+  check(burnin::archCovers("sm_121f", 120) == ArchCover::Mismatch, "sm_121f on CC 12.0");
+  check(burnin::archCovers("sm_120f", 90) == ArchCover::Mismatch, "sm_120f on CC 9.0");
+
+  // A plain cubin is binary-compatible forward within its major only.
+  check(burnin::archCovers("sm_90", 90) == ArchCover::Covers, "sm_90 on CC 9.0");
+  check(burnin::archCovers("sm_120", 121) == ArchCover::Covers, "sm_120 cubin runs on CC 12.1");
+  check(burnin::archCovers("sm_90", 100) == ArchCover::Mismatch,
+        "sm_90 on CC 10.0: binary compat does not cross a major");
+  check(burnin::archCovers("sm_121", 120) == ArchCover::Mismatch, "sm_121 on CC 12.0");
+}
+
+// The gate may only refuse on what it positively established.
+static void testArchCoversNeverGuesses() {
+  using burnin::ArchCover;
+  // A hand-built binary carries "unknown"; it runs on and the runtime speaks.
+  check(burnin::archCovers("unknown", 121) == ArchCover::Unknown, "arch \"unknown\"");
+  check(burnin::archCovers("", 121) == ArchCover::Unknown, "empty arch string");
+  check(burnin::archCovers("sm_", 121) == ArchCover::Unknown, "sm_ with no digits");
+  check(burnin::archCovers("sm_9", 90) == ArchCover::Unknown, "one digit names no part");
+  check(burnin::archCovers("sm_1210", 121) == ArchCover::Unknown, "four digits names no part");
+  check(burnin::archCovers("sm_121x", 121) == ArchCover::Unknown, "a suffix we do not know");
+  check(burnin::archCovers("gfx90a", 90) == ArchCover::Unknown, "not an sm_ string at all");
+  // A capability that was never read is not a capability this gate can match
+  // anything against; scopeOf refuses that case before this gate is consulted.
+  check(burnin::archCovers("sm_121a", 0) == ArchCover::Unknown, "cc 0 answers Unknown");
+  check(burnin::archCovers("sm_121a", -1) == ArchCover::Unknown, "cc -1 answers Unknown");
+}
+
+static void testMismatchMessageIsActionable() {
+  const std::string msg = burnin::mismatchMessage("sm_120a", 121);
+  check(msg.rfind("GEMM_SWEEP_ERROR:", 0) == 0, "a mismatch is an error and says so");
+  check(msg.find("sm_120a") != std::string::npos, "the message names the image's arch");
+  check(msg.find("12.1") != std::string::npos, "the message names what the part reports");
+  check(msg.find("UNJUDGED") != std::string::npos, "the message says nothing was measured");
+  check(msg.find("never about the hardware") != std::string::npos,
+        "the message says this is not a hardware verdict");
+}
+
+// The exit contract is load-bearing for the operator; a renumbering here would
+// silently remap verdicts fleet-wide.
+static void testExitCodesMatchTheRunnerContract() {
+  check(burnin::kExitPass == 0, "pass is exit 0");
+  check(burnin::kExitFail == 1, "fail is exit 1");
+  check(burnin::kExitSkip == 2, "skip is exit 2");
+  check(burnin::kExitError == 3, "error is exit 3");
+}
+
 // Every precision has a name, and no two share one.
 static void testNamesAreDistinct() {
   for (Precision a : burnin::everyPrecision()) {
@@ -193,6 +260,10 @@ int main() {
   testFP64NeverSkipsOnARealPart();
   testSkipIsOnlyForAnEstablishedShortfall();
   testMessagesAreActionable();
+  testArchCoversTheBinaryCompatTrap();
+  testArchCoversNeverGuesses();
+  testMismatchMessageIsActionable();
+  testExitCodesMatchTheRunnerContract();
   testNamesAreDistinct();
 
   if (failures != 0) {

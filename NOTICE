@@ -17,7 +17,7 @@ permissive license (Apache-2.0 / BSD / MIT), notably:
   - k8s.io/{api,apimachinery,client-go}   Apache-2.0
   - github.com/onsi/ginkgo, gomega        MIT
   - github.com/robfig/cron/v3             MIT
-  - github.com/NVIDIA/cutlass             BSD-3-Clause  (runners/compute-smoke)
+  - github.com/NVIDIA/cutlass             BSD-3-Clause  (runners/compute-smoke, runners/gemm-sweep)
   - github.com/prometheus/client_golang   Apache-2.0
 
 github.com/robfig/cron/v3 v3.0.1 parses BurnInSchedule cron expressions. Its
@@ -25,11 +25,12 @@ LICENSE file is MIT ("Copyright (C) 2012 Rob Figueiredo ... MIT LICENSE"), it is
 not dual-licensed, and it has no dependencies of its own, so it adds nothing
 further to this list.
 
-The compute-smoke runner (runners/compute-smoke) links NVIDIA CUTLASS, a
-header-only BSD-3-Clause template library. It is compiled into the runner binary;
-no CUTLASS source is redistributed by this project. The CUTLASS subdirectory
-python/CuTeDSL is covered by the NVIDIA EULA rather than BSD-3-Clause and is NOT
-used here.
+The compute-smoke and gemm-sweep runners (runners/compute-smoke,
+runners/gemm-sweep) link NVIDIA CUTLASS, a header-only BSD-3-Clause template
+library. It is compiled into each runner binary; no CUTLASS source is
+redistributed by this project. The gemm-sweep build asserts the licence from the
+LICENSE.txt of the exact commit fetched. The CUTLASS subdirectory python/CuTeDSL
+is covered by the NVIDIA EULA rather than BSD-3-Clause and is NOT used here.
 
 Third-party components built into the other runner images, each verified against
 the project allowlist. Every one is built from source in a build stage; see each
