@@ -31,7 +31,7 @@ jobs:
       # than "somebody held a key". Same identity model as the image workflows.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # goreleaser derives the changelog from history; a shallow clone
           # produces a changelog that silently omits everything before the
