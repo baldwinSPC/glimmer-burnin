@@ -310,16 +310,13 @@ func (r *BurnInRunReconciler) gateClientOnServer(
 	}
 
 	if r.podOverdue(serverPod, &t.Spec) {
-		if err := r.Delete(ctx, serverPod); err != nil && !apierrors.IsNotFound(err) {
-			return advancePending, none, err
-		}
 		r.completeAttempt(ctx, run, p, t, nodes, attempt, serverPod.Name, serverPod, runner.Result{
 			Verdict: runner.VerdictError,
 			Message: fmt.Sprintf(
 				"the %s endpoint on %s never became ready within its window (last phase %q) — the client was never started and the link was not measured; no verdict",
 				pairRoleServer, serverNode, serverPod.Status.Phase),
 		})
-		return advanceHarvested, advanceEffect{dirty: true}, nil
+		return advanceHarvested, advanceEffect{dirty: true, kill: []*corev1.Pod{serverPod}}, nil
 	}
 
 	if !podStarted(serverPod) {
@@ -388,16 +385,17 @@ func (r *BurnInRunReconciler) harvestPair(
 	_, clientDone, _, _ := podOutcome(clientPod)
 	if !clientDone {
 		if r.podOverdue(clientPod, &t.Spec) {
-			if err := r.deletePairPods(ctx, serverPod, clientPod); err != nil {
-				return advancePending, none, err
-			}
+			// BOTH ends, and the server is live and healthy — a client timeout
+			// takes its peer down with it, because a pair is one unit. All the
+			// more reason the record must be durable first: losing it restarts
+			// the whole unit and destroys a server that was measuring fine.
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, serverPod.Name, serverPod, runner.Result{
 				Verdict: runner.VerdictError,
 				Message: fmt.Sprintf(
 					"the %s endpoint on %s never completed within its window (last phase %q) — the link was not measured; no verdict",
 					pairRoleClient, clientNode, clientPod.Status.Phase),
 			})
-			return advanceHarvested, advanceEffect{dirty: true}, nil
+			return advanceHarvested, advanceEffect{dirty: true, kill: []*corev1.Pod{serverPod, clientPod}}, nil
 		}
 		_, opened := r.beginAttempt(run, t, nodes, attempt, serverPod)
 		// Checkpoint from the client, because that is where the numbers are.

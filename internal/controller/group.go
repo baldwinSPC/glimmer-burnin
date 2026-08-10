@@ -323,18 +323,15 @@ func (r *BurnInRunReconciler) gateWorkersOnRoot(
 		// clean root exit with no workers is not a pass.
 		members := r.harvestMembers(ctx, t, nodes, pods)
 		logErr := members.logErr
-		if err := r.deletePods(ctx, pods...); err != nil {
-			return advancePending, none, err
-		}
 		r.completeAttempt(ctx, run, p, t, nodes, attempt, root.Name, root,
 			combineGroup(members.members, logErr, &t.Spec))
-		return advanceHarvested, advanceEffect{dirty: true}, nil
+		// EVERY rank, deferred until the record is durable. A collective is one
+		// unit: losing the record here destroys N live ranks and restarts the
+		// whole thing having spent no retry budget.
+		return advanceHarvested, advanceEffect{dirty: true, kill: pods}, nil
 	}
 
 	if r.podOverdue(root, &t.Spec) {
-		if err := r.deletePods(ctx, pods...); err != nil {
-			return advancePending, none, err
-		}
 		r.completeAttempt(ctx, run, p, t, nodes, attempt, root.Name, root, runner.Result{
 			Verdict: runner.VerdictError,
 			Message: fmt.Sprintf(
@@ -342,7 +339,7 @@ func (r *BurnInRunReconciler) gateWorkersOnRoot(
 					"the other %d rank(s) were never started and the collective was not measured; no verdict",
 				groupRootRank, nodes[groupRootRank], root.Status.Phase, len(nodes)-1),
 		})
-		return advanceHarvested, advanceEffect{dirty: true}, nil
+		return advanceHarvested, advanceEffect{dirty: true, kill: pods}, nil
 	}
 
 	if !podStarted(root) {
@@ -399,7 +396,6 @@ func (r *BurnInRunReconciler) harvestGroup(
 	attempt int32,
 	pods []*corev1.Pod,
 ) (advanceState, advanceEffect, error) {
-	var none advanceEffect
 	root := pods[groupRootRank]
 
 	// A rank that never STARTED and a rank that started and hung are different
@@ -425,9 +421,6 @@ func (r *BurnInRunReconciler) harvestGroup(
 		// every OTHER rank blocks waiting for the one that never arrived, so
 		// without this the report would name all of them equally.
 		if r.anyOverdue(pods, &t.Spec) {
-			if err := r.deletePods(ctx, pods...); err != nil {
-				return advancePending, none, err
-			}
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, root.Name, root, runner.Result{
 				Verdict: runner.VerdictError,
 				Message: fmt.Sprintf(
@@ -435,7 +428,7 @@ func (r *BurnInRunReconciler) harvestGroup(
 						"every other rank blocks on a rank that never arrives, so this names the ones that did not; no verdict",
 					len(stillRunning), len(nodes), strings.Join(stillRunning, ", ")),
 			})
-			return advanceHarvested, advanceEffect{dirty: true}, nil
+			return advanceHarvested, advanceEffect{dirty: true, kill: pods}, nil
 		}
 		_, opened := r.beginAttempt(run, t, nodes, attempt, root)
 		// Checkpoint from the root, because that is the conventional reporting
