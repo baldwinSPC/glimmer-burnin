@@ -1,6 +1,13 @@
 // Package verdict evaluates parsed test metrics against a test's thresholds.
-// It is deliberately pure (no k8s, no I/O) so the pass/fail logic every
-// BurnInRun depends on is unit-testable in isolation.
+// It performs no I/O, so the pass/fail logic every BurnInRun depends on is
+// unit-testable in isolation.
+//
+// IT IS NOT KUBERNETES-FREE, unlike pkg/contract and pkg/runner, and this
+// comment used to claim otherwise. Evaluate takes []burninv1alpha1.Threshold,
+// so importing this package brings api/v1alpha1 and with it apimachinery and
+// controller-runtime — nine modules a consumer links. Issue #274 tracks whether
+// to move the threshold types down into pkg/contract and make this genuinely
+// standalone; that breaks every caller and is not something to do silently.
 //
 // This is public API. It exists outside internal/ so that a burn-in dispatcher
 // which is not this operator — notably a pre-Kubernetes, agent-native path —
