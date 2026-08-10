@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -146,8 +147,13 @@ func TestUnmeasurableCountersReachTheParserAsDeclarations(t *testing.T) {
 	}
 }
 
-// Evidence metrics are unregistered by design (the registry is an open world),
-// but they still have to obey the grammar and remain thresholdable.
+// Evidence metrics mostly stay unregistered by design (the registry is an open
+// world), but they still have to obey the grammar and remain thresholdable —
+// which is what makes them usable by a stricter profile than this runner's own
+// verdict.
+//
+// The exception is a metric whose VALUE IS A LABEL, and eccMode is one; see
+// TestALabelValuedMetricIsNotThresholdable below.
 func TestEvidenceMetricNamesAreWellFormed(t *testing.T) {
 	f := newE2EFixture(t, healthyGPU(), "0")
 	var buf bytes.Buffer
@@ -156,7 +162,6 @@ func TestEvidenceMetricNamesAreWellFormed(t *testing.T) {
 
 	for _, name := range []string{
 		"xidPreexisting",
-		"eccMode",
 		"eccCorrectedAggregate",
 		"eccUncorrectedVolatile",
 		"remappedRowsCorrectable",
@@ -189,5 +194,40 @@ func TestEvidenceMetricNamesAreWellFormed(t *testing.T) {
 	}
 	if contract.UnitOf("gpuTempC") != contract.UnitCelsius {
 		t.Error("gpuTempC must declare celsius")
+	}
+}
+
+// TestALabelValuedMetricIsNotThresholdable pins eccMode on the other side of
+// that line.
+//
+// Its values are "Enabled", "Disabled" and "unsupported" — strings, never
+// numbers — and a threshold is compared as a float64. So a gate on it does not
+// merely fail to help: it fails CLOSED on every node forever, and reads as a
+// hardware verdict on healthy hardware. That is the same defect the registry
+// already records for pdWedgeSuspected, throttleClassification and computeCap,
+// and eccMode was missed.
+//
+// It was previously asserted to be thresholdable, alongside a list of genuine
+// numbers. Registering it as Evidence is what makes verdict.ValidateThresholds
+// report the gate as Unsound at authoring time instead.
+func TestALabelValuedMetricIsNotThresholdable(t *testing.T) {
+	f := newE2EFixture(t, healthyGPU(), "0")
+	var buf bytes.Buffer
+	code := run(f.cfg, &buf)
+	res := runner.Parse("host-health", buf.String(), code)
+
+	v, ok := res.Metrics["eccMode"]
+	if !ok {
+		t.Fatalf("eccMode is not emitted at all:\n%s", buf.String())
+	}
+	if _, err := strconv.ParseFloat(v, 64); err == nil {
+		t.Fatalf("eccMode = %q, which parses as a number — if that is now true, "+
+			"this test and the registry entry are both wrong", v)
+	}
+	if err := contract.ValidateMetricName("eccMode"); err != nil {
+		t.Errorf("eccMode must still obey the grammar: %v", err)
+	}
+	if contract.SafeToThresholdOn("eccMode") {
+		t.Error("eccMode is reported as safe to threshold on; a gate on a string fails closed forever")
 	}
 }

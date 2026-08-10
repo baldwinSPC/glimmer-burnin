@@ -834,6 +834,30 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	"eccMode": {
+		Name: "eccMode", Unit: UnitNone,
+		Description:  "whether ECC is enabled on the device, as the driver reports it (\"Enabled\"/\"Disabled\"). A LABEL: a threshold is compared as a float64, so gating on it fails closed on every node forever and reads as a hardware verdict. It is what tells \"this part has no ECC\" from \"ECC was switched off\", and only the first is declarable as unmeasurable",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"eccSource": {
+		Name: "eccSource", Unit: UnitNone,
+		Description:  "where the ECC counters came from (\"amdgpu-sysfs\"). A LABEL, recorded because eccErrors means the same thing across vendors only if a reader can see which subsystem produced it",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"eccVendorConflict": {
+		Name: "eccVendorConflict", Unit: UnitNone,
+		Description:  "present only on a node where two vendors' accelerators both have ECC counters to report (\"nvidia+amd\"). One pod gets one image, so this operator does not support such a node; the first reading stands and this records that a second was declined rather than silently overwriting it",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"amdRasUnreadableFiles": {
+		Name: "amdRasUnreadableFiles", Unit: UnitNone,
+		Description:  "the amdgpu RAS counter files that could not be read, comma-joined. A LABEL, and the reason eccErrors is absent rather than zero: without it an omitted counter looks identical to one nobody implemented, and the fail-closed verdict has no reason attached",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"xidSource": {
 		Name: "xidSource", Unit: UnitNone,
 		Description:  "where the Xid scan read from: kmsg|kernlog|none. A label naming the PROVENANCE of xidEvents, and the value that matters most is the one a gate cannot express — \"none\" means the scan did not run, and the counters it would have produced are omitted rather than zeroed, so xidEvents already fails closed on its own",
