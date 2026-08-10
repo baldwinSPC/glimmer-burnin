@@ -52,15 +52,26 @@ type BurnInRunReconciler struct {
 	// cache. The manager wires it from mgr.GetAPIReader(); nil falls back to
 	// the cached client, which is what a test that does not care gets.
 	//
-	// It is used for exactly three reads, and the rule for adding a fourth is
-	// stated once here: a read goes uncached ONLY when a stale answer would cost
-	// the fleet something a later pass cannot get back — a node permanently out
-	// of the scheduler, or hardware driven past what it was budgeted for. Those
-	// three are the run's start-time capture of prior schedulability, the
-	// release path's search for the nodes it owns, and the admission scan for
-	// runs already holding this run's targets. Everything else — pods, the run
-	// itself, profiles, tests — stays cached, because a stale answer there costs
-	// a wasted pass and is corrected by the next one.
+	// THE RULE, stated once here, for anyone adding a read: a read goes uncached
+	// ONLY when a stale answer would cost the fleet something a later pass
+	// cannot get back — a node permanently out of the scheduler, or hardware
+	// driven past what it was budgeted for. In practice that is any read whose
+	// answer is RECORDED somewhere else, or used to decide NOT TO ACT. Neither
+	// has an optimistic-concurrency check standing behind it; a read whose only
+	// consequence is an Update of the SAME object does, because the apiserver
+	// refuses a stale write on resourceVersion and the next pass reads again.
+	//
+	// The five that qualify, all on the cordon interlock:
+	//
+	//	capturePriorSchedulability   recorded into the run's status
+	//	cordonNode's node read       two arms decline to cordon and write nothing
+	//	releaseNode's node read      two arms drop the node from status and write nothing
+	//	releaseCordons' scan         finds nothing, concludes nothing is owed
+	//	the admission scan           decides this run may take hardware another holds
+	//
+	// Everything else — pods, the run itself, profiles, tests — stays cached,
+	// because a stale answer there costs a wasted pass and is corrected by the
+	// next one.
 	//
 	// The failure this exists to prevent (issue #84): a run that cordons a node
 	// and releases it seconds later leaves the informer holding the cordoned
