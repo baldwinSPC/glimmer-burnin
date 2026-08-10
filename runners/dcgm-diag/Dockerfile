@@ -124,6 +124,11 @@ RUN set -eu; \
     got="$(git -C /dcgm-src rev-parse HEAD)"; \
     if [ "${got}" != "${DCGM_SHA}" ]; then \
       echo "refusing to build: ${DCGM_REF} is ${got}, expected ${DCGM_SHA}" >&2; \
+      if [ "$(git cat-file -t "${DCGM_SHA}" 2>/dev/null)" = "tag" ]; then \
+        echo "  ${DCGM_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
+        echo "  Use the peeled value: $(git rev-parse "${DCGM_SHA}^{commit}")" >&2; \
+        echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
+      fi; \
       exit 1; \
     fi; \
     echo "DCGM ${DCGM_REF} = ${got}: OK"; \

@@ -32,7 +32,12 @@ ARG CUTLASS_REF=v4.6.1
 # tag would change what that image computes with no audit trail — and CUTLASS is
 # the kernel itself here, not a peripheral dependency.  Bumping CUTLASS_REF means
 # bumping CUTLASS_SHA with it; resolve the new value with
-# `git ls-remote https://github.com/NVIDIA/cutlass.git refs/tags/<ref>`.
+# `git ls-remote https://github.com/NVIDIA/cutlass.git 'refs/tags/<ref>' 'refs/tags/<ref>^{}'`,
+# taking the PEELED `^{}` value where the tag is annotated — that is the commit
+# a shallow clone leaves at HEAD, and therefore what the assertion compares
+# against. CUTLASS's tags happen to be lightweight, so the unpeeled form gives
+# the right answer here by luck; it is the wrong command to learn, and the
+# build below diagnoses the mistake if you make it.
 ARG CUTLASS_SHA=e05f953a5b3d38adc240df2ff928e0421c2abba3
 
 # ── CPU architecture and GPU architecture are ORTHOGONAL ─────────────────────
@@ -88,6 +93,11 @@ RUN git clone --depth 1 -b ${CUTLASS_REF} https://github.com/NVIDIA/cutlass.git 
 RUN got="$(git -C /cutlass rev-parse HEAD)"; \
     if [ "${got}" != "${CUTLASS_SHA}" ]; then \
       echo "refusing to build: ${CUTLASS_REF} is ${got}, expected ${CUTLASS_SHA}" >&2; \
+      if [ "$(git cat-file -t "${CUTLASS_SHA}" 2>/dev/null)" = "tag" ]; then \
+        echo "  ${CUTLASS_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
+        echo "  Use the peeled value: $(git rev-parse "${CUTLASS_SHA}^{commit}")" >&2; \
+        echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
+      fi; \
       exit 1; \
     fi; \
     echo "CUTLASS ${CUTLASS_REF} = ${got}: OK"
