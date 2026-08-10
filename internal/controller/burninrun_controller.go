@@ -2064,32 +2064,6 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 	}
 	recount(run)
 
-	// Release before the finalizer comes off, and before anything can return
-	// early: a node held by a run that will never step again is capacity the
-	// fleet silently loses.
-	//
-	// Uncordoning is safe to do before the status write in a way that killing a
-	// pod is not: it is level-based and idempotent, reconcileTerminal repeats it
-	// on every pass while the finalizer is on, and getting it wrong costs a
-	// cordon the operator can see and redo. Killing a pod destroys an execution
-	// that cannot be recovered, which is why that step now waits below.
-	if _, err := r.releaseCordons(ctx, run); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	delivered := r.deliverPhase(ctx, run, sinks, phase)
-
-	if !delivered {
-		// The terminal envelope is the one delivery with no later transition
-		// to carry it; mark it pending so the terminal loop keeps retrying.
-		if run.Annotations == nil {
-			run.Annotations = map[string]string{}
-		}
-		run.Annotations[pendingDeliveryAnnotation] = string(phase)
-		if err := r.updateKeepingStatus(ctx, run); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
 	if err := r.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -2115,6 +2089,58 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 	// this one call succeeding.
 	if err := r.deleteLivePods(ctx, run); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// THE LOAD IS OFF. Only now is it safe to hand the nodes back, and that
+	// order is the fix for issue #246.
+	//
+	// Releasing first put a node running a full-power burn-in back into the
+	// scheduler with this run's own stamp already removed, so nothing in the
+	// cluster said it was loaded — for the length of a terminal delivery, up to
+	// the 15s delivery timeout against a slow sink. Production pods could be
+	// placed onto a machine at maximum thermal and electrical load, and because
+	// releaseCordons also drops AnnotationCordonOwner, a SECOND BurnInRun could
+	// admit, cordon and load the same node inside the window, defeating
+	// maxConcurrentNodes as a facility interlock.
+	//
+	// It was worst on the path the feature exists for: CancelImmediate is
+	// documented as the tool for a facility power or cooling event, where the
+	// load itself is the reason for stopping — and it returned the nodes to
+	// service before stopping the load.
+	//
+	// Going last costs nothing. The release is level-based: reconcileTerminal
+	// repeats it on every pass while the finalizer is on, so a deleteLivePods
+	// failure returning early above leaves the cordon HELD, which is the safe
+	// direction and converges on the next pass. reconcileTerminal has always
+	// used this order; terminate was the one place inverted.
+	released, err := r.releaseCordons(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if released {
+		// releaseCordons clears status.cordonedNodes, and that has to reach the
+		// apiserver or an operator watching the run still believes nodes are
+		// held. Previously the release rode along on the status write above;
+		// now that it happens after, it gets its own — the same shape
+		// reconcileTerminal uses.
+		if err := r.Status().Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Delivery LAST of the three, because it is network I/O to somebody else's
+	// endpoint and nothing about the fleet's safety may wait on it.
+	delivered := r.deliverPhase(ctx, run, sinks, phase)
+	if !delivered {
+		// The terminal envelope is the one delivery with no later transition
+		// to carry it; mark it pending so the terminal loop keeps retrying.
+		if run.Annotations == nil {
+			run.Annotations = map[string]string{}
+		}
+		run.Annotations[pendingDeliveryAnnotation] = string(phase)
+		if err := r.updateKeepingStatus(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// The finalizer comes off LAST, because it is the standing record that this
