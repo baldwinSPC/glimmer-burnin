@@ -97,11 +97,15 @@ RUN got="$(git -C /cutlass rev-parse HEAD)"; \
 # The licence is asserted from the exact commit fetched, not from a comment that
 # cannot notice the dependency moving.  If CUTLASS ever stops being BSD-3-Clause
 # this build fails rather than quietly compiling in something this project may
-# not publish.  (CUTLASS's python/CuTeDSL subdirectory is under the NVIDIA EULA
-# and is not touched by this build; the headers compiled in are BSD-3-Clause.)
+# not publish.  The strings are the FILE'S OWN, measured rather than assumed:
+# CUTLASS's LICENSE.txt carries no "BSD 3-Clause License" heading — it
+# identifies itself by its SPDX tag — and a first version of this step grepped
+# for the heading and refused every build.  (CUTLASS's python/CuTeDSL
+# subdirectory is under the NVIDIA EULA and is not touched by this build; the
+# headers compiled in are BSD-3-Clause.)
 RUN set -e; \
     test -f /cutlass/LICENSE.txt; \
-    grep -q "BSD 3-Clause License" /cutlass/LICENSE.txt; \
+    grep -q "SPDX-License-Identifier: BSD-3-Clause" /cutlass/LICENSE.txt; \
     grep -q "Redistribution and use in source and binary forms" /cutlass/LICENSE.txt; \
     echo "CUTLASS ${CUTLASS_REF} is BSD-3-Clause: OK"
 
