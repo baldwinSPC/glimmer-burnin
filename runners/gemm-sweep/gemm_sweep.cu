@@ -740,10 +740,16 @@ int main() {
       return runDense2x<cutlass::bfloat16_t, float, float, cutlass::arch::OpClassTensorOp,
                         cutlass::arch::Sm80>(windowSeconds);
     case Precision::TF32:
-      // ElementA/B float on the Sm80 tensor-op path IS the tf32 kernel: the
-      // mainloop truncates to tf32 for the mma and accumulates in fp32, which
-      // is exactly the path a training framework calls "tf32".
-      return runDense2x<float, float, float, cutlass::arch::OpClassTensorOp,
+      // The tf32 cell feeds the tensor cores tf32 OPERANDS directly (stored in
+      // 32-bit containers). Passing float and expecting the mainloop to
+      // truncate leaves the element type f32 all the way down to the
+      // instruction, for which no mma.sync exists — measured as an
+      // incomplete-type build failure on CUDA 13.0.1 / CUTLASS v4.6.1, twenty
+      // errors, all in this cell. Integer operands are exact in tf32's 10-bit
+      // mantissa, so the exact-match property is unchanged, and the claim —
+      // the tf32 instruction path computes correct numbers — is precisely what
+      // storing tf32 asserts.
+      return runDense2x<cutlass::tfloat32_t, float, float, cutlass::arch::OpClassTensorOp,
                         cutlass::arch::Sm80>(windowSeconds);
     case Precision::FP64:
       return runDense2x<double, double, double, cutlass::arch::OpClassSimt,
