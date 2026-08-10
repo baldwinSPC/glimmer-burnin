@@ -645,6 +645,14 @@ func (r *BurnInRunReconciler) step(ctx context.Context, run *burninv1alpha1.Burn
 		if err := r.Status().Update(ctx, run); err != nil {
 			return ctrl.Result{}, err
 		}
+		// THE RECORD IS DURABLE. Only now may a pod this pass condemned be
+		// destroyed — issue #247, and the same rule terminate states at length.
+		// A failure here leaves an overdue pod running for one more pass, which
+		// the next pass's own overdue check settles; the opposite order left a
+		// destroyed pod with no record that it ever ran.
+		if err := r.killPods(ctx, pass.kill); err != nil {
+			return ctrl.Result{}, err
+		}
 		if pass.checkpointed {
 			r.deliverCheckpoint(ctx, run, p.Sinks, r.checkpointSequence(run, p))
 		}
@@ -676,6 +684,9 @@ type passResult struct {
 	// checkpointed means at least one in-flight result had its evidence
 	// refreshed and a Checkpoint envelope is owed.
 	checkpointed bool
+	// kill are pods to destroy ONCE the status recording why is durable. See
+	// advanceEffect.kill for the failure this ordering prevents.
+	kill []*corev1.Pod
 	// checkpointEvery is the shortest checkpoint interval among the tests
 	// actually IN FLIGHT this pass, or 0 when none of them checkpoints.
 	//
@@ -712,6 +723,24 @@ type advanceEffect struct {
 	dirty        bool
 	checkpointed bool
 	rendezvous   bool
+	// kill are pods this pass decided to destroy, DEFERRED until the status
+	// recording that decision is durable.
+	//
+	// This is the #84 rule applied to the timeout paths, which is issue #247:
+	// terminate had it right and these five sites had it inverted. They deleted
+	// the pod, then recorded the Error in memory, and left the write to step —
+	// so a lost resourceVersion race, or an error from any LATER target in the
+	// same pass, discarded the record while the pod stayed destroyed. The
+	// attempt then never happened as far as the apiserver was concerned,
+	// ErrorRetries was never incremented, and the run recreated the same pod
+	// under the same attempt number: a loop that spends no retry budget and
+	// records nothing, which is exactly what a rolling update of the manager
+	// produces.
+	//
+	// Carrying the pods here instead of deleting in place keeps ONE place
+	// responsible for the ordering, the same way completeAttempt is the one
+	// place a verdict is decided.
+	kill []*corev1.Pod
 }
 
 // execute sweeps the plan once. launch=false harvests and checkpoints exactly
@@ -776,6 +805,7 @@ func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.B
 			test.checkpointed = test.checkpointed || effect.checkpointed
 			test.dirty = test.dirty || effect.dirty
 			test.rendezvous = test.rendezvous || effect.rendezvous
+			test.kill = append(test.kill, effect.kill...)
 			switch state {
 			case advanceRunning:
 				test.running = true
@@ -828,6 +858,7 @@ func (r *BurnInRunReconciler) execute(ctx context.Context, run *burninv1alpha1.B
 		out.checkpointed = out.checkpointed || test.checkpointed
 		out.dirty = out.dirty || test.dirty
 		out.rendezvous = out.rendezvous || test.rendezvous
+		out.kill = append(out.kill, test.kill...)
 		if test.checkpointEvery > 0 &&
 			(out.checkpointEvery == 0 || test.checkpointEvery < out.checkpointEvery) {
 			out.checkpointEvery = test.checkpointEvery
@@ -1018,14 +1049,13 @@ func (r *BurnInRunReconciler) advance(
 		// an unschedulable pod (typo'd node name, missing toleration) has no
 		// deadline at all and would wedge the run in Running forever.
 		if r.podOverdue(&pod, &t.Spec) {
-			if delErr := r.Delete(ctx, &pod); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return advancePending, none, delErr
-			}
+			// Recorded now, destroyed by step once the record is durable.
+			overdue := pod
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, pod.Name, &pod, runner.Result{
 				Verdict: runner.VerdictError,
 				Message: fmt.Sprintf("pod never completed within its window (last phase %q) — unschedulable target or stuck image pull; no verdict", pod.Status.Phase),
 			})
-			return advanceHarvested, advanceEffect{dirty: true}, nil
+			return advanceHarvested, advanceEffect{dirty: true, kill: []*corev1.Pod{&overdue}}, nil
 		}
 		if !podStarted(&pod) {
 			// Scheduled but not executing. Nothing has been tested yet, so no
@@ -2544,4 +2574,25 @@ func clampPodDetail(s string) string {
 	// runtime produced and may be any encoding at all, and this value goes
 	// straight into a stored status and a delivered envelope.
 	return truncateAtRune(strings.Join(strings.Fields(s), " "), maxPodDetail, "… (truncated)")
+}
+
+// killPods destroys pods whose fate is already recorded durably.
+//
+// A TERMINATED pod is left alone: it is drawing no power, and its logs are the
+// post-mortem. That rule came from deletePods and deletePairPods, which this
+// replaced — losing it would delete the evidence for the very Error just
+// recorded.
+//
+// NotFound is success: the pod may have finished on its own between the
+// decision and the write, and that is the ordinary case rather than an error.
+func (r *BurnInRunReconciler) killPods(ctx context.Context, pods []*corev1.Pod) error {
+	for _, pod := range pods {
+		if pod == nil || !podLive(pod) {
+			continue
+		}
+		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }

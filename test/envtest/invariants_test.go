@@ -306,16 +306,39 @@ func TestATerminalRunNeverGoesBackToRunning(t *testing.T) {
 // justifiesDestroying reports whether the run's DURABLE status explains why a
 // still-executing pod was destroyed.
 //
-// Two things justify it, and nothing else does: the run has reached a terminal
-// phase (its verdict is recorded, and a terminal run must not keep burning
-// hardware), or the execution this pod belongs to already has a terminal result
-// (the attempt has been judged and the pod is now just load).
+// Three things justify it, and nothing else does: the run has reached a
+// terminal phase (its verdict is recorded, and a terminal run must not keep
+// burning hardware); the execution this pod belongs to already has a terminal
+// result (the attempt has been judged and the pod is now just load); or THIS
+// POD's own attempt is recorded as finished.
+//
+// The third was added with issue #247 and is not a loosening. An attempt that
+// errors with retry budget left does NOT settle its result — completeAttempt
+// increments ErrorRetries and leaves the result open for the next attempt — so
+// on the timeout path the run stays Running and the result stays non-terminal
+// even after the record is durable. What makes the pod safe to destroy there is
+// that the apiserver already knows this attempt happened: the retry is counted,
+// the next pass will not repeat it under the same number, and nothing can
+// re-harvest the container as a fresh execution. Without this case the rule
+// would be unsatisfiable on any retryable timeout, which is most of them.
 func justifiesDestroying(run *burninv1alpha1.BurnInRun, pod *corev1.Pod) bool {
 	if isTerminalPhase(run.Status.Phase) {
 		return true
 	}
 	res := resultFor(run, pod.Labels["burnin.glimmer.ai/test"], pod.Labels["burnin.glimmer.ai/node"])
-	return res != nil && res.Phase.IsTerminal()
+	if res == nil {
+		return false
+	}
+	if res.Phase.IsTerminal() {
+		return true
+	}
+	for i := range res.Attempts {
+		a := &res.Attempts[i]
+		if a.PodName == pod.Name && a.Phase.IsTerminal() {
+			return true
+		}
+	}
+	return false
 }
 
 // assertNoManufacturedVerdict checks that no result blames the hardware for
