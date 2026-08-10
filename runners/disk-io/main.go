@@ -109,27 +109,56 @@ func run() int {
 	metric("diskIoPath", dir)
 	logf("disk-io: %s, %d MiB in %d KiB blocks, %s free", target, sizeMB, blockKB, humanBytes(free))
 
-	// The file is removed on EVERY exit path, including the failures. A burn-in
-	// that leaves a gigabyte behind on each of a thousand nodes has done damage
-	// of its own kind.
-	defer func() {
-		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-			logf("disk-io: WARNING could not remove %s: %v", target, err)
-		}
-	}()
-
 	deadline := time.Now().Add(time.Duration(duration) * time.Second)
 
 	write, werr := writePass(target, totalBytes, block, deadline)
+
+	// CLEANUP IS ARMED ONLY FOR A FILE THIS RUN CREATED, and that is why it is
+	// registered HERE rather than before the write.
+	//
+	// It used to be armed before writePass, with the reasoning that a burn-in
+	// leaving a gigabyte behind on each of a thousand nodes has done damage of
+	// its own kind. True, and still handled — but it also fired on the ONE path
+	// where the file is not ours: the O_EXCL refusal below. So the runner
+	// declined to open a leftover from a crashed run, told the operator it had
+	// been left alone and to inspect it, and then deleted it. That is worse than
+	// having no check at all: without it the data is overwritten and the
+	// operator knows the runner touched it; with it, the data is gone and the
+	// operator has been told it is safe. Observed on a real ext4 volume (#242).
+	//
+	// An open that failed for any other reason created nothing, so removing is a
+	// no-op there and the ordering costs nothing.
+	if !isExistErr(werr) {
+		defer func() {
+			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+				logf("disk-io: WARNING could not remove %s: %v", target, err)
+			}
+		}()
+	}
+
 	if werr != nil {
-		if os.IsExist(werr) || strings.Contains(werr.Error(), "file exists") {
+		if isExistErr(werr) {
 			return fin(exitError, "%s already exists. Refusing to open it: this runner only ever writes a "+
 				"file it created, so a leftover from a crashed run is a refusal rather than an overwrite. "+
 				"Remove it once you are satisfied it is not something else", target)
 		}
+		// A FAILURE TO OPEN IS NOT A FAILING DISK. Exit 1 is a hardware verdict
+		// and is never retried, so it belongs only to something the run actually
+		// measured about the device. A read-only mount, a directory the runner's
+		// uid cannot write, a hostPath that resolves to a file — every one of
+		// those stopped the measurement from happening and is exit 3.
+		//
+		// This shipped reporting `permission denied` as a FAILED disk, which
+		// would have condemned every node sharing one bad mount with the retry
+		// budget unspent — the compute-smoke v0.1.0 mistake in a new runner.
+		if write.bytes == 0 {
+			report(write, result{})
+			return fin(exitError, "could not write to %s: %v — the measurement never started, so this "+
+				"says nothing about the device", target, werr)
+		}
 		report(write, result{})
-		// An I/O error mid-write is the hardware speaking. Not an Error: the
-		// device was reached and it failed, which is a verdict about the part.
+		// Past the first byte the device was reached and it failed, which IS a
+		// verdict about the part.
 		return fin(exitFail, "write failed after %s: %v", humanBytes(write.bytes), werr)
 	}
 
@@ -178,6 +207,16 @@ func report(write, read result) {
 	// exactly what a gate of `ioErrors Equal 0` needs to see to pass a healthy
 	// node.
 	metric("ioErrors", strconv.Itoa(write.errors+read.errors))
+}
+
+// isExistErr reports whether an open failed because the file was already there.
+//
+// Checked in two ways because the runner's own openFile seam may wrap it: the
+// distinction between "this file is not mine" and every other open failure
+// decides both the exit code and whether cleanup is armed, so it must not
+// depend on which layer produced the error.
+func isExistErr(err error) bool {
+	return err != nil && (os.IsExist(err) || strings.Contains(err.Error(), "file exists"))
 }
 
 func trim(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) }
