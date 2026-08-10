@@ -237,11 +237,34 @@ spec:
     # host access below — which is exactly the review question this field exists
     # to make askable, so it is spelled out rather than assumed.
     #
-    # The mount and the privilege do different jobs and BOTH are needed on a
-    # hardened node: the mount supplies the device node, and privileged supplies
-    # CAP_SYSLOG, without which reading /dev/kmsg is refused wherever
-    # kernel.dmesg_restrict=1 (the default on most distributions).
+    # THREE things are needed to read /dev/kmsg, and this sample used to name
+    # only two. The mount supplies the device node; `privileged` supplies the
+    # capability to the PROCESS; and `runAsUser: 0` is what lets that capability
+    # survive into the effective set.
+    #
+    # The claim that used to be here — "privileged supplies CAP_SYSLOG" — is
+    # false for a non-root container, and this file's own sibling
+    # (pair-network-acceptance.yaml) already documents the same trap for
+    # IPC_LOCK: Linux drops effective capabilities when a process switches away
+    # from root, so a privileged pod running as uid 65532 reads CapEff as all
+    # zeros. Every runner image this project publishes declares USER 65532.
+    #
+    # MEASURED, on a healthy GB10 with this sample applied unmodified:
+    #
+    #     phase: Failed
+    #     metric "xidEvents" was not reported by the runner [HOST_HEALTH_OK]
+    #
+    # The runner said the host was fine and the profile condemned the node,
+    # because `xidEvents Equal 0` is Required and a metric the runner never
+    # emitted fails closed — correctly. The gate was unsatisfiable on every node
+    # in any fleet with kernel.dmesg_restrict=1, which is the default on Ubuntu
+    # and most distributions. See issue #134.
     privileged: true
+    # Without this the mount above is necessary and not sufficient, and the
+    # xidEvents gate below can never be satisfied. If your policy forbids a root
+    # runner, drop the xidEvents threshold too — a gate nothing can satisfy is
+    # worse than no gate, because it arrives in the shape of a hardware verdict.
+    runAsUser: 0
     hostPaths:
       # readOnly is left unset and therefore TRUE. This runner only ever reads
       # the ring buffer; a burn-in runner has no business writing to the kernel
