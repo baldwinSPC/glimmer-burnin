@@ -2,6 +2,8 @@ package localrun
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -124,6 +126,26 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 			if m.Type != nil && *m.Type == corev1.HostPathCharDev {
 				spec.Devices = append(spec.Devices, m.Path)
 			}
+			// AND SO DOES EVERY CHARACTER DEVICE INSIDE A MOUNTED DIRECTORY.
+			//
+			// The rule above keys on the declared type, which is right as far as
+			// it goes and covers /dev/kmsg. But the case this project actually
+			// ships is a DIRECTORY of devices: pair-network-acceptance.yaml
+			// declares /dev/infiniband as `type: Directory`, because uverbs
+			// numbering is per-node and not even symmetric across a cable, so no
+			// fixed list of nodes is right everywhere.
+			//
+			// Bind-mounting that directory makes uverbs0-3 visible and leaves
+			// them unopenable — `Operation not permitted` — so perftest failed
+			// with "Couldn't get context for the device" and no fabric test could
+			// run on bare metal. In-cluster the same BurnInTest works, which is
+			// how the documented, shipped configuration came to be broken on one
+			// dispatcher only (#289).
+			//
+			// Only the immediate children are granted. Recursing would sweep in
+			// by-ibdev/ and by-path/, which hold symlinks to the same nodes, and
+			// granting a path twice is noise at best.
+			spec.Devices = append(spec.Devices, charDevicesIn(m.Path)...)
 			for _, trigger := range memlockTriggers {
 				if strings.HasPrefix(m.Path, trigger) {
 					spec.UnlimitedMemlock = true
@@ -201,6 +223,32 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 //
 // Not a stylistic rule: BURNIN_ROLE decides which end of a link a runner is, and
 // a profile that could set it would be able to make both ends the client.
+
+// charDevicesIn lists the character devices directly inside a directory.
+//
+// Reads the host filesystem, which makes Translate environment-dependent — so it
+// is a seam (statDir) that tests replace, and it returns nothing rather than an
+// error for a path that is not a directory or cannot be read. A missing device
+// is the runtime's to report: refusing to translate here would turn "this node
+// has no RDMA" into a CLI error instead of the runner's own honest Skip.
+var statDir = func(dir string) ([]os.DirEntry, error) { return os.ReadDir(dir) }
+
+func charDevicesIn(dir string) []string {
+	entries, err := statDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			continue
+		}
+		out = append(out, filepath.Join(dir, e.Name()))
+	}
+	return out
+}
+
 var reservedEnv = map[string]struct{}{
 	"BURNIN_DURATION_SECONDS": {},
 	"BURNIN_ATTEMPT":          {},
