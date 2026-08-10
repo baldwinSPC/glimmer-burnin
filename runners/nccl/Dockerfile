@@ -91,9 +91,9 @@ WORKDIR /nccl
 RUN got="$(git rev-parse HEAD)"; \
     if [ "${got}" != "${NCCL_SHA}" ]; then \
       echo "refusing to build: ${NCCL_REF} is ${got}, expected ${NCCL_SHA}" >&2; \
-      if [ "$(git cat-file -t "${NCCL_SHA}" 2>/dev/null)" = "tag" ]; then \
+      if [ "$(cd /nccl && git cat-file -t "${NCCL_SHA}" 2>/dev/null)" = "tag" ]; then \
         echo "  ${NCCL_SHA} is the ANNOTATED TAG OBJECT, not the commit it points to." >&2; \
-        echo "  Use the peeled value: $(git rev-parse "${NCCL_SHA}^{commit}")" >&2; \
+        echo "  Use the peeled value: $(cd /nccl && git rev-parse "${NCCL_SHA}^{commit}")" >&2; \
         echo "  Resolve it with: git ls-remote <repo> 'refs/tags/<ref>^{}'" >&2; \
       fi; \
       exit 1; \
