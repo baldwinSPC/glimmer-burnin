@@ -244,20 +244,22 @@ int measureWindow(long windowSeconds, double flopsPerIteration, double tolerance
                     (s.totalKernelMs * 1e-3) / 1e12);
   }
 
-  // Correctness first: NaN/Inf in the DEVICE output is a self-contained
-  // measurement of the part that needs no reference at all.
-  if (s.nonfinite != 0) return fail("output contains NaN/Inf");
-
-  // An all-zero REFERENCE is not a finding about the GPU: the yardstick came
-  // out degenerate, so nothing was measured. Checked before the two verdicts
-  // that rely on it — condemning a node because the harness could not build a
-  // reference is precisely the confusion the exit table exists to prevent.
-  if (maxAbsRef <= 0.0)
-    return errored("the host reference GEMM came out all zeros; the comparison has no yardstick "
-                   "and nothing was measured about this part");
-
-  if (s.sumAbsFirst <= 0.0) return fail("device output is all zeros");
-  if (!(maxRelError <= tolerance)) return fail("numerical mismatch exceeds tolerance");
+  // The verdict itself — the one place exit 0 and exit 1 are told apart — is
+  // pure logic and lives in precision.h, where a test that cannot execute this
+  // file drives it exhaustively (ordering included).
+  switch (burnin::judgeWindow(s.nonfinite, maxAbsRef, s.sumAbsFirst, maxRelError, tolerance)) {
+    case burnin::Judgement::FailNonfinite:
+      return fail("output contains NaN/Inf");
+    case burnin::Judgement::ErrorNoYardstick:
+      return errored("the host reference GEMM came out all zeros; the comparison has no yardstick "
+                     "and nothing was measured about this part");
+    case burnin::Judgement::FailAllZeros:
+      return fail("device output is all zeros");
+    case burnin::Judgement::FailMismatch:
+      return fail("numerical mismatch exceeds tolerance");
+    case burnin::Judgement::Pass:
+      break;
+  }
   std::printf("GEMM_SWEEP_PASS\n");
   return kExitPass;
 }

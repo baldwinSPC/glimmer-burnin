@@ -205,6 +205,41 @@ inline std::string refuseMessage(Precision p, const std::string& raw, int comput
          " applies to it is unknown — the part is UNJUDGED rather than skipped";
 }
 
+// ── the verdict over a measured window ───────────────────────────────────────
+//
+// Pure and CUDA-free so it can be driven without a GPU: this is the ONE place
+// exit 0 and exit 1 are told apart, which makes it the most expensive logic in
+// the runner to get wrong — and the .cu it would otherwise live in cannot be
+// executed by any test in this repository.
+enum class Judgement {
+  Pass,
+  FailNonfinite,     // NaN/Inf in the device output — needs no reference at all
+  ErrorNoYardstick,  // the HOST reference came out degenerate: nothing measured
+  FailAllZeros,      // the device wrote nothing but zeros
+  FailMismatch,      // outside tolerance against the reference
+};
+
+// judgeWindow orders its checks deliberately, and the order is load-bearing:
+//
+//   1. Nonfinite device output is a self-contained measurement of the part, so
+//      it is judged before anything that could go wrong with the yardstick.
+//   2. A degenerate reference is OUR failure, not the part's — max relative
+//      error is INFINITY by construction off the back of it, so the tolerance
+//      check below would fire and condemn a node because the harness could not
+//      build a comparison. It is an Error, checked before both verdicts that
+//      rely on the reference.
+//   3. The tolerance check is written !(x <= tol) rather than (x > tol) so a
+//      NaN relative error FAILS CLOSED: NaN compares false against everything,
+//      and the other spelling would wave it through as a pass.
+inline Judgement judgeWindow(long long nonfiniteCount, double maxAbsRef, double sumAbsFirst,
+                             double maxRelError, double tolerance) {
+  if (nonfiniteCount != 0) return Judgement::FailNonfinite;
+  if (maxAbsRef <= 0.0) return Judgement::ErrorNoYardstick;
+  if (sumAbsFirst <= 0.0) return Judgement::FailAllZeros;
+  if (!(maxRelError <= tolerance)) return Judgement::FailMismatch;
+  return Judgement::Pass;
+}
+
 // ── does the arch this binary was built for cover the part in front of it? ───
 //
 // The CUDA runtime does not answer this reliably, and the direction it misses

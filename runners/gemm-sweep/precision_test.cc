@@ -10,6 +10,7 @@
 
 #include "precision.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -222,6 +223,41 @@ static void testMismatchMessageIsActionable() {
         "the message says this is not a hardware verdict");
 }
 
+// The window verdict: the one place exit 0 and exit 1 are told apart.
+static void testJudgeWindow() {
+  using burnin::Judgement;
+  // A clean window passes.
+  check(burnin::judgeWindow(0, 100.0, 50.0, 1e-9, 1e-6) == Judgement::Pass, "clean window passes");
+
+  // Nonfinite device output outranks everything — including a degenerate
+  // reference, because it is a measurement of the part that needs no reference.
+  check(burnin::judgeWindow(1, 100.0, 50.0, 1e-9, 1e-6) == Judgement::FailNonfinite,
+        "one NaN fails the part");
+  check(burnin::judgeWindow(1, 0.0, 0.0, INFINITY, 1e-6) == Judgement::FailNonfinite,
+        "nonfinite outranks the degenerate reference");
+
+  // A degenerate reference is OUR failure and must be an Error, checked before
+  // the two verdicts that rely on it: the same inputs would otherwise read as
+  // an all-zeros or out-of-tolerance hardware Fail.
+  check(burnin::judgeWindow(0, 0.0, 0.0, INFINITY, 1e-6) == Judgement::ErrorNoYardstick,
+        "no yardstick is an Error, not a Fail");
+  check(burnin::judgeWindow(0, -1.0, 50.0, 1e-9, 1e-6) == Judgement::ErrorNoYardstick,
+        "a negative max|ref| is equally degenerate");
+
+  check(burnin::judgeWindow(0, 100.0, 0.0, 0.0, 1e-6) == Judgement::FailAllZeros,
+        "an all-zero device output is a measured Fail");
+  check(burnin::judgeWindow(0, 100.0, 50.0, 1e-3, 1e-6) == Judgement::FailMismatch,
+        "outside tolerance is a measured Fail");
+  check(burnin::judgeWindow(0, 100.0, 50.0, 1e-6, 1e-6) == Judgement::Pass,
+        "the tolerance bound is inclusive");
+
+  // A NaN relative error FAILS CLOSED. NaN compares false against everything,
+  // so the (x > tol) spelling would wave it through as a pass — this row is the
+  // reason the check is written !(x <= tol).
+  check(burnin::judgeWindow(0, 100.0, 50.0, NAN, 1e-6) == Judgement::FailMismatch,
+        "a NaN relative error must fail closed, never pass");
+}
+
 // The exit contract is load-bearing for the operator; a renumbering here would
 // silently remap verdicts fleet-wide.
 static void testExitCodesMatchTheRunnerContract() {
@@ -263,6 +299,7 @@ int main() {
   testArchCoversTheBinaryCompatTrap();
   testArchCoversNeverGuesses();
   testMismatchMessageIsActionable();
+  testJudgeWindow();
   testExitCodesMatchTheRunnerContract();
   testNamesAreDistinct();
 

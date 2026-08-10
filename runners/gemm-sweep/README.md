@@ -105,5 +105,4 @@ Built and unit-tested (the decision layer exhaustively, without a GPU); **not
 yet verified on real hardware**, and therefore unpublished — no tag exists and
 `pkg/runnerimages` deliberately carries no default image for this kind, so a
 BurnInTest must name `spec.runner.image` explicitly. The hardware-verification
-checklist, including what to capture for the parser tests, is the follow-up
-issue this runner landed with.
+checklist, including what to capture for the parser tests, is issue #265.
