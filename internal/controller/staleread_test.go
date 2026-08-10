@@ -148,6 +148,53 @@ func TestRun_PriorSchedulabilityIsNotInheritedFromAStaleCache(t *testing.T) {
 	h.assertNoStrandedCordons()
 }
 
+// The same capture, through the reading the test above cannot reach: a node the
+// informer remembers as unschedulable with NO stamp on it.
+//
+// The test above passes whether capturePriorSchedulability reads the cache or
+// the apiserver, and that is not a spare assertion — it is a hole. Its stale
+// node carries a well-formed stamp, so preBurnInSchedulability answers from the
+// STAMP and never looks at spec.unschedulable; the cache could be arbitrarily
+// far behind and the answer would still be right. The reading that has nothing
+// to correct it is the unstamped one, and an administrator's drain lifted
+// moments before the run started is exactly that: the informer holds
+// unschedulable=true with no annotations, so prior=true is recorded about a node
+// that is schedulable, and teardown makes it permanent. A cordon nobody placed,
+// held forever, with no stamp left for the reaper to key on.
+func TestRun_PriorSchedulabilityIsNotTakenFromAStaleUnstampedCordon(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-85a9"),
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-85a9"),
+	)
+	sc := h.throughCache()
+
+	stale := h.node("spark-85a9").DeepCopy()
+	stale.Spec.Unschedulable = true
+	sc.nodes = map[string]*corev1.Node{"spark-85a9": stale}
+
+	h.reconcile("run1")
+	sc.thaw()
+
+	if got, ok := h.run("run1").Status.PriorUnschedulable["spark-85a9"]; !ok || got {
+		t.Fatalf("status.priorUnschedulable[spark-85a9] = %v (recorded %v) — the run took a drain "+
+			"that had already been lifted for the node's pre-existing state", got, ok)
+	}
+
+	h.reconcile("run1")
+	pods := h.pods("run1")
+	h.startPod(pods["spark-85a9"])
+	h.finishPod(pods["spark-85a9"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+
+	if h.node("spark-85a9").Spec.Unschedulable {
+		t.Error("spark-85a9 was left unschedulable, restoring a cordon that was already gone when " +
+			"the run arrived — and with the stamp removed, nothing is left to key a reaper on")
+	}
+	h.assertNoStrandedCordons()
+}
+
 // The release must find the nodes this run is holding even when the informer
 // has not yet observed that it stamped them. Issue #59.
 //
@@ -194,6 +241,105 @@ func TestRun_ReleaseFindsACordonTheInformerHasNotSeen(t *testing.T) {
 			"that had not seen the stamp, found nothing to give back, and dropped the finalizer")
 	}
 	h.assertNoStrandedCordons()
+}
+
+// betweenWaves drives a two-node, cap-1 run to the moment it is about to hand
+// back its first node: spark-a is cordoned and its pod has just finished.
+//
+// The mid-run release is where a per-node release is exercised at all:
+// releaseCordons only ever runs at teardown, so this is the only path that
+// decides, node by node, whether the run still owes one back.
+func (h *harness) betweenWaves() {
+	h.t.Helper()
+	h.reconcile("run1") // Pending → Running: capture prior schedulability
+	h.reconcile("run1") // wave 1: cordon spark-a, create its pod
+	pod := h.pods("run1")["spark-a"]
+	if pod == nil {
+		h.t.Fatal("precondition: wave 1 should have created a pod on spark-a")
+	}
+	if !h.node("spark-a").Spec.Unschedulable {
+		h.t.Fatal("precondition: the run should be holding spark-a by now")
+	}
+	h.startPod(pod)
+	h.finishPod(pod, 0, fp4Stdout, "Completed")
+}
+
+// assertReleasedFirstWave is the fleet-visible half of the invariant: once the
+// run has dropped its claim on spark-a, spark-a is back in the scheduler.
+func (h *harness) assertReleasedFirstWave(how string) {
+	h.t.Helper()
+	for _, n := range h.run("run1").Status.CordonedNodes {
+		if n == "spark-a" {
+			h.t.Fatalf("precondition: the run has not released spark-a yet (%s)", how)
+		}
+	}
+	if h.node("spark-a").Spec.Unschedulable {
+		h.t.Errorf("spark-a is still cordoned with this run's stamp on it, but the run no longer "+
+			"claims it: %s. status.cordonedNodes now disagrees with the fleet, and the lost "+
+			"scheduling capacity is invisible until somebody diffs it against kubectl get nodes", how)
+	}
+}
+
+// A run must not drop its claim on a node it is still holding because the
+// informer cannot see the stamp. Issue #245.
+//
+// The reproduction: a cap-1 run steps from spark-a to spark-b, and at the moment
+// it goes to give spark-a back the informer is still holding the version from
+// before the stamp went on. releaseNode read that through the cache, concluded
+// the node was not its own any more, wrote NOTHING — and dropped spark-a from
+// status.CordonedNodes anyway.
+//
+// That is a conclusion of ABSENCE drawn from a cache, which is the class of read
+// that has no optimistic-concurrency check behind it: an Update would have been
+// refused on resourceVersion, but this arm makes no Update at all. The node
+// stays cordoned, with this run's own stamp on it, and nothing owes it back
+// until the run next cordons it or reaches teardown — for a single-test profile
+// that is the rest of the run.
+//
+// It is scheduling capacity that is lost, not power: busyNodes counts live pods,
+// so no extra load lands in the room. What is lost is a node the cluster can no
+// longer place anything on, and a status.cordonedNodes that lies about it.
+func TestRun_ReleaseDoesNotDropAClaimOnACordonTheInformerHasNotSeen(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a", "spark-b"),
+	)
+	sc := h.throughCache()
+	h.betweenWaves()
+
+	// The informer is stuck on the version it had BEFORE this run stamped
+	// spark-a: no owner annotation, still schedulable.
+	preCordon := gb10Node("spark-a")
+	preCordon.ResourceVersion = h.node("spark-a").ResourceVersion
+	sc.nodes = map[string]*corev1.Node{"spark-a": preCordon}
+
+	h.reconcile("run1") // harvest spark-a, release it, move to spark-b
+	sc.thaw()
+
+	h.assertReleasedFirstWave("the informer was still holding the pre-cordon version")
+}
+
+// The same defect through the other arm: an informer that has not observed the
+// node AT ALL answers NotFound, and "the node is gone" is the strongest
+// conclusion of absence there is. A cache may not be the source of it.
+func TestRun_ReleaseDoesNotDropAClaimOnANodeTheInformerCannotSee(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		smokeTest("fp4"),
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a", "spark-b"),
+	)
+	sc := h.throughCache()
+	h.betweenWaves()
+
+	sc.hidden = map[string]bool{"spark-a": true}
+
+	h.reconcile("run1")
+	sc.thaw()
+
+	h.assertReleasedFirstWave("the informer had not observed spark-a at all")
 }
 
 // conflictOnTerminalStatus fails the run's status write once, the way a
