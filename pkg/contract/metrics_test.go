@@ -12,6 +12,8 @@ func TestUnitOf(t *testing.T) {
 	}{
 		// The two that motivated the convention. They must stay distinguishable.
 		{"bandwidthGbps", UnitGigabitsPerSecond},
+		{"peerReadBandwidthGBs", UnitGigabytesPerSecond},
+		{"peerWriteBandwidthGBs", UnitGigabytesPerSecond},
 		{"tcpThroughputGbps", UnitGigabitsPerSecond},
 		{"tcpRttUs", UnitMicroseconds},
 		{"busBandwidthGBs", UnitGigabytesPerSecond},
@@ -135,6 +137,10 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"deviceToDeviceBandwidthGBs": {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"memoryBandwidthGBs":         {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"bandwidthGbps":              {UnitGigabitsPerSecond, ThresholdUseAcceptance},
+		"peerReadBandwidthGBs":       {UnitGigabytesPerSecond, ThresholdUseAcceptance},
+		"peerWriteBandwidthGBs":      {UnitGigabytesPerSecond, ThresholdUseAcceptance},
+		"peerReadBandwidthMaxGBs":    {UnitGigabytesPerSecond, ThresholdUseEvidence},
+		"peerWriteBandwidthMaxGBs":   {UnitGigabytesPerSecond, ThresholdUseEvidence},
 		"tcpThroughputGbps":          {UnitGigabitsPerSecond, ThresholdUseAcceptance},
 		"tcpRttUs":                   {UnitMicroseconds, ThresholdUseAcceptance},
 		"peakBandwidthGbps":          {UnitGigabitsPerSecond, ThresholdUseAcceptance},
@@ -381,10 +387,14 @@ func TestAggregationOfTheEasilyMistakenMetrics(t *testing.T) {
 		// A floor: the WORST window is the verdict. A soak holding 83% for
 		// eleven hours and 40% for one hour is a part that dropped to 40%, and
 		// Max or Last would certify the drop away.
-		"sustainedClockPct": {AggMin, "the worst window describes the part"},
-		"bandwidthGbps":     {AggMin, "likewise — the slowest window is the link"},
-		"tcpThroughputGbps": {AggMin, "the slowest window is the path"},
-		"tcpRttUs":          {AggMax, "the worst round-trip is the one that hurts a collective"},
+		"sustainedClockPct":        {AggMin, "the worst window describes the part"},
+		"bandwidthGbps":            {AggMin, "likewise — the slowest window is the link"},
+		"peerReadBandwidthGBs":     {AggMin, "the worst cell of the matrix is the fabric"},
+		"peerWriteBandwidthGBs":    {AggMin, "likewise, in the other direction"},
+		"peerReadBandwidthMaxGBs":  {AggMax, "the best cell; its distance from the min is the signal"},
+		"peerWriteBandwidthMaxGBs": {AggMax, "likewise"},
+		"tcpThroughputGbps":        {AggMin, "the slowest window is the path"},
+		"tcpRttUs":                 {AggMax, "the worst round-trip is the one that hurts a collective"},
 
 		// A ceiling, the same reasoning inverted.
 		"gpuTempC":  {AggMax, "peak across the whole soak, not the last segment"},

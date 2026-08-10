@@ -261,6 +261,30 @@ var registry = map[string]Metric{
 		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"peerReadBandwidthGBs": {
+		Name: "peerReadBandwidthGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "worst cell of the all-pairs GPU-to-GPU READ bandwidth matrix, over NVLink, xGMI or a PCIe switch. The MINIMUM rather than the mean because a fabric is as good as its worst link, and a mean over the matrix hides the single degraded lane this measurement exists to find. Unmeasurable (n/a) on a node with one accelerator, or with no peer path between them",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"peerReadBandwidthMaxGBs": {
+		Name: "peerReadBandwidthMaxGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "best cell of the same matrix. Evidence, not acceptance: its distance from peerReadBandwidthGBs is what makes ONE degraded link visible as a spread rather than as a slightly lower average",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"peerWriteBandwidthGBs": {
+		Name: "peerWriteBandwidthGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "worst cell of the all-pairs GPU-to-GPU WRITE bandwidth matrix. Reported separately from the read direction because a link can degrade asymmetrically and averaging the two would hide it",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"peerWriteBandwidthMaxGBs": {
+		Name: "peerWriteBandwidthMaxGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "best cell of the write matrix. Evidence, for the same reason as the read direction",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"deviceToDeviceBandwidthGBs": {
 		Name: "deviceToDeviceBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "on-device copy bandwidth, device memory to device memory; bounded by the memory subsystem rather than by the host link",

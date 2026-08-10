@@ -74,15 +74,41 @@ Also emitted, as context rather than as gates: `nvbandwidth_ref`, `gpu_name`,
 ### Why `device_local_copy` backs `deviceToDeviceBandwidthGBs`
 
 nvbandwidth's `device_to_device_*` testcases are GPU-to-**peer**-GPU copies: they
-need at least two accelerators, they skip themselves on a single-GPU node, and
-what they measure is the peer link.
+need at least two accelerators and what they measure is the peer link.
 
-The metric this project registered is the on-device figure — "bounded by the
-memory subsystem rather than by the host link" — which is `device_local_copy`.
-A peer-link figure is a different measurand; recording it under this name would
-put two quantities in one column and make a single-GPU node look like it failed
-to measure. A peer-bandwidth gate belongs in a Pair-scope test under a name of
-its own.
+The metric this project registered under that name is the on-device figure —
+"bounded by the memory subsystem rather than by the host link" — which is
+`device_local_copy`. A peer-link figure is a different measurand, so it gets
+**names of its own** rather than sharing this column: putting two quantities in
+one place is what the separation avoids.
+
+### The peer matrix
+
+`peerReadBandwidthGBs` and `peerWriteBandwidthGBs` are the **worst cell** of the
+all-pairs matrix, the two directions measured separately because a link can
+degrade asymmetrically and averaging them would hide it.
+
+On a multi-GPU node this is where the interesting failures live. A degraded
+NVLink lane, an xGMI link that trained narrow, a switch port that fell back —
+none of them move a device-local copy, and all of them halve a training job that
+assumed the fabric. The minimum rather than the mean, for the reason this runner
+reports minima everywhere: a fabric is as good as its worst link, and an average
+over the matrix hides the single bad lane the measurement exists to find. The
+`*MaxGBs` companions are evidence — their distance from the minimum is what
+makes ONE degraded link visible as a spread rather than as a slightly lower
+average.
+
+**On a single-GPU node these are `n/a` — not absent, and not a skip of the whole
+test.** There is no peer, so the runner declares the figures unmeasurable.
+Omitting the keys would make a gate on them fail closed and condemn every
+single-GPU node in a fleet; exiting 2 would throw away the three device-local
+figures the run did take, which on a DGX Spark is the entire value of this kind.
+Pair such a gate with `applicability: RequiredIfMeasurable` and it is reported
+NOT EVALUATED instead. The same declaration is made when two or more devices are
+present but no peer path exists between them.
+
+Ship them thresholdless first: peer bandwidth is SKU- and topology-specific, and
+this project pins thresholds from measured baselines rather than datasheets.
 
 ### Why `memoryBandwidthGBs` is *not* emitted
 

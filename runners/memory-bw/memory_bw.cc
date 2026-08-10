@@ -416,23 +416,41 @@ Probe probeCuda(Device &device, std::string &detail) {
 // depend on which SM architecture the image was compiled for.
 //
 // device_local_copy — not device_to_device_memcpy_read_ce — is what backs
-// deviceToDeviceBandwidthGBs. nvbandwidth's device_to_device testcases are
-// GPU-to-GPU peer copies: they need at least two accelerators, they skip
-// themselves on a single-GPU node, and they measure the peer link. The metric
-// this project registered is the on-device figure ("bounded by the memory
-// subsystem rather than by the host link"), which is device_local_copy. A peer
-// figure is a different measurand and belongs to a Pair-scope test under a name
-// of its own; recording it here would put two quantities in one column.
+// deviceToDeviceBandwidthGBs. The two are different measurands and each has its
+// own column: device_local_copy is the on-device figure ("bounded by the memory
+// subsystem rather than by the host link"), while the device_to_device cases are
+// GPU-to-GPU PEER copies over NVLink, xGMI or a PCIe switch. Putting a peer
+// figure in the on-device column would put two quantities in one place, which is
+// why the peer cases below carry names of their own rather than sharing.
+//
+// The peer cases are where a multi-GPU node's interesting failures live — issue
+// #161. A degraded NVLink lane, an xGMI link that trained narrow, a switch port
+// that fell back to a lower width: none of them move a device-local copy, and
+// all of them halve a training job that assumed the fabric.
 struct Case {
   const char *testcase;
   const char *minKey;  // the acceptance metric — see README on why it is the min
   const char *maxKey;  // evidence, so a one-bad-link node is visible as a spread
+  // peer marks a case that measures a link BETWEEN accelerators and therefore
+  // needs at least two. On a single-GPU node it is not merely absent: it is
+  // declared unmeasurable — see the n/a emission below.
+  bool peer;
 };
 
 const Case kCases[] = {
-    {"host_to_device_memcpy_ce", "h2d_bandwidth_gbs", "hostToDeviceBandwidthMaxGBs"},
-    {"device_to_host_memcpy_ce", "d2h_bandwidth_gbs", "deviceToHostBandwidthMaxGBs"},
-    {"device_local_copy", "d2d_bandwidth_gbs", "deviceToDeviceBandwidthMaxGBs"},
+    {"host_to_device_memcpy_ce", "h2d_bandwidth_gbs", "hostToDeviceBandwidthMaxGBs", false},
+    {"device_to_host_memcpy_ce", "d2h_bandwidth_gbs", "deviceToHostBandwidthMaxGBs", false},
+    {"device_local_copy", "d2d_bandwidth_gbs", "deviceToDeviceBandwidthMaxGBs", false},
+    // The all-pairs peer matrix, read and write. Copy-engine variants for the
+    // same reason as the three above: the figure must not depend on which SM
+    // architecture this image was compiled for.
+    //
+    // The MINIMUM cell is the acceptance figure, matching this runner's existing
+    // convention and for a sharper reason here — a fabric is as good as its
+    // worst link, and a mean over an all-pairs matrix hides exactly the single
+    // degraded lane the case exists to find.
+    {"device_to_device_memcpy_read_ce", "peer_read_bandwidth_gbs", "peerReadBandwidthMaxGBs", true},
+    {"device_to_device_memcpy_write_ce", "peer_write_bandwidth_gbs", "peerWriteBandwidthMaxGBs", true},
 };
 
 // reportsCorruption identifies the one condition under which nvbandwidth's
@@ -500,6 +518,25 @@ int main() {
   std::string skipReason;
 
   for (const Case &c : kCases) {
+    // A PEER CASE ON A SINGLE-GPU NODE IS UNMEASURABLE, AND SAYS SO.
+    //
+    // Not a silent omission and not a skip of the whole test. Omitting the key
+    // would make a threshold on it fail closed, condemning every single-GPU
+    // node in the fleet for hardware it does not have; exiting 2 would throw
+    // away the three device-local figures this run DID measure, which on a DGX
+    // Spark is the entire value of the kind.
+    //
+    // `n/a` is the reserved value for exactly this: the runner looked, and the
+    // part has nothing to report. pkg/runner puts it in Result.Unmeasurable
+    // rather than Metrics, so a threshold with applicability
+    // RequiredIfMeasurable is reported NOT EVALUATED instead of failed. It is a
+    // declaration the runner is entitled to make because it positively
+    // established the device count — the same rule host-health follows for ECC.
+    if (c.peer && device.count < 2) {
+      std::printf("%s=n/a\n%s=n/a\n", c.minKey, c.maxKey);
+      continue;
+    }
+
     std::vector<std::string> args{NVBANDWIDTH_BIN,        "-t", c.testcase,
                                   "-b", std::to_string(bufferMiB),
                                   "-i", std::to_string(samples)};
@@ -547,6 +584,14 @@ int main() {
       continue;
     }
     if (containsCI(child.output, "waived")) {
+      if (c.peer) {
+        // Two or more accelerators and nvbandwidth still declined: no peer path
+        // between them (no NVLink, no P2P over the switch). That is a fact about
+        // the topology, so it is declared unmeasurable rather than waiving the
+        // whole test — the device-local figures are still good.
+        std::printf("%s=n/a\n%s=n/a\n", c.minKey, c.maxKey);
+        continue;
+      }
       if (skipReason.empty())
         skipReason = std::string(c.testcase) + " is not supported on this hardware";
       continue;
