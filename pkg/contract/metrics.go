@@ -608,6 +608,24 @@ var registry = map[string]Metric{
 	},
 
 	// --- Correctness counters -----------------------------------------------
+	"maxAbsError": {
+		Name: "maxAbsError", Unit: UnitNone,
+		Description:  "largest absolute difference between a GEMM cell and its reference. Evidence beside maxRelativeError, which is the gateable form: an absolute error means nothing without the magnitude it is relative to, and maxAbsRef carries that",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"maxAbsRef": {
+		Name: "maxAbsRef", Unit: UnitNone,
+		Description:  "largest absolute value in the reference matrix, the denominator maxRelativeError is taken against. Recorded so a stored result can be re-derived rather than trusted",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"totalKernelMs": {
+		Name: "totalKernelMs", Unit: UnitMilliseconds,
+		Description:  "summed device time across the measured GEMM launches. The denominator achievedTflops was computed from, kept so the throughput figure can be checked rather than believed",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"nonfiniteCount": {
 		Name: "nonfiniteCount", Unit: UnitNone,
 		Description:  "count of NaN or Inf values in a kernel's output",

@@ -173,11 +173,17 @@ func (k *kernelLogProbe) why() string {
 		// supply CAP_SYSLOG to a container running as a non-root uid, because
 		// the effective set is dropped on the switch away from root — so
 		// "privileged: true" looks like it should be enough and is not.
-		out += ". This image runs as uid 65532 by design. /dev/kmsg needs CAP_SYSLOG " +
-			"wherever kernel.dmesg_restrict=1, and a privileged pod does NOT grant it to a " +
-			"non-root uid; a text kern.log is usually mode -rw-r----- syslog:adm and is " +
-			"unreadable for the same reason. Set spec.runner.runAsUser: 0, or mount a " +
-			"kernel log this uid can read and point BURNIN_KERN_LOG_PATHS at it"
+		out += ". This image runs as uid 65532 by design, and reading /dev/kmsg needs THREE " +
+			"things at once — measured on GB10, issue #134: (1) a DEVICE-CGROUP GRANT, so " +
+			"hostPaths type: CharDevice and not a plain bind mount, which the runtime denies " +
+			"for a character device; (2) uid 0, because a capability added to the bounding " +
+			"set does nothing for a non-root uid; and (3) CAP_SYSLOG wherever " +
+			"kernel.dmesg_restrict=1. Any two of the three still report none. So: " +
+			"hostPaths[type: CharDevice] + runAsUser: 0 + capabilities: [SYSLOG] — or " +
+			"privileged: true WITH runAsUser: 0, which grants all three at once and is why " +
+			"privileged alone, as a non-root uid, buys nothing. Alternatively mount a text " +
+			"kernel log this uid can read and point BURNIN_KERN_LOG_PATHS at it, though one " +
+			"is usually mode -rw-r----- syslog:adm and unreadable for the same reason"
 	}
 	return out
 }
