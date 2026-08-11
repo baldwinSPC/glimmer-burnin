@@ -115,7 +115,17 @@ func loadConfig() (config, error) {
 	c.startEngine = true
 	// Bound to loopback deliberately: the host engine speaks an unauthenticated
 	// protocol, and this pod may run with hostNetwork.
-	c.hostEngineArgs = []string{"-n", "-b", "127.0.0.1", "-p", port}
+	// --home-dir is not optional in a container, and leaving it out cost a real
+	// misdiagnosis (#304). The image runs as uid 65532 with a read-only-ish
+	// root, so nvvs cannot create its working file in "/" — DCGM reports that
+	// as a FAILED subtest reading:
+	//
+	//   Permissions and OS Blocks: No permission to create a file in directory
+	//   '/'. Please restart the hostengine with parameter --home-dir ...
+	//
+	// which arrives as a hardware verdict about a perfectly healthy GPU. /tmp is
+	// writable in this image and is where a scratch file belongs.
+	c.hostEngineArgs = []string{"-n", "-b", "127.0.0.1", "-p", port, "--home-dir", "/tmp"}
 	if raw := os.Getenv("BURNIN_NV_HOSTENGINE_ARGS"); raw != "" {
 		c.hostEngineArgs = strings.Fields(raw)
 	}
@@ -302,16 +312,50 @@ func verdict(
 			"DCGM skipped every subtest on this part: "+reason)
 	}
 
+	// #304. Reported whatever the verdict turns out to be: a node whose
+	// persistence mode is off should say so on a pass, on an error, and on a
+	// fail alike, because it is the thing an operator has to act on.
+	if len(c.ConfigFindings) > 0 {
+		rep.set(keyConfigFindings, strings.Join(c.ConfigFindings, " | "))
+	}
+	if len(c.UnreadableFindings) > 0 {
+		// UNMEASURABLE, not zero. `n/a` is the reserved value this project uses
+		// for exactly this, and it is what lets a threshold with
+		// RequiredIfMeasurable report NOT EVALUATED instead of failing closed
+		// against a field the tool could not read.
+		rep.set(keyUnreadableFields, "n/a")
+		rep.set(keyExcusedSubtests, strings.Join(c.ExcusedNames, ","))
+	} else if len(c.ExcusedNames) > 0 {
+		rep.set(keyExcusedSubtests, strings.Join(c.ExcusedNames, ","))
+	}
+
 	if c.Failed > 0 {
 		reason := fmt.Sprintf("%d of %d DCGM subtests failed: %s",
 			c.Failed, c.Executed, strings.Join(c.FailedNames, ", "))
+		if c.BlockingFinding != "" {
+			// FIRST, because the displayed reason is truncated and this is the
+			// one finding that decided the verdict. Everything else follows as
+			// context.
+			reason += " — the finding that indicts the hardware: " + c.BlockingFinding
+		}
 		if len(res.failReasons) > 0 {
-			reason += " — " + strings.Join(res.failReasons, "; ")
+			reason += " — all findings: " + strings.Join(res.failReasons, "; ")
 		}
 		return finish(out, rep, exitFail, markerFail, reason)
 	}
 
 	if c.NotRun > 0 {
+		if len(c.ExcusedNames) > 0 {
+			// Distinguished from an ordinary partial run because the remedy is
+			// completely different: this node needs configuring, not replacing.
+			detail := strings.Join(append(append([]string{}, c.ConfigFindings...), c.UnreadableFindings...), "; ")
+			return finish(out, rep, exitError, markerError, fmt.Sprintf(
+				"%d of %d DCGM subtests are UNJUDGED because every finding against them was a node "+
+					"setting or a field DCGM could not read, not a fault in the part — %s. Fix the "+
+					"configuration and re-run; this is deliberately not a Fail, which would condemn "+
+					"the hardware for something a command fixes (issue #304)",
+				c.NotRun, c.Total, detail))
+		}
 		return finish(out, rep, exitError, markerError, fmt.Sprintf(
 			"%d of %d DCGM subtests did not run, so this node is only partly checked; "+
 				"treating a partial suite as a pass would overstate what was verified",

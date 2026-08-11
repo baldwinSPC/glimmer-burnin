@@ -96,6 +96,20 @@ type diagCounts struct {
 	Skipped  int
 
 	FailedNames []string
+
+	// ExcusedNames are subtests DCGM failed whose findings were all
+	// non-hardware, so they were counted as NotRun instead. See #304.
+	ExcusedNames []string
+	// ConfigFindings are node-setting problems: real, reportable, and not a
+	// statement about the silicon.
+	ConfigFindings []string
+	// BlockingFinding is the first finding that kept a failed subtest from
+	// being excused — the one that is actually about the hardware.
+	BlockingFinding string
+	// UnreadableFindings are fields DCGM could not read. Reported as
+	// unmeasurable rather than as a value, which is the rule everywhere in this
+	// project — a counter nobody read is not a counter that read zero.
+	UnreadableFindings []string
 }
 
 // parseDiagJSON extracts the diagnostic document from dcgmi's stdout.
@@ -278,6 +292,27 @@ func (r *diagResults) Counts() diagCounts {
 		case statusPass:
 			c.Passed++
 		case statusFail:
+			// A failure whose every finding is a node setting or a failed read
+			// is not a verdict about the part — issue #304. It becomes NOT RUN,
+			// which is already this runner's word for "DCGM did not establish a
+			// result here", and which run() reports as Error: unjudged, rather
+			// than a hardware Fail that is never retried.
+			//
+			// Reusing NotRun rather than inventing a fourth outcome keeps one
+			// meaning per phase. The findings themselves are not discarded —
+			// they are carried out for the report, because a node whose
+			// persistence mode is off should say so.
+			cfg, unread, blocking, excused := excusedFindings(reasonsFor(name, r.failReasons))
+			if !excused && blocking != "" && c.BlockingFinding == "" {
+				c.BlockingFinding = blocking
+			}
+			if excused {
+				c.NotRun++
+				c.ExcusedNames = append(c.ExcusedNames, name)
+				c.ConfigFindings = append(c.ConfigFindings, cfg...)
+				c.UnreadableFindings = append(c.UnreadableFindings, unread...)
+				continue
+			}
 			c.Failed++
 			c.FailedNames = append(c.FailedNames, name)
 		case statusWarn:
@@ -288,7 +323,14 @@ func (r *diagResults) Counts() diagCounts {
 			c.NotRun++
 		}
 	}
-	c.Executed = c.Passed + c.Failed + c.Warned
+	// Excused subtests COUNT AS EXECUTED (#304). DCGM ran them and produced
+	// findings; what changed is that the findings were not about the part. If
+	// they were left out, a run whose only subtest was excused would reach
+	// Executed == 0 and be reported as SKIPPED — "not applicable to this
+	// hardware" — which is a worse claim than the Fail this excusal exists to
+	// avoid, because it looks benign while verifying nothing. verdict_test.go
+	// catches exactly that.
+	c.Executed = c.Passed + c.Failed + c.Warned + len(c.ExcusedNames)
 	return c
 }
 
