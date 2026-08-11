@@ -24,7 +24,7 @@ spec:
     # apiserver checks at apply time.
     imagesByVendor:
       - vendor: nvidia
-        image: ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.5.0
+        image: ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0
       - vendor: amd
         # No AMD image is published yet — see the R6 milestone. Named here to
         # show the shape; a node whose vendor resolves to a missing image fails

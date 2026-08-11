@@ -61,20 +61,36 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// All eleven images are v0.5.0, published to GHCR, public, and anonymously
+// All eleven images are v0.6.0, published to GHCR, public, and anonymously
 // pullable.
 //
-// THESE TAGS WERE NOT VERIFIED ON REAL HARDWARE BEFORE PUBLICATION, which this
-// file's own rule below ("publish only after the kernel has been verified on
-// real hardware") requires. The GPU fleet was unavailable and the release was
-// cut anyway, deliberately and with the trade understood. What DOES stand behind
-// them: the unit, envtest and kind-based e2e tiers, including a real three-node
-// rendezvous for Group scope, and four rounds of adversarial review that found
-// twenty defects in this release's own code. What does not: no GB10 has run
-// these exact tags, NO 3-RANK COLLECTIVE HAS EVER EXECUTED through the N-rank
-// path on any hardware, and CI builds runner images by CHANGED DIRECTORY — so
-// the runners whose sources did not move are republished from sources CI did not
-// rebuild for this release.
+// v0.6.0 IS THE FIRST RELEASE WHERE SOME OF THESE RAN ON REAL SILICON BEFORE
+// PUBLICATION — the rule below ("publish only after the kernel has been verified
+// on real hardware") is now partly satisfied rather than knowingly broken, and
+// the split is recorded here rather than left for a reader to assume.
+//
+// Verified on a two-node DGX Spark (GB10, CC 12.1, driver 580.82.09) against
+// THESE sources before the tag:
+//
+//	compute-smoke   FP4_GEMM_PASS — the sm_121a path executed and got the right
+//	                answer, which is the one claim this runner exists to make
+//	host-health     passed on both nodes, 28 metrics, nvmlStatus=ok
+//	thermal-soak    a full 300 s window, peaking at 80 C
+//
+// NOT verified on hardware, and shipping on the unit, envtest and kind e2e tiers
+// alone: clockprobe, dcgm-diag, memory-bw, memory-stress, gpu-burn, ib-write-bw,
+// nccl, gpudirect-rdma. Two further gaps that no tier covers: NO 3-RANK
+// COLLECTIVE HAS EVER EXECUTED through the N-rank path on any hardware, and CI
+// builds runner images by CHANGED DIRECTORY — so a runner whose source did not
+// move is republished from sources CI did not rebuild for this release.
+//
+// One measured caveat that belongs with these tags rather than in a release
+// note, because it decides how a soak is scheduled: on this fleet a
+// thermal-soak pod is SIGKILLed after 60-106 s IN KUBERNETES while the identical
+// image runs its full window under the bare-metal CLI on the same GPU. That is
+// not thermal — it was reproduced from a 53 C start, dying at 68 C — and it is
+// unresolved (issue #280). A long soak scheduled through the operator on a
+// GB10 will not complete today.
 //
 // The v0.3.0 tags remain published and immutable, and the measurements behind
 // THEM were taken on a two-node DGX Spark cluster with the v0.2.0 build of the
@@ -116,18 +132,18 @@ var defaults = map[api.TestKind]image{
 	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
 	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
 	// repushed ones.
-	api.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0", Vendor: VendorNVIDIA},
 
-	api.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.5.0", Vendor: VendorNVIDIA},
-	api.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.5.0", Vendor: VendorNVIDIA},
-	api.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.5.0", Vendor: VendorNVIDIA},
-	api.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.5.0", Vendor: VendorNVIDIA},
-	api.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.5.0", Vendor: VendorAny},
-	api.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.5.0", Vendor: VendorNVIDIA},
-	api.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.5.0", Vendor: VendorNVIDIA},
-	api.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.5.0", Vendor: VendorAny},
-	api.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.5.0", Vendor: VendorNVIDIA},
-	api.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.5.0", Vendor: VendorNVIDIA},
+	api.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
+	api.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.0", Vendor: VendorNVIDIA},
+	api.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.0", Vendor: VendorNVIDIA},
+	api.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
+	api.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.0", Vendor: VendorAny},
+	api.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.6.0", Vendor: VendorNVIDIA},
+	api.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.6.0", Vendor: VendorNVIDIA},
+	api.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.0", Vendor: VendorAny},
+	api.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.0", Vendor: VendorNVIDIA},
+	api.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.0", Vendor: VendorNVIDIA},
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.

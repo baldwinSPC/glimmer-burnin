@@ -190,7 +190,7 @@ The GPU axis is per runner and is documented in each runner's README:
 
 > **The `v0.1.0` and `v0.2.x` runner tags are `linux/arm64` only.** Published
 > tags are immutable, so they stay that way; multi-arch begins at `v0.3.0`. The
-> operator pins `v0.5.0` for every runner — `pkg/runnerimages/images.go` is the
+> operator pins `v0.6.0` for every runner — `pkg/runnerimages/images.go` is the
 > source of truth, not this table.
 
 ## Documentation
@@ -371,7 +371,7 @@ gate is made of.
 ### Known limitations
 
 - **No 3-rank collective has ever executed on hardware.** The `nccl` runner does
-  speak the Group rendezvous as of `v0.5.0` — it reads `BURNIN_RANK`,
+  speak the Group rendezvous as of `v0.6.0` — it reads `BURNIN_RANK`,
   `BURNIN_NRANKS` and `BURNIN_ROOT_HOST`, and it is the one kind the operator
   will dispatch by default for a Group test — but no GPU cluster has run it.
   Verifying an N-rank collective needs three or more GPU nodes and this fleet has

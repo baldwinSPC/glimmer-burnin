@@ -50,7 +50,7 @@ CRDs live in `crds/`, which is Helm's convention and carries Helm's caveat:
 That is stated rather than worked around. To upgrade the CRDs:
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/baldwinSPC/glimmer-burnin/v0.5.0/config/crd/
+kubectl apply -f https://raw.githubusercontent.com/baldwinSPC/glimmer-burnin/v0.6.0/config/crd/
 ```
 
 `helm uninstall` leaves the CRDs, and therefore every `BurnInRun`, in place. That
