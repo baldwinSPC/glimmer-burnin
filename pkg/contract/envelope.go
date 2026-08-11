@@ -207,24 +207,33 @@ type NotEvaluated struct {
 
 // Summary is the run's tally, in units of per-(test, node) EXECUTIONS — a
 // 2-test profile against 3 nodes finishes with up to 6 in these counters, so
-// consumers must not gate on passed == number-of-tests. Skipped and Errored
-// executions appear in neither counter; Results carries their phases.
+// consumers must not gate on passed == number-of-tests.
+//
+// ALL FOUR TERMINAL OUTCOMES ARE COUNTED, one entry per Results element. That
+// changed in v0.6.0 and the change is the reason this paragraph is worded
+// carefully: through v0.5.0 the struct carried only Passed and Failed, and this
+// comment told consumers that "Skipped and Errored executions appear in neither
+// counter; Results carries their phases". A consumer who followed that advice
+// wrote a walk over Results to recover them — correctly — and if it now ALSO
+// adds the new counters it double-counts every execution that did not pass.
+//
+// So: read the counters, or walk Results, but not both. The two are the same
+// tally by construction.
+//
+// The four are kept separate rather than folded together for the reason
+// recount() keeps them separate in the status: an Errored execution measured
+// nothing and a Skipped one did not apply, and neither is a hardware verdict.
+//
+// On a CHECKPOINT the run has not finished, so executions still in flight are
+// counted in none of the four and the sum is less than the number of Results.
 type Summary struct {
 	Passed int32 `json:"passed"`
 	Failed int32 `json:"failed"`
-	// Errored and Skipped complete the tally.
-	//
-	// Without them the summary counted two of the four phases and the doc
-	// comment told the consumer to walk Results instead — which is correct and
-	// means the summary could not be used for the one thing a summary is for.
-	// "How many executions did not pass" is the question every consumer asks
-	// first, and it was the one question this struct could not answer.
-	//
-	// They are kept as separate counters rather than folded into Failed for the
-	// reason recount() keeps them separate in the status: an Errored execution
-	// measured nothing and a Skipped one did not apply, and neither is a
-	// hardware verdict. A summary reading "0 failed" beside eight executions
-	// that never ran would be a clean sweep of hardware nobody measured.
+	// Errored and Skipped complete the tally. Without them the summary counted
+	// two of the four phases and could not answer the question every consumer
+	// asks first — "how many executions did not pass" — which is the one thing a
+	// summary is for. A summary reading "0 failed" beside eight executions that
+	// never ran would be a clean sweep of hardware nobody measured.
 	Errored int32 `json:"errored"`
 	Skipped int32 `json:"skipped"`
 }
