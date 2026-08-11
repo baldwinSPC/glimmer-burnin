@@ -199,6 +199,23 @@ var aliases = map[string]map[string]string{
 		"tflops": "throughputTflops",
 	},
 
+	// Measured against a real GB10 capture (runners/gemm-sweep/testdata,
+	// issue #265): the runner emitted five keys nothing had registered, so a
+	// threshold on any of them could never be evaluated. Two of the five are
+	// simply a different spelling of a name that already exists and belong
+	// here; the other three are genuinely new quantities and were registered in
+	// pkg/contract instead.
+	"gemm-sweep": {
+		// Seconds, and the registry spells that suffix "S" — `windowSeconds`
+		// would normalise to a name whose unit the grammar cannot see, so it
+		// would be treated as dimensionless and silently unregistered.
+		"window_seconds": "sampleWindowS",
+		// The same count gpu-burn reports under the same canonical name; a
+		// second name for one quantity is a quantity that eventually disagrees
+		// with itself.
+		"gemm_iterations": "iterationsCompleted",
+	},
+
 	"gpu-burn": {
 		// gpu_burn calls a mismatched result an "error"; ours is the more
 		// specific word, and keeping it distinct from eccErrors matters — a

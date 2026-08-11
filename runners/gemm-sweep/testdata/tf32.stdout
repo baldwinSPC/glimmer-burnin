@@ -1,0 +1,14 @@
+built_cuda_arch=sm_121a
+gemm_precision=tf32
+window_seconds=12
+gpu_name=NVIDIA GB10
+compute_cap=12.1
+gemm_shape=1024x1024x1024
+gemm_iterations=12912
+total_kernel_ms=946.379
+max_abs_ref=260
+max_abs_error=0
+max_relative_error=0
+nonfinite_count=0
+achieved_tflops=29.299
+GEMM_SWEEP_PASS
