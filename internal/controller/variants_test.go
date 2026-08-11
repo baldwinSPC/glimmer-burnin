@@ -313,3 +313,66 @@ func byName(t *testing.T, in []resolvedTest, name string) resolvedTest {
 	t.Fatalf("no execution named %q", name)
 	return resolvedTest{}
 }
+
+// A variant may overlay env or args onto a test that declares no runner block.
+//
+// This is the CANONICAL use of the feature — TestVariant's own doc gives the
+// motivating case as "authoring five BurnInTest objects differing by one
+// environment variable" — and it is exactly the shape that has no `runner:` of
+// its own, because a built-in kind resolves its image from pkg/runnerimages and
+// therefore has nothing to put there.
+//
+// expandVariants wrote through cell.Runner.Env without creating the block, so
+// the first profile anybody writes with this feature panicked the reconciler.
+// A nil dereference in a reconcile loop is not one failed run: controller-runtime
+// recovers the panic and requeues, so it crash-loops on every pass and the whole
+// operator stops making progress for every OTHER run in the cluster too.
+func TestVariants_OverlayOnATestWithNoRunnerBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		variant burninv1alpha1.TestVariant
+		check   func(*testing.T, burninv1alpha1.BurnInTestSpec)
+	}{
+		{
+			name:    "env overlay",
+			variant: burninv1alpha1.TestVariant{Name: "hot", Env: []corev1.EnvVar{{Name: "X", Value: "1"}}},
+			check: func(t *testing.T, s burninv1alpha1.BurnInTestSpec) {
+				if s.Runner == nil || len(s.Runner.Env) != 1 || s.Runner.Env[0].Name != "X" {
+					t.Errorf("env overlay lost: %+v", s.Runner)
+				}
+			},
+		},
+		{
+			name:    "args overlay",
+			variant: burninv1alpha1.TestVariant{Name: "wide", Args: []string{"--size", "4M"}},
+			check: func(t *testing.T, s burninv1alpha1.BurnInTestSpec) {
+				if s.Runner == nil || len(s.Runner.Args) != 2 {
+					t.Errorf("args overlay lost: %+v", s.Runner)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// No Runner block at all — a built-in kind on its default image.
+			base := burninv1alpha1.BurnInTestSpec{
+				Kind:            burninv1alpha1.KindThermalSoak,
+				Scope:           burninv1alpha1.ScopeNode,
+				DurationSeconds: 300,
+			}
+			if base.Runner != nil {
+				t.Fatal("fixture is wrong: this test needs a spec with no runner block")
+			}
+			cells := expandVariants("soak", base, true,
+				[]burninv1alpha1.TestVariant{tc.variant})
+			if len(cells) != 1 {
+				t.Fatalf("cells = %d, want 1", len(cells))
+			}
+			tc.check(t, cells[0].spec)
+			// And the image still resolves: an empty RunnerSpec must behave
+			// exactly as a nil one did, or this fix would break every default.
+			if _, err := runnerImage(&cells[0].spec, ""); err != nil {
+				t.Errorf("image no longer resolves after the overlay: %v", err)
+			}
+		})
+	}
+}

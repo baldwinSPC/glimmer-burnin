@@ -799,7 +799,7 @@ func TestSoak_ManySegmentsStayWritableAndStillRenderTheVerdict(t *testing.T) {
 
 	cm := &sink.ConfigMap{Client: h.c, Namespace: "burnin", Name: "burnin-results"}
 	env := sink.EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, sink.PhaseKey(burninv1alpha1.RunPassed),
-		h.nowVal, nil)
+		h.nowVal, nil, false)
 	if err := cm.Deliver(context.Background(), env); err != nil {
 		t.Fatalf("the ConfigMap sink refused a %d-segment soak's verdict: %v", segments, err)
 	}
@@ -1248,5 +1248,71 @@ func TestPair_HoldsBothEndpointsBetweenRepeats(t *testing.T) {
 		if !h.node(want).Spec.Unschedulable {
 			t.Errorf("%s is schedulable again while its pair test is still running", want)
 		}
+	}
+}
+
+// A CHECKPOINT MUST NOT PUBLISH OVER THE FOLD.
+//
+// foldSegment maintains `res.Metrics = res.AggregatedMetrics` after every clean
+// segment, because a reader mid-soak wants the accumulated numbers. The
+// checkpoint path then overwrote that with ONE partial window, with no
+// SegmentsRequired guard — and `res.Metrics` is the only metric field anything
+// outside this package reads: the delivery envelope, all four renderers, and the
+// Prometheus exposition. AggregatedMetrics is carried by none of them.
+//
+// So the archived envelope for a soak that was cancelled or hit its deadline
+// mid-window reported one window's numbers under a `segments` block saying many
+// windows completed — the peak erased in the CERTIFYING direction, and elapsedS
+// short by the whole soak. The checkpoint progress record, which is the entire
+// reason checkpoints exist for a multi-day soak, sawtoothed instead of advancing.
+//
+// The shipped sample is exactly this configuration: config/samples/segmented-soak.yaml
+// sets both segmentSeconds and checkpointIntervalSeconds.
+func TestSoak_ACheckpointDoesNotPublishOverTheFold(t *testing.T) {
+	run := newRun("run1", "acceptance", "spark-a")
+	bt := soakTest("soak", 2700, 900)
+	bt.Spec.CheckpointIntervalSeconds = int32p(60)
+	h := newHarness(t,
+		gb10Node("spark-a"), bt,
+		profile("acceptance", nil, false, testRef("soak")),
+		run,
+	)
+
+	// Two clean segments: the fold is 1800 s and a peak of 89.
+	h.burnSegment("run1", 1, 0, thermalSegmentStdout("900", "89.0", "83.2", "0"))
+	h.burnSegment("run1", 2, 0, thermalSegmentStdout("900", "70.0", "83.2", "0"))
+	res := soakResult(t, h.run("run1"))
+	if got := res.Metrics["elapsedS"]; got != "1800" {
+		t.Fatalf("precondition: fold elapsedS = %q, want 1800", got)
+	}
+	if got := res.Metrics["gpuTempC"]; got != "89.0" {
+		t.Fatalf("precondition: fold peak = %q, want 89", got)
+	}
+
+	// Now checkpoint 300 s into segment 3, reporting a cooler partial window.
+	pod := h.awaitSegmentPod("run1", 3)
+	h.startPod(pod)
+	h.reconcile("run1")
+	h.logs[pod.Name] = thermalSegmentStdout("300", "70.0", "83.2", "0")
+	h.nowVal = h.nowVal.Add(90 * time.Second)
+	h.reconcile("run1")
+
+	if soakResult(t, h.run("run1")).LastCheckpointAt == nil {
+		t.Fatal("no checkpoint was taken, so this test is not exercising the case it describes")
+	}
+
+	res = soakResult(t, h.run("run1"))
+	if got := res.Metrics["elapsedS"]; got == "300" {
+		t.Errorf("res.Metrics[elapsedS] = 300: the checkpoint published one partial window over a "+
+			"1800 s fold, and res.Metrics is the only field the envelope and every renderer read "+
+			"(aggregate still holds %q)", res.AggregatedMetrics["elapsedS"])
+	}
+	if got := res.Metrics["gpuTempC"]; got == "70.0" || got == "70" {
+		t.Errorf("res.Metrics[gpuTempC] = %q: the soak's real peak of 89 was erased, in the "+
+			"certifying direction, on the one document a consumer keeps", got)
+	}
+	// The aggregate itself was never at risk; it is the published view that was.
+	if got := res.AggregatedMetrics["elapsedS"]; got != "1800" {
+		t.Errorf("the checkpoint corrupted the aggregate itself: elapsedS = %q", got)
 	}
 }

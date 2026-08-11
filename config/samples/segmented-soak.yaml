@@ -26,11 +26,12 @@ spec:
     # time changing pods than measuring hardware. This soak is 672 segments.
     segmentSeconds: 900
     # Left at its default of false. Turning it on ends the soak the moment the
-    # aggregate PROVABLY violates a gate — which here would be xidEvents, a Sum
-    # under Equal 0, since a count that has left zero can never return to it.
-    # sustainedClockPct would not trigger it: it aggregates Min under a floor,
-    # which is monotone, but the temperature ceiling below is a Max and only
-    # rises. Read the abortEarly section of docs/soaks.md before setting it.
+    # aggregate PROVABLY violates a gate — meaning no later segment could retract
+    # it. Two of the three gates below qualify: sustainedClockPct is a Min under
+    # a floor and a minimum only falls, and gpuTempC is a Max under a ceiling and
+    # a maximum only rises. elapsedS does NOT: it is a Sum under a floor, and a
+    # sum only grows, so that gate can only become satisfied and never provably
+    # broken. Read the abortEarly section of docs/soaks.md before setting it.
     abortEarly: false
   # Mid-flight evidence, so a soak that is lost at hour eighty still says what
   # the temperatures were doing. A checkpoint is EVIDENCE and never a verdict:
@@ -43,11 +44,17 @@ spec:
     - metric: elapsedS
       comparison: GreaterThanOrEqual
       value: "574560"
-    # A per-window count, summed. Exact comparison because it is a dimensionless
-    # counter, and a tolerance around zero Xids is a tolerance for Xids.
-    - metric: xidEvents
-      comparison: Equal
-      value: "0"
+    # NO XID GATE HERE, deliberately. thermal-soak does not measure the kernel
+    # ring buffer and never emits xidEvents — it reports eccErrors and the
+    # throttle counters — so gating it here would fail EVERY healthy node after
+    # seven days of burn, with "metric was not reported by the runner". That is a
+    # Failed, the one phase this operator never retries, so the retry budget goes
+    # unspent and the node is permanently indicted on a reading nobody took.
+    # A missing measurement failing closed is correct; asking the wrong runner
+    # for it is the authoring error, and this is where it was made.
+    #
+    # Xids over the same window belong on a host-health test in this profile,
+    # which reads /dev/kmsg and does emit them.
     # A ceiling on a Max-aggregated metric: the peak across the WHOLE soak, not
     # the peak of the last window.
     - metric: gpuTempC

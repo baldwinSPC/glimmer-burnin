@@ -520,6 +520,25 @@ func expandVariants(
 		if v.DurationSeconds != nil {
 			cell.DurationSeconds = *v.DurationSeconds
 		}
+		// A VARIANT THAT OVERLAYS A RUNNER FIELD IS ASKING FOR A RUNNER BLOCK,
+		// and the test it overlays usually has none: a built-in kind resolves its
+		// image from pkg/runnerimages, so there is nothing for its author to put
+		// in `runner:`. That is the CANONICAL use of this feature — five cells
+		// differing by one environment variable — and writing through a nil
+		// pointer panicked the reconciler on the first profile anybody wrote.
+		//
+		// A nil dereference here is not one failed run. controller-runtime
+		// recovers the panic and requeues, so it crash-loops every pass and the
+		// operator stops making progress for every OTHER run in the cluster too.
+		//
+		// Creating an empty block is safe for image resolution: Resolve treats an
+		// empty Image and an empty ImagesByVendor exactly as it treats a nil
+		// RunnerSpec, so a cell that gains one still lands on the kind's default.
+		if v.Args != nil || v.Env != nil {
+			if cell.Runner == nil {
+				cell.Runner = &burninv1alpha1.RunnerSpec{}
+			}
+		}
 		if v.Args != nil {
 			cell.Runner.Args = append([]string(nil), v.Args...)
 		}
@@ -1877,9 +1896,39 @@ func (r *BurnInRunReconciler) checkpoint(
 	}
 
 	now := metav1.NewTime(r.now())
-	res.Metrics = parsed.Metrics
+
+	// A CHECKPOINT MUST NOT PUBLISH OVER THE FOLD.
+	//
+	// foldSegment maintains res.Metrics = res.AggregatedMetrics after every clean
+	// segment, because a reader mid-soak wants the accumulated numbers rather
+	// than the last window's. Overwriting that with ONE partial window erased the
+	// soak so far from the only metric field anything outside this package reads:
+	// the delivery envelope carries res.Metrics and not AggregatedMetrics, and so
+	// do all four renderers and the Prometheus exposition.
+	//
+	// The damage was silent and in the certifying direction. A soak that had
+	// peaked at 89 C over 1800 seconds, checkpointed 300 seconds into a cooler
+	// window, published 70 C and 300 s — under a `segments` block still saying
+	// two windows had completed, which docs/sinks.md tells consumers to read as a
+	// fold. The progress record that is the whole reason to checkpoint a
+	// multi-day soak sawtoothed instead of advancing.
+	//
+	// So the published view is the fold COMBINED WITH the window in flight, which
+	// is the honest answer to "how is this soak going": foldMetrics applies each
+	// metric's own rule, so elapsedS sums and gpuTempC takes the peak.
+	// AggregatedMetrics itself is deliberately NOT touched — a checkpoint is not
+	// a completed segment, and folding it in would count the same seconds again
+	// when the segment finishes, which TestSoak_ACheckpointNeverFoldsIntoTheAggregate
+	// pins.
+	published := parsed.Metrics
+	if res.SegmentsRequired > 0 && len(res.AggregatedMetrics) > 0 {
+		published = foldMetrics(res.AggregatedMetrics, parsed.Metrics)
+	}
+	res.Metrics = published
 	res.LastCheckpointAt = &now
 	if n := len(res.Attempts); n > 0 && !res.Attempts[n-1].Phase.IsTerminal() {
+		// The ATTEMPT record keeps this window's own reading. An attempt is one
+		// pod, and the fold is not a property of it.
 		res.Attempts[n-1].Metrics = parsed.Metrics
 		res.Attempts[n-1].LastCheckpointAt = &now
 	}
