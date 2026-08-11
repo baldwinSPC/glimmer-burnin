@@ -22,10 +22,11 @@ func EnvelopeFor(
 	eventKey string,
 	now time.Time,
 	cluster *contract.ClusterRef,
+	baseline bool,
 ) *contract.Envelope {
 	env := &contract.Envelope{
 		Version:    contract.Version,
-		Baseline:   run.Spec.Baseline != nil && *run.Spec.Baseline,
+		Baseline:   baseline,
 		DeliveryID: contract.NewDeliveryID(string(run.UID), reason, eventKey),
 		Reason:     reason,
 		SentAt:     now.UTC(),

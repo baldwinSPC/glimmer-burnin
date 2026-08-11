@@ -83,7 +83,8 @@ func (r *BurnInRunReconciler) deliver(
 		return true
 	}
 	logger := log.FromContext(ctx)
-	env := sink.EnvelopeFor(run, run.Spec.ProfileRef, reason, eventKey, r.now(), r.Cluster)
+	env := sink.EnvelopeFor(run, run.Spec.ProfileRef, reason, eventKey, r.now(), r.Cluster,
+		pinnedBaseline(run))
 
 	ctx, cancel := context.WithTimeout(ctx, deliveryTimeout)
 	defer cancel()
@@ -119,4 +120,29 @@ func (r *BurnInRunReconciler) deliver(
 		}
 	}
 	return allOK
+}
+
+// pinnedBaseline reports whether the run that EXECUTED applied no gates, read
+// from the pinned plan rather than from the live spec.
+//
+// `baseline` is the field that says a run MEASURED rather than certified, and
+// docs/sinks.md promises flatly that "true here is a reliable claim that nothing
+// was gated". Reading spec.baseline at delivery time made that a claim about the
+// object's state at the moment the envelope was built, not about the run that
+// was executed: clearing the flag on a live run turned every subsequent envelope
+// — including the terminal one a consumer archives — into a certification of a
+// sweep that applied no thresholds at all. The run still delivers phase Passed,
+// so a control plane gating admission on "the last run passed" would then admit
+// a fleet nobody measured.
+//
+// The plan is pinned at start precisely so a mid-run edit cannot change what an
+// execution MEANT; this is the same rule applied to what it REPORTS.
+//
+// A run with no readable plan has not started executing, so its spec is still
+// the only statement of intent there is, and it is the honest fallback.
+func pinnedBaseline(run *burninv1alpha1.BurnInRun) bool {
+	if p, ok, err := loadPlan(run); err == nil && ok && p != nil {
+		return p.Baseline
+	}
+	return run.Spec.Baseline != nil && *run.Spec.Baseline
 }
