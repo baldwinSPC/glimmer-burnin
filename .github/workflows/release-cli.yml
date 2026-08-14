@@ -52,6 +52,36 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
+      # And the vulnerability scan, for the same reason and one more.
+      #
+      # BE PRECISE ABOUT WHAT THIS DOES AND DOES NOT PROTECT, because the
+      # obvious claim for it is wrong and was written here once already.
+      #
+      # It would NOT have prevented #309. v0.6.0's commit was scanned green at
+      # 2026-08-11T00:29:36Z and the tag was cut at 00:38:20Z — nine minutes
+      # later — so a gate here would have re-asked a question that had just been
+      # answered, and got the same green. The advisory data only turned that
+      # same scan red hours afterwards (the next commit's CI, 04:46:21Z, failed
+      # on identical scanning). Nothing can protect already-signed bytes from an
+      # advisory published after they were signed; the remedy for that is
+      # re-cutting the release, which is what v0.6.1 was.
+      #
+      # What it DOES protect: this workflow fires on any `v*` tag and on
+      # workflow_dispatch, neither of which implies a recent scan of the commit
+      # being built. A tag cut from a commit merged weeks ago, a re-dispatch, or
+      # a tag on a branch CI never ran carries no fresh answer at all. This asks
+      # the question about the bytes being signed, at the moment they are
+      # signed — which for a same-day tag is merely redundant, and for any other
+      # tag is the only time it gets asked.
+      #
+      # Deliberately BEFORE the Release step: after it, the archives are already
+      # published and signed, and a scan whose failure cannot stop the release
+      # is a report, not a gate. It fails the release closed — including when
+      # the advisory database is simply unreachable, since "we could not check"
+      # must not sign like "we checked and it was clean".
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
       - name: Release
         uses: goreleaser/goreleaser-action@v7
         with:
