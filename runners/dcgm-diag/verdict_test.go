@@ -150,20 +150,41 @@ func TestVerdict_WarningPassesAndIsCounted(t *testing.T) {
 	}
 }
 
-// The whole point of the wrapper, on the hardware it was written for: dcgmi
-// exits 226, which is not a runner-contract code at all, and the parsed document
-// says exactly one determinate thing — a subtest failed. The verdict must be 1.
+// dcgmi exits 226, which is not a runner-contract code at all, and the parsed
+// document says exactly one determinate thing — its `software` subtest failed.
 //
-// Letting 226 reach the caller, or reporting Error because 226 is unfamiliar,
-// would convert a completely determinate diagnostic result into "we don't know"
-// and leave the node unjudged.
-func TestVerdict_GB10PersistenceModeFailureIsFailNotError(t *testing.T) {
+// THIS TEST USED TO REQUIRE exit 1, on the argument that reporting Error would
+// "convert a completely determinate diagnostic result into we-don't-know". That
+// argument is right about determinacy and wrong about what was determined:
+// running this on a healthy GB10 (issue #304) showed the two findings behind
+// that failure are persistence mode being off and a field DCGM could not read.
+// The result IS determinate — determinately a node that is not configured — and
+// the node's silicon was never judged either way.
+//
+// So the verdict is Error, and the distinction is not academic. Fail is the one
+// phase never retried and it settles the test permanently: at exit 1 this
+// suite condemns 100% of a stock Spark fleet for something `nvidia-smi -pm 1`
+// fixes. Error costs a retry that will not help and then reports honestly,
+// which is the cheaper mistake by a wide margin.
+//
+// What must NOT happen is the message becoming vague. It names the setting, and
+// this test still checks that.
+func TestVerdict_GB10PersistenceModeIsUnjudgedRatherThanAHardwareFail(t *testing.T) {
 	code, out := runVerdict(t, dcgm4GB10, 226, nil, dcgm4GB10)
-	if code != exitFail {
-		t.Fatalf("exit = %d, want %d — dcgmi's 226 must not become Error\n%s", code, exitFail, out)
+	if code != exitError {
+		t.Fatalf("exit = %d, want %d — a node setting is not a hardware verdict (#304)\n%s",
+			code, exitError, out)
 	}
 	if !strings.Contains(out, "Persistence mode") {
-		t.Errorf("the message does not say what failed:\n%s", out)
+		t.Errorf("the message does not say what the operator has to fix:\n%s", out)
+	}
+	if !strings.Contains(out, "UNJUDGED") {
+		t.Errorf("the message must say the hardware was not judged, not merely that something failed:\n%s", out)
+	}
+	// The findings still reach the result — excusing them from the verdict must
+	// not delete them from the report.
+	if !strings.Contains(out, "diag_config_findings=") {
+		t.Errorf("the config finding was dropped from the metrics:\n%s", out)
 	}
 }
 

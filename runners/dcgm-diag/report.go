@@ -29,10 +29,14 @@ const (
 	keyTestsSkipped    = "tests_skipped"
 	keyDcgmiExitCode   = "dcgmi_exit_code"
 	keySampleCount     = "sample_count"
-	keyCounterReset    = "counter_baseline_reset"
-	keyPrunedObjects   = "pruned_objects"
-	keyElapsedS        = "elapsed_s"
-	keyReason          = "reason"
+	// #304: findings DCGM reported that are not verdicts about the part.
+	keyConfigFindings   = "diag_config_findings"
+	keyUnreadableFields = "diag_unreadable_fields"
+	keyExcusedSubtests  = "diag_excused_subtests"
+	keyCounterReset     = "counter_baseline_reset"
+	keyPrunedObjects    = "pruned_objects"
+	keyElapsedS         = "elapsed_s"
+	keyReason           = "reason"
 
 	// Sampled DCGM field values. See fields.go for the field each one comes
 	// from and how it is aggregated.

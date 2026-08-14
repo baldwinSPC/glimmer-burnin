@@ -134,12 +134,37 @@ func TestParseDiagJSON_RealGB10Document(t *testing.T) {
 	if res.DriverVersion != "580.82.09" {
 		t.Errorf(`DriverVersion = %q, want 580.82.09 — DCGM 4.2.3 spells the key "Driver Version Detected"`, res.DriverVersion)
 	}
+	// CHANGED with issue #304, and the change is the point of that issue.
+	//
+	// This document is a real level-1 run on a healthy GB10. DCGM failed its
+	// `software` subtest for two findings: persistence mode being disabled, and
+	// a SRAM threshold field it could not read (Value = 9223372036854775794, a
+	// sentinel near 2^63). Neither is the part falling short — one is a node
+	// setting and one is an absent measurement — so neither may produce a Fail,
+	// which is this project's word for "measured, and wrong", and the one phase
+	// that is never retried.
+	//
+	// The subtest still counts as EXECUTED. It ran; it simply did not judge the
+	// hardware. Dropping it out of Executed would take the run to the "DCGM
+	// skipped everything" branch and report Skipped — "not applicable to this
+	// hardware" — which verifies nothing while looking benign.
 	c := res.Counts()
-	if c.Total != 1 || c.Executed != 1 || c.Failed != 1 {
-		t.Fatalf("counts = %+v, want one executed subtest that failed", c)
+	if c.Total != 1 || c.Executed != 1 {
+		t.Fatalf("counts = %+v, want one executed subtest", c)
 	}
-	if len(c.FailedNames) != 1 || c.FailedNames[0] != "software" {
-		t.Errorf("FailedNames = %v, want [software]", c.FailedNames)
+	if c.Failed != 0 {
+		t.Errorf("Failed = %d, want 0 — every finding here is a node setting or an unread field, "+
+			"and failing a healthy Spark for `nvidia-smi -pm 1` is issue #304", c.Failed)
+	}
+	if len(c.ExcusedNames) != 1 || c.ExcusedNames[0] != "software" {
+		t.Errorf("ExcusedNames = %v, want [software]", c.ExcusedNames)
+	}
+	if len(c.ConfigFindings) != 1 || !strings.Contains(c.ConfigFindings[0], "Persistence mode") {
+		t.Errorf("the persistence-mode finding must survive as a reportable config finding: %v",
+			c.ConfigFindings)
+	}
+	if len(c.UnreadableFindings) != 1 {
+		t.Errorf("the unreadable SRAM field must survive as unmeasurable: %v", c.UnreadableFindings)
 	}
 	if !strings.Contains(strings.Join(res.failReasons, " "), "Persistence mode") {
 		t.Errorf("DCGM's own explanation was dropped: %v", res.failReasons)
