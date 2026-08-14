@@ -51,6 +51,20 @@
 #include <cstddef>
 #include <cstdint>
 
+// BURNIN_HD marks the functions below as callable from BOTH host and device.
+//
+// They are called from inside a __global__ kernel, which HIP refuses for a
+// plain host function — but this header must ALSO compile under an ordinary C++
+// compiler with no HIP anywhere, because that is what lets wmma_tile_test.cc
+// check the layout without a GPU. The macro is what keeps both true: it expands
+// to the HIP annotations only when a device compiler is what is reading the
+// file, and to nothing at all for the unit test.
+#if defined(__HIPCC__) || defined(__CUDACC__)
+#define BURNIN_HD __host__ __device__
+#else
+#define BURNIN_HD
+#endif
+
 namespace burnin {
 
 constexpr int kWave32 = 32;
@@ -58,19 +72,19 @@ constexpr int kFragElems = 16;  // A and B elements per lane
 constexpr int kAccElems = 8;    // D elements per lane
 
 // aIndex returns the flat index into A that lane `lane` loads for element `e`.
-inline int aIndex(int lane, int e) { return (lane % 16) * 16 + e; }
+BURNIN_HD inline int aIndex(int lane, int e) { return (lane % 16) * 16 + e; }
 
 // bIndex returns the flat index into B (stored column-major, NxK) that lane
 // `lane` loads for element `e`.
-inline int bIndex(int lane, int e) { return (lane % 16) * 16 + e; }
+BURNIN_HD inline int bIndex(int lane, int e) { return (lane % 16) * 16 + e; }
 
 // dRow and dCol map an accumulator element back to its place in the output
 // tile. Both halves of the wave write the same column and differ by row parity.
-inline int dRow(int lane, int e) { return e * 2 + (lane / 16); }
-inline int dCol(int lane) { return lane % 16; }
+BURNIN_HD inline int dRow(int lane, int e) { return e * 2 + (lane / 16); }
+BURNIN_HD inline int dCol(int lane) { return lane % 16; }
 
 // dIndex is the flat row-major index into D.
-inline int dIndex(int lane, int e) { return dRow(lane, e) * 16 + dCol(lane); }
+BURNIN_HD inline int dIndex(int lane, int e) { return dRow(lane, e) * 16 + dCol(lane); }
 
 // bf16Bits truncates a float to bfloat16's bit pattern.
 //
@@ -80,7 +94,7 @@ inline int dIndex(int lane, int e) { return dRow(lane, e) * 16 + dCol(lane); }
 // low half is zero. That is a property of the test's inputs, not a general
 // bf16 conversion — do not lift this into anything that converts arbitrary
 // data.
-inline std::uint16_t bf16Bits(float f) {
+BURNIN_HD inline std::uint16_t bf16Bits(float f) {
 	std::uint32_t u = 0;
 	// memcpy rather than a union or a pointer cast: the others are undefined
 	// behaviour that happens to work until a compiler decides otherwise.
@@ -90,7 +104,7 @@ inline std::uint16_t bf16Bits(float f) {
 
 // bf16ToFloat reverses bf16Bits, for the host-side check that the conversion
 // really is lossless on these inputs.
-inline float bf16ToFloat(std::uint16_t bits) {
+BURNIN_HD inline float bf16ToFloat(std::uint16_t bits) {
 	const std::uint32_t u = static_cast<std::uint32_t>(bits) << 16;
 	float f = 0;
 	__builtin_memcpy(&f, &u, sizeof(f));
