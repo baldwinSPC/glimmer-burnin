@@ -59,14 +59,6 @@ var iperfVersion = "unknown"
 
 func main() { os.Exit(run()) }
 
-func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-}
-
-// metric prints one key=value line, which with the exit code is the whole
-// runner contract.
-func metric(key, value string) { fmt.Printf("%s=%s\n", key, value) }
-
 // fin prints the declared marker for a non-pass outcome and returns the code.
 //
 // The marker is required, not decorative: an exit 2 WITHOUT a recognised
@@ -77,11 +69,11 @@ func fin(code int, format string, args ...any) int {
 	msg := fmt.Sprintf(format, args...)
 	switch code {
 	case exitSkip:
-		fmt.Printf("TCP_BASELINE_SKIP: %s\n", msg)
+		fmt.Printf("TCP_BASELINE_SKIP: %s\n", sanitize(msg))
 	case exitError:
-		fmt.Printf("TCP_BASELINE_ERROR: %s\n", msg)
+		fmt.Printf("TCP_BASELINE_ERROR: %s\n", sanitize(msg))
 	case exitFail:
-		fmt.Printf("TCP_BASELINE_FAIL: %s\n", msg)
+		fmt.Printf("TCP_BASELINE_FAIL: %s\n", sanitize(msg))
 	}
 	logf("%s", msg)
 	return code
@@ -428,16 +420,4 @@ func trim(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
 func oneLine(s string) string {
 	return strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
-}
-
-func envInt(name string, def int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return def
-	}
-	return n
 }

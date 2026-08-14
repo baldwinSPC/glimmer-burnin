@@ -94,18 +94,12 @@ var ncclVersion = "unknown"
 
 func main() { os.Exit(run()) }
 
-func logf(format string, args ...any) {
-	fmt.Printf("[burnin-nccl] "+format+"\n", args...)
-}
-
-func metric(key, value string) { fmt.Printf("%s=%s\n", key, value) }
-
 func fin(code int, format string, args ...any) int {
 	marker := map[int]string{
 		exitPass: "NCCL_PASS", exitFail: "NCCL_FAIL",
 		exitSkip: "NCCL_SKIP", exitError: "NCCL_ERROR",
 	}[code]
-	fmt.Printf("%s: %s\n", marker, fmt.Sprintf(format, args...))
+	fmt.Printf("%s: %s\n", marker, sanitize(fmt.Sprintf(format, args...)))
 	return code
 }
 
@@ -541,19 +535,6 @@ func echo(out string) {
 		}
 		fmt.Printf("| %s\n", line)
 	}
-}
-
-func envInt(name string, def int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		logf("ignoring %s=%q: not a positive integer", name, v)
-		return def
-	}
-	return n
 }
 
 // checkPorts refuses a configuration in which the readiness port and the

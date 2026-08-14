@@ -612,13 +612,6 @@ func prunedObjectCount(path string) int {
 	return n
 }
 
-func envOr(key, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return fallback
-}
-
 func firstLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
@@ -630,10 +623,4 @@ func firstLine(s string) string {
 
 func round1(v float64) float64 {
 	return float64(int64(v*10+0.5)) / 10
-}
-
-// logf writes prose to stderr. Nothing but key=value lines and the final marker
-// may go to stdout.
-func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }

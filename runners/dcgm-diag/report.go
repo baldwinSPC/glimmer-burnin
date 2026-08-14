@@ -5,8 +5,6 @@ import (
 	"io"
 	"math"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 )
 
 // The keys this runner prints. They are the RUNNER's spelling, not the
@@ -121,34 +119,6 @@ func formatNumber(v float64) string {
 		return strconv.FormatInt(int64(v), 10)
 	}
 	return strconv.FormatFloat(v, 'f', -1, 64)
-}
-
-// sanitize keeps a value on one line. A metric value that contained a newline
-// would be read by the parser as two lines, and the second one — a fragment of
-// somebody's error string — would become the run's Message.
-func sanitize(s string) string {
-	s = strings.Map(func(r rune) rune {
-		switch r {
-		case '\n', '\r', '\t':
-			return ' '
-		}
-		return r
-	}, s)
-	s = strings.Join(strings.Fields(s), " ")
-	const max = 300
-	if len(s) > max {
-		// Cut on a rune boundary. DCGM's own prose is ASCII, but the reasons
-		// this runner builds are not — they join with an em dash — and a byte
-		// slice landing mid-sequence would put a replacement character into a
-		// metric value, i.e. corrupt the very field a human reads to find out
-		// why a node failed.
-		cut := max
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		s = s[:cut] + "…"
-	}
-	return s
 }
 
 // finish prints every metric gathered so far, then the marker line, then hands

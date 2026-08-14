@@ -91,18 +91,12 @@ var perftestRef = "unknown"
 
 func main() { os.Exit(run()) }
 
-func logf(format string, args ...any) {
-	fmt.Printf("[burnin-gpudirect-rdma] "+format+"\n", args...)
-}
-
-func metric(key, value string) { fmt.Printf("%s=%s\n", key, value) }
-
 func fin(code int, format string, args ...any) int {
 	marker := map[int]string{
 		exitPass: "GPUDIRECT_RDMA_PASS", exitFail: "GPUDIRECT_RDMA_FAIL",
 		exitSkip: "GPUDIRECT_RDMA_SKIP", exitError: "GPUDIRECT_RDMA_ERROR",
 	}[code]
-	fmt.Printf("%s: %s\n", marker, fmt.Sprintf(format, args...))
+	fmt.Printf("%s: %s\n", marker, sanitize(fmt.Sprintf(format, args...)))
 	return code
 }
 
@@ -561,17 +555,4 @@ func oneLine(s string) string {
 		return s[:400] + "…"
 	}
 	return s
-}
-
-func envInt(name string, def int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		logf("ignoring %s=%q: not a positive integer", name, v)
-		return def
-	}
-	return n
 }

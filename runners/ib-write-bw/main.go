@@ -106,21 +106,12 @@ var perftestRef = "unknown"
 
 func main() { os.Exit(run()) }
 
-func logf(format string, args ...any) {
-	fmt.Printf("[burnin-ib-write-bw] "+format+"\n", args...)
-}
-
-// metric prints one key=value line. Every metric this runner emits goes through
-// here so that "metrics before the decision" is a property of the code rather
-// than of the author's memory.
-func metric(key, value string) { fmt.Printf("%s=%s\n", key, value) }
-
 func fin(code int, format string, args ...any) int {
 	marker := map[int]string{
 		exitPass: "IB_WRITE_BW_PASS", exitFail: "IB_WRITE_BW_FAIL",
 		exitSkip: "IB_WRITE_BW_SKIP", exitError: "IB_WRITE_BW_ERROR",
 	}[code]
-	fmt.Printf("%s: %s\n", marker, fmt.Sprintf(format, args...))
+	fmt.Printf("%s: %s\n", marker, sanitize(fmt.Sprintf(format, args...)))
 	return code
 }
 
@@ -760,17 +751,4 @@ func oneLine(s string) string {
 		return s[:400] + "…"
 	}
 	return s
-}
-
-func envInt(name string, def int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		logf("ignoring %s=%q: not a positive integer", name, v)
-		return def
-	}
-	return n
 }

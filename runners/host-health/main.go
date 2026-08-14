@@ -192,10 +192,10 @@ func configFromEnv(start time.Time) config {
 	cfg := config{
 		window:       time.Duration(clampWindowSeconds(envInt("BURNIN_DURATION_SECONDS", 0))) * time.Second,
 		deadline:     start.Add(maxTotalSeconds * time.Second),
-		kmsgPath:     envStr("BURNIN_KMSG_PATH", "/dev/kmsg"),
-		kernLogPaths: splitPaths(envStr("BURNIN_KERN_LOG_PATHS", "/var/log/kern.log:/var/log/messages:/var/log/syslog")),
-		sysfsRoot:    envStr("BURNIN_SYSFS_ROOT", "/sys"),
-		nvidiaSMI:    envStr("BURNIN_NVIDIA_SMI", "nvidia-smi"),
+		kmsgPath:     envOr("BURNIN_KMSG_PATH", "/dev/kmsg"),
+		kernLogPaths: splitPaths(envOr("BURNIN_KERN_LOG_PATHS", "/var/log/kern.log:/var/log/messages:/var/log/syslog")),
+		sysfsRoot:    envOr("BURNIN_SYSFS_ROOT", "/sys"),
+		nvidiaSMI:    envOr("BURNIN_NVIDIA_SMI", "nvidia-smi"),
 		probeTimeout: probeTimeoutSeconds * time.Second,
 		run:          execRunner,
 		now:          time.Now,
@@ -510,25 +510,6 @@ func (e *emitter) writeTo(w io.Writer) {
 // ---------------------------------------------------------------------------
 
 type commandRunner func(ctx context.Context, name string, args []string) (string, error)
-
-func envStr(name, def string) string {
-	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(name string, def int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return n
-}
 
 func splitPaths(s string) []string {
 	var out []string
