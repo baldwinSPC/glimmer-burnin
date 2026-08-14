@@ -545,6 +545,8 @@ jobs:
             platform: linux/arm64
           - runner: compute-smoke-rocm
             platform: linux/arm64
+          - runner: memory-bw-rocm
+            platform: linux/arm64
     steps:
       # ── FIRST, before anything pulls a layer ──────────────────────────────────
       # A hosted ubuntu-latest runner has roughly 14 GB free and ships 20-30 GB of
