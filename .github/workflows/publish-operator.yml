@@ -176,6 +176,64 @@ jobs:
           # by-digest reference regardless of what the tag looks like.
           cosign sign --yes "${REF%%:*}@${DIGEST}"
 
+      - name: Assert the published image carries a patched standard library
+        # THE OPERATOR IS THE CASE THAT MATTERS MOST. internal/sink/webhook.go
+        # imports net/http directly and dials a site-supplied BurnInSink URL, so
+        # the standard library's URL parsing and TLS handshake are on a live path
+        # taking externally-influenced input, inside the cluster.
+        #
+        # v0.6.0 shipped on go1.26.5 with 8 reachable vulnerabilities — including
+        # http.Client.Do and net.LookupCNAME — and nothing in this workflow
+        # looked (#309). Unlike the runners, whose flagged symbols are linked but
+        # not driven, this one is genuinely exercised.
+        #
+        # NOTE THE OPERATOR'S FAILURE MODE IS NOT THE RUNNERS'. Its Dockerfile
+        # says golang:1.26, which is the right BRANCH — and the official golang
+        # images set GOTOOLCHAIN=local, so that tag decides the standard library
+        # and go.mod's `toolchain` directive never reaches this build. CI asserts
+        # the Dockerfile's major.minor equals go.mod's `go` directive, which is
+        # the right granularity for a floating tag but cannot express "at least
+        # the toolchain's patch". v0.6.0 was simply built while golang:1.26 still
+        # resolved to 1.26.5; a rebuild today gets 1.26.6 and is clean, with no
+        # pin to change. The runners were a different problem — golang:1.24, a
+        # branch the advisories were never fixed on at all (#335).
+        #
+        # Which is exactly why a scan of the ARTEFACT is the right control here:
+        # no pin check can catch "built before the patch existed".
+        #
+        # A CONFIRMATION, not a gate: there is no image to scan before it is
+        # pushed. A failure means a bad tag already exists, and published tags are
+        # immutable, so the answer is to supersede rather than repush. "Ships
+        # known-vulnerable code" and "this step could not read the image" are kept
+        # apart on every branch — a scanner that cannot find its binary must
+        # report neither a clean image nor a dirty one.
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          workdir="$(mktemp -d)"
+          if ! go run github.com/google/go-containerregistry/cmd/crane@v0.21.9 \
+                 export "${REF}" - 2>"${workdir}/crane.err" | tar x -C "${workdir}" 2>/dev/null; then
+            echo "::error::could not export ${REF} to scan it. This proves NOTHING about the image — do not supersede a tag over it. $(tail -1 "${workdir}/crane.err" || true)"
+            exit 1
+          fi
+
+          entry="$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.9 config "${REF}" \
+                   | jq -r '.config.Entrypoint[0] // .config.Cmd[0] // empty')"
+          if [ -z "${entry}" ] || [ ! -f "${workdir}${entry}" ]; then
+            echo "::error::could not locate the entrypoint binary (${entry:-none}) inside ${REF}. NOT a verdict about the image."
+            exit 1
+          fi
+          echo "${entry} was built with: $(go version -m "${workdir}${entry}" | head -1 | awk '{print $2}')"
+
+          if go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -mode=binary "${workdir}${entry}"; then
+            echo "no known vulnerabilities in the standard library ${REF} ships"
+            exit 0
+          fi
+          echo "::error::${REF} SHIPS KNOWN-VULNERABLE CODE on a path this image drives — the sink webhook parses an operator-supplied URL and opens TLS to it. The tag is immutable, so supersede it rather than repushing: rebuild and publish a new tag, then move the manifest pin (#309)."
+          exit 1
+
       - name: Report digest
         run: |
           echo "### Published" >> "$GITHUB_STEP_SUMMARY"
