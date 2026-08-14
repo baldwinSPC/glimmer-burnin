@@ -71,6 +71,110 @@ func runnerDirs(t *testing.T) []string {
 	return out
 }
 
+// vendorVariantSuffixes are the directory-name suffixes that mark a runner as
+// ANOTHER VENDOR'S IMAGE FOR AN EXISTING KIND, not as a kind of its own.
+//
+// A runner directory is normally named for the TestKind it implements, and
+// several guards in this file read it that way. That correspondence broke the
+// moment one kind gained a second image: runners/clockprobe-rocm implements
+// `clockprobe` on AMD hardware and is selected per node through
+// spec.runner.imagesByVendor, so the operator never sees a kind called
+// "clockprobe-rocm" — but a guard splitting on the directory name does.
+//
+// Read as a kind, "clockprobe-rocm" is simply UNKNOWN, and every property the
+// API answers about an unknown kind is a default rather than the truth:
+//
+//   - TestKind.BurstOnly() answers false. That is right for clockprobe by
+//     accident and WRONG for compute-smoke, so a future compute-smoke-rocm
+//     would be told to read BURNIN_DURATION_SECONDS — the precise opposite of
+//     what the kind promises, enforced by the guard that exists to keep that
+//     promise honest.
+//   - the groupCapable mirror below answers false, so a future nccl-rocm that
+//     correctly speaks the Group rendezvous would be failed and its author
+//     sent to register a kind that is already registered.
+//
+// Ordered longest-first so an overlapping suffix cannot resolve by map
+// iteration order, and paired with its vendor so this table stays the one
+// place that knows what a variant directory means.
+var vendorVariantSuffixes = []struct {
+	Suffix string
+	Vendor string // matches the CRD's VendorImage enum
+}{
+	{"-rocm", "amd"},
+}
+
+// kindForDir maps a runner directory to the TestKind it implements, and to the
+// vendor whose variant it is ("" for the base image).
+func kindForDir(dir string) (burninv1alpha1.TestKind, string) {
+	for _, v := range vendorVariantSuffixes {
+		if strings.HasSuffix(dir, v.Suffix) {
+			return burninv1alpha1.TestKind(strings.TrimSuffix(dir, v.Suffix)), v.Vendor
+		}
+	}
+	return burninv1alpha1.TestKind(dir), ""
+}
+
+// TestKindForDirMapsVariantsToTheirKind is the regression test for the trap
+// vendorVariantSuffixes describes, written against the two cases that would
+// otherwise be found by a future runner rather than by CI.
+//
+// compute-smoke is the one that matters: it is burst-only, and reading its
+// variant directory as a kind silently inverts that.
+func TestKindForDirMapsVariantsToTheirKind(t *testing.T) {
+	for _, tc := range []struct {
+		dir        string
+		wantKind   burninv1alpha1.TestKind
+		wantVendor string
+	}{
+		{"clockprobe", burninv1alpha1.KindClockProbe, ""},
+		{"clockprobe-rocm", burninv1alpha1.KindClockProbe, "amd"},
+		{"compute-smoke-rocm", burninv1alpha1.KindComputeSmoke, "amd"},
+		{"nccl-rocm", burninv1alpha1.KindNCCL, "amd"},
+	} {
+		gotKind, gotVendor := kindForDir(tc.dir)
+		if gotKind != tc.wantKind || gotVendor != tc.wantVendor {
+			t.Errorf("kindForDir(%q) = (%q, %q), want (%q, %q)",
+				tc.dir, gotKind, gotVendor, tc.wantKind, tc.wantVendor)
+		}
+	}
+
+	// The property the whole mapping exists for: a variant directory must
+	// answer the BASE kind's promises, not an unknown kind's defaults.
+	if k, _ := kindForDir("compute-smoke-rocm"); !k.BurstOnly() {
+		t.Error("compute-smoke-rocm must resolve to a burst-only kind; read as a kind of its own " +
+			"it answers false, and the duration guard would demand the runner honour a budget " +
+			"the kind promises to ignore")
+	}
+}
+
+// TestEveryRunnerDirectoryNamesARealKind is what keeps the mapping above
+// honest as directories are added.
+//
+// Every guard in this file that reasons about a runner's KIND depends on the
+// directory resolving to one this project actually declares. A directory that
+// resolves to an unknown kind gets DEFAULT answers from the API rather than
+// true ones — silently, and in the lenient direction — so the failure belongs
+// here, where it names the directory, rather than in whichever guard happens to
+// ask first.
+func TestEveryRunnerDirectoryNamesARealKind(t *testing.T) {
+	for _, d := range runnerDirs(t) {
+		kind, vendor := kindForDir(d)
+		if kind.IsBuiltIn() {
+			continue
+		}
+		if vendor == "" {
+			t.Errorf("runners/%s does not name a built-in TestKind. A runner directory is named for "+
+				"the kind it implements; if this is another vendor's image for an existing kind, "+
+				"name it <kind>-<suffix> and register the suffix in vendorVariantSuffixes. If it is "+
+				"a genuinely new kind, declare it in api/v1alpha1 and add it to BuiltInKinds.", d)
+			continue
+		}
+		t.Errorf("runners/%s is registered as the %s variant of %q, but %q is not a built-in "+
+			"TestKind — a variant must implement a kind this project declares, or every guard "+
+			"reading its kind gets default answers instead of true ones", d, vendor, kind, kind)
+	}
+}
+
 // TestEveryRunnerDirectoryHasADockerfile is the floor. A runner directory with
 // no Dockerfile is source that nothing can turn into the image a TestKind runs.
 func TestEveryRunnerDirectoryHasADockerfile(t *testing.T) {
@@ -103,10 +207,12 @@ func TestDurationIsHonouredOrDeclaredBurstOnly(t *testing.T) {
 	const durationEnv = "BURNIN_DURATION_SECONDS"
 
 	for _, d := range runnerDirs(t) {
-		// The directory name IS the TestKind value, which is what lets this run
-		// off a directory listing; TestEveryRunnerDirectoryHasADockerfile and
-		// the publish-workflow check rest on the same correspondence.
-		kind := burninv1alpha1.TestKind(d)
+		// The directory names the TestKind it implements — through kindForDir,
+		// because a vendor variant like clockprobe-rocm implements `clockprobe`
+		// and answering with the directory would ask the API about a kind that
+		// does not exist. TestEveryRunnerDirectoryHasADockerfile and the
+		// publish-workflow check are directory-keyed on BOTH sides and stay so.
+		kind, _ := kindForDir(d)
 		reads := false
 		err := filepath.WalkDir(d, func(path string, e os.DirEntry, err error) error {
 			if err != nil || e.IsDir() || reads {
@@ -863,7 +969,13 @@ func TestGroupCapableRunnersReallyReadTheGroupContract(t *testing.T) {
 	// Mirrors internal/controller/plan.go's groupCapableKinds. It is restated
 	// rather than imported because runners/ is deliberately not coupled to the
 	// controller — and a restatement that drifts is what this test catches.
-	groupCapable := map[string]bool{"nccl": true}
+	//
+	// Keyed by KIND, matching plan.go, which checks groupCapableKinds[spec.Kind].
+	// Group capability is a property of the image, but the operator's gate is on
+	// the kind, and every vendor's image for a group-capable kind has to speak
+	// the rendezvous for that gate to be honest — so a variant directory is held
+	// to exactly the same requirement as the base one.
+	groupCapable := map[burninv1alpha1.TestKind]bool{burninv1alpha1.KindNCCL: true}
 
 	// BURNIN_ROOT_HOST is the discriminator, and picking the right one mattered:
 	// a first attempt keyed on BURNIN_RANK/BURNIN_NRANKS and failed, because
@@ -906,17 +1018,19 @@ func TestGroupCapableRunnersReallyReadTheGroupContract(t *testing.T) {
 			t.Fatalf("walking %s: %v", d, err)
 		}
 
+		kind, _ := kindForDir(d)
 		switch {
-		case groupCapable[d] && !reads:
-			t.Errorf("%s is on the operator's groupCapableKinds list, but no non-test source in "+
-				"runners/%s reads %s. The operator will dispatch this image for a Group test and "+
-				"it will read the absent BURNIN_ROLE as Node scope: exit 2 with a skip marker, "+
-				"and a collective certified as inapplicable (#118).", d, d, rootVar)
-		case !groupCapable[d] && reads:
-			t.Errorf("runners/%s reads %s but is NOT on the operator's groupCapableKinds list, so "+
-				"a Group test naming this kind is refused at plan time even though the image "+
-				"could run it. Add it to groupCapableKinds in internal/controller/plan.go and to "+
-				"the mirror in this test.", d, rootVar)
+		case groupCapable[kind] && !reads:
+			t.Errorf("%s implements kind %q, which is on the operator's groupCapableKinds list, but "+
+				"no non-test source in runners/%s reads %s. The operator will dispatch this image "+
+				"for a Group test and it will read the absent BURNIN_ROLE as Node scope: exit 2 "+
+				"with a skip marker, and a collective certified as inapplicable (#118).",
+				d, kind, d, rootVar)
+		case !groupCapable[kind] && reads:
+			t.Errorf("runners/%s reads %s but its kind %q is NOT on the operator's groupCapableKinds "+
+				"list, so a Group test naming that kind is refused at plan time even though the "+
+				"image could run it. Add it to groupCapableKinds in internal/controller/plan.go "+
+				"and to the mirror in this test.", d, rootVar, kind)
 		}
 	}
 }
