@@ -39,7 +39,7 @@
 # so the packages that own those paths install themselves.
 
 ARG BUILD_IMAGE=debian:trixie-slim
-ARG GO_IMAGE=golang:1.24-trixie
+ARG GO_IMAGE=golang:1.26-trixie
 # The runtime base is the SAME Debian release as the build stage, so the glibc
 # perftest was linked against is the glibc it runs on.
 ARG RUNTIME_IMAGE=debian:trixie-slim

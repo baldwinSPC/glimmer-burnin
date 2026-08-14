@@ -14,7 +14,7 @@
 # an image that needed driver injection could not.
 # runners/pins_test.go asserts that absence rather than leaving it to a reader.
 
-ARG GO_IMAGE=golang:1.24-bookworm
+ARG GO_IMAGE=golang:1.26-bookworm
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build

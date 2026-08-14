@@ -22,7 +22,7 @@
 # absence rather than leaving it to a reader.
 
 ARG BUILD_IMAGE=debian:bookworm-slim
-ARG GO_IMAGE=golang:1.24-bookworm
+ARG GO_IMAGE=golang:1.26-bookworm
 # The runtime base is the SAME Debian release as the iperf3 build stage, so the
 # glibc the binary was linked against is the glibc it runs on.  Moving one
 # without the other is how a runner starts failing with GLIBC_2.xx errors on

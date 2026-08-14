@@ -48,7 +48,7 @@
 # PATH, refuses to guess, and reports Error (unjudged) rather than a verdict when
 # it is absent. See README.md for the three supported ways to provide it.
 
-ARG GO_IMAGE=golang:1.24
+ARG GO_IMAGE=golang:1.26
 
 # The base of the shipped image. Declared here, in the global scope, because an
 # ARG a FROM expands must be declared before the first FROM — one declared after
