@@ -796,6 +796,17 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 		"tcp-baseline":      "measures the kernel TCP stack through iperf3; it is the accelerator-free half of the fabric story and runs on nodes with no GPU at all",
 	}
 
+	// Runners whose accelerator is not NVIDIA's. The injection contract this
+	// test enforces belongs to the NVIDIA container runtime; an AMD runner's
+	// devices (/dev/kfd, /dev/dri) arrive from the device plugin's resource
+	// grant, no NVIDIA_* declaration is involved, and declaring one would ask
+	// for access the image cannot use. Adding a name here is a claim that the
+	// runner never opens a CUDA context and never executes nvidia-smi — the
+	// same claim noAccelerator makes, for a different reason.
+	amdAccelerator := map[string]string{
+		"clockprobe-rocm": "drives the AMD accelerator through HIP; /dev/kfd and /dev/dri arrive from the amd.com/gpu device plugin, not from NVIDIA driver injection",
+	}
+
 	for _, d := range runnerDirs(t) {
 		raw, err := os.ReadFile(filepath.Join(d, "Dockerfile"))
 		if err != nil {
@@ -810,6 +821,14 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 				t.Errorf("%s is listed as needing no accelerator (%s) but its Dockerfile declares "+
 					"NVIDIA driver injection — either the exemption is stale or the image is asking "+
 					"for access it does not use", d, why)
+			}
+			continue
+		}
+		if why, exempt := amdAccelerator[d]; exempt {
+			if visible || caps {
+				t.Errorf("%s is listed as an AMD-accelerator runner (%s) but its Dockerfile declares "+
+					"NVIDIA driver injection — either the exemption is stale or the image is asking "+
+					"for access it cannot use", d, why)
 			}
 			continue
 		}

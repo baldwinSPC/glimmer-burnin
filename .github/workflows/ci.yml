@@ -532,6 +532,17 @@ jobs:
           - platform: linux/arm64
             host: ubuntu-24.04-arm
             arch: arm64
+        # clockprobe-rocm builds with the ROCm apt toolchain, which AMD
+        # publishes for linux/amd64 only — and every AMD accelerator host that
+        # image could measure (Strix Halo APUs, Instinct) is amd64, so an
+        # arm64 leg would build an image for a machine that does not exist.
+        # Excluded rather than emulated: with no QEMU on these runners the leg
+        # would fail at FROM, and emulating it would verify nothing anyway.
+        # publish-runner.yml's two-platform assertion must grow the same
+        # awareness before that runner is ever published.
+        exclude:
+          - runner: clockprobe-rocm
+            platform: linux/arm64
     steps:
       # ── FIRST, before anything pulls a layer ──────────────────────────────────
       # A hosted ubuntu-latest runner has roughly 14 GB free and ships 20-30 GB of
