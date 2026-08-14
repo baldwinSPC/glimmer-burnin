@@ -189,8 +189,15 @@ type Summary struct{ Passed, Failed, Errored, Skipped int32 }
 // TestResult is one test's outcome, shaped to match what the operator records so
 // a caller can build an identical envelope from either dispatcher.
 type TestResult struct {
-	Name       string
-	Kind       string
+	Name string
+	Kind string
+	// Scope travels with the result because a consumer needs it to read the
+	// verdict at all: a Pair result is a statement about the LINK between its
+	// two nodes, and without it that is indistinguishable from two single-node
+	// claims. The operator has always delivered it; this dispatcher EXECUTED
+	// Pair scope while delivering Scope:"" — the same-contract-two-assemblers
+	// drift the parity guard in cmd/burnin now pins (found while writing it).
+	Scope      api.TestScope
 	Phase      api.RunPhase
 	Nodes      []string
 	StartedAt  time.Time
@@ -206,6 +213,14 @@ type TestResult struct {
 	RepeatsCompleted int32
 	ErrorRetries     int32
 	Attempts         []Attempt
+}
+
+// scopeOf mirrors the CRD's defaulting: an unset scope means Node.
+func scopeOf(spec api.BurnInTestSpec) api.TestScope {
+	if spec.Scope == "" {
+		return api.ScopeNode
+	}
+	return spec.Scope
 }
 
 // Attempt is one execution.
@@ -272,8 +287,13 @@ func runWithClock(ctx context.Context, p Plan, rt ContainerRuntime, h Hooks, now
 // controller behaviour it reproduces.
 func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h Hooks, now Clock) (TestResult, error) {
 	res := TestResult{
-		Name:            t.Name,
-		Kind:            string(t.Spec.Kind),
+		Name: t.Name,
+		Kind: string(t.Spec.Kind),
+		// Defaulted here because no apiserver ever saw this spec: the CRD
+		// defaults an unset scope to Node, and a dispatcher that reads the
+		// YAML verbatim must apply the same default or the two disagree about
+		// the same document.
+		Scope:           scopeOf(t.Spec),
 		Nodes:           NodesFor(p, t),
 		StartedAt:       now(),
 		RepeatsRequired: repeatCount(t.Spec),

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/hostinfo"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
@@ -64,6 +63,7 @@ func toContractResult(r localrun.TestResult) contract.TestResult {
 	out := contract.TestResult{
 		Name:         r.Name,
 		Kind:         r.Kind,
+		Scope:        string(r.Scope),
 		Phase:        string(r.Phase),
 		Nodes:        r.Nodes,
 		Metrics:      r.Metrics,
@@ -142,5 +142,3 @@ func mintUID() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-
-var _ = api.RunPassed
