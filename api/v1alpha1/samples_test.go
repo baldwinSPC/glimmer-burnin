@@ -1,6 +1,7 @@
 package v1alpha1_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -278,4 +279,124 @@ func hasContent(doc string) bool {
 		}
 	}
 	return false
+}
+
+// THE SAME BAR, FOR THE PLACE THIS RELEASE MOVED THE GATES TO.
+//
+// TestSamplesThresholdsLintClean above decodes only BurnInTest documents, so it
+// never saw a threshold written inside a profile — and variants are both the
+// newest and the most error-prone place to write one, because a variant's
+// thresholds REPLACE rather than merge (#297).
+//
+// CLAUDE.md claims config/samples/ is held to the linter's bar in CI. It was
+// not, for the newest surface. A sample gating a variant on an Evidence-only
+// metric, or on an exact comparison against a continuous one, would ship to
+// every newcomer who copied it with CI green — and samples are the thing people
+// copy, which is the entire reason this guard exists.
+//
+// The testRef resolution is not incidental to that. A gate can only be linted
+// against the KIND that will run it, so resolving the reference is the
+// precondition — and doing it turns a dangling reference into a test failure
+// rather than something a user discovers by applying the sample (#300).
+func TestSampleProfileThresholdsLintCleanIncludingVariants(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := burninv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	decoder := json.NewSerializerWithOptions(
+		json.DefaultMetaFactory, scheme, scheme,
+		json.SerializerOptions{Yaml: true, Strict: true},
+	)
+
+	files, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob samples: %v", err)
+	}
+
+	// Kinds by BurnInTest name, across every sample: a profile may reference a
+	// test declared in another file, which is how the samples are organised.
+	kinds := map[string]burninv1alpha1.TestKind{}
+	type profileDoc struct {
+		file string
+		p    *burninv1alpha1.BurnInProfile
+	}
+	var profiles []profileDoc
+
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, doc := range splitYAMLDocuments(string(raw)) {
+			obj, _, err := decoder.Decode([]byte(doc), nil, nil)
+			if err != nil {
+				continue // TestSamplesDecodeStrictly owns that failure.
+			}
+			switch o := obj.(type) {
+			case *burninv1alpha1.BurnInTest:
+				kinds[o.Name] = o.Spec.Kind
+			case *burninv1alpha1.BurnInProfile:
+				profiles = append(profiles, profileDoc{file: filepath.Base(file), p: o})
+			}
+		}
+	}
+
+	gated, resolved := 0, 0
+	for _, pd := range profiles {
+		for i, pt := range pd.p.Spec.Tests {
+			where := fmt.Sprintf("%s: BurnInProfile %q test[%d]", pd.file, pd.p.Name, i)
+
+			// Which kind will run this entry?
+			var kind burninv1alpha1.TestKind
+			switch {
+			case pt.Inline != nil:
+				kind = pt.Inline.Kind
+			case pt.TestRef != "":
+				k, ok := kinds[pt.TestRef]
+				if !ok {
+					// The feature's worked example referenced two BurnInTests
+					// that did not exist, so it could not run at all.
+					t.Errorf("%s references testRef %q, and no BurnInTest of that name is declared in "+
+						"config/samples/. A sample is the thing people copy; a dangling reference makes "+
+						"the example unrunnable and is invisible until someone applies it",
+						where, pt.TestRef)
+					continue
+				}
+				kind, resolved = k, resolved+1
+			default:
+				t.Errorf("%s declares neither testRef nor inline", where)
+				continue
+			}
+
+			// An inline entry carries its own spec, thresholds included. A
+			// testRef entry's base thresholds live on the BurnInTest the first
+			// linter already covers, so only the variants are new here.
+			if pt.Inline != nil && len(pt.Inline.Thresholds) > 0 {
+				gated++
+				for _, p := range verdict.ValidateThresholdsForKind(kind, pt.Inline.Thresholds) {
+					t.Errorf("%s inline (kind %s) %s", where, kind, p.Error())
+				}
+			}
+			for j, v := range pt.Variants {
+				if len(v.Thresholds) == 0 {
+					continue
+				}
+				gated++
+				for _, p := range verdict.ValidateThresholdsForKind(kind, v.Thresholds) {
+					t.Errorf("%s variant[%d] %q (kind %s) %s", where, j, v.Name, kind, p.Error())
+				}
+			}
+		}
+	}
+
+	// A check that silently stops finding anything to check is not a check —
+	// and this one failed to find the variants for a whole release.
+	if resolved == 0 {
+		t.Error("no sample profile resolved a testRef; either the samples stopped using them or this " +
+			"test stopped finding them")
+	}
+	if gated == 0 {
+		t.Error("no sample profile declares a threshold on an entry or a variant; the gates moved, or " +
+			"this test lost sight of them")
+	}
 }
