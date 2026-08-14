@@ -362,6 +362,48 @@ func verdict(
 			c.NotRun, c.Total))
 	}
 
+	// A SUBTEST DCGM DECLINED TO RUN LEAVES THAT ASPECT UNVERIFIED.
+	//
+	// The same rule as NotRun directly above, and it was missing: the verdict
+	// checked Executed==0, Failed and NotRun, then fell through to Pass with no
+	// rule for Skipped at all. A run where DCGM executed one subtest and skipped
+	// four reported a GREEN NODE — "a suite that checks nothing must never
+	// report a green node" is already stated by the Executed==0 branch, but was
+	// applied only to the all-or-nothing case.
+	//
+	// Not hypothetical. DCGM gates every CUDA-backed plugin behind a per-SKU
+	// allowlist that GB10 is not on, so a level-2+ run on a DGX Spark executes
+	// the deployment check and skips the memory, PCIe and stress plugins. Under
+	// the old rule that node passed the DCGM gate having had no memory test, no
+	// PCIe test and no stress test run against it — the exact false negative the
+	// exit-2 path exists to prevent, arriving through the pass path instead.
+	//
+	// ERROR, not Fail: DCGM declining to test something says nothing about the
+	// silicon, so it must not condemn the part. Unjudged and retryable is what
+	// the NotRun branch already returns for the same situation.
+	//
+	// The all-skipped case never reaches here — Executed==0 returns Skip above,
+	// which is right for a kind that does not apply to this part at all. This is
+	// the PARTIAL case, where some of the node was checked and some was not.
+	if c.Skipped > 0 {
+		// Emitted HERE rather than beside the counts, so the names travel with
+		// the verdict that depends on them — verdict() is reachable on its own
+		// and a caller that never ran run()'s reporting still gets the evidence.
+		if len(c.SkippedNames) > 0 {
+			rep.set(keySkippedSubtests, strings.Join(c.SkippedNames, ","))
+		}
+		if len(res.skipReasons) > 0 {
+			rep.set(keySkipReason, strings.Join(res.skipReasons, " | "))
+		}
+		return finish(out, rep, exitError, markerError, fmt.Sprintf(
+			"%d of %d DCGM subtests were SKIPPED, so this node is only partly checked (%d executed, "+
+				"%d skipped). Passing it would certify hardware DCGM never tested. If the skips are the "+
+				"per-SKU plugin allowlist (GB10 and other unlisted parts), enable them explicitly with "+
+				"`-p <plugin>.is_allowed=true`; if they genuinely do not apply to this part, target the "+
+				"profile with a node selector rather than accepting an unverified pass. Reasons: %s",
+			c.Skipped, c.Total, c.Executed, c.Skipped, orNone(strings.Join(res.skipReasons, "; "))))
+	}
+
 	if code != 0 {
 		return finish(out, rep, exitError, markerError, fmt.Sprintf(
 			"every DCGM subtest passed but dcgmi exited %d; the evidence contradicts "+

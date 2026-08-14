@@ -228,3 +228,82 @@ func TestReportDiag_Counts(t *testing.T) {
 		}
 	}
 }
+
+// partialSkipDoc is the shape a DCGM level-2+ run takes on a part that is not
+// on DCGM's per-SKU plugin allowlist: the deployment check runs and passes, and
+// every CUDA-backed plugin is skipped. Measured on GB10 (issue #304 follow-up).
+const partialSkipDoc = `{
+ "DCGM Diagnostic": {
+  "test_categories": [
+   {"category": "Deployment", "tests": [
+     {"name": "software", "results": [{"status": "Pass"}]}
+   ]},
+   {"category": "Hardware", "tests": [
+     {"name": "pcie",   "results": [{"status": "Skip", "info": ["Plugin is not allowed on this SKU"]}]},
+     {"name": "memory", "results": [{"status": "Skip", "info": ["Plugin is not allowed on this SKU"]}]}
+   ]},
+   {"category": "Stress", "tests": [
+     {"name": "targeted_stress", "results": [{"status": "Skip"}]},
+     {"name": "sm_stress",       "results": [{"status": "Skip"}]}
+   ]}
+  ]
+ }
+}`
+
+// A NODE DCGM DECLINED TO TEST MUST NOT PASS THE DCGM GATE.
+//
+// The verdict checked Executed==0, Failed and NotRun and then fell through to
+// Pass, with no rule for Skipped. So this document — one subtest executed and
+// passed, four skipped — reported exit 0 on a node that had no memory test, no
+// PCIe test and no stress test run against it.
+//
+// That is the false negative the exit-2 skip path exists to prevent, arriving
+// through the pass path instead, and it is the ordinary case on any part
+// missing from DCGM's plugin allowlist rather than an exotic one.
+func TestVerdict_APartlySkippedSuiteIsNotAPass(t *testing.T) {
+	code, out := runVerdict(t, partialSkipDoc, 0, nil, partialSkipDoc)
+	if code == exitPass {
+		t.Fatalf("a node with 4 of 5 subtests skipped PASSED the DCGM gate\n%s", out)
+	}
+	// Error, not Fail: DCGM declining to test something says nothing about the
+	// silicon, so it must never condemn the part.
+	if code != exitError {
+		t.Fatalf("exit = %d, want %d (unjudged, not a hardware verdict)\n%s", code, exitError, out)
+	}
+	for _, want := range []string{"SKIPPED", "partly checked", "is_allowed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the message should mention %q so an operator can act on it:\n%s", want, out)
+		}
+	}
+	// The skipped subtests are NAMED. "4 skipped" does not tell anyone whether
+	// the memory test or the PCIe test is the one that never ran.
+	if !strings.Contains(out, "diag_skipped_subtests=") {
+		t.Errorf("the skipped subtests were not recorded:\n%s", out)
+	}
+}
+
+// The all-skipped case must stay a SKIP, not become an Error.
+//
+// "This kind does not apply to this part" is a different statement from "this
+// part is half-checked", and collapsing them would make a genuinely
+// inapplicable suite look like a machinery fault on every node in a fleet.
+func TestVerdict_AnAllSkippedSuiteIsStillNotApplicable(t *testing.T) {
+	doc := `{"DCGM Diagnostic": {"test_categories": [{"category": "Hardware", "tests": [
+	  {"name": "pcie", "results": [{"status": "Skip"}]}]}]}}`
+	code, out := runVerdict(t, doc, 0, nil, doc)
+	if code != exitSkip {
+		t.Fatalf("exit = %d, want %d — a suite that applies to nothing here is a Skip, "+
+			"not a partial check\n%s", code, exitSkip, out)
+	}
+}
+
+// A clean run still passes. The new rule must not make every node unjudged.
+func TestVerdict_AFullyExecutedCleanRunStillPasses(t *testing.T) {
+	doc := `{"DCGM Diagnostic": {"test_categories": [{"category": "Deployment", "tests": [
+	  {"name": "software", "results": [{"status": "Pass"}]},
+	  {"name": "pcie",     "results": [{"status": "Pass"}]}]}]}}`
+	code, out := runVerdict(t, doc, 0, nil, doc)
+	if code != exitPass {
+		t.Fatalf("exit = %d, want %d — nothing skipped, nothing failed\n%s", code, exitPass, out)
+	}
+}

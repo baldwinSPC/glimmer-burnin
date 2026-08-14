@@ -97,6 +97,10 @@ type diagCounts struct {
 
 	FailedNames []string
 
+	// SkippedNames are subtests DCGM declined to run. Named rather than only
+	// counted: "4 skipped" does not tell an operator whether the memory test or
+	// the PCIe test is the one that never ran.
+	SkippedNames []string
 	// ExcusedNames are subtests DCGM failed whose findings were all
 	// non-hardware, so they were counted as NotRun instead. See #304.
 	ExcusedNames []string
@@ -319,6 +323,7 @@ func (r *diagResults) Counts() diagCounts {
 			c.Warned++
 		case statusSkip:
 			c.Skipped++
+			c.SkippedNames = append(c.SkippedNames, name)
 		default:
 			c.NotRun++
 		}

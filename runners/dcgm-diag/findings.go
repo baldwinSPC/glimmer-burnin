@@ -145,3 +145,14 @@ func reasonsFor(subtest string, all []string) []string {
 	}
 	return out
 }
+
+// orNone renders an empty explanation as something a reader can act on.
+//
+// DCGM does not always say why it skipped, and "Reasons: " trailing into
+// nothing reads as a truncated message rather than as an absent explanation.
+func orNone(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "DCGM gave no reason"
+	}
+	return s
+}
