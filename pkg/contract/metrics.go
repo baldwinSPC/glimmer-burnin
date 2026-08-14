@@ -800,6 +800,18 @@ var registry = map[string]Metric{
 		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	// The count DCGM's own suite reports as WARNED — an observation that did
+	// not cross DCGM's failure line. Registered as Acceptance because the
+	// decision belongs to the profile: the runner deliberately does not promote
+	// a warning to a failure, so without a gateable name a warning passes the
+	// node by default and nothing anywhere notices (#323). A site that treats
+	// warnings as advisory simply does not gate it.
+	"testsWarned": {
+		Name: "testsWarned", Unit: UnitNone,
+		Description:  "count of diagnostic subtests that reported a warning rather than a failure; the runner does not promote these to a failure, so gate this to act on them. diag_warn_findings carries what they said",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
 	"iterationsCompleted": {
 		Name: "iterationsCompleted", Unit: UnitNone,
 		Description:  "count of stress iterations the runner completed; a soak that completes far fewer than expected did less work than its duration suggests",

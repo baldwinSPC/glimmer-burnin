@@ -82,6 +82,10 @@ type diagResults struct {
 	// verdict can say WHY rather than only that it happened.
 	skipReasons []string
 	failReasons []string
+	// warnReasons is what the WARNED subtests said, kept apart from
+	// failReasons so a testsWarned gate can name what it tripped on without
+	// dragging in the failures' prose (#323).
+	warnReasons []string
 	// findings carries the same failures WITH whatever metadata DCGM attached.
 	// failReasons stays as it was because it is what builds the human message;
 	// this is what the verdict classifies against. Keyed by subtest name.
@@ -219,13 +223,14 @@ func (r *diagResults) record(name string, st status, node map[string]any) {
 		// blocking finding for another GPU's excusable failure. The excusal
 		// decision is about why the subtest failed, so it reads the failures.
 		//
-		// The consequence is that a subtest whose every result is a Warn
-		// collects no findings — which is honest, because nothing downstream
-		// classifies them: Counts() handles statusWarn as a counter and
-		// verdict() exits pass. Making a DCGM warning actionable is a separate
-		// question, tracked rather than half-answered here.
+		// A warn's own prose is kept separately, so a profile that gates
+		// testsWarned can be told WHAT it tripped on (#323). It is not fed to
+		// the excusal machinery: classification decides whether a FAILURE is
+		// about the part, and a warning did not cross DCGM's failure line.
 		if st == statusFail {
 			r.findings[name] = append(r.findings[name], findingsFrom(node)...)
+		} else {
+			r.warnReasons = appendReasons(r.warnReasons, name, node)
 		}
 		r.failReasons = appendReasons(r.failReasons, name, node)
 	}

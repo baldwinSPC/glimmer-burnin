@@ -36,11 +36,14 @@ const (
 	// Which subtests DCGM declined to run, and why — evidence for the
 	// partial-coverage verdict.
 	keySkippedSubtests = "diag_skipped_subtests"
-	keySkipReason      = "diag_skip_reason"
-	keyCounterReset    = "counter_baseline_reset"
-	keyPrunedObjects   = "pruned_objects"
-	keyElapsedS        = "elapsed_s"
-	keyReason          = "reason"
+	// What the WARNED subtests said. testsWarned is a count, and a count with
+	// no text leaves an operator who gated on it with nothing to act on (#323).
+	keyWarnFindings  = "diag_warn_findings"
+	keySkipReason    = "diag_skip_reason"
+	keyCounterReset  = "counter_baseline_reset"
+	keyPrunedObjects = "pruned_objects"
+	keyElapsedS      = "elapsed_s"
+	keyReason        = "reason"
 
 	// Sampled DCGM field values. See fields.go for the field each one comes
 	// from and how it is aggregated.
@@ -69,7 +72,7 @@ var emittedKeys = []string{
 	keyDiagLevel, keyDiagLevelSource, keyDcgmVersion, keyDriverVersion,
 	keyGPUCount, keyTestsRun, keyTestsFailed, keyTestsWarned, keyTestsNotRun,
 	keyTestsSkipped, keyDcgmiExitCode, keySampleCount, keyCounterReset,
-	keyPrunedObjects, keyElapsedS, keyReason,
+	keyPrunedObjects, keyElapsedS, keyReason, keyWarnFindings,
 	keyGPUTempC, keyLastXidCode, keyPCIeReplayCount, keyECCSbeTotal,
 	keyECCDbeTotal, keyRowsRemapped,
 }
