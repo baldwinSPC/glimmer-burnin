@@ -911,7 +911,8 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 	// same claim noAccelerator makes, for a different reason.
 	amdAccelerator := map[string]string{
 		"clockprobe-rocm":    "drives the AMD accelerator through HIP; /dev/kfd and /dev/dri arrive from the amd.com/gpu device plugin, not from NVIDIA driver injection",
-		"compute-smoke-rocm": "runs a matrix-core GEMM through HIP/rocWMMA; same device-plugin path, no NVIDIA driver injection",
+		"compute-smoke-rocm": "runs a matrix-core GEMM through HIP; same device-plugin path, no NVIDIA driver injection",
+		"memory-bw-rocm":     "measures copy paths and a STREAM triad through HIP; same device-plugin path, no NVIDIA driver injection",
 	}
 
 	for _, d := range runnerDirs(t) {
