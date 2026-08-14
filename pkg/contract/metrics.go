@@ -943,6 +943,18 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	"idleClockLockSuspected": {
+		Name: "idleClockLockSuspected", Unit: UnitNone,
+		Description:  "whether the run matched the amdgpu idle-clock-lock signature — slow, cool, and busy (ROCm issue #5750): one of true|false|unknown. Tri-state for the same reason pdWedgeSuspected is: without a temperature the lock cannot be told from a thermal throttle, and without a utilization reading \"busy while slow\" cannot be established — neither unknown may read as an all-clear. The runner fails the node on the clock floor itself; a threshold cannot express the three states",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"gfxTarget": {
+		Name: "gfxTarget", Unit: UnitNone,
+		Description:  "the AMD accelerator's compute target as HIP reports it (\"gfx1151\"). A label with the same standing as gpuName: identity is a fleet-inventory question, never a threshold",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"clockFloorBasis": {
 		Name: "clockFloorBasis", Unit: UnitNone,
 		Description:  "which floor the run was judged against, general|thermal, naming the reason clockFloorAppliedPct is what it is; a label recording the runner's own decision",

@@ -27,6 +27,7 @@ cover.out
 # and fails if a runner directory has no entry, so a new runner cannot land
 # without one.
 /clockprobe
+/clockprobe-rocm
 /compute-smoke
 /dcgm-diag
 /disk-io

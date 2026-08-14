@@ -250,6 +250,8 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"throttleReasons":         {UnitNone, ThresholdUseEvidence},
 		"throttleClassification":  {UnitNone, ThresholdUseEvidence},
 		"pdWedgeSuspected":        {UnitNone, ThresholdUseEvidence},
+		"idleClockLockSuspected":  {UnitNone, ThresholdUseEvidence},
+		"gfxTarget":               {UnitNone, ThresholdUseEvidence},
 		"clockFloorBasis":         {UnitNone, ThresholdUseEvidence},
 		"fabricCountersSaturated": {UnitNone, ThresholdUseAcceptance},
 		"fabricSaturatedCounters": {UnitNone, ThresholdUseEvidence},
