@@ -53,17 +53,13 @@ const defaultSysfs = "/host/sys"
 
 func main() { os.Exit(run()) }
 
-func logf(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
-
-func metric(key, value string) { fmt.Printf("%s=%s\n", key, value) }
-
 func fin(code int, format string, args ...any) int {
 	msg := fmt.Sprintf(format, args...)
 	switch code {
 	case exitSkip:
-		fmt.Printf("FINGERPRINT_PROBE_SKIP: %s\n", msg)
+		fmt.Printf("FINGERPRINT_PROBE_SKIP: %s\n", sanitize(msg))
 	case exitError:
-		fmt.Printf("FINGERPRINT_PROBE_ERROR: %s\n", msg)
+		fmt.Printf("FINGERPRINT_PROBE_ERROR: %s\n", sanitize(msg))
 	}
 	logf("%s", msg)
 	return code

@@ -80,6 +80,15 @@ var fabricFiles = []fabricFile{
 			"cannot.",
 	},
 	{
+		name:     "zz_runnerlib.go",
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir},
+		reason: "the repo-wide runner helper stamp, generated from hack/runnerlib/runnerlib.go.src " +
+			"by `go run ./hack/runnerlib`. runners/runnerlib_test.go already holds every copy " +
+			"byte-identical to the source across ALL Go runners; this entry exists because this " +
+			"table also enumerates shared files, and a file tracked by two guards must say so in " +
+			"both or the next reader assumes one of them is stale.",
+	},
+	{
 		name:     "rdma.go",
 		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir},
 		reason: "device discovery, port selection and GID resolution are one implementation. " +

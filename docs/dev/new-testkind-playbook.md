@@ -419,3 +419,18 @@ device-side assert inside the kernel.
 
 A runner may only declare **what it positively established**. Everything above is
 that sentence applied to a specific place where it was once got wrong.
+
+
+## The shared helper stamp
+
+Every Go runner carries `zz_runnerlib.go`, stamped byte-identical from
+`hack/runnerlib/runnerlib.go.src` — `logf`, `metric` (sanitizing), `envInt`,
+`envOr`, `sanitize`. The image build is a throwaway module and cannot import a
+repository package, so this is how helpers are shared. For a new Go runner:
+
+```sh
+go run ./hack/runnerlib
+```
+
+and do not declare any of those five locally — `runners/runnerlib_test.go`
+fails CI on a missing or drifted stamp and on a local re-declaration alike.

@@ -71,35 +71,18 @@ const (
 
 func main() { os.Exit(run()) }
 
-func logf(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
-
-func metric(key, value string) { fmt.Printf("%s=%s\n", key, value) }
-
 func fin(code int, format string, args ...any) int {
 	msg := fmt.Sprintf(format, args...)
 	switch code {
 	case exitSkip:
-		fmt.Printf("FABRIC_SOAK_SKIP: %s\n", msg)
+		fmt.Printf("FABRIC_SOAK_SKIP: %s\n", sanitize(msg))
 	case exitError:
-		fmt.Printf("FABRIC_SOAK_ERROR: %s\n", msg)
+		fmt.Printf("FABRIC_SOAK_ERROR: %s\n", sanitize(msg))
 	case exitFail:
-		fmt.Printf("FABRIC_SOAK_FAIL: %s\n", msg)
+		fmt.Printf("FABRIC_SOAK_FAIL: %s\n", sanitize(msg))
 	}
 	logf("%s", msg)
 	return code
-}
-
-func envInt(name string, def int) int {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		logf("fabric-soak: %s=%q is not a positive integer; using %d", name, v, def)
-		return def
-	}
-	return n
 }
 
 func run() int {
