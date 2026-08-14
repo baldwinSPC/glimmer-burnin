@@ -45,7 +45,7 @@ const (
 	// Sampled DCGM field values. See fields.go for the field each one comes
 	// from and how it is aggregated.
 	keyGPUTempC        = "gpu_temp_c"
-	keyXIDErrors       = "xid_errors"
+	keyLastXidCode     = "last_xid_code"
 	keyPCIeReplayCount = "pcie_replay_count"
 	keyECCSbeTotal     = "ecc_sbe_total"
 	keyECCDbeTotal     = "ecc_dbe_total"
@@ -59,7 +59,7 @@ var emittedKeys = []string{
 	keyGPUCount, keyTestsRun, keyTestsFailed, keyTestsWarned, keyTestsNotRun,
 	keyTestsSkipped, keyDcgmiExitCode, keySampleCount, keyCounterReset,
 	keyPrunedObjects, keyElapsedS, keyReason,
-	keyGPUTempC, keyXIDErrors, keyPCIeReplayCount, keyECCSbeTotal,
+	keyGPUTempC, keyLastXidCode, keyPCIeReplayCount, keyECCSbeTotal,
 	keyECCDbeTotal, keyRowsRemapped,
 }
 

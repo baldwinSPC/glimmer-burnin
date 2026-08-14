@@ -525,7 +525,7 @@ driver_version=580.82.09
 diag_level=3
 tests_run=14
 tests_failed=0
-xid_errors=0
+last_xid_code=0
 ecc_sbe_total=0
 ecc_dbe_total=0
 rows_remapped=0
@@ -543,7 +543,7 @@ DCGM_DIAG_PASS
 				"testsRun":      "14",
 				// DCGM's "tests_failed" is a subtest count, not a verdict.
 				"diagTestsFailed": "0",
-				"xidEvents":       "0",
+				"lastXidCode":     "0",
 				// Correctable and uncorrectable ECC stay two numbers: a few
 				// SBEs is a working part, one DBE is a failing one.
 				"eccSbeTotal":      "0",

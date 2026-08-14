@@ -664,6 +664,23 @@ var registry = map[string]Metric{
 		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	// The CODE, which is a different quantity from the COUNT above and must not
+	// be confused with it. DCGM's DCGM_FI_DEV_XID_ERRORS holds "the specific
+	// XID error" rather than a running total, so it answers "which" and never
+	// "how many" — dcgm-diag reported a subtraction of two such codes as
+	// xidEvents until #311, and read 0 for a GPU sitting at one code all window.
+	//
+	// Evidence rather than Acceptance, for a reason that outlives the naming
+	// fix: the field is LIFETIME-scoped. A non-zero code may name an Xid from
+	// weeks before this run, so a gate on it condemns a node for history the
+	// test never observed. The window-scoped count is xidEvents, which
+	// host-health derives from /dev/kmsg by counting events.
+	"lastXidCode": {
+		Name: "lastXidCode", Unit: UnitNone,
+		Description:  "code of the most recent NVIDIA Xid error the device reports, lifetime-scoped; 0 when none is reported. Which Xid, never how many — the count is xidEvents",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"remappedRows": {
 		Name: "remappedRows", Unit: UnitNone,
 		Description:  "count of device memory rows the driver has remapped; a rising count is a degrading part even while every test still passes",

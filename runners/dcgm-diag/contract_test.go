@@ -53,7 +53,7 @@ func TestOwnedMetricsLandOnTheirRegisteredNames(t *testing.T) {
 		keyTestsFailed:     "diagTestsFailed",
 		keyPCIeReplayCount: "pcieReplayErrors",
 		keyGPUTempC:        "gpuTempC",
-		keyXIDErrors:       "xidEvents",
+		keyLastXidCode:     "lastXidCode",
 		keyRowsRemapped:    "remappedRows",
 		keyElapsedS:        "elapsedS",
 	}

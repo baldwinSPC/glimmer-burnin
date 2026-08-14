@@ -58,6 +58,7 @@ func TestUnitOf(t *testing.T) {
 		{"totalKernelMs", UnitMilliseconds},
 		{"miscompares", UnitNone},
 		{"xidEvents", UnitNone},
+		{"lastXidCode", UnitNone},
 		{"remappedRows", UnitNone},
 		{"pcieReplayErrors", UnitNone},
 		{"nicLinkDownEvents", UnitNone},
@@ -204,6 +205,7 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"eccErrors":            {UnitNone, ThresholdUseAcceptance},
 		"memoryErrors":         {UnitNone, ThresholdUseAcceptance},
 		"xidEvents":            {UnitNone, ThresholdUseAcceptance},
+		"lastXidCode":          {UnitNone, ThresholdUseEvidence},
 		"remappedRows":         {UnitNone, ThresholdUseAcceptance},
 		"pcieReplayErrors":     {UnitNone, ThresholdUseAcceptance},
 		"nicLinkDownEvents":    {UnitNone, ThresholdUseAcceptance},
@@ -398,6 +400,7 @@ func TestAggregationOfTheEasilyMistakenMetrics(t *testing.T) {
 
 		// WINDOWED events from the same runner, which DO sum.
 		"xidEvents":            {AggSum, "counted from the kernel log over the window"},
+		"lastXidCode":          {AggLast, "a state, not a count: the last code the device reports"},
 		"pcieReplayErrors":     {AggSum, "differenced over the window"},
 		"nicLinkDownEvents":    {AggSum, "differenced over the window"},
 		"tcpRetransmits":       {AggSum, "a per-window count of retransmitted segments"},

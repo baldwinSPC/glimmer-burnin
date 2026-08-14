@@ -24,7 +24,16 @@ const (
 	// DCGM's aggregate counters are lifetime totals; reporting them raw would
 	// mean a part that took one ECC error two years ago fails every burn-in it
 	// is ever given, and a threshold of "0" would be untunable.
+	//
+	// ONLY FOR FIELDS DCGM DOCUMENTS AS MONOTONIC COUNTERS. dcgm_fields.h says
+	// so explicitly for the ones that qualify ("Note: monotonically
+	// increasing"); a field that merely holds a small integer does not.
+	// Subtracting two readings of something that is not a counter produces a
+	// plausible small number that is not a count of anything — see aggLast.
 	aggDelta
+	// aggLast reports the final reading, for a field that holds a STATE rather
+	// than a count. No arithmetic is done on it, because none is meaningful.
+	aggLast
 )
 
 // dcgmField is one DCGM field this runner samples.
@@ -44,7 +53,29 @@ type dcgmField struct {
 
 var sampledFields = []dcgmField{
 	{sym: "DCGM_FI_DEV_GPU_TEMP", id: 150, key: keyGPUTempC, agg: aggMax},
-	{sym: "DCGM_FI_DEV_XID_ERRORS", id: 230, key: keyXIDErrors, agg: aggDelta},
+	// FIELD 230 IS NOT A COUNTER, and it was read as one until #311.
+	// dcgm_fields.h describes it as "XID errors. The value is the specific XID
+	// error" — the CODE of the last XID encountered. Compare the two ECC
+	// entries below, which dcgm_fields.h marks "Note: monotonically
+	// increasing"; that note is the licence to take a delta, and 230 does not
+	// carry it.
+	//
+	// Subtracting two codes produced neither a count nor a code. A GPU sitting
+	// at XID 79 for the whole window reported 79-79 = 0 and CERTIFIED CLEAN,
+	// which is a false pass on a faulting part; a GPU that went 13 -> 79
+	// reported "66 Xid errors". The shipped sample gated `xidEvents Equal 0` on
+	// exactly this number.
+	//
+	// This is the same substitution the 393/394 note below describes — a
+	// plausible small integer, thresholdable, and wrong — reached by a
+	// different route. The build's field-id assertion cannot catch it: the id
+	// is right and the SEMANTICS are wrong, so the check that matters is
+	// reading the field's description before choosing an aggregation.
+	//
+	// It is reported as evidence now, under its own name, and `xidEvents` comes
+	// from host-health's /dev/kmsg path, which counts events rather than
+	// subtracting codes.
+	{sym: "DCGM_FI_DEV_XID_ERRORS", id: 230, key: keyLastXidCode, agg: aggLast},
 	{sym: "DCGM_FI_DEV_PCIE_REPLAY_COUNTER", id: 202, key: keyPCIeReplayCount, agg: aggDelta},
 	{sym: "DCGM_FI_DEV_ECC_SBE_AGG_TOTAL", id: 312, key: keyECCSbeTotal, agg: aggDelta},
 	{sym: "DCGM_FI_DEV_ECC_DBE_AGG_TOTAL", id: 313, key: keyECCDbeTotal, agg: aggDelta},
@@ -320,6 +351,26 @@ func (s *sampler) report(rep *report) {
 			}
 			if found {
 				rep.setNumber(key, total)
+			}
+		case aggLast:
+			// The node-level value of a per-GPU STATE. The largest final
+			// reading across the GPUs, which for an XID code is not an
+			// arithmetic claim — it is "some GPU ended the window reporting
+			// this code, and none reported a higher one". What matters for a
+			// gate is that it is non-zero exactly when some GPU reports an
+			// error, and it is deterministic on identical input.
+			best, found := 0.0, false
+			for _, i := range idx {
+				for gpu := range s.gpus {
+					if ser := s.state[seriesKey{field: i, gpu: gpu}]; ser != nil && ser.n > 0 {
+						if !found || ser.last > best {
+							best, found = ser.last, true
+						}
+					}
+				}
+			}
+			if found {
+				rep.setNumber(key, best)
 			}
 		}
 	}
