@@ -90,8 +90,25 @@ lifetime figures. Reported raw, a part that took one ECC error two years ago
 would fail every burn-in it is ever given, and a threshold of `0` would be
 untunable. The runner samples before, during and after the diagnostic and
 reports the movement. A counter that goes backwards (driver reload, device
-reset) reports `0` and sets `counter_baseline_reset=true` rather than a negative
-number nothing can threshold.
+reset) reports **`n/a`** and sets `counter_baseline_reset=true`.
+
+`n/a`, not `0` — the distinction is the whole point, and this runner reported
+`0` until #312, in flat contradiction of the paragraph immediately below. A
+reset means the window's movement is *unknown*; `0` asserts that nothing
+happened, and `pkg/runner` files the two in different places: `n/a` in
+`Result.Unmeasurable`, `0` in `Result.Metrics`, where `eccErrors Equal 0` is
+satisfied by it. A reset is also exactly when these counters are likeliest to
+have recorded something before being zeroed, so reporting `0` certified the one
+window whose evidence had just been destroyed. The whole key goes `n/a` when any
+GPU contributing to it reset: the number is a sum across the node, and a sum
+missing one of its terms is not a smaller sum but an unknown one.
+
+A `Required` threshold on these counters therefore now FAILS on a mid-test
+reset, where it previously passed. That is the intended change. A profile that
+would rather report such a node as unjudged than reject it says so explicitly
+with `applicability: RequiredIfMeasurable`, which reports the gate as NOT
+EVALUATED — the choice is the profile's to make, and is visible in the spec
+either way.
 
 **A metric that was not measured is not emitted.** Nothing defaults to zero. A
 single sample cannot establish that a counter did not move, so with fewer than
