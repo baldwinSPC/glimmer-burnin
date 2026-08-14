@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 )
 
@@ -124,7 +126,7 @@ const (
 // ghcr.io/<owner lowercased>/glimmer-burnin-<kind>:<version> — so an entry here
 // and a workflow_dispatch of publish-runner with the same version agree by
 // construction rather than by anyone remembering to keep them in step.
-var defaults = map[api.TestKind]image{
+var defaults = map[contract.TestKind]image{
 	// compute-smoke moves off v0.1.0 deliberately. That tag is public and
 	// immutable and stays exactly as it is, but it reports "no usable CUDA
 	// device", a wrong-arch image, and every CUDA runtime error as exit 1 —
@@ -132,18 +134,18 @@ var defaults = map[api.TestKind]image{
 	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
 	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
 	// repushed ones.
-	api.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0", Vendor: VendorNVIDIA},
 
-	api.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
-	api.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.0", Vendor: VendorNVIDIA},
-	api.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.0", Vendor: VendorNVIDIA},
-	api.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
-	api.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.0", Vendor: VendorAny},
-	api.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.6.0", Vendor: VendorNVIDIA},
-	api.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.6.0", Vendor: VendorNVIDIA},
-	api.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.0", Vendor: VendorAny},
-	api.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.0", Vendor: VendorNVIDIA},
-	api.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.0", Vendor: VendorAny},
+	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.0", Vendor: VendorAny},
+	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.0", Vendor: VendorNVIDIA},
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
@@ -155,7 +157,7 @@ var defaults = map[api.TestKind]image{
 // it fails fast and legibly at plan time asking for spec.runner.image, which is
 // far better than scheduling a pod with no image and getting an
 // ImagePullBackOff that reads as a hardware fault.
-func Default(kind api.TestKind) (string, bool) {
+func Default(kind contract.TestKind) (string, bool) {
 	e, ok := defaults[kind]
 	return e.Ref, ok
 }
@@ -163,7 +165,7 @@ func Default(kind api.TestKind) (string, bool) {
 // VendorOf reports which vendor's hardware a kind's default image can measure.
 //
 // VendorAny means it measures no accelerator at all and therefore runs anywhere.
-func VendorOf(kind api.TestKind) (string, bool) {
+func VendorOf(kind contract.TestKind) (string, bool) {
 	e, ok := defaults[kind]
 	return e.Vendor, ok
 }
@@ -172,8 +174,8 @@ func VendorOf(kind api.TestKind) (string, bool) {
 //
 // A mutable package-level map shared by two dispatchers is a way for one of them
 // to change what the other runs.
-func All() map[api.TestKind]string {
-	out := make(map[api.TestKind]string, len(defaults))
+func All() map[contract.TestKind]string {
+	out := make(map[contract.TestKind]string, len(defaults))
 	for k, v := range defaults {
 		out[k] = v.Ref
 	}
@@ -193,11 +195,11 @@ func All() map[api.TestKind]string {
 // plan-time error that names the problem into an ImagePullBackOff on every
 // targeted node. Add it here the moment the tag is published, and delete this
 // paragraph with it.
-func WithoutDefault() []api.TestKind {
-	return []api.TestKind{
-		api.KindCustom, api.KindTCPBaseline, api.KindDiskIO, api.KindFingerprintProbe,
-		api.KindFabricSoak,
-		api.KindGemmSweep,
+func WithoutDefault() []contract.TestKind {
+	return []contract.TestKind{
+		contract.KindCustom, contract.KindTCPBaseline, contract.KindDiskIO, contract.KindFingerprintProbe,
+		contract.KindFabricSoak,
+		contract.KindGemmSweep,
 	}
 }
 
@@ -219,7 +221,7 @@ func WithoutDefault() []api.TestKind {
 //
 // The order is: an explicit image, then the vendor's own entry, then the kind's
 // default — but only if the default can actually measure this node.
-func Resolve(kind api.TestKind, runner *api.RunnerSpec, vendor string) (string, error) {
+func Resolve(kind contract.TestKind, runner *api.RunnerSpec, vendor string) (string, error) {
 	if runner != nil && runner.Image != "" {
 		// Pinned by the author for every node. Their call, including on a mixed
 		// fleet, and no vendor check applies: naming an image IS the declaration.

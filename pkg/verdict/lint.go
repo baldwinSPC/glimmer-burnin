@@ -5,7 +5,6 @@ import (
 	"math"
 	"strconv"
 
-	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
@@ -71,8 +70,8 @@ func (p Problem) Error() string {
 // checks that hold for any runner honouring the contract, so an unregistered
 // metric name passes it clean. Where the caller knows which kind's runner will
 // be asked for the metric, ValidateThresholdsForKind says more.
-func ValidateThresholds(thresholds []burninv1alpha1.Threshold) []Problem {
-	return ValidateThresholdsForKind(burninv1alpha1.KindCustom, thresholds)
+func ValidateThresholds(thresholds []contract.Threshold) []Problem {
+	return ValidateThresholdsForKind(contract.KindCustom, thresholds)
 }
 
 // ValidateThresholdsForKind is ValidateThresholds plus the one check that
@@ -102,7 +101,7 @@ func ValidateThresholds(thresholds []burninv1alpha1.Threshold) []Problem {
 // writing a THRESHOLD is the moment a name stops being incidental evidence and
 // starts deciding acceptance, and a name this project owns and decides
 // acceptance on belongs in the registry.
-func ValidateThresholdsForKind(kind burninv1alpha1.TestKind, thresholds []burninv1alpha1.Threshold) []Problem {
+func ValidateThresholdsForKind(kind contract.TestKind, thresholds []contract.Threshold) []Problem {
 	var problems []Problem
 
 	for i, th := range thresholds {
@@ -137,11 +136,11 @@ func ValidateThresholdsForKind(kind burninv1alpha1.TestKind, thresholds []burnin
 		}
 
 		switch th.Comparison {
-		case burninv1alpha1.GTE, burninv1alpha1.LTE:
+		case contract.GTE, contract.LTE:
 			// A floor or a ceiling on any metric is sound; the pair of them is
 			// how a continuous quantity gets a band.
 
-		case burninv1alpha1.EQ, burninv1alpha1.NEQ:
+		case contract.EQ, contract.NEQ:
 			// The intended use is a dimensionless counter against a whole
 			// number: eccErrors Equal 0. Anything else is asking a continuous
 			// quantity to reproduce a decimal string exactly.
@@ -150,17 +149,17 @@ func ValidateThresholdsForKind(kind burninv1alpha1.TestKind, thresholds []burnin
 			case unit != contract.UnitNone:
 				add(SeverityUnsound,
 					"%s and %s compare exactly, with no tolerance, and %q carries the unit %q — it is a continuous measurement, and no run reproduces a decimal exactly, so this gate fails on every healthy node and the failure reads as a hardware verdict. Use %s and/or %s (both, for a band); reserve exact comparison for dimensionless counters such as eccErrors",
-					burninv1alpha1.EQ, burninv1alpha1.NEQ, th.Metric, unit, burninv1alpha1.GTE, burninv1alpha1.LTE)
+					contract.EQ, contract.NEQ, th.Metric, unit, contract.GTE, contract.LTE)
 			case valErr == nil && want != math.Trunc(want):
 				add(SeverityUnsound,
 					"%s and %s compare exactly, and the value %q is not a whole number; exact comparison is for dimensionless counters, whose values are integers. Use %s and/or %s to gate a fractional quantity",
-					burninv1alpha1.EQ, burninv1alpha1.NEQ, th.Value, burninv1alpha1.GTE, burninv1alpha1.LTE)
+					contract.EQ, contract.NEQ, th.Value, contract.GTE, contract.LTE)
 			}
 
 		default:
 			add(SeverityMalformed,
 				"comparison %q is not one of %s, %s, %s, %s; an unrecognised comparison fails closed, so this gate fails on every node",
-				th.Comparison, burninv1alpha1.GTE, burninv1alpha1.LTE, burninv1alpha1.EQ, burninv1alpha1.NEQ)
+				th.Comparison, contract.GTE, contract.LTE, contract.EQ, contract.NEQ)
 		}
 
 		// A metric this project's own runner is being asked for, that this
@@ -173,7 +172,7 @@ func ValidateThresholdsForKind(kind burninv1alpha1.TestKind, thresholds []burnin
 		if _, registered := contract.Lookup(th.Metric); !registered && nameErr == nil && kind.IsBuiltIn() {
 			add(SeverityUnsound,
 				"%q is not in the metric registry, and %q is a kind whose runner this project ships. Either it is a first-party measurement whose entry in pkg/contract was forgotten — register it, since gating on a name is what promotes it from evidence to acceptance — or no runner emits it, in which case this gate is never satisfied, fails every node forever, and reports it in the shape of a hardware verdict. The registry stays open for runners this project does not ship: on kind %q an unregistered name is expected and nothing is said about it",
-				th.Metric, kind, burninv1alpha1.KindCustom)
+				th.Metric, kind, contract.KindCustom)
 		}
 
 		// The registry's own opinion about what may decide acceptance. An

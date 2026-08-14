@@ -14,11 +14,20 @@ import (
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
 
-// typesFile is this package's own source, read back so the checks below are
-// about what is DECLARED rather than about a second list someone maintained by
-// hand. It is the same idiom runners/pins_test.go uses over the Dockerfiles: the
-// declaration is the only thing that knows the whole set.
-const typesFile = "burnintest_types.go"
+// typesFile is the source these checks read back, so they are about what is
+// DECLARED rather than about a second list someone maintained by hand. Same
+// idiom runners/pins_test.go uses over the Dockerfiles: the declaration is the
+// only thing that knows the whole set.
+//
+// It points OUT of this package since #274: the acceptance vocabulary — TestKind
+// and the Threshold struct with its kubebuilder markers — moved to pkg/contract
+// so the verdict brain would stop importing the CRD to get its own words. The
+// tests stayed here because what they check is a property of the CRD: that the
+// markers reach the generated schema, and that the Pattern the apiserver will
+// enforce agrees with the grammar pkg/contract states. All four of these failed
+// the moment the types moved, saying "this test no longer reads what it thinks
+// it reads" — which is exactly what a guard reading source by path should do.
+const typesFile = "../../pkg/contract/vocabulary.go"
 
 func readTypesFile(t *testing.T) string {
 	t.Helper()

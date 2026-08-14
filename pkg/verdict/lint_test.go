@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
 // ─── Equal / NotEqual are EXACT, and that is the pinned semantics ─────────────
@@ -13,7 +13,7 @@ import (
 // through a float64 average of sampled clocks, so an exact gate on a continuous
 // metric is a permanent failure wearing the costume of a hardware verdict.
 func TestEvaluate_EqualIsExactAndTrapsAContinuousMetric(t *testing.T) {
-	thresholds := []burninv1alpha1.Threshold{th("sustainedClockPct", burninv1alpha1.EQ, "83.22")}
+	thresholds := []contract.Threshold{th("sustainedClockPct", contract.EQ, "83.22")}
 
 	// The measurement a healthy part actually produces: 83.22 as computed, not
 	// as typed. 0.1+0.2 is the canonical demonstration that the two differ.
@@ -39,7 +39,7 @@ func TestEvaluate_EqualIsExactAndTrapsAContinuousMetric(t *testing.T) {
 // number it names, because a tolerance around zero ECC errors is a tolerance for
 // ECC errors. This is the test that fails if anyone adds a fuzz factor.
 func TestEvaluate_EqualHasNoEpsilonOnCounters(t *testing.T) {
-	thresholds := []burninv1alpha1.Threshold{th("eccErrors", burninv1alpha1.EQ, "0")}
+	thresholds := []contract.Threshold{th("eccErrors", contract.EQ, "0")}
 
 	for _, reported := range []string{"1", "0.5", "0.000001", "-0.000001"} {
 		t.Run(reported, func(t *testing.T) {
@@ -55,7 +55,7 @@ func TestEvaluate_EqualHasNoEpsilonOnCounters(t *testing.T) {
 		t.Errorf("a clean counter failed its own gate: %q", got.Message)
 	}
 	if got := Evaluate(map[string]string{"xidEvents": "9007199254740992"}, nil,
-		[]burninv1alpha1.Threshold{th("xidEvents", burninv1alpha1.EQ, "9007199254740992")}); !got.Passed {
+		[]contract.Threshold{th("xidEvents", contract.EQ, "9007199254740992")}); !got.Passed {
 		t.Errorf("a large integer counter failed an exact gate it matches: %q", got.Message)
 	}
 }
@@ -67,25 +67,25 @@ func TestEvaluate_NonFiniteValuesNeverSatisfyAGate(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		metrics    map[string]string
-		thresholds []burninv1alpha1.Threshold
+		thresholds []contract.Threshold
 		wantIn     string
 	}{
 		{
 			name:       "NaN metric under NotEqual",
 			metrics:    map[string]string{"eccErrors": "NaN"},
-			thresholds: []burninv1alpha1.Threshold{th("eccErrors", burninv1alpha1.NEQ, "1")},
+			thresholds: []contract.Threshold{th("eccErrors", contract.NEQ, "1")},
 			wantIn:     "not a finite measurement",
 		},
 		{
 			name:       "Inf metric under a ceiling",
 			metrics:    map[string]string{"gpuTempC": "+Inf"},
-			thresholds: []burninv1alpha1.Threshold{th("gpuTempC", burninv1alpha1.LTE, "85")},
+			thresholds: []contract.Threshold{th("gpuTempC", contract.LTE, "85")},
 			wantIn:     "not a finite measurement",
 		},
 		{
 			name:       "NaN threshold value under NotEqual",
 			metrics:    map[string]string{"eccErrors": "0"},
-			thresholds: []burninv1alpha1.Threshold{th("eccErrors", burninv1alpha1.NEQ, "NaN")},
+			thresholds: []contract.Threshold{th("eccErrors", contract.NEQ, "NaN")},
 			wantIn:     "not a finite number",
 		},
 	} {
@@ -103,12 +103,12 @@ func TestEvaluate_NonFiniteValuesNeverSatisfyAGate(t *testing.T) {
 
 // ─── ValidateThresholds: the same rule, said before the run ───────────────────
 
-func problemFor(t *testing.T, threshold burninv1alpha1.Threshold) []Problem {
+func problemFor(t *testing.T, threshold contract.Threshold) []Problem {
 	t.Helper()
-	return ValidateThresholds([]burninv1alpha1.Threshold{threshold})
+	return ValidateThresholds([]contract.Threshold{threshold})
 }
 
-func onlyProblem(t *testing.T, threshold burninv1alpha1.Threshold) Problem {
+func onlyProblem(t *testing.T, threshold contract.Threshold) Problem {
 	t.Helper()
 	ps := problemFor(t, threshold)
 	if len(ps) != 1 {
@@ -120,19 +120,19 @@ func onlyProblem(t *testing.T, threshold burninv1alpha1.Threshold) Problem {
 // The gates an author is supposed to write must not be nagged about, or the
 // check gets switched off and stops protecting anything.
 func TestValidateThresholds_AcceptsTheGatesItIsFor(t *testing.T) {
-	sound := []burninv1alpha1.Threshold{
-		th("eccErrors", burninv1alpha1.EQ, "0"),
-		th("throttleEvents", burninv1alpha1.EQ, "0"),
-		th("miscompares", burninv1alpha1.EQ, "0"),
-		th("iterationsCompleted", burninv1alpha1.NEQ, "0"),
-		th("busBandwidthGBs", burninv1alpha1.GTE, "20"),
-		th("gpuTempC", burninv1alpha1.LTE, "85"),
-		th("sustainedClockPct", burninv1alpha1.GTE, "90"),  // the correct form of the trap below
-		th("sustainedClockPct", burninv1alpha1.LTE, "105"), // …and its other side
+	sound := []contract.Threshold{
+		th("eccErrors", contract.EQ, "0"),
+		th("throttleEvents", contract.EQ, "0"),
+		th("miscompares", contract.EQ, "0"),
+		th("iterationsCompleted", contract.NEQ, "0"),
+		th("busBandwidthGBs", contract.GTE, "20"),
+		th("gpuTempC", contract.LTE, "85"),
+		th("sustainedClockPct", contract.GTE, "90"),  // the correct form of the trap below
+		th("sustainedClockPct", contract.LTE, "105"), // …and its other side
 		// An unregistered metric from a third-party runner: the registry is an
 		// open world, and this package does not know better than its author.
-		th("vendorFabricRetries", burninv1alpha1.EQ, "0"),
-		th("vendorLinkUtilPct", burninv1alpha1.GTE, "80"),
+		th("vendorFabricRetries", contract.EQ, "0"),
+		th("vendorLinkUtilPct", contract.GTE, "80"),
 	}
 	if got := ValidateThresholds(sound); len(got) != 0 {
 		t.Fatalf("sound thresholds were rejected: %v", got)
@@ -144,7 +144,7 @@ func TestValidateThresholds_AcceptsTheGatesItIsFor(t *testing.T) {
 
 // The issue's own example, caught while the author can still fix it.
 func TestValidateThresholds_FlagsExactComparisonOnAContinuousMetric(t *testing.T) {
-	for _, op := range []burninv1alpha1.Comparison{burninv1alpha1.EQ, burninv1alpha1.NEQ} {
+	for _, op := range []contract.Comparison{contract.EQ, contract.NEQ} {
 		t.Run(string(op), func(t *testing.T) {
 			p := onlyProblem(t, th("sustainedClockPct", op, "83.22"))
 			if p.Severity != SeverityUnsound {
@@ -154,7 +154,7 @@ func TestValidateThresholds_FlagsExactComparisonOnAContinuousMetric(t *testing.T
 				t.Errorf("problem = %+v, want it to point at threshold 0 / sustainedClockPct", p)
 			}
 			// The message has to name the fix, or it is just a complaint.
-			for _, want := range []string{"Pct", string(burninv1alpha1.GTE), string(burninv1alpha1.LTE)} {
+			for _, want := range []string{"Pct", string(contract.GTE), string(contract.LTE)} {
 				if !strings.Contains(p.Reason, want) {
 					t.Errorf("reason = %q, want it to mention %q", p.Reason, want)
 				}
@@ -174,7 +174,7 @@ func TestValidateThresholds_FlagsExactComparisonOnEveryUnitBearingMetric(t *test
 		"elapsedS", "gpuTempC", "powerDrawW", "smClockMHz", "sustainedThroughputTflops",
 	} {
 		t.Run(metric, func(t *testing.T) {
-			p := onlyProblem(t, th(metric, burninv1alpha1.EQ, "100"))
+			p := onlyProblem(t, th(metric, contract.EQ, "100"))
 			if p.Severity != SeverityUnsound {
 				t.Errorf("severity = %q, want %q", p.Severity, SeverityUnsound)
 			}
@@ -185,7 +185,7 @@ func TestValidateThresholds_FlagsExactComparisonOnEveryUnitBearingMetric(t *test
 // A dimensionless name does not make a fractional exact gate sensible: a counter
 // counts, and `Equal 0.5` can never hold either.
 func TestValidateThresholds_FlagsExactComparisonAgainstAFractionalValue(t *testing.T) {
-	p := onlyProblem(t, th("miscompares", burninv1alpha1.EQ, "0.5"))
+	p := onlyProblem(t, th("miscompares", contract.EQ, "0.5"))
 	if p.Severity != SeverityUnsound {
 		t.Errorf("severity = %q, want %q", p.Severity, SeverityUnsound)
 	}
@@ -200,7 +200,7 @@ func TestValidateThresholds_FlagsExactComparisonAgainstAFractionalValue(t *testi
 func TestValidateThresholds_FlagsAGateOnAnEvidenceOnlyMetric(t *testing.T) {
 	for _, metric := range []string{"throughputTflops", "ratedBoostClockMHz"} {
 		t.Run(metric, func(t *testing.T) {
-			ps := problemFor(t, th(metric, burninv1alpha1.GTE, "90"))
+			ps := problemFor(t, th(metric, contract.GTE, "90"))
 			if len(ps) != 1 {
 				t.Fatalf("got %d problems, want 1: %v", len(ps), ps)
 			}
@@ -252,7 +252,7 @@ func TestValidateThresholds_FlagsAGateOnALabelValuedMetric(t *testing.T) {
 		t.Run(metric, func(t *testing.T) {
 			// "== 1" is the shape an author reaches for on something that reads
 			// like a boolean, and it is exactly what #65 reproduced.
-			gate := th(metric, burninv1alpha1.EQ, "1")
+			gate := th(metric, contract.EQ, "1")
 
 			ps := problemFor(t, gate)
 			if len(ps) == 0 {
@@ -268,7 +268,7 @@ func TestValidateThresholds_FlagsAGateOnALabelValuedMetric(t *testing.T) {
 			// authoring time: evaluation is unchanged and still fails closed.
 			// The linter is advisory — it does not rescue this gate, it warns
 			// while the author can still fix it.
-			out := Evaluate(map[string]string{metric: reported}, nil, []burninv1alpha1.Threshold{gate})
+			out := Evaluate(map[string]string{metric: reported}, nil, []contract.Threshold{gate})
 			if out.Passed {
 				t.Fatalf("Evaluate passed a gate on the non-numeric value %q; it must fail closed", reported)
 			}
@@ -281,8 +281,8 @@ func TestValidateThresholds_FlagsAGateOnALabelValuedMetric(t *testing.T) {
 			// description, which tells the author the values the metric
 			// actually takes and what to gate on instead. Asserted so a future
 			// change cannot quietly demote it back.
-			aware := ValidateThresholdsForKind(burninv1alpha1.KindClockProbe,
-				[]burninv1alpha1.Threshold{gate})
+			aware := ValidateThresholdsForKind(contract.KindClockProbe,
+				[]contract.Threshold{gate})
 			if len(aware) == 0 {
 				t.Fatalf("the kind-aware form said nothing about a gate on %q", metric)
 			}
@@ -303,32 +303,32 @@ func TestValidateThresholds_FlagsAGateOnALabelValuedMetric(t *testing.T) {
 func TestValidateThresholds_FlagsThresholdsThatCanNeverBeEvaluated(t *testing.T) {
 	cases := []struct {
 		name      string
-		threshold burninv1alpha1.Threshold
+		threshold contract.Threshold
 		wantIn    string
 	}{
 		{
 			name:      "ungrammatical metric name is dropped by the parser",
-			threshold: th("bus_bandwidth_gbs", burninv1alpha1.GTE, "20"),
+			threshold: th("bus_bandwidth_gbs", contract.GTE, "20"),
 			wantIn:    "can never be satisfied",
 		},
 		{
 			name:      "empty metric name",
-			threshold: th("", burninv1alpha1.GTE, "20"),
+			threshold: th("", contract.GTE, "20"),
 			wantIn:    "must not be empty",
 		},
 		{
 			name:      "non-numeric value",
-			threshold: th("busBandwidthGBs", burninv1alpha1.GTE, "fast"),
+			threshold: th("busBandwidthGBs", contract.GTE, "fast"),
 			wantIn:    "not numeric",
 		},
 		{
 			name:      "non-finite value",
-			threshold: th("eccErrors", burninv1alpha1.NEQ, "NaN"),
+			threshold: th("eccErrors", contract.NEQ, "NaN"),
 			wantIn:    "not a finite number",
 		},
 		{
 			name:      "unrecognised comparison",
-			threshold: th("eccErrors", burninv1alpha1.Comparison("EqualIsh"), "0"),
+			threshold: th("eccErrors", contract.Comparison("EqualIsh"), "0"),
 			wantIn:    "fails closed",
 		},
 	}
@@ -379,8 +379,8 @@ func TestValidateThresholds_FlagsThresholdsThatCanNeverBeEvaluated(t *testing.T)
 func TestValidateThresholdsForKind_FlagsAnUnregisteredMetricOnABuiltInKind(t *testing.T) {
 	for _, metric := range []string{"hwSlowdownSamples", "swPowerCapSamples", "gpuIdleSamples"} {
 		t.Run(metric, func(t *testing.T) {
-			ps := ValidateThresholdsForKind(burninv1alpha1.KindClockProbe,
-				[]burninv1alpha1.Threshold{th(metric, burninv1alpha1.EQ, "0")})
+			ps := ValidateThresholdsForKind(contract.KindClockProbe,
+				[]contract.Threshold{th(metric, contract.EQ, "0")})
 			if len(ps) != 1 {
 				t.Fatalf("got %d problems, want 1: %v", len(ps), ps)
 			}
@@ -409,19 +409,19 @@ func TestValidateThresholdsForKind_FlagsAnUnregisteredMetricOnABuiltInKind(t *te
 // or merely nagging about it — is what pushes an author toward stuffing data
 // into a message string where nothing can gate on it.
 func TestValidateThresholdsForKind_SaysNothingAboutRunnersThisProjectDoesNotShip(t *testing.T) {
-	thresholds := []burninv1alpha1.Threshold{
-		th("vendorFabricRetries", burninv1alpha1.EQ, "0"),
-		th("vendorLinkUtilPct", burninv1alpha1.GTE, "80"),
+	thresholds := []contract.Threshold{
+		th("vendorFabricRetries", contract.EQ, "0"),
+		th("vendorLinkUtilPct", contract.GTE, "80"),
 		// A first-party name that is unregistered on purpose. It belongs here
 		// rather than only among the vendor-shaped ones: the rule keys off the
 		// KIND, not off whether a name looks like ours, and a third-party runner
 		// reusing a spelling we happen to also emit must still go unremarked.
-		th("hwSlowdownSamples", burninv1alpha1.EQ, "0"),
+		th("hwSlowdownSamples", contract.EQ, "0"),
 	}
-	for _, kind := range []burninv1alpha1.TestKind{
-		burninv1alpha1.KindCustom,
-		burninv1alpha1.TestKind("some-vendors-own-runner"),
-		burninv1alpha1.TestKind(""),
+	for _, kind := range []contract.TestKind{
+		contract.KindCustom,
+		contract.TestKind("some-vendors-own-runner"),
+		contract.TestKind(""),
 	} {
 		t.Run(string(kind), func(t *testing.T) {
 			if got := ValidateThresholdsForKind(kind, thresholds); len(got) != 0 {
@@ -434,21 +434,21 @@ func TestValidateThresholdsForKind_SaysNothingAboutRunnersThisProjectDoesNotShip
 // ValidateThresholds is the kind-agnostic form and must stay that way: it is
 // public API with two dispatchers, and one of them has no TestKind to give.
 func TestValidateThresholds_IsTheKindAgnosticForm(t *testing.T) {
-	thresholds := []burninv1alpha1.Threshold{
-		th("hwSlowdownSamples", burninv1alpha1.EQ, "0"),
-		th("gpuTempC", burninv1alpha1.LTE, "85"),
+	thresholds := []contract.Threshold{
+		th("hwSlowdownSamples", contract.EQ, "0"),
+		th("gpuTempC", contract.LTE, "85"),
 	}
 	if got := ValidateThresholds(thresholds); len(got) != 0 {
 		t.Errorf("the kind-agnostic form gained an opinion about an unregistered name: %v", got)
 	}
 	// The registered metrics this project owns are judged identically either
 	// way — the kind changes exactly one check and nothing else.
-	registered := []burninv1alpha1.Threshold{
-		th("sustainedClockPct", burninv1alpha1.EQ, "83.22"),
-		th("throughputTflops", burninv1alpha1.GTE, "90"),
+	registered := []contract.Threshold{
+		th("sustainedClockPct", contract.EQ, "83.22"),
+		th("throughputTflops", contract.GTE, "90"),
 	}
 	agnostic := ValidateThresholds(registered)
-	aware := ValidateThresholdsForKind(burninv1alpha1.KindClockProbe, registered)
+	aware := ValidateThresholdsForKind(contract.KindClockProbe, registered)
 	if len(agnostic) != len(aware) {
 		t.Fatalf("kind-aware form reported %d problems and the agnostic form %d: %v vs %v", len(aware), len(agnostic), aware, agnostic)
 	}
@@ -463,8 +463,8 @@ func TestValidateThresholds_IsTheKindAgnosticForm(t *testing.T) {
 // nothing to "the parser will drop it", and two complaints about one mistake is
 // how a check earns the reputation that gets it switched off.
 func TestValidateThresholdsForKind_DoesNotPileOnAnUngrammaticalName(t *testing.T) {
-	ps := ValidateThresholdsForKind(burninv1alpha1.KindHostHealth,
-		[]burninv1alpha1.Threshold{th("xid_events", burninv1alpha1.EQ, "0")})
+	ps := ValidateThresholdsForKind(contract.KindHostHealth,
+		[]contract.Threshold{th("xid_events", contract.EQ, "0")})
 	if len(ps) != 1 {
 		t.Fatalf("got %d problems for one malformed name, want 1: %v", len(ps), ps)
 	}
@@ -478,18 +478,18 @@ func TestValidateThresholdsForKind_DoesNotPileOnAnUngrammaticalName(t *testing.T
 // keep.
 func TestValidateThresholdsForKind_AcceptsFirstPartyGatesOnRegisteredMetrics(t *testing.T) {
 	for _, tc := range []struct {
-		kind      burninv1alpha1.TestKind
-		threshold burninv1alpha1.Threshold
+		kind      contract.TestKind
+		threshold contract.Threshold
 	}{
-		{burninv1alpha1.KindHostHealth, th("eccErrors", burninv1alpha1.EQ, "0")},
-		{burninv1alpha1.KindHostHealth, th("xidEvents", burninv1alpha1.EQ, "0")},
-		{burninv1alpha1.KindClockProbe, th("sustainedClockPct", burninv1alpha1.GTE, "70")},
-		{burninv1alpha1.KindNCCL, th("busBandwidthGBs", burninv1alpha1.GTE, "10.8")},
-		{burninv1alpha1.KindIBWriteBW, th("bandwidthGbps", burninv1alpha1.GTE, "89")},
-		{burninv1alpha1.KindMemoryStress, th("memoryErrors", burninv1alpha1.EQ, "0")},
+		{contract.KindHostHealth, th("eccErrors", contract.EQ, "0")},
+		{contract.KindHostHealth, th("xidEvents", contract.EQ, "0")},
+		{contract.KindClockProbe, th("sustainedClockPct", contract.GTE, "70")},
+		{contract.KindNCCL, th("busBandwidthGBs", contract.GTE, "10.8")},
+		{contract.KindIBWriteBW, th("bandwidthGbps", contract.GTE, "89")},
+		{contract.KindMemoryStress, th("memoryErrors", contract.EQ, "0")},
 	} {
 		t.Run(string(tc.kind)+"/"+tc.threshold.Metric, func(t *testing.T) {
-			if got := ValidateThresholdsForKind(tc.kind, []burninv1alpha1.Threshold{tc.threshold}); len(got) != 0 {
+			if got := ValidateThresholdsForKind(tc.kind, []contract.Threshold{tc.threshold}); len(got) != 0 {
 				t.Errorf("a gate this project ships was flagged: %v", got)
 			}
 		})
@@ -499,12 +499,12 @@ func TestValidateThresholdsForKind_AcceptsFirstPartyGatesOnRegisteredMetrics(t *
 // An author fixing a profile should see the whole list, and each problem must
 // point at the threshold it came from.
 func TestValidateThresholds_ReportsEveryProblemWithItsIndex(t *testing.T) {
-	got := ValidateThresholds([]burninv1alpha1.Threshold{
-		th("busBandwidthGBs", burninv1alpha1.GTE, "20"),       // fine
-		th("gpuTempC", burninv1alpha1.EQ, "85"),               // unsound: exact on continuous
-		th("throughputTflops", burninv1alpha1.GTE, "90"),      // unsound: evidence only
-		th("eccErrors", burninv1alpha1.Comparison("~="), "0"), // malformed: unknown comparison
-		th("latencyUs", burninv1alpha1.EQ, "not-a-number"),    // malformed value AND exact on continuous
+	got := ValidateThresholds([]contract.Threshold{
+		th("busBandwidthGBs", contract.GTE, "20"),       // fine
+		th("gpuTempC", contract.EQ, "85"),               // unsound: exact on continuous
+		th("throughputTflops", contract.GTE, "90"),      // unsound: evidence only
+		th("eccErrors", contract.Comparison("~="), "0"), // malformed: unknown comparison
+		th("latencyUs", contract.EQ, "not-a-number"),    // malformed value AND exact on continuous
 	})
 	if len(got) != 5 {
 		t.Fatalf("got %d problems, want 5: %v", len(got), got)
