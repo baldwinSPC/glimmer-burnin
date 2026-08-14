@@ -376,3 +376,67 @@ func TestVariants_OverlayOnATestWithNoRunnerBlock(t *testing.T) {
 		})
 	}
 }
+
+// A CELL THAT CANNOT BE CONFIGURED MUST NOT REPORT AS A CELL (#296).
+//
+// variantEnv skips an axis whose name is not a legal environment variable
+// rather than mangling it — right, because a mangled name configures the wrong
+// thing. But the axis was still delivered as the cell's identity, so the run
+// reported N distinct cells that had all executed the runner's default
+// configuration. pkg/contract tells consumers to group a sweep BY those labels.
+func TestPlan_RefusesAVariantAxisTheRunnerCouldNeverReceive(t *testing.T) {
+	for _, tc := range []struct{ name, axis string }{
+		{"a hyphen is not legal in an env var", "message-size"},
+		{"nor is a dot", "block.size"},
+		{"nor may it start with a digit", "8bit"},
+		{"nor may it be empty", ""},
+	} {
+		tests := []resolvedTest{{
+			name: "sweep-cell",
+			spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
+			axes: map[string]string{tc.axis: "value"},
+		}}
+		_, err := buildPlan(&burninv1alpha1.BurnInProfile{}, tests, []string{"node-a"}, 1, false)
+		if err == nil {
+			t.Errorf("%s: buildPlan accepted axis %q — the cell would run the default configuration "+
+				"while reporting a distinct axis label", tc.name, tc.axis)
+			continue
+		}
+		if !strings.Contains(err.Error(), "sweep-cell") {
+			t.Errorf("%s: refusal does not name the test: %v", tc.name, err)
+		}
+	}
+}
+
+// The refusal must not fire on the axes the shipped samples actually use.
+func TestPlan_AcceptsTheAxisNamesTheSamplesUse(t *testing.T) {
+	tests := []resolvedTest{{
+		name: "gemm-precision-sweep-fp4",
+		spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
+		axes: map[string]string{"precision": "fp4", "class": "smoke", "measurand": "bandwidth"},
+	}}
+	if _, err := buildPlan(&burninv1alpha1.BurnInProfile{}, tests, []string{"node-a"}, 1, false); err != nil {
+		t.Errorf("buildPlan refused axis names the shipped samples use: %v", err)
+	}
+}
+
+// The refusal names ONE axis deterministically. Go randomises map iteration, and
+// a run that blames a different axis on each attempt is a run nobody can act on.
+func TestPlan_TheAxisRefusalIsDeterministic(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 30; i++ {
+		tests := []resolvedTest{{
+			name: "sweep-cell",
+			spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
+			axes: map[string]string{"bad-one": "a", "bad.two": "b", "9bad": "c"},
+		}}
+		_, err := buildPlan(&burninv1alpha1.BurnInProfile{}, tests, []string{"node-a"}, 1, false)
+		if err == nil {
+			t.Fatal("buildPlan accepted three illegal axes")
+		}
+		seen[err.Error()] = true
+	}
+	if len(seen) != 1 {
+		t.Errorf("the refusal named a different axis across runs (%d distinct messages)", len(seen))
+	}
+}
