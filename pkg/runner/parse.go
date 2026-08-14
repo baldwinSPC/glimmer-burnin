@@ -230,6 +230,12 @@ var aliases = map[string]map[string]string{
 
 	"dcgm-diag": {
 		"tests_failed": "diagTestsFailed",
+		// No tests_warned entry: generic normalisation already produces
+		// testsWarned, and TestAliasEntriesAreNecessary rejects an alias that is
+		// merely a respelling. What #323 was actually missing was the REGISTRY
+		// entry — the name reached the envelope all along, but nothing declared
+		// it, so ValidateThresholds warned anyone who gated on it and no
+		// consumer could discover it existed.
 		// No xid_errors entry, deliberately. This runner used to publish a
 		// subtraction of two DCGM_FI_DEV_XID_ERRORS readings under xidEvents,
 		// but that field holds the last Xid CODE rather than a count, so the

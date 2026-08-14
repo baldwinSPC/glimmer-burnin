@@ -77,7 +77,7 @@ threshold is written against.
 | `ecc_sbe_total` | `eccSbeTotal` | Correctable ECC errors during the test |
 | `ecc_dbe_total` | `eccDbeTotal` | Uncorrectable ECC errors during the test |
 | `elapsed_s` | `elapsedS` | Wall-clock seconds the diagnostic ran |
-| `tests_run` / `tests_warned` / `tests_not_run` / `tests_skipped` | `testsRun`, … | Subtest tallies |
+| `tests_run` / `tests_warned` / `tests_not_run` / `tests_skipped` | `testsRun`, `testsWarned`, … | Subtest tallies. `testsWarned` is registered and gateable: a `Warn` subtest exits **0**, so a node DCGM warned about passes unless a profile gates it. `diag_warn_findings` carries what it said. See #323. |
 | `diag_level` / `diag_level_source` | `diagLevel`, `diagLevelSource` | Which level ran, and whether it was asked for or derived |
 | `dcgm_version` / `driver_version` / `gpu_count` | `dcgmVersion`, … | Provenance |
 | `dcgmi_exit_code` / `sample_count` / `counter_baseline_reset` | `dcgmiExitCode`, … | Evidence about the run itself |

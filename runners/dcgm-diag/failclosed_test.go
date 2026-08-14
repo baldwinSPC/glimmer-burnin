@@ -365,3 +365,42 @@ func TestAGenuineUnsupportedPartStillSkips(t *testing.T) {
 			code, exitSkip)
 	}
 }
+
+// A GATEABLE COUNT NEEDS SOMETHING TO ACT ON.
+//
+// The runner deliberately does not promote a DCGM warning to a failure — "the
+// runner's job is to measure, and the profile's is to decide". But the profile
+// was given nothing to decide with: testsWarned was unregistered, so
+// ValidateThresholds warned anyone who gated on it and no consumer could
+// discover it; and the warning's text went only to stderr, where a verdict
+// cannot read it. So a warning passed the node and nothing anywhere said so
+// (#323).
+func TestAWarnedSubtestIsReportedWithWhatItSaid(t *testing.T) {
+	const doc = `{"tests":[
+		{"name":"pcie","results":[{"status":"Warn","info":["bandwidth below expected for GPU 0"]}]},
+		{"name":"memory","results":[{"status":"Pass"}]}]}`
+	res, err := parseDiagJSON(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := res.Counts()
+	if c.Warned != 1 || c.Failed != 0 {
+		t.Fatalf("Warned=%d Failed=%d, want 1 and 0", c.Warned, c.Failed)
+	}
+
+	rep := newReport()
+	var out strings.Builder
+	if code := verdict(&out, rep, res, 0, nil, doc, "", time.Minute); code != exitPass {
+		t.Errorf("exit = %d, want exitPass: a warning is not a failure and must not be promoted", code)
+	}
+	// ...but it must be legible on STDOUT, where a threshold and a consumer can
+	// both reach it, not only in the log.
+	got := rep.vals[keyWarnFindings]
+	if !strings.Contains(got, "bandwidth below expected") {
+		t.Errorf("%s = %q, want it to name what the subtest warned about", keyWarnFindings, got)
+	}
+	// And the warning's prose must not be filed as a failure's.
+	if len(res.findings["pcie"]) != 0 {
+		t.Errorf("findings[pcie] = %+v; a warning is not a failure's finding", res.findings["pcie"])
+	}
+}

@@ -333,6 +333,12 @@ func verdict(
 	if len(c.ConfigFindings) > 0 {
 		rep.set(keyConfigFindings, strings.Join(c.ConfigFindings, " | "))
 	}
+	// Same reasoning as the config findings above, for the warned subtests: a
+	// profile that gates testsWarned needs to be told what it tripped on, and
+	// stderr is not somewhere a verdict can read (#323).
+	if len(res.warnReasons) > 0 {
+		rep.set(keyWarnFindings, strings.Join(res.warnReasons, " | "))
+	}
 	if len(c.UnreadableFindings) > 0 {
 		// UNMEASURABLE, not zero. `n/a` is the reserved value this project uses
 		// for exactly this, and it is what lets a threshold with
