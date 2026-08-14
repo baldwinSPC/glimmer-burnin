@@ -52,9 +52,9 @@ func TestOneHardwareFindingKeepsTheWholeSubtestFailing(t *testing.T) {
 	// The rule that makes excusal safe. A subtest that failed for two reasons,
 	// one of them the hardware, has failed — and the blocking finding is named
 	// so an operator is not left guessing which of them decided it.
-	_, _, blocking, excused := excusedFindings([]string{
-		"Persistence Mode: disabled",
-		"Inforom is corrupted for GPU 0",
+	_, _, blocking, excused := excusedFindings([]finding{
+		{Text: "Persistence Mode: disabled"},
+		{Text: "Inforom is corrupted for GPU 0"},
 	})
 	if excused {
 		t.Fatal("a subtest with a hardware finding was excused")
@@ -86,5 +86,77 @@ func TestTheHostEngineIsGivenAWritableHome(t *testing.T) {
 	if !strings.Contains(joined, "--home-dir") {
 		t.Errorf("nv-hostengine args %q lack --home-dir; in a container nvvs cannot write to \"/\" "+
 			"and DCGM reports that as a hardware failure (#304)", joined)
+	}
+}
+
+// DCGM'S OWN CLASSIFICATION OUTRANKS OUR READING OF A SENTENCE.
+//
+// Values are from dcgm_errors.h. The persistence case is the one measured on
+// GB10 — severity 5 (CONFIG), category 8 (SOFTWARE_OTHER), error_id 29 — which
+// is DCGM stating in its own vocabulary what #304 had to infer from wording.
+func TestDCGMsOwnSeverityDecidesWhereItIsGiven(t *testing.T) {
+	rows := []struct {
+		name string
+		f    finding
+		want findingClass
+	}{
+		{"CONFIG severity, measured on GB10",
+			finding{Text: "Persistence Mode: ... disabled", Severity: 5, Category: 8, ErrorID: 29, HasMeta: true},
+			findingConfiguration},
+		{"ISOLATE severity is the part",
+			finding{Text: "anything at all", Severity: 2, Category: 10, HasMeta: true},
+			findingHardware},
+		{"RESET severity is the part",
+			finding{Text: "anything at all", Severity: 6, Category: 15, HasMeta: true},
+			findingHardware},
+
+		// The composition that matters. A severity that would excuse, on a
+		// category DCGM says is hardware, must NOT be excused — otherwise a
+		// memory fault marked configurable walks straight through.
+		{"CONFIG severity cannot excuse a HARDWARE_MEMORY category",
+			finding{Text: "plausible-sounding config message", Severity: 5, Category: 10, HasMeta: true},
+			findingHardware},
+		{"CONFIG severity cannot excuse a HARDWARE_POWER category",
+			finding{Text: "plausible-sounding config message", Severity: 5, Category: 14, HasMeta: true},
+			findingHardware},
+
+		// UNKNOWN means DCGM does not recognise the code. That is the
+		// definition of something we must not wave through.
+		{"UNKNOWN severity fails closed",
+			finding{Text: "some future check", Severity: 3, Category: 16, HasMeta: true},
+			findingHardware},
+		// MONITOR is an observation about the part, not a node setting.
+		{"MONITOR severity is not excused",
+			finding{Text: "watch this", Severity: 1, Category: 2, HasMeta: true},
+			findingHardware},
+	}
+	for _, r := range rows {
+		if got := classify(r.f); got != r.want {
+			t.Errorf("%s: class = %v, want %v", r.name, got, r.want)
+		}
+	}
+}
+
+// Where DCGM gives no enums, the text rules still apply — and they must, because
+// `test_summary.info` entries are bare strings. The unreadable-SRAM finding
+// measured on GB10 arrives exactly that way.
+func TestTextRulesStillApplyWhereDCGMGivesNoMetadata(t *testing.T) {
+	f := finding{Text: "Error getting the SRAM Threshold Count for GPU 0. Status = 0. Value = 9223372036854775794."}
+	if got := classify(f); got != findingUnreadable {
+		t.Errorf("class = %v, want findingUnreadable — this finding has no enums attached", got)
+	}
+	if got := classify(finding{Text: "Inforom is corrupted"}); got != findingHardware {
+		t.Error("an unrecognised message with no metadata must fail closed to hardware")
+	}
+}
+
+// Half a classification is worse than none, because it looks authoritative.
+func TestPartialMetadataIsNotTreatedAsAuthoritative(t *testing.T) {
+	// Severity present, category absent: HasMeta must be false, so the text
+	// path decides rather than a severity that cannot be composed with the
+	// hardware-category veto.
+	f := finding{Text: "Inforom is corrupted for GPU 0", Severity: 5, HasMeta: false}
+	if got := classify(f); got != findingHardware {
+		t.Errorf("class = %v, want findingHardware — a lone severity must not excuse", got)
 	}
 }
