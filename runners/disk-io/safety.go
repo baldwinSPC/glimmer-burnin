@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // What this test writes, and where.
@@ -106,4 +107,28 @@ func humanBytes(n uint64) string {
 		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+// passDeadlines splits the test's window so the read cannot be starved.
+//
+// Both passes used the SAME deadline, and writePass stops CLEANLY when it
+// arrives rather than returning an error. So a device that merely wrote slower
+// than the window allowed handed the read a deadline already in the past: the
+// read moved zero bytes, and the run reported exit 1 — a permanent hardware
+// verdict, never retried, on a working disk, with no readBandwidthMBs in the
+// report to explain it (#298).
+//
+// A quarter is reserved rather than a half because reads are the faster
+// direction on every device this runs on, and the write is the pass carrying a
+// byte target it is trying to hit. A write that finishes early simply leaves
+// the remainder to the read, which is the ordinary case — the reservation only
+// binds when the write would otherwise have consumed everything.
+//
+// Pure, and takes `now`, so the split is testable on any platform. The paths
+// that consume it need O_DIRECT and therefore Linux.
+func passDeadlines(now time.Time, window time.Duration) (writeDeadline, deadline time.Time) {
+	if window <= 0 {
+		return now, now
+	}
+	return now.Add(window - window/4), now.Add(window)
 }
