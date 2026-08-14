@@ -290,6 +290,21 @@ func verdict(
 	c := res.Counts()
 
 	if c.Total == 0 {
+		// A Skip removes a node from scope without anyone looking at it again,
+		// so it may only be reached from evidence we actually READ.
+		//
+		// "We recorded no subtests" is not "DCGM produced no subtests", and the
+		// two had the same representation here. A status key spelled
+		// differently by a future DCGM, or a document extractJSON only partly
+		// recovered, lands on this branch too — and matching unsupported-part
+		// prose anywhere across stdout and stderr then turned a document that
+		// may have REPORTED FAILURES into "not applicable to this hardware"
+		// (#322). The guard's premise was not what it tested.
+		if res.SawResultStructure {
+			return finish(out, rep, exitError, markerError,
+				"the diagnostic reported subtests this runner could not read, so the hardware is "+
+					"unjudged; a document we cannot parse is not a part DCGM refused to test")
+		}
 		if sig := unsupportedSignature(stdout + "\n" + stderr); sig != "" {
 			rep.set(keyReason, sig)
 			return finish(out, rep, exitSkip, markerSkip,
