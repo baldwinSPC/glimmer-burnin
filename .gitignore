@@ -43,5 +43,6 @@ cover.out
 /memory-bw-rocm
 /memory-stress
 /nccl
+/nccl-rocm
 /tcp-baseline
 /thermal-soak
