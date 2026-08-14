@@ -39,6 +39,7 @@ on:
           - clockprobe-rocm
           - compute-smoke-rocm
           - memory-bw-rocm
+          - nccl-rocm
       version:
         description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
         required: true
