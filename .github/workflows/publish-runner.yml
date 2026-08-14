@@ -441,6 +441,73 @@ jobs:
           fi
           echo "both platforms present in ${REF}"
 
+      - name: Assert the published image carries a patched standard library
+        # WHY THIS EXISTS. Every published v0.6.0 image was measured after the
+        # fact and every Go one carried an unpatched standard library: the
+        # operator on go1.26.5 (8 reachable vulnerabilities) and six runners on
+        # go1.24.13 (29 each, because 1.24 is end-of-life and none of the
+        # advisories were ever fixed on that branch). Nothing in this workflow
+        # looked, so nothing said (#309).
+        #
+        # The Dockerfile pin is the guard — a runner image builds a THROWAWAY
+        # module, so go.mod's toolchain never reaches it and GO_IMAGE is the only
+        # thing deciding which standard library ships. runners/pins_test.go keeps
+        # that pin from falling behind go.mod. This step is what proves the guard
+        # worked on the artefact that actually got pushed.
+        #
+        # Like the platform assertion above, it is a CONFIRMATION rather than a
+        # gate: there is no image to scan before it is pushed, so a failure here
+        # means a bad tag already exists. Published tags are immutable, so the
+        # response is to supersede it — never to repush.
+        #
+        # The two outcomes are kept apart on every branch below, the same way,
+        # and for the same reason: "this image ships known-vulnerable code" is a
+        # verdict about the artefact, and "this step could not read the image" is
+        # emphatically not one. A scanner that cannot find a binary must not
+        # report a clean image, and must not report a dirty one either.
+        env:
+          REF: ${{ needs.prepare.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          workdir="$(mktemp -d)"
+          if ! go run github.com/google/go-containerregistry/cmd/crane@v0.21.9 \
+                 export "${REF}" - 2>"${workdir}/crane.err" | tar x -C "${workdir}" 2>/dev/null; then
+            echo "::error::could not export ${REF} to scan it. This proves NOTHING about the image — do not read it as a verdict, and do not supersede a tag over it. $(tail -1 "${workdir}/crane.err" || true)"
+            exit 1
+          fi
+
+          # The entrypoint is the binary this image exists to run. Resolving it
+          # from the config rather than guessing a path keeps this working for
+          # runners that install under a different name.
+          entry="$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.9 config "${REF}" \
+                   | jq -r '.config.Entrypoint[0] // .config.Cmd[0] // empty')"
+          if [ -z "${entry}" ]; then
+            echo "::error::${REF} declares no entrypoint, so this step cannot tell which binary to scan. NOT a verdict about the image."
+            exit 1
+          fi
+          bin="${workdir}${entry}"
+          if [ ! -f "${bin}" ]; then
+            echo "::error::${REF} names entrypoint ${entry}, which is not in the exported filesystem. NOT a verdict about the image — this step could not read it."
+            exit 1
+          fi
+
+          # A C++/CUDA runner has no Go binary and nothing to say here. That is a
+          # legitimate clean result, and distinguishing it from a scan that failed
+          # is the whole point of the branches above.
+          if ! go version "${bin}" >/dev/null 2>&1; then
+            echo "${entry} is not a Go binary (C++/CUDA runner) — no Go standard library to check"
+            exit 0
+          fi
+          echo "${entry} was built with: $(go version -m "${bin}" | head -1 | awk '{print $2}')"
+
+          if go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -mode=binary "${bin}"; then
+            echo "no known vulnerabilities in the standard library ${REF} ships"
+            exit 0
+          fi
+          echo "::error::${REF} SHIPS KNOWN-VULNERABLE CODE. The tag exists and is immutable, so supersede it rather than repushing: bump ARG GO_IMAGE in this runner's Dockerfile if it is behind go.mod's toolchain, then publish a new tag and move the pkg/runnerimages pin. Note govulncheck reports symbols PRESENT in the binary, which is not the same as a path this runner drives — read the trace before deciding how urgent it is (#309)."
+          exit 1
+
       - name: Report
         env:
           REF: ${{ needs.prepare.outputs.ref }}
