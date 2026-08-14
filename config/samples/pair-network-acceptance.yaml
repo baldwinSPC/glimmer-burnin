@@ -22,20 +22,26 @@
 #     whole test and therefore costs two slots of the facility interlock. The
 #     default of 1 cannot admit a pair at all.
 #
-# ─── WHAT IS STILL MISSING: THE RUNNER IMAGES ─────────────────────────────────
+# ─── THE RUNNER IMAGES: THIS PROFILE RUNS ─────────────────────────────────────
 #
-# No nccl or ib-write-bw runner ships in this repo yet, so neither kind has a
-# default image and each test below must name spec.runner.image before this
-# profile can run. Applied as-is, the run settles as Error — "no default runner
-# image for kind ... — set spec.runner.image" — which is an infrastructure
-# error, never a hardware verdict. That failure is fast and legible at plan
-# time, which is why no placeholder tag is filled in here: a tag that does not
-# exist would fail slowly, per node, and look like a fabric problem.
+# APPLYING THIS IS NOT A NO-OP. Both kinds below — nccl and ib-write-bw — now
+# resolve to published default images, so a run cordons the two named nodes,
+# holds BOTH for the whole test (a pair costs two interlock slots), and puts
+# real RDMA and collective load on them.
 #
-# Each test below therefore carries a spec.runner block with NO image in it: the
-# block is there for the /dev/infiniband mount, and leaving the image unset keeps
-# the fast, legible plan-time refusal exactly as described above rather than
-# swapping it for a tag that does not exist.
+# This header said the opposite until #299: it claimed neither runner shipped,
+# so the profile settled as a plan-time Error and was safe to apply blind. That
+# was true when it was written and the release invalidated it. Nothing about the
+# statement looked stale, which is why a guard now checks it —
+# TestSamplesAgreeWithTheRunnerImageTable in pkg/runnerimages.
+#
+# Each test below still carries a spec.runner block with NO image in it, and now
+# for one reason rather than two: the block exists for the /dev/infiniband
+# mount, and an unset image takes the pinned default.
+#
+# KINDS THAT STILL NEED AN EXPLICIT spec.runner.image (generated — do not edit
+# by hand; the guard above compares this line against runnerimages.WithoutDefault):
+#   custom, disk-io, fabric-soak, fingerprint-probe, gemm-sweep, tcp-baseline
 #
 # ─── WHY /dev/infiniband IS MOUNTED, AND THE REAL RLIMIT TRAP ─────────────────
 #

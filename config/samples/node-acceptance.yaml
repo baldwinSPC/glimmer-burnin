@@ -1,15 +1,27 @@
-# Single-node acceptance. Every test here is Node scope, which is what this
-# operator version executes end to end; see pair-network-acceptance.yaml for the
-# Pair-scope suite, which is recorded as Error rather than executed.
+# Single-node acceptance. Every test here is Node scope; see
+# pair-network-acceptance.yaml for the Pair-scope suite, which now executes too
+# — it was recorded as Error when this line was written, and both statements
+# went stale at the same release (#299).
 #
 # ─── RUNNER IMAGES ────────────────────────────────────────────────────────────
 #
-# Only compute-smoke has a published image. The other kinds below have runner
-# source, Dockerfiles and tests in this repo, and pkg/runnerimages/images.go
-# names the tag each WILL be published under, but those tags are not in the
-# registry yet. Applying this file today runs fp4-compute-smoke and reports an
-# infrastructure Error (never a hardware verdict) for the rest, once their pods
-# fail to pull. Set spec.runner.image on a test to point it at your own build.
+# APPLYING THIS FILE PUTS REAL LOAD ON THE NODES IT NAMES. Most kinds below now
+# resolve to published default images, so their pods pull, the run cordons each
+# target as it reaches it, and the hardware is exercised.
+#
+# This header said the opposite until #299 — "only compute-smoke has a published
+# image ... those tags are not in the registry yet" — which was true when it was
+# written and stopped being true at a release. A reader had no way to tell it had
+# expired, so a guard now checks it against the table rather than trusting the
+# prose: TestSamplesAgreeWithTheRunnerImageTable in pkg/runnerimages.
+#
+# A kind with no default still reports a plan-time infrastructure Error, never a
+# hardware verdict, naming the kind and asking for spec.runner.image. Point that
+# at your own build to run one.
+#
+# KINDS THAT STILL NEED AN EXPLICIT spec.runner.image (generated — do not edit
+# by hand; the guard above compares this line against runnerimages.WithoutDefault):
+#   custom, disk-io, fabric-soak, fingerprint-probe, gemm-sweep, tcp-baseline
 #
 # ─── THRESHOLDS FAIL CLOSED ───────────────────────────────────────────────────
 #

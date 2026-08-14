@@ -82,6 +82,59 @@ spec:
   # parent's list entirely.
 
 ---
+# Declared HERE rather than referenced from another sample, because a sample
+# that cannot be applied on its own is not a worked example. Both profiles below
+# referenced BurnInTests that existed only in segmented-soak.yaml and
+# pair-network-acceptance.yaml, so `kubectl apply -f variant-sweep.yaml` planned
+# nothing at all (#300).
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: thermal-soak
+spec:
+  kind: thermal-soak
+  scope: Node
+  # The BASE duration, which every variant below overrides. It is the shortest
+  # of them on purpose: an overlay that is never applied should run the cheapest
+  # cell rather than the most expensive one.
+  durationSeconds: 60
+  thresholds:
+    # Deliberately none. This entry is `required: false` in the profile and
+    # exists to demonstrate the duration axis; a gate here would make the
+    # example about thermal acceptance instead, and the numbers that belong in
+    # one are per-SKU and measured. See node-acceptance.yaml for a real gate.
+
+---
+# The link this sweep measures, declared here for the same reason as above.
+#
+# Named for the LINK rather than for the tool: a Pair verdict is a statement
+# about the path between two nodes, and one TestResult names both of them.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: ib-write-bw-link
+spec:
+  kind: ib-write-bw
+  scope: Pair
+  durationSeconds: 60
+  runner:
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        # WRITABLE, and it has to be said out loud because readOnly defaults to
+        # true. ibv_open_device opens the uverbs nodes read-write, so a
+        # read-only mount fails in the same place as no mount at all.
+        readOnly: false
+        # A fabric node with no /dev/infiniband has not loaded its RDMA drivers.
+        # That is infrastructure, so refusing the pod (Error — unjudged) is
+        # right; the operator will not create the path to paper over it.
+        type: Directory
+  # No thresholds: every gate in this example lives on a variant, which is the
+  # point being demonstrated. A variant's thresholds REPLACE rather than merge,
+  # so a base gate here would be silently discarded by the cells below and read
+  # as though it applied.
+
+---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInProfile
 metadata:

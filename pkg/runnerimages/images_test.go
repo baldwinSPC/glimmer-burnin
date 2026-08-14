@@ -1,6 +1,9 @@
 package runnerimages
 
 import (
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -202,4 +205,72 @@ func mustDefault(t *testing.T, kind api.TestKind) string {
 		t.Fatalf("kind %q has no default", kind)
 	}
 	return img
+}
+
+// SAMPLES MUST AGREE WITH THIS TABLE, because a sample is a claim about what
+// applying it will do to a fleet.
+//
+// Two samples told an operator they were inert. pair-network-acceptance.yaml
+// said "no nccl or ib-write-bw runner ships in this repo yet, so neither kind
+// has a default image", and node-acceptance.yaml said "only compute-smoke has a
+// published image". Both were true when written, and a release made them false
+// without touching either file. An engineer applying the first believing it a
+// documented no-op instead cordoned two named nodes, held BOTH for the whole
+// test — a pair costs two interlock slots — and put real RDMA load on them
+// (#299).
+//
+// Nothing produced a wrong verdict. It produced unrequested load on a fleet on
+// the strength of a comment the release had invalidated, which prose review
+// cannot catch: the sentence still reads perfectly.
+//
+// So the samples carry a GENERATED line and this compares it to the table. The
+// same discipline hack/invariants already applies to CLAUDE.md.
+func TestSamplesAgreeWithTheRunnerImageTable(t *testing.T) {
+	want := make([]string, 0, len(WithoutDefault()))
+	for _, k := range WithoutDefault() {
+		want = append(want, string(k))
+	}
+	sort.Strings(want)
+	expected := strings.Join(want, ", ")
+
+	files, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	marker := "KINDS THAT STILL NEED AN EXPLICIT spec.runner.image"
+	found := 0
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		i := strings.Index(text, marker)
+		if i < 0 {
+			continue
+		}
+		found++
+
+		// The generated list is the first comment line after the marker's own
+		// two-line preamble that names kinds.
+		var got string
+		for _, line := range strings.Split(text[i:], "\n") {
+			trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
+			if trimmed == "" || strings.Contains(trimmed, marker) ||
+				strings.HasPrefix(trimmed, "by hand") {
+				continue
+			}
+			got = trimmed
+			break
+		}
+		if got != expected {
+			t.Errorf("%s lists kinds needing an explicit image as:\n  %s\nbut runnerimages.WithoutDefault() says:\n  %s\n"+
+				"A sample is a claim about what applying it does to a fleet; this one has gone stale, which is "+
+				"exactly how #299 shipped.", filepath.Base(file), got, expected)
+		}
+	}
+	if found == 0 {
+		t.Errorf("no sample carries the %q marker, so nothing keeps the samples' image claims honest", marker)
+	}
 }
