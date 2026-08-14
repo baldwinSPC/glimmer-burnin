@@ -36,14 +36,54 @@ answer.** Two precisions, gated independently:
 
 | Precision | Path | Why it is here |
 |---|---|---|
-| bf16 | WMMA (RDNA3+) / MFMA (CDNA) | what inference on this hardware actually runs |
-| fp16 | same units, different data path | the older path much software still reaches for |
+| bf16 | `v_wmma_f32_16x16x16_bf16` | what inference on this hardware actually runs |
+| fp16 | `v_wmma_f32_16x16x16_f16` | the older path much software still reaches for |
 
 A part can pass one and fail the other, so both must pass; a partial pass is a
 **FAIL** naming the precision that failed, never a pass with a footnote.
 
 The claim is worth exactly as much as the arch gate around it, which is why
 there are three separate questions and no fallback path in the image.
+
+## rocWMMA does not support gfx1151
+
+This runner was first written against **rocWMMA**, AMD's portable matrix-fragment
+API. It does not compile for Strix Halo. ROCm 6.4.4's
+`rocwmma/internal/config.hpp` ends its architecture dispatch with
+
+```
+static_assert(0, "Unsupported architecture");
+```
+
+and gfx1151 reaches it: the allow-list covers gfx908/90a/94x and
+gfx1100/1101/1102, and the RDNA3.5 APUs are absent.
+
+**The part is not the problem.** gfx1151 implements the same `V_WMMA_*`
+instructions as gfx1100, and clang exposes them as builtins for the whole
+`gfx11-insts` family. Only the library's list omits it — another instance of the
+pattern this hardware keeps producing, where AMD's own libraries lag the APU
+(compare `amd-smi` reporting N/A on gfx1151 while the kernel has the data).
+
+So the kernels call the wave32 builtins directly. The cost is real and worth
+stating: rocWMMA would have covered CDNA's MFMA from the same source, and these
+builtins cover gfx11 only. **CDNA parts are not covered by this image** and are
+reported as an Error (hardware unjudged), never a Skip. The alternative was a
+runner that cannot measure the hardware it was written for.
+
+## The fragment layout is unit-tested
+
+A WMMA layout bug does not crash — it produces a tile that is wrong in a
+structured way (every other row, or a transpose), which against a symmetric test
+matrix can even look right. So `wmma_tile.h` holds the index arithmetic with no
+HIP in it, and `wmma_tile_test.cc` checks it as a permutation without a GPU:
+
+- every one of the 256 outputs is written **exactly once** (a layout that writes
+  one twice necessarily leaves another unwritten, and that is invisible against
+  a zero-filled buffer);
+- every A and B element is loaded by some lane;
+- both halves of the wave load the same fragments — the wave32 form, asserted so
+  a "fix" that makes them differ fails;
+- a **simulated wave** in plain C++ reproduces the reference GEMM end to end.
 
 ## The three arch questions
 
@@ -98,6 +138,8 @@ and report a matrix path that never executed.
 - **No published image, no registered default** — publication is hardware-gated
   by policy, and `pkg/runnerimages` lists nothing before it is published.
 - **linux/amd64 only** (issue #319 covers teaching the publish workflow).
+- **CDNA (MFMA) is not covered** — a follow-up, blocked on rocWMMA supporting
+  gfx1151 or on a second MFMA kernel path.
 - **No fault-injection macros**, unlike the CUDA compute-smoke. Its pair exists
   because its Skip path had never executed anywhere; here that path is covered
   by unit tests over `scopeOf`. Add them if the on-hardware pass finds the

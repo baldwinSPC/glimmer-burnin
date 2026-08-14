@@ -14,8 +14,11 @@
 # Licensing — the final image ships its accelerator runtime, which the NVIDIA
 # runners do not: the ROCm/HIP userspace is MIT, so carrying it is compatible
 # with this repository's permissive-only rule.
-#   - our source        Apache-2.0   (compute_smoke_rocm.cc, gfx_gate.h)
-#   - rocWMMA           MIT          (build-time header library; no runtime dep)
+#   - our source        Apache-2.0   (compute_smoke_rocm.cc, gfx_gate.h,
+#                                    wmma_tile.h)
+#   - third-party       none.  The matrix instructions come from the compiler's
+#                       own gfx11 WMMA builtins, not from a library — see
+#                       wmma_tile.h for why rocWMMA could not be used.
 #   - shipped runtime   MIT          (ROCm HIP runtime and its ROCm deps)
 #
 # Build from AMD's devel image rather than assembling ROCm from apt.  That is
@@ -32,26 +35,18 @@ FROM ${ROCM_IMAGE} AS build
 # image can measure — a target absent from it has no code here at all, which the
 # runner reports as an Error (hardware unjudged), never a Skip and never a Fail.
 #
-#   gfx1151  Strix Halo / Ryzen AI Max — WMMA (the hardware this exists for)
-#   gfx1100  RDNA3 dGPU (7900 class)   — WMMA, the nearest common desktop part
-#   gfx942   Instinct MI300X/MI325X    — MFMA, so one image serves the DC tier
+#   gfx1151  Strix Halo / Ryzen AI Max — the hardware this runner exists for
+#   gfx1100  RDNA3 dGPU (7900 class)   — the nearest common desktop part
 #
-# rocWMMA emits WMMA on RDNA3+ and MFMA on CDNA from the same fragment source,
-# which is what lets both families share this runner; gfx_gate.h's kernelCovers
-# reports a part from any OTHER family as an Error rather than pretending.
-ARG GPU_TARGETS="gfx1151 gfx1100 gfx942"
+# BOTH ARE gfx11, and that is a limitation rather than a choice. The kernels use
+# the compiler's wave32 WMMA builtins directly because rocWMMA — which would
+# have covered CDNA's MFMA from the same source — refuses to compile for
+# gfx1151 at all (see wmma_tile.h). CDNA parts are therefore NOT covered by this
+# image, and gfx_gate.h's kernelCovers reports one as an Error (hardware
+# unjudged) rather than pretending otherwise.
+ARG GPU_TARGETS="gfx1151 gfx1100"
 
-# rocWMMA is in the -complete image, but assert it rather than assume it: a
-# missing header would otherwise surface as a wall of template errors in the
-# compile step below, and the fix (install rocwmma-dev) is not obvious from
-# that output.
-RUN test -f /opt/rocm/include/rocwmma/rocwmma.hpp || { \
-      echo "ERROR: rocWMMA headers are absent from this base image." >&2; \
-      echo "Install rocwmma-dev, or use a -complete ROCm devel tag." >&2; \
-      exit 1; \
-    }
-
-COPY compute_smoke_rocm.cc gfx_gate.h /src/
+COPY compute_smoke_rocm.cc gfx_gate.h wmma_tile.h /src/
 
 # BURNIN_BUILT_TARGETS bakes the offload list into the binary so it can answer
 # "what was I built for" at runtime.  That is not a convenience: archMatch

@@ -5,9 +5,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright the Glimmer authors.
 //
-// This file is original work licensed under Apache-2.0. It uses rocWMMA (MIT)
-// as its matrix-fragment API and the ROCm HIP runtime (MIT); both are
-// permissive and shippable under this repository's licensing rules.
+// This file is original work licensed under Apache-2.0. It links only the ROCm
+// HIP runtime (MIT) and uses the compiler's own gfx11 WMMA builtins; see
+// wmma_tile.h for why rocWMMA is NOT used (it refuses to compile for gfx1151,
+// the hardware this runner exists for).
 //
 // WHAT THIS PROVES, AND WHAT IT DELIBERATELY DOES NOT
 // ---------------------------------------------------
@@ -56,7 +57,6 @@
 //     WMMA_GEMM_ERROR: <why>       exit 3   we could not measure; UNJUDGED
 
 #include <hip/hip_runtime.h>
-#include <rocwmma/rocwmma.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -65,6 +65,7 @@
 #include <vector>
 
 #include "gfx_gate.h"
+#include "wmma_tile.h"
 
 using burnin::kExitError;
 using burnin::kExitFail;
@@ -103,33 +104,52 @@ int skip(const std::string &w) { return emitMarker("WMMA_GEMM_SKIP", w, kExitSki
 int errored(const std::string &w) { return emitMarker("WMMA_GEMM_ERROR", w, kExitError); }
 
 // ── device code ──────────────────────────────────────────────────────────────
+//
+// The gfx11 WMMA builtins, wave32 form. Clang declares them (BuiltinsAMDGPU.def)
+// for the whole gfx11-insts family, which includes gfx1151 — the family rocWMMA
+// declines to serve.
+//
+//   f16 : v8f32 (v16f16 a, v16f16 b, v8f32 c)
+//   bf16: v8f32 (v16i16 a, v16i16 b, v8f32 c)   bf16 passed as raw 16-bit lanes
+typedef _Float16 v16h __attribute__((ext_vector_type(16)));
+typedef short v16s __attribute__((ext_vector_type(16)));
+typedef float v8f __attribute__((ext_vector_type(8)));
 
-// convert turns the host's float inputs into the fragment element type ON THE
-// DEVICE, so no host-side half/bfloat16 conversion is involved anywhere. That
-// keeps the only precision reduction in the test on the same silicon the test
-// is about.
-template <typename T>
-__global__ void convert(const float *src, T *dst, int n) {
-	const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-	if (i < n) dst[i] = static_cast<T>(src[i]);
+// gemmTileF16 computes one 16x16 output tile with one wavefront.
+//
+// Every index comes from wmma_tile.h, whose mapping is unit-tested by
+// simulating the whole wave in plain C++ — the layout is the part that fails
+// quietly, so it is the part that is checked without hardware.
+__global__ void gemmTileF16(const float *a, const float *b, float *d) {
+	const int lane = static_cast<int>(threadIdx.x);
+	v16h aFrag, bFrag;
+	for (int e = 0; e < burnin::kFragElems; e++) {
+		aFrag[e] = static_cast<_Float16>(a[burnin::aIndex(lane, e)]);
+		bFrag[e] = static_cast<_Float16>(b[burnin::bIndex(lane, e)]);
+	}
+	v8f acc = {0, 0, 0, 0, 0, 0, 0, 0};
+	acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(aFrag, bFrag, acc);
+	for (int e = 0; e < burnin::kAccElems; e++) {
+		d[burnin::dIndex(lane, e)] = acc[e];
+	}
 }
 
-// gemmTile computes D = A * Bᵀ for one 16x16x16 tile through the matrix cores.
+// gemmTileBf16 is the same tile through the bf16 path.
 //
-// A is row-major MxK and B is column-major KxN (stored NxK), which is what
-// makes Bᵀ the natural product and lets referenceGemm in gfx_gate.h describe
-// exactly the same operation.
-template <typename T>
-__global__ void gemmTile(const T *a, const T *b, float *d) {
-	rocwmma::fragment<rocwmma::matrix_a, kM, kN, kK, T, rocwmma::row_major> fragA;
-	rocwmma::fragment<rocwmma::matrix_b, kM, kN, kK, T, rocwmma::col_major> fragB;
-	rocwmma::fragment<rocwmma::accumulator, kM, kN, kK, float> fragAcc;
-
-	rocwmma::fill_fragment(fragAcc, 0.0f);
-	rocwmma::load_matrix_sync(fragA, a, kK);
-	rocwmma::load_matrix_sync(fragB, b, kK);
-	rocwmma::mma_sync(fragAcc, fragA, fragB, fragAcc);
-	rocwmma::store_matrix_sync(d, fragAcc, kN, rocwmma::mem_row_major);
+// The conversion is a truncation of the top 16 bits, which is EXACT for this
+// runner's inputs and only for them — see burnin::bf16Bits.
+__global__ void gemmTileBf16(const float *a, const float *b, float *d) {
+	const int lane = static_cast<int>(threadIdx.x);
+	v16s aFrag, bFrag;
+	for (int e = 0; e < burnin::kFragElems; e++) {
+		aFrag[e] = static_cast<short>(burnin::bf16Bits(a[burnin::aIndex(lane, e)]));
+		bFrag[e] = static_cast<short>(burnin::bf16Bits(b[burnin::bIndex(lane, e)]));
+	}
+	v8f acc = {0, 0, 0, 0, 0, 0, 0, 0};
+	acc = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(aFrag, bFrag, acc);
+	for (int e = 0; e < burnin::kAccElems; e++) {
+		d[burnin::dIndex(lane, e)] = acc[e];
+	}
 }
 
 // runPrecision executes one precision end to end and checks it.
@@ -138,20 +158,17 @@ __global__ void gemmTile(const T *a, const T *b, float *d) {
 // wins, and whether it is a Fail or an Error, is a decision for main — a
 // per-precision helper that emitted its own verdict would let the first
 // precision settle the run.
-template <typename T>
-bool runPrecision(const char *label, const float *hostA, const float *hostB, const float *hostRef,
-                  int warpSize, double tolerance, burnin::GemmCheck *out, std::string *why) {
+bool runPrecision(const char *label, void (*kernel)(const float *, const float *, float *),
+                  const float *hostA, const float *hostB, const float *hostRef,
+                  double tolerance, burnin::GemmCheck *out, std::string *why) {
 	const int elems = kM * kK;
 	const int outElems = kM * kN;
 
 	float *dA = nullptr, *dB = nullptr, *dOut = nullptr;
-	T *tA = nullptr, *tB = nullptr;
 	auto cleanup = [&]() {
 		if (dA) (void)hipFree(dA);
 		if (dB) (void)hipFree(dB);
 		if (dOut) (void)hipFree(dOut);
-		if (tA) (void)hipFree(tA);
-		if (tB) (void)hipFree(tB);
 	};
 	auto hipFail = [&](const char *where, hipError_t e) {
 		*why = std::string(label) + ": " + where + ": " + hipGetErrorString(e);
@@ -162,8 +179,6 @@ bool runPrecision(const char *label, const float *hostA, const float *hostB, con
 	hipError_t e;
 	if ((e = hipMalloc(&dA, elems * sizeof(float))) != hipSuccess) return hipFail("hipMalloc A", e);
 	if ((e = hipMalloc(&dB, elems * sizeof(float))) != hipSuccess) return hipFail("hipMalloc B", e);
-	if ((e = hipMalloc(&tA, elems * sizeof(T))) != hipSuccess) return hipFail("hipMalloc tA", e);
-	if ((e = hipMalloc(&tB, elems * sizeof(T))) != hipSuccess) return hipFail("hipMalloc tB", e);
 	if ((e = hipMalloc(&dOut, outElems * sizeof(float))) != hipSuccess)
 		return hipFail("hipMalloc D", e);
 
@@ -180,16 +195,8 @@ bool runPrecision(const char *label, const float *hostA, const float *hostB, con
 	    hipSuccess)
 		return hipFail("hipMemcpy sentinel", e);
 
-	const int threads = 256;
-	hipLaunchKernelGGL((convert<T>), dim3((elems + threads - 1) / threads), dim3(threads), 0,
-	                   nullptr, dA, tA, elems);
-	hipLaunchKernelGGL((convert<T>), dim3((elems + threads - 1) / threads), dim3(threads), 0,
-	                   nullptr, dB, tB, elems);
-	if ((e = hipDeviceSynchronize()) != hipSuccess) return hipFail("convert", e);
-
-	// One wavefront computes one tile; rocWMMA's fragments are sized for the
-	// wave, so the block must be exactly the device's wavefront width.
-	hipLaunchKernelGGL((gemmTile<T>), dim3(1), dim3(warpSize), 0, nullptr, tA, tB, dOut);
+	// One wavefront computes one tile.
+	hipLaunchKernelGGL(kernel, dim3(1), dim3(burnin::kWave32), 0, nullptr, dA, dB, dOut);
 	if ((e = hipGetLastError()) != hipSuccess) return hipFail("gemm launch", e);
 	if ((e = hipDeviceSynchronize()) != hipSuccess) return hipFail("gemm", e);
 
@@ -285,6 +292,18 @@ int main() {
 		               "rebuild with GPU_TARGETS including that target. Hardware unjudged");
 	}
 
+	// The kernels are the WAVE32 form of the WMMA instruction and their
+	// fragment layout is wave32's. gfx11 runs compute at wave32, so this should
+	// never fire — which is exactly why it is checked rather than assumed: if it
+	// ever does, every index in wmma_tile.h is wrong and the tile would be
+	// silently mis-assembled rather than refused.
+	if (props.warpSize != burnin::kWave32) {
+		return errored(std::string("this image's WMMA kernels are the wave32 form, and this part "
+		                           "reports a wavefront of ") +
+		               std::to_string(props.warpSize) +
+		               "; the fragment layout would not match. Hardware unjudged");
+	}
+
 	// ── inputs and the host reference ────────────────────────────────────────
 	std::vector<float> a(kM * kK), b(kN * kK), ref(kM * kN);
 	for (int i = 0; i < kM * kK; i++) a[static_cast<std::size_t>(i)] = burnin::exactInputValue(i);
@@ -302,12 +321,12 @@ int main() {
 
 	burnin::GemmCheck bf16{}, fp16{};
 	std::string why;
-	if (!runPrecision<rocwmma::bfloat16_t>("bf16", a.data(), b.data(), ref.data(), props.warpSize,
-	                                       tolerance, &bf16, &why)) {
+	if (!runPrecision("bf16", gemmTileBf16, a.data(), b.data(), ref.data(), tolerance, &bf16,
+	                  &why)) {
 		return errored(why + " — hardware unjudged");
 	}
-	if (!runPrecision<rocwmma::float16_t>("fp16", a.data(), b.data(), ref.data(), props.warpSize,
-	                                      tolerance, &fp16, &why)) {
+	if (!runPrecision("fp16", gemmTileF16, a.data(), b.data(), ref.data(), tolerance, &fp16,
+	                  &why)) {
 		return errored(why + " — hardware unjudged");
 	}
 
