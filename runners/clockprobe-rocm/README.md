@@ -104,17 +104,29 @@ Same rules as clockprobe, with the vocabulary sysfs supports:
   hardware pass settles the least privilege that works — record what is
   measured, then narrow.
 
-## Build note: the distro shadow
+## Build notes
 
-Ubuntu noble/universe ships its own `hipcc` package (5.7.1-3, installed to
-`/usr/bin`). On this image's first CI build every ROCm package resolved from
-`repo.radeon.com` at 6.4.4 **except** `hipcc`, which apt took from
-`archive.ubuntu.com`; the compile then failed with `/opt/rocm/bin/hipcc: not
-found`. The Dockerfile now pins the `repo.radeon.com` origin at priority 1000
-and asserts the compiler identifies as ROCm/AMD **before** compiling with it.
+**Build from AMD's devel image, not from apt.** The build stage is
+`rocm/dev-ubuntu-24.04:6.4.4-complete`, matching how every NVIDIA runner here
+builds against `nvcr.io/nvidia/cuda:*-devel`. The first two CI builds of this
+image assembled the toolchain from apt instead, and both failed on package
+archaeology rather than on anything about this runner:
 
-The pin matters beyond that one package: a missing path fails loudly, but a
-distro-shadowed `hsa-rocr` or `comgr` would build fine and then misbehave
-against a 6.4.4 runtime — the same shape as the container-toolkit version-skew
-faults this project already tracks. If you re-pin `ROCM_VERSION`, keep both the
-pin and the assertion.
+1. Ubuntu noble/universe ships its **own** `hipcc` (5.7.1-3, `/usr/bin`), and
+   apt preferred it while every other ROCm package came from
+   `repo.radeon.com` at 6.4.4 — the compile died on `/opt/rocm/bin/hipcc: not
+   found`.
+2. With the origin pinned, the hand-picked package set still lacked what
+   `amdgcn-link` needs, so device-code linking failed.
+
+**The origin pin still matters in the runtime stage**, which does install from
+apt: a distro-shadowed `hsa-rocr` or `comgr` would install quietly and then
+misbehave against a 6.4.4-compiled binary — subtler than a missing path, and
+the same shape as the container-toolkit version-skew faults this project
+already tracks. If you re-pin `ROCM_VERSION`, keep the pin, and keep both
+`ldd` assertions: one proves the built binary links the HIP runtime, the other
+proves the runtime stage actually resolves it.
+
+**Why 6.4.x and not 7.x**: 6.4.4 is the first release train listing gfx1151 as
+supported, and the community has reported ROCm 7.x performance regressions on
+this part. Revisit when the hardware pass can measure both.
