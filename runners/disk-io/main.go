@@ -109,9 +109,9 @@ func run() int {
 	metric("diskIoPath", dir)
 	logf("disk-io: %s, %d MiB in %d KiB blocks, %s free", target, sizeMB, blockKB, humanBytes(free))
 
-	deadline := time.Now().Add(time.Duration(duration) * time.Second)
+	writeDeadline, deadline := passDeadlines(time.Now(), time.Duration(duration)*time.Second)
 
-	write, werr := writePass(target, totalBytes, block, deadline)
+	write, werr := writePass(target, totalBytes, block, writeDeadline)
 
 	// CLEANUP IS ARMED ONLY FOR A FILE THIS RUN CREATED, and that is why it is
 	// registered HERE rather than before the write.
@@ -165,14 +165,38 @@ func run() int {
 	read, rerr := readPass(target, block, deadline)
 	if rerr != nil {
 		report(write, read)
+		// The same asymmetry the write path above already observes, and for the
+		// same reason. A read that never reached the device — the file could
+		// not be opened, O_DIRECT was refused, the mount went away — measured
+		// nothing, so it cannot be a verdict about the part.
+		if read.bytes == 0 {
+			return fin(exitError, "could not read back from %s: %v — the read never reached the device, "+
+				"so this says nothing about it", target, rerr)
+		}
+		// Past the first byte the device was reached and it failed, which IS a
+		// verdict about the part.
 		return fin(exitFail, "read failed after %s: %v", humanBytes(read.bytes), rerr)
 	}
 
 	report(write, read)
 
-	if write.bytes == 0 || read.bytes == 0 {
-		return fin(exitFail, "the run completed without moving data (wrote %d, read %d bytes)",
-			write.bytes, read.bytes)
+	// NEITHER DIRECTION MOVING DATA IS AN ERROR, NOT A FAIL, and the two are
+	// reported apart because "the run completed without moving data (wrote
+	// 1073741824, read 0 bytes)" contradicted itself in the one message an
+	// operator had to work from.
+	//
+	// Exit 1 is a permanent hardware verdict that is never retried. It belongs
+	// only to something the run actually measured about the device, and a pass
+	// that moved no bytes measured nothing — this is the compute-smoke v0.1.0
+	// mistake, which this file already cites by name a few lines above.
+	if write.bytes == 0 {
+		return fin(exitError, "the write pass moved no data, so nothing was measured and the device is "+
+			"unjudged. Check the size and duration this test was given")
+	}
+	if read.bytes == 0 {
+		return fin(exitError, "the write moved %s but the read moved nothing, so no read was measured "+
+			"and readBandwidthMBs is absent. The device is unjudged rather than failing",
+			humanBytes(write.bytes))
 	}
 	logf("disk-io: write %.1f MB/s, read %.1f MB/s",
 		throughputMBs(write.bytes, write.elapsed), throughputMBs(read.bytes, read.elapsed))
