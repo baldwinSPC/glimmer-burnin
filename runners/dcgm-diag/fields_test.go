@@ -153,9 +153,16 @@ func TestSampler_APersistentXidIsReportedNotSubtractedAway(t *testing.T) {
 }
 
 // A lifetime counter that goes backwards means the driver was reloaded or the
-// device was reset mid-test. Report no movement and say so, rather than a
-// negative count nothing can threshold.
-func TestSampler_CounterResetIsFlaggedNotNegative(t *testing.T) {
+// device was reset mid-test. The window's movement is then UNMEASURABLE, and
+// that is a different statement from zero.
+//
+// This test asserted 0 until #312. The reasoning was that 0 is "the movement we
+// can defend (none)", which is wrong in the one way that matters: 0 says
+// nothing happened, pkg/runner files it under Metrics, and `pcieReplayErrors
+// Equal 0` is satisfied by it. A reset is also precisely when these counters
+// are likeliest to have recorded something before being zeroed, so the old
+// behaviour certified the window whose evidence had just been destroyed.
+func TestSampler_CounterResetIsUnmeasurableNotZero(t *testing.T) {
 	s := newSampler(config{})
 	s.observeAll("GPU 0   58   0   9   0   0   0   0\n")
 	s.observeAll("GPU 0   58   0   1   0   0   0   0\n")
@@ -163,11 +170,55 @@ func TestSampler_CounterResetIsFlaggedNotNegative(t *testing.T) {
 	rep := newReport()
 	s.report(rep)
 
-	if got := rep.vals[keyPCIeReplayCount]; got != "0" {
-		t.Errorf("%s = %q, want 0", keyPCIeReplayCount, got)
+	if got := rep.vals[keyPCIeReplayCount]; got != metricUnmeasurable {
+		t.Errorf("%s = %q, want %q — a reset window was not measured, and 0 would claim it was",
+			keyPCIeReplayCount, got, metricUnmeasurable)
 	}
 	if rep.vals[keyCounterReset] != "true" {
-		t.Errorf("%s was not set; a silent clamp hides that the device reset", keyCounterReset)
+		t.Errorf("%s was not set; the reset must stay visible as corroborating evidence", keyCounterReset)
+	}
+}
+
+// A key is unmeasurable as a WHOLE when any GPU contributing to it reset.
+//
+// The reported number is a sum across the node's GPUs, and a sum missing one of
+// its terms is not a smaller sum — it is an unknown one. Reporting the
+// surviving GPUs' movement would understate the node by exactly the amount
+// nobody can see.
+func TestSampler_OneGPUsResetMakesTheWholeKeyUnmeasurable(t *testing.T) {
+	s := newSampler(config{})
+	s.observeAll("GPU 0   58   0   9   0   0   0   0\nGPU 1   58   0   4   0   0   0   0\n")
+	s.observeAll("GPU 0   58   0   1   0   0   0   0\nGPU 1   58   0   7   0   0   0   0\n")
+
+	rep := newReport()
+	s.report(rep)
+
+	// GPU 1 moved 4 -> 7, a real +3. GPU 0 reset. Publishing "3" would read as
+	// the node's whole replay count for the window, and it is not.
+	if got := rep.vals[keyPCIeReplayCount]; got != metricUnmeasurable {
+		t.Errorf("%s = %q, want %q — one GPU's reset makes the node's sum unknown, not smaller",
+			keyPCIeReplayCount, got, metricUnmeasurable)
+	}
+}
+
+// A counter that did not move is still a measurement, and must stay a number.
+//
+// The point of #312 is not that these counters became untrustworthy; it is that
+// "we could not tell" and "it was zero" are different claims. A clean window
+// still reports 0, and a gate on it still passes.
+func TestSampler_AQuietWindowStillReportsZero(t *testing.T) {
+	s := newSampler(config{})
+	s.observeAll("GPU 0   58   0   4   0   0   0   0\n")
+	s.observeAll("GPU 0   58   0   4   0   0   0   0\n")
+
+	rep := newReport()
+	s.report(rep)
+
+	if got := rep.vals[keyPCIeReplayCount]; got != "0" {
+		t.Errorf("%s = %q, want \"0\" — nothing moved, and that IS measurable", keyPCIeReplayCount, got)
+	}
+	if _, present := rep.vals[keyCounterReset]; present {
+		t.Errorf("%s was set on a window with no reset", keyCounterReset)
 	}
 }
 

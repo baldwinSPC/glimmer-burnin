@@ -52,6 +52,17 @@ const (
 	keyRowsRemapped    = "rows_remapped"
 )
 
+// metricUnmeasurable is the project's reserved metric value, recognised
+// case-insensitively by pkg/runner and routed to Result.Unmeasurable rather
+// than Result.Metrics.
+//
+// It means "we looked, and this hardware cannot produce that measurement" — a
+// positive declaration, never a substitute for a value we simply failed to
+// collect. Emitting it where the probe itself broke would turn a crash into an
+// acceptance under RequiredIfMeasurable, so the rule is to OMIT the key in that
+// case and use this only where the absence was established.
+const metricUnmeasurable = "n/a"
+
 // emittedKeys is every key this runner can print. It exists so a test can
 // enumerate them; nothing at runtime iterates it.
 var emittedKeys = []string{

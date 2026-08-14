@@ -329,7 +329,7 @@ func (s *sampler) report(rep *report) {
 			if s.samples < 2 {
 				continue
 			}
-			total, found := 0.0, false
+			total, found, wentBackwards := 0.0, false, false
 			for _, i := range idx {
 				for gpu := range s.gpus {
 					ser := s.state[seriesKey{field: i, gpu: gpu}]
@@ -337,19 +337,45 @@ func (s *sampler) report(rep *report) {
 						continue
 					}
 					found = true
-					d := ser.last - ser.first
-					if d < 0 {
+					if d := ser.last - ser.first; d < 0 {
 						// A lifetime counter that went backwards means the
 						// driver was reloaded or the device reset mid-test.
-						// Report the movement we can defend (none) and say so,
-						// rather than a negative count nothing can threshold.
-						reset = true
-						d = 0
+						wentBackwards = true
+					} else {
+						total += d
 					}
-					total += d
 				}
 			}
-			if found {
+			switch {
+			case !found:
+			case wentBackwards:
+				// UNMEASURABLE, not zero.
+				//
+				// This used to clamp the negative movement to 0 and publish the
+				// sum anyway, reasoning that 0 was "the movement we can defend
+				// (none)". It is not: 0 is the assertion that NOTHING HAPPENED,
+				// pkg/runner stores it in Result.Metrics, and `eccErrors Equal
+				// 0` is satisfied by it.
+				//
+				// The condition is the one under which we know least. A counter
+				// going backwards means the driver reloaded or the device
+				// reset, which is exactly when ECC and Xid counters are most
+				// likely to have recorded something before being zeroed — so
+				// the old behaviour reported "clean" for precisely the window
+				// whose evidence was destroyed (#312).
+				//
+				// `n/a` is this project's reserved word for "we looked and
+				// there is nothing we can report". pkg/runner puts it in
+				// Result.Unmeasurable rather than Metrics, so a Required
+				// threshold fails closed and RequiredIfMeasurable reports NOT
+				// EVALUATED. Both are honest; a fabricated 0 is neither.
+				//
+				// The whole key goes unmeasurable, not just the affected GPU: a
+				// sum missing one of its terms is not a smaller sum, it is an
+				// unknown one.
+				reset = true
+				rep.set(key, metricUnmeasurable)
+			default:
 				rep.setNumber(key, total)
 			}
 		case aggLast:
