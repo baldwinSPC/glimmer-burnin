@@ -93,71 +93,56 @@ type NotEvaluated struct {
 	Reason string
 }
 
-// Cause says who should act on a violation. It is the axis that separates a
-// statement about the hardware from a statement about the machinery or about
-// the profile — a separation that matters because all three arrive as the same
-// Failed test, and only one of them is a reason to touch a node.
-type Cause string
+// Cause and ViolationKind are contract's, aliased.
+//
+// They moved to pkg/contract for #295: the envelope tells a consumer to switch
+// on these words, so the words belong in the package a consumer decodes. An
+// alias IS the type, so nothing here changed and the producer cannot drift from
+// the document.
+type (
+	Cause         = contract.Cause
+	ViolationKind = contract.ViolationKind
+)
 
 const (
 	// CauseMeasurement is the hardware falling short of a bar that was applied
 	// to a real measurement. This is the only cause that is evidence about the
 	// part.
-	CauseMeasurement Cause = "Measurement"
+	CauseMeasurement = contract.CauseMeasurement
 
 	// CauseEvidence is a runner report that cannot support a judgement at all:
 	// the metric is missing, unparseable, non-finite, self-contradictory, or
 	// declared unmeasurable under a gate that requires it. The node is unjudged,
 	// not condemned — though the threshold still fails closed.
-	CauseEvidence Cause = "Evidence"
+	CauseEvidence = contract.CauseEvidence
 
 	// CauseAuthoring is a broken threshold. No hardware is implicated and no
 	// node should be touched; the profile needs fixing. ValidateThresholds
 	// catches these before a run, and this cause is what they look like when
 	// one slips through anyway.
-	CauseAuthoring Cause = "Authoring"
+	CauseAuthoring = contract.CauseAuthoring
 )
-
-// ViolationKind is the specific route by which a threshold went unsatisfied.
-// It is finer-grained than Cause so the taxonomy can gain routes without
-// reclassifying the ones already there.
-type ViolationKind string
 
 const (
 	// KindUnsatisfied is a real measurement that failed the comparison.
-	KindUnsatisfied ViolationKind = "Unsatisfied"
+	KindUnsatisfied = contract.KindUnsatisfied
 	// KindNotReported is a metric absent from both the metrics and the
 	// unmeasurable set. Absence is not a declaration.
-	KindNotReported ViolationKind = "NotReported"
+	KindNotReported = contract.KindNotReported
 	// KindNonNumeric is a metric value that does not parse as a float64.
-	KindNonNumeric ViolationKind = "NonNumeric"
+	KindNonNumeric = contract.KindNonNumeric
 	// KindNonFinite is a metric that parsed as NaN or ±Inf.
-	KindNonFinite ViolationKind = "NonFinite"
+	KindNonFinite = contract.KindNonFinite
 	// KindContradictory is a metric both reported and declared unmeasurable.
-	KindContradictory ViolationKind = "Contradictory"
+	KindContradictory = contract.KindContradictory
 	// KindUnmeasurableRequired is a metric declared unmeasurable under an
 	// applicability that requires it.
-	KindUnmeasurableRequired ViolationKind = "UnmeasurableRequired"
+	KindUnmeasurableRequired = contract.KindUnmeasurableRequired
 	// KindThresholdValueNonNumeric is a threshold whose Value does not parse.
-	KindThresholdValueNonNumeric ViolationKind = "ThresholdValueNonNumeric"
+	KindThresholdValueNonNumeric = contract.KindThresholdValueNonNumeric
 	// KindThresholdValueNonFinite is a threshold whose Value is NaN or ±Inf.
-	KindThresholdValueNonFinite ViolationKind = "ThresholdValueNonFinite"
+	KindThresholdValueNonFinite = contract.KindThresholdValueNonFinite
 )
-
-// Cause reports which cause this kind belongs to. It is the single mapping
-// between the two, so a Violation's Kind and Cause can never disagree. An
-// unrecognised kind answers CauseEvidence: the conservative reading is that we
-// could not establish anything, never that the hardware is at fault.
-func (k ViolationKind) Cause() Cause {
-	switch k {
-	case KindUnsatisfied:
-		return CauseMeasurement
-	case KindThresholdValueNonNumeric, KindThresholdValueNonFinite:
-		return CauseAuthoring
-	default:
-		return CauseEvidence
-	}
-}
 
 // Violation is one threshold that was not satisfied. Its shape deliberately
 // mirrors Problem in lint.go — Index, Metric, a classification, and a Reason

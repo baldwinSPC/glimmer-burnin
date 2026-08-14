@@ -123,3 +123,68 @@ func fieldNames(t reflect.Type) map[string]bool {
 	}
 	return out
 }
+
+// THE WORDS MUST AGREE, not just the shapes (#295).
+//
+// TestMirroredStructsAgree above proves the three structs carry the same
+// FIELDS. This proves the VALUES that travel in them mean the same thing in
+// every package — which is the half that decides whether an engineer is
+// dispatched.
+//
+// pkg/contract now exports Cause, ViolationKind and Phase so a consumer can
+// switch on them without hard-coding "Measurement" or importing the producer.
+// The risk that creates is a new one: three packages that each spell the
+// vocabulary, drifting silently. api/v1alpha1's RunPhase is deliberately NOT an
+// alias — it is the CRD's own enum with its own kubebuilder markers — so this
+// is the only thing holding the two together.
+func TestTheVerdictVocabularyAgreesAcrossPackages(t *testing.T) {
+	// Every phase the CRD can record must have a contract spelling, or the
+	// envelope would carry a phase no consumer's switch has a case for.
+	apiPhases := []burninv1alpha1.RunPhase{
+		burninv1alpha1.RunPending, burninv1alpha1.RunRunning, burninv1alpha1.RunPassed,
+		burninv1alpha1.RunFailed, burninv1alpha1.RunError, burninv1alpha1.RunSkipped,
+		burninv1alpha1.RunCancelled,
+	}
+	inContract := map[string]bool{}
+	for _, p := range contract.Phases {
+		inContract[string(p)] = true
+	}
+	for _, p := range apiPhases {
+		if !inContract[string(p)] {
+			t.Errorf("api/v1alpha1 can record phase %q and pkg/contract has no constant for it — a "+
+				"consumer switching on contract.Phase has no case for a phase the operator emits", p)
+		}
+	}
+	if len(contract.Phases) != len(apiPhases) {
+		t.Errorf("contract declares %d phases and the API has %d; the lists have drifted, and the "+
+			"envelope's vocabulary is what a consumer builds a switch from",
+			len(contract.Phases), len(apiPhases))
+	}
+
+	// verdict's names are aliases of contract's, so a mismatch here means
+	// somebody re-declared one locally rather than aliasing it.
+	if verdict.CauseMeasurement != contract.CauseMeasurement ||
+		verdict.CauseEvidence != contract.CauseEvidence ||
+		verdict.CauseAuthoring != contract.CauseAuthoring {
+		t.Error("pkg/verdict's Cause constants are not pkg/contract's — they must be aliases, or the " +
+			"evaluator and the document can disagree about who should act")
+	}
+
+	// Every kind maps to a cause, and the mapping lives in ONE place.
+	for _, k := range contract.ViolationKinds {
+		if c := k.Cause(); c != contract.CauseMeasurement &&
+			c != contract.CauseEvidence && c != contract.CauseAuthoring {
+			t.Errorf("kind %q maps to cause %q, which is not one of contract.Causes", k, c)
+		}
+	}
+
+	// The open-world rule, asserted rather than assumed: a kind from a newer
+	// version must classify as Evidence — unjudged — and never as Measurement,
+	// which would dispatch someone to replace a working part over a word this
+	// version did not recognise.
+	if got := contract.ViolationKind("SomethingAVersionFromNextYearEmits").Cause(); got != contract.CauseEvidence {
+		t.Errorf("an unrecognised kind classified as %q, want %q: erring towards a hardware verdict "+
+			"on a word we do not understand is the one direction that condemns good hardware",
+			got, contract.CauseEvidence)
+	}
+}
