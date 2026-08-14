@@ -89,6 +89,17 @@ type diagResults struct {
 
 	versionDepth int
 	driverDepth  int
+
+	// SawResultStructure records that the document contained a non-empty
+	// tests / results / test_categories array, whether or not any status was
+	// read out of it.
+	//
+	// It exists so a verdict can distinguish "DCGM produced no results" from
+	// "we recorded no results", which are not the same statement and had the
+	// same representation (#322). The first may legitimately become a Skip;
+	// the second is a parser that did not understand the document, and a Skip
+	// there takes a node out of scope on the strength of our own blindness.
+	SawResultStructure bool
 }
 
 type diagCounts struct {
@@ -162,6 +173,16 @@ func (r *diagResults) walk(node any, inheritedName string, depth int) {
 		}
 		if v := driverVersionField(n); v != "" && (r.driverDepth < 0 || depth < r.driverDepth) {
 			r.DriverVersion, r.driverDepth = v, depth
+		}
+		// Did DCGM report subtest STRUCTURE, whether or not we could read a
+		// status out of it? This is what lets the verdict tell "DCGM ran
+		// nothing" apart from "DCGM ran things and we did not understand the
+		// document" — two states that were indistinguishable, and only the
+		// first of which may become a Skip. See #322.
+		for _, container := range []string{"tests", "results", "test_categories"} {
+			if items, ok := n[container].([]any); ok && len(items) > 0 {
+				r.SawResultStructure = true
+			}
 		}
 		if raw, ok := n["status"].(string); ok {
 			r.record(inheritedName, parseStatus(raw), n)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Every test in this file failed against the first draft of the metadata path,
@@ -296,5 +297,71 @@ func TestTheBlockingFindingIsDeterministic(t *testing.T) {
 	}
 	if len(seen) != 1 {
 		t.Errorf("blocking finding varied across runs: %v", seen)
+	}
+}
+
+// A DOCUMENT WE CANNOT PARSE IS NOT A PART DCGM REFUSED TO TEST.
+//
+// Both statements used to arrive as Total == 0, and the runner then scanned the
+// whole of stdout plus stderr for unsupported-part prose. So a document that
+// reported real failures, but whose subtest statuses this runner could not
+// read, became exit 2 SKIP — "not applicable to this hardware" — on the
+// strength of a sentence that was never about the verdict. Skip is the one
+// outcome nothing retries and nothing condemns (#322).
+func TestAnUnreadableDocumentIsUnjudgedRatherThanNotApplicable(t *testing.T) {
+	// DCGM reported subtests. The status key is spelled the way a future
+	// release might, so nothing is recorded — and the output also carries a
+	// perfectly ordinary sentence about one subsystem being unsupported.
+	const doc = `{"version":"9.9.9","tests":[
+		{"name":"memory","results":[{"gpu_id":0,"state":"Fail",
+		  "warnings":[{"warning":"Uncorrectable ECC error detected on GPU 0",
+		    "error_severity":2,"error_category":10}]}]}]}`
+	const stderr = "NvLink is not supported by dcgm on this GPU\n"
+
+	res, err := parseDiagJSON(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := res.Counts(); c.Total != 0 {
+		t.Fatalf("Total = %d; this test is only meaningful when nothing was recorded", c.Total)
+	}
+	if !res.SawResultStructure {
+		t.Fatal("SawResultStructure = false, but the document carries a non-empty tests[] array")
+	}
+
+	var out strings.Builder
+	code := verdict(&out, newReport(), res, 226, nil, doc, stderr, time.Minute)
+	if code != exitError {
+		t.Errorf("exit = %d, want exitError (%d): an unreadable document must leave the hardware "+
+			"unjudged, never mark it out of scope", code, exitError)
+	}
+	if strings.Contains(out.String(), markerSkip) {
+		t.Errorf("output declares %s; a parser failure is not a hardware exemption:\n%s",
+			markerSkip, out.String())
+	}
+}
+
+// The genuine refusal still skips, which is the behaviour that must survive.
+//
+// DCGM produced no subtest structure at all and said why, so there is nothing
+// to read and nothing to judge — the one case where "not applicable" is a claim
+// about the hardware rather than about this runner.
+func TestAGenuineUnsupportedPartStillSkips(t *testing.T) {
+	const doc = `{"version":"4.2.3"}`
+	const stderr = "Error: Unable to run diagnostic on unsupported GPU 0.\n"
+
+	res, err := parseDiagJSON(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SawResultStructure {
+		t.Fatal("SawResultStructure = true on a document with no tests[] at all")
+	}
+
+	var out strings.Builder
+	code := verdict(&out, newReport(), res, 1, nil, doc, stderr, time.Minute)
+	if code != exitSkip {
+		t.Errorf("exit = %d, want exitSkip (%d): a part DCGM refuses to test is out of scope",
+			code, exitSkip)
 	}
 }
