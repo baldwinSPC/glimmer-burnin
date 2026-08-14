@@ -88,8 +88,8 @@ GPU 1        66       1       8       4       0       1       1
 	if got := rep.vals[keyECCSbeTotal]; got != "1" {
 		t.Errorf("%s = %q, want 1", keyECCSbeTotal, got)
 	}
-	if got := rep.vals[keyXIDErrors]; got != "1" {
-		t.Errorf("%s = %q, want 1", keyXIDErrors, got)
+	if got := rep.vals[keyLastXidCode]; got != "1" {
+		t.Errorf("%s = %q, want 1", keyLastXidCode, got)
 	}
 	// Correctable and uncorrectable remapped rows are one quantity, summed.
 	if got := rep.vals[keyRowsRemapped]; got != "1" {
@@ -110,7 +110,7 @@ func TestSampler_SingleSampleEmitsNoDeltas(t *testing.T) {
 	rep := newReport()
 	s.report(rep)
 
-	for _, key := range []string{keyPCIeReplayCount, keyECCSbeTotal, keyECCDbeTotal, keyXIDErrors, keyRowsRemapped} {
+	for _, key := range []string{keyPCIeReplayCount, keyECCSbeTotal, keyECCDbeTotal, keyRowsRemapped} {
 		if v, present := rep.vals[key]; present {
 			t.Errorf("%s = %q from a single sample; a delta needs two readings", key, v)
 		}
@@ -118,6 +118,37 @@ func TestSampler_SingleSampleEmitsNoDeltas(t *testing.T) {
 	// The peak temperature IS establishable from one reading, so it stays.
 	if _, present := rep.vals[keyGPUTempC]; !present {
 		t.Errorf("%s should still be reported from a single sample", keyGPUTempC)
+	}
+	// And so is the Xid CODE, which is the point of reading field 230 as a
+	// state rather than a counter. One reading answers "which Xid does this
+	// device report" completely; it was only the subtraction that needed two,
+	// and the subtraction was never a count of anything (#311).
+	if _, present := rep.vals[keyLastXidCode]; !present {
+		t.Errorf("%s should be reported from a single sample: it is a state, not a delta", keyLastXidCode)
+	}
+}
+
+// FIELD 230 IS A CODE, AND MUST NOT BE SUBTRACTED.
+//
+// The two rows below are the case that made this a false PASS rather than a
+// cosmetic naming problem: a GPU sitting at Xid 79 for the whole window. Read
+// as a delta it reported 79-79 = 0 and satisfied `xidEvents Equal 0`; read as
+// a state it reports 79, and nothing gates on it.
+func TestSampler_APersistentXidIsReportedNotSubtractedAway(t *testing.T) {
+	s := newSampler(config{})
+	s.observeAll("GPU 0 45 79 100 12 4 8 2\n")
+	s.observeAll("GPU 0 46 79 100 12 4 8 2\n")
+
+	rep := newReport()
+	s.report(rep)
+
+	if got := rep.vals[keyLastXidCode]; got != "79" {
+		t.Errorf("%s = %q, want \"79\" — the code the device actually reports", keyLastXidCode, got)
+	}
+	// And the name that used to carry the subtraction is gone, so no profile
+	// can gate a count on this runner's output by accident.
+	if v, present := rep.vals["xid_errors"]; present {
+		t.Errorf("xid_errors = %q; this runner must not publish a count it cannot derive", v)
 	}
 }
 

@@ -229,8 +229,14 @@ var aliases = map[string]map[string]string{
 	},
 
 	"dcgm-diag": {
-		"tests_failed":      "diagTestsFailed",
-		"xid_errors":        "xidEvents",
+		"tests_failed": "diagTestsFailed",
+		// No xid_errors entry, deliberately. This runner used to publish a
+		// subtraction of two DCGM_FI_DEV_XID_ERRORS readings under xidEvents,
+		// but that field holds the last Xid CODE rather than a count, so the
+		// subtraction was not a number of anything (#311). It now emits
+		// last_xid_code, which normalises to lastXidCode without an alias
+		// because that is merely a different spelling. xidEvents keeps one
+		// derivation, in host-health, which counts events from /dev/kmsg.
 		"pcie_replay_count": "pcieReplayErrors",
 		"rows_remapped":     "remappedRows",
 		// DCGM reports correctable (SBE) and uncorrectable (DBE) ECC counts

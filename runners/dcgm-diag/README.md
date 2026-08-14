@@ -72,7 +72,7 @@ threshold is written against.
 | `tests_failed` | `diagTestsFailed` | Subtests that returned a failure. A **count**, not a verdict: zero alongside a non-zero exit means the suite could not run. |
 | `pcie_replay_count` | `pcieReplayErrors` | PCIe replay events **during the test** |
 | `gpu_temp_c` | `gpuTempC` | Peak temperature seen across the test window |
-| `xid_errors` | `xidEvents` | Xid errors during the test |
+| `last_xid_code` | `lastXidCode` | **Which** Xid the device reports, not how many — DCGM's field holds the last code, and it is lifetime-scoped. Registered `ThresholdUse: Evidence`; the windowed count is `xidEvents`, from host-health. See #311. |
 | `rows_remapped` | `remappedRows` | Rows remapped during the test (correctable + uncorrectable) |
 | `ecc_sbe_total` | `eccSbeTotal` | Correctable ECC errors during the test |
 | `ecc_dbe_total` | `eccDbeTotal` | Uncorrectable ECC errors during the test |
@@ -369,7 +369,7 @@ tests_warned=0
 tests_not_run=0
 tests_skipped=0
 gpu_temp_c=43
-xid_errors=0
+last_xid_code=0
 pcie_replay_count=0
 ecc_sbe_total=0
 ecc_dbe_total=0
