@@ -36,6 +36,7 @@ cover.out
 /fingerprint-probe
 /gemm-sweep
 /gpu-burn
+/gpu-burn-rocm
 /gpudirect-rdma
 /host-health
 /ib-write-bw
@@ -46,3 +47,4 @@ cover.out
 /nccl-rocm
 /tcp-baseline
 /thermal-soak
+/thermal-soak-rocm
