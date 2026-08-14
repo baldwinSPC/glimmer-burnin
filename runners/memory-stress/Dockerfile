@@ -25,7 +25,7 @@
 # NVIDIA_* environment and needs no GPU.
 
 ARG SAT_BUILD_IMAGE=debian:bookworm-slim
-ARG GO_IMAGE=golang:1.24-bookworm
+ARG GO_IMAGE=golang:1.26-bookworm
 # The runtime base is the SAME Debian release as the stressapptest build stage,
 # so the glibc the binary was linked against is the glibc it runs on.  Moving
 # one without the other is how a runner starts failing with GLIBC_2.xx errors on

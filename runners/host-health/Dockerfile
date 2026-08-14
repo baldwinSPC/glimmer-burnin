@@ -15,7 +15,7 @@
 #                           carries are unmodified upstream and are not linked
 #                           into our binary.  See README "Licensing".
 
-ARG GO_IMAGE=golang:1.24
+ARG GO_IMAGE=golang:1.26
 # cc-debian13 rather than static-debian13 for ONE reason: the nvidia-smi the
 # toolkit injects is a DYNAMICALLY linked binary and needs a loader and a libc
 # from the container's own rootfs — the toolkit supplies the driver libraries,

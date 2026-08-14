@@ -17,7 +17,7 @@
 # stack, so it sets no NVIDIA_* environment; runners/pins_test.go asserts that
 # absence rather than leaving it to a reader.
 
-ARG GO_IMAGE=golang:1.24-bookworm
+ARG GO_IMAGE=golang:1.26-bookworm
 # `static` rather than `cc`: nothing here needs a dynamic loader.
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12
 

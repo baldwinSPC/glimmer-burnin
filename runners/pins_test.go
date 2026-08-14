@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1234,4 +1235,80 @@ func TestPairServerDoesNotRequireAPeerHost(t *testing.T) {
 		t.Fatalf("found %d peer-host guards across %d Pair runners, want at least %d — the sweep is "+
 			"not reading what it thinks it is", checked, len(pairRunners), minGuards)
 	}
+}
+
+// EVERY RUNNER'S BUILDER MUST BE ON A GO BRANCH THAT STILL GETS FIXES.
+//
+// The runner images build a throwaway module (`go mod init` inside the image),
+// so there is no `toolchain` directive for GOTOOLCHAIN to act on: whatever
+// GO_IMAGE names is what compiles the binary, full stop. That makes the pin the
+// only thing standing between a runner and an unpatched standard library, and
+// nothing was checking it.
+//
+// It had already drifted. go.mod moved to go1.26.6 for six standard-library
+// advisories (#308), while ten runners still said golang:1.24 — a branch those
+// advisories were never fixed on. Go supports a release until two newer majors
+// exist, and the fix list for every one of the six names only 1.25.13, 1.26.6
+// and 1.27.0-rc.3. So this is not "a bit behind": there was no patch to take.
+//
+// Compared against go.mod rather than a literal, so the pin cannot rot again
+// the next time the toolchain moves.
+func TestRunnerBuildersAreNotOlderThanTheModuleToolchain(t *testing.T) {
+	modMajor, modMinor := moduleToolchainVersion(t)
+
+	matches, err := filepath.Glob(filepath.Join("..", "runners", "*", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`(?m)^ARG GO_IMAGE=golang:(\d+)\.(\d+)`)
+
+	var checked int
+	for _, path := range matches {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+			continue
+		}
+		m := re.FindSubmatch(src)
+		if m == nil {
+			// Not every runner builds Go in its image (the CUDA ones compile
+			// only C++). A Dockerfile with no GO_IMAGE has nothing to check.
+			continue
+		}
+		checked++
+		major, _ := strconv.Atoi(string(m[1]))
+		minor, _ := strconv.Atoi(string(m[2]))
+		if major < modMajor || (major == modMajor && minor < modMinor) {
+			t.Errorf("%s builds with golang:%d.%d, older than go.mod's toolchain go%d.%d. "+
+				"The image builds a throwaway module, so nothing upgrades this at build time and the "+
+				"binary ships whatever standard library that branch has — including advisories fixed "+
+				"only on newer branches (#309).",
+				path, major, minor, modMajor, modMinor)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no runner Dockerfile declared ARG GO_IMAGE, so this guard checked nothing")
+	}
+}
+
+// moduleToolchainVersion reads the major and minor from go.mod's `toolchain`
+// directive, falling back to `go` when there is none.
+func moduleToolchainVersion(t *testing.T) (major, minor int) {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join("..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^toolchain go(\d+)\.(\d+)`),
+		regexp.MustCompile(`(?m)^go (\d+)\.(\d+)`),
+	} {
+		if m := re.FindSubmatch(src); m != nil {
+			major, _ = strconv.Atoi(string(m[1]))
+			minor, _ = strconv.Atoi(string(m[2]))
+			return major, minor
+		}
+	}
+	t.Fatal("go.mod declares neither a toolchain nor a go version")
+	return 0, 0
 }

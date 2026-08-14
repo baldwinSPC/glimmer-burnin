@@ -35,7 +35,7 @@
 
 # The CUDA toolchain is BUILD-TIME ONLY; none of its layers are shipped.
 ARG CUDA_IMAGE=nvcr.io/nvidia/cuda:12.9.1-devel-ubuntu24.04
-ARG GO_IMAGE=golang:1.24-bookworm
+ARG GO_IMAGE=golang:1.26-bookworm
 # The runtime base is the same distribution release as the CUDA build image
 # (Ubuntu 24.04), so the glibc perftest was linked against is the one it runs on.
 ARG RUNTIME_IMAGE=ubuntu:24.04

@@ -36,7 +36,7 @@
 # unconditional assertion instead of an exception list.
 
 ARG CUDA_IMAGE=nvcr.io/nvidia/cuda:12.9.1-devel-ubuntu24.04
-ARG GO_IMAGE=golang:1.24-bookworm
+ARG GO_IMAGE=golang:1.26-bookworm
 ARG RUNTIME_IMAGE=ubuntu:24.04
 
 # ── NCCL, from source ─────────────────────────────────────────────────────────
