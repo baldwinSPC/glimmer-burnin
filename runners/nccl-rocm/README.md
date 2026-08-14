@@ -42,6 +42,22 @@ Before that, the answer was explicit: AMD, on rccl#2026 (Nov 2025), *"we do not
 have plans to support Strix Halo for RCCL."* Any guide still telling you to ship
 a patched `librccl.so` is describing the pre-7.12 world.
 
+## AMD's apt repository cannot supply this runtime
+
+Every other `-rocm` runner installs its ROCm runtime from `repo.radeon.com`.
+This one cannot, and the reason compounds the version floor above:
+**the apt repository tops out at 7.2.4.** There is no 7.12, 7.13 or 7.14
+published there at all, and `apt/latest` *is* 7.2.4 — the exact maintenance line
+that never received the gfx1151 fix. AMD's container images are a dozen minor
+versions ahead of their package repository.
+
+So the runtime libraries are copied from the devel image that compiled the
+binary, which also guarantees the runtime is the exact build the link resolved
+against. The NVIDIA runner reaches the same destination by a different road: it
+builds NCCL from source and links it statically, so no vendor `.so` ships at
+all. HIP has no comparable static path, so the `ldd` closure is copied instead —
+plus the known dlopen'd companions, since `ldd` cannot see those.
+
 ## Transport: TCP/Ethernet, deliberately
 
 This runner is socket-only. That is what AMD themselves support on this

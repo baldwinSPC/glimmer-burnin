@@ -60,37 +60,65 @@ RUN ldd /out/rccl_pair | tee /out/ldd.txt \
     && grep -q libamdhip64 /out/ldd.txt \
     && ! grep -q 'not found' /out/ldd.txt
 
-# RCCL and rccl-tests are BSD-3-Clause (NVIDIA 2015-2020, AMD modifications).
-# Asserted rather than asked-of-a-comment, matching how every other runner here
-# checks the licence of what it ships.
-RUN for f in /opt/rocm/share/doc/rccl/LICENSE.txt /opt/rocm/share/doc/rccl/LICENSE \
-             /opt/rocm/share/licenses/rccl/LICENSE.txt; do \
-      if [ -f "$f" ]; then grep -qi 'BSD' "$f" && echo "RCCL licence at $f is BSD: OK" && break; fi; \
-    done || echo "WARNING: could not locate RCCL's licence file to assert BSD"
+# ── collect the ROCm runtime, because APT CANNOT SUPPLY IT ───────────────────
+#
+# Every other -rocm runner installs its runtime from repo.radeon.com.  This one
+# cannot, and the reason is the whole point of this runner: AMD's APT REPOSITORY
+# TOPS OUT AT 7.2.4 — there is no 7.12, 7.13 or 7.14 published there at all, and
+# `apt/latest` IS 7.2.4.  Since 7.2.x is precisely the maintenance line that
+# never received the gfx1151 RCCL fix, apt can only ever supply an RCCL with no
+# kernels for this hardware.  The container images are a dozen minor versions
+# ahead of the package repository.
+#
+# So the libraries come from the devel image that compiled the binary, which
+# also guarantees the runtime is the exact build the link was resolved against.
+# The NVIDIA runner reaches the same destination by a different road: it builds
+# NCCL from source and links it statically, leaving no vendor .so in its image.
+# HIP has no comparable static path, so the closure is copied instead.
+#
+# `ldd` gives the full TRANSITIVE closure of linked libraries.  What it cannot
+# show is anything dlopen'd at runtime, so the known HIP companions are copied
+# explicitly when present — and the runtime stage still asserts that nothing is
+# unresolved.  A dlopen that fails despite this would surface as a clear ROCm
+# error rather than a silent wrong answer; the hardware pass (issue #320) is
+# where that gets confirmed.
+RUN set -eu; \
+    mkdir -p /rocm-runtime; \
+    ldd /out/rccl_pair | awk '{print $3}' | grep -E '^/opt/rocm' | while read -r lib; do \
+      cp -L "$lib" /rocm-runtime/; \
+    done; \
+    for extra in libhsakmt.so.1 libamd_comgr.so.3 librocprofiler-register.so.0 \
+                 libhsa-runtime64.so.1 librccl.so.1; do \
+      if [ -f "/opt/rocm/lib/$extra" ]; then cp -L "/opt/rocm/lib/$extra" /rocm-runtime/; fi; \
+    done; \
+    ls -la /rocm-runtime
 
-# ── final: the binary plus the MIT HIP runtime and BSD RCCL ──────────────────
+# RCCL is BSD-3-Clause (NVIDIA 2015-2020, AMD modifications 2019-2026).
+RUN found=0; \
+    for f in /opt/rocm/share/doc/rccl/LICENSE.txt /opt/rocm/share/doc/rccl/LICENSE \
+             /opt/rocm/share/licenses/rccl/LICENSE.txt; do \
+      if [ -f "$f" ] && grep -qi 'BSD' "$f"; then echo "RCCL licence at $f is BSD: OK"; found=1; break; fi; \
+    done; \
+    if [ "$found" = 0 ]; then echo "WARNING: could not locate RCCL's licence file to assert BSD"; fi
+
+# ── final: the binary plus exactly the ROCm libraries it resolves ────────────
 FROM ubuntu:24.04
 
-ARG ROCM_APT_VERSION=7.14
+# libnuma is a HIP dependency that comes from the DISTRO rather than from ROCm,
+# so it is the one thing still installed here.  No ROCm apt repository is
+# configured at all — see the collection step above for why there would be no
+# point.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates wget gnupg \
-  && wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \
-      | gpg --dearmor > /usr/share/keyrings/rocm.gpg \
-  && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_APT_VERSION} noble main" \
-      > /etc/apt/sources.list.d/rocm.list \
-  # The origin pin: Ubuntu ships its own builds of ROCm package names, and the
-  # runtime the binary loads must match the one it was compiled against.
-  && printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' \
-      > /etc/apt/preferences.d/rocm \
-  && apt-get update && apt-get install -y --no-install-recommends \
-      rocm-hip-runtime rccl \
-  && apt-get purge -y wget gnupg && apt-get autoremove -y \
+      libnuma1 ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+COPY --from=build /rocm-runtime/ /opt/rocm/lib/
 ENV LD_LIBRARY_PATH=/opt/rocm/lib
 
 COPY --from=build /out/rccl_pair /usr/local/bin/rccl_pair
 
+# Written as `if grep; then fail; fi` rather than `grep && { ...; exit 1; } || true`,
+# where the `|| true` would catch the exit and pass the step with the fault intact.
 RUN if ldd /usr/local/bin/rccl_pair | grep -q 'not found'; then \
       echo "ERROR: unresolved libraries in the runtime stage:" >&2; \
       ldd /usr/local/bin/rccl_pair >&2; \
