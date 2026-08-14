@@ -29,6 +29,7 @@ cover.out
 /clockprobe
 /clockprobe-rocm
 /compute-smoke
+/compute-smoke-rocm
 /dcgm-diag
 /disk-io
 /fabric-soak
