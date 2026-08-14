@@ -27,11 +27,23 @@ FROM ${ROCM_IMAGE} AS build
 #   gfx942   Instinct MI300X/MI325X
 ARG GPU_TARGETS="gfx1151 gfx1100 gfx942"
 
-# Assert the toolchain AND the RCCL floor before compiling anything.
+# Assert the toolchain, and then assert THE PROPERTY THIS RUNNER DEPENDS ON:
+# that the RCCL in this image actually carries device code for every target we
+# are about to compile for.
 #
-# The version check is not ceremony: an image built on 7.2.x links an RCCL with
-# no gfx1151 kernels, and the failure would surface on a node as a runtime error
-# that reads like a fabric fault rather than like the packaging mistake it is.
+# The first version of this check read /opt/rocm/.info/version and compared it
+# against a 7.12 floor. It failed closed on the 7.14 image — that file does not
+# exist there — which was the right behaviour for an unreadable version but the
+# wrong question to be asking. A version number is a PROXY for gfx1151 support;
+# the bundled code objects ARE gfx1151 support. Asserting the proxy would also
+# have gone silently wrong the other way, since AMD backports across lines that
+# do not sort the way a floor comparison assumes (the rocm-7.2.x line is newer
+# than 7.0 and still lacks the fix entirely).
+#
+# So: grep the library for each target's own name. The code objects RCCL bundles
+# carry their arch strings, so a target with no kernels leaves no mark. This is
+# the same discipline the rest of this repository applies to shell — assert the
+# effect, not the invocation.
 RUN set -eu; \
     hipcc=/opt/rocm/bin/hipcc; \
     [ -x "$hipcc" ] || { echo "ERROR: $hipcc missing; not a ROCm devel image." >&2; exit 1; }; \
@@ -39,15 +51,24 @@ RUN set -eu; \
       echo "ERROR: $hipcc does not identify as a ROCm/AMD compiler." >&2; exit 1; }; \
     [ -f /opt/rocm/include/rccl/rccl.h ] || [ -f /opt/rocm/include/rccl.h ] || { \
       echo "ERROR: RCCL headers are absent from this base image; install rccl-dev." >&2; exit 1; }; \
-    ver=$(cat /opt/rocm/.info/version 2>/dev/null || echo 0.0.0); \
-    major=$(echo "$ver" | cut -d. -f1); minor=$(echo "$ver" | cut -d. -f2); \
-    echo "ROCm version: $ver"; \
-    if [ "$major" -lt 7 ] || { [ "$major" -eq 7 ] && [ "$minor" -lt 12 ]; }; then \
-      echo "ERROR: RCCL gained gfx1151 in ROCm 7.12 (rocm-systems PR #3415);" >&2; \
-      echo "this base image is $ver, whose RCCL has no kernels for that target." >&2; \
-      echo "NOTE: the rocm-7.2.x line never received the fix — it is not a valid floor." >&2; \
-      exit 1; \
-    fi
+    rccl=""; \
+    for cand in /opt/rocm/lib/librccl.so /opt/rocm/lib/librccl.so.1 /opt/rocm/lib/librccl.so.*; do \
+      if [ -f "$cand" ]; then rccl="$cand"; break; fi; \
+    done; \
+    [ -n "$rccl" ] || { echo "ERROR: no librccl.so found under /opt/rocm/lib." >&2; exit 1; }; \
+    echo "RCCL library: $rccl"; \
+    "$hipcc" --version | head -2; \
+    for t in ${GPU_TARGETS}; do \
+      if grep -aq "$t" "$rccl"; then \
+        echo "  RCCL carries code for $t: OK"; \
+      else \
+        echo "ERROR: $rccl carries no device code for $t." >&2; \
+        echo "RCCL gained gfx1151 in rocm-systems PR #3415, first shipped in ROCm 7.12." >&2; \
+        echo "NOTE: the rocm-7.2.x line never received it, and AMD's apt repository" >&2; \
+        echo "tops out at 7.2.4 — only a 7.12+ CONTAINER IMAGE carries this." >&2; \
+        exit 1; \
+      fi; \
+    done
 
 COPY rccl_pair.cc collective_bw.h /src/
 RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \

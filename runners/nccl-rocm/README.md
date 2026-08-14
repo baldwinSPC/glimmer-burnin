@@ -29,8 +29,16 @@ RCCL did not support gfx1151 until [rocm-systems PR #3415](https://github.com/RO
 (merged 2026-02-26), first shipped in **ROCm 7.12**. The `rocm-7.2.x` line is a
 maintenance branch that **never received the fix**, so "ROCm 7.x" is not a
 sufficient floor — a 7.2.4 image would carry an RCCL with no kernels for the
-target. The Dockerfile asserts the floor at build time rather than trusting a
-comment to survive a version bump.
+target. The Dockerfile asserts this at build time — but it asserts **the property, not
+the version**. It greps `librccl.so` for each target's own name, because the
+bundled code objects carry their arch strings and a target with no kernels
+leaves no mark. A version floor would only be a proxy, and a misleading one:
+AMD backports across lines that do not sort the way a comparison assumes, since
+`rocm-7.2.x` is newer than 7.0 and still lacks the fix entirely.
+
+(The first version of the check did compare `/opt/rocm/.info/version` against a
+7.12 floor. It failed closed on the 7.14 image because that file does not exist
+there — right behaviour, wrong question.)
 
 Seven separate defects had to be fixed for gfx1151, which is why an unpatched
 build cannot be coaxed into working: the target missing from `DEFAULT_GPUS`,
