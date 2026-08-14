@@ -116,6 +116,21 @@ enumerates the host's interfaces, and a fabric test wants the host namespace
 anyway. Without it the guard fails closed and the test reports an Error — the
 intended degradation, since it will not measure a path it cannot classify.
 
+That was the documented intent and not the behaviour, until #285. From inside a
+pod namespace the guard saw exactly one non-loopback interface which also
+carried the default route — **identical to a single-NIC node** — and returned
+the declared Skip meant for that case. A Skip is never retried and does not
+count against a run, so a profile that merely omitted `hostNetwork: true` had
+every node report this test as not-applicable, with the fabric unmeasured and
+the acceptance reading clean.
+
+The guard now establishes the host namespace *positively* — `/proc/self/ns/net`,
+corroborated by `/proc/1/ns/net` when the pod also shares the host PID namespace
+— and records it as `tcpNetNamespace`. The single-NIC Skip is reachable only
+once that is known; otherwise the same observation is an Error, because "only
+one interface is visible" is not a declaration that this is a one-NIC node.
+Absence is not a declaration.
+
 ## Licensing
 
 iperf3 is BSD-3-Clause (Lawrence Berkeley National Laboratory), on this

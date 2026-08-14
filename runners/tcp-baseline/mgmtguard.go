@@ -54,6 +54,67 @@ type guardResult struct {
 	reason    string
 }
 
+// netnsKind is what could be POSITIVELY established about this process's
+// network namespace. It exists because a one-NIC node and a pod namespace are
+// indistinguishable from inside — each has exactly one non-loopback interface,
+// which is also that namespace's default route — and the guard owes them
+// opposite verdicts (#285).
+//
+// Getting that wrong is a fleet-wide fail-open rather than a cosmetic error. A
+// profile that merely forgot `hostNetwork: true` had every node report
+// tcp-baseline as a declared Skip: never retried, not counted against the run,
+// the fabric never measured, and the acceptance reported clean. That is the
+// outcome the `*_SKIP`-marker rule exists to prevent, reached through the guard
+// instead of through a crash.
+type netnsKind int
+
+const (
+	// netnsUnknown: nothing could be established. Fails closed.
+	netnsUnknown netnsKind = iota
+	// netnsHost: this IS the host's network namespace, so what the guard can
+	// see is what the node has.
+	netnsHost
+	// netnsNotHost: definitively a different namespace from PID 1's.
+	netnsNotHost
+)
+
+// initialNetnsLink is what /proc/self/ns/net reads as in the host's network
+// namespace. The initial namespace's inode is fixed at boot on every mainstream
+// kernel.
+//
+// This is CONVENTION and not kernel ABI, which is precisely why it is used only
+// as a POSITIVE signal. If a kernel ever numbered the initial namespace
+// differently, netnsFromLinks reports Unknown and the guard errors where it
+// would have skipped: a node reported unjudged and retried, which is
+// survivable. Trusting the constant in the other direction would let a pod
+// namespace pass itself off as a single-NIC node, which is the bug being fixed.
+const initialNetnsLink = "net:[4026531840]"
+
+// netnsFromLinks classifies the namespace from two /proc readlink results.
+//
+// It takes the resolved links rather than reading them, so the reasoning is
+// testable on a laptop, in CI and inside a container — none of which can
+// arrange all the cases it has to get right.
+//
+// selfLink is /proc/self/ns/net; pid1Link is /proc/1/ns/net, which is evidence
+// ONLY when the pod shares the host's PID namespace. When it does not, PID 1 is
+// the container's own init: the two links agree while proving nothing, so a
+// match is deliberately not treated as establishing the host namespace.
+func netnsFromLinks(selfLink, pid1Link string) netnsKind {
+	if selfLink == "" {
+		return netnsUnknown
+	}
+	if pid1Link != "" && pid1Link != selfLink {
+		// A different namespace from init's. Conclusive, and the only
+		// conclusive negative available.
+		return netnsNotHost
+	}
+	if selfLink == initialNetnsLink {
+		return netnsHost
+	}
+	return netnsUnknown
+}
+
 // classifyRoute decides whether traffic to peer would cross the management path.
 //
 // The default route's interface IS the management path, for this purpose. It is
@@ -66,7 +127,7 @@ type guardResult struct {
 //
 // Both inputs are supplied by the caller rather than read here, which is what
 // keeps this function pure and testable on a laptop with one interface.
-func classifyRoute(peerIface, mgmtIface string, explicit bool) guardResult {
+func classifyRoute(peerIface, mgmtIface string, explicit bool, ns netnsKind) guardResult {
 	switch {
 	case mgmtIface == "":
 		return guardResult{
@@ -100,9 +161,37 @@ func classifyRoute(peerIface, mgmtIface string, explicit bool) guardResult {
 				peerIface),
 		}
 
+	case peerIface == mgmtIface && ns != netnsHost:
+		// The same observation, from somewhere it cannot mean what it says.
+		//
+		// Inside a pod namespace there is exactly one non-loopback interface
+		// and it carries that namespace's default route — identical to a
+		// one-NIC node, and nothing about the NODE follows from it. The
+		// default route seen here is the POD's, not the machine's.
+		//
+		// So this is not a declared skip. "Only one interface is visible" is
+		// not a declaration that this is a one-NIC node; it is an absence of
+		// evidence, and the project's rule is that absence is not a
+		// declaration. Error is the honest answer: the guard could not
+		// classify the path, the hardware is unjudged, and it is retryable —
+		// where a Skip would be permanent, silent, and fleet-wide (#285).
+		return guardResult{
+			decision:  routeUnknown,
+			iface:     peerIface,
+			mgmtIface: mgmtIface,
+			reason: fmt.Sprintf(
+				"the only visible route to the peer is %s, which also carries the default route — but this "+
+					"process is not in the host's network namespace, so that describes the POD's routing and "+
+					"says nothing about the node's. A one-NIC node and a pod namespace look identical from "+
+					"inside. Set hostNetwork: true so the test can see the node's real interfaces; refusing "+
+					"rather than reporting this node as not-applicable, which would leave the fabric unmeasured",
+				peerIface),
+		}
+
 	case peerIface == mgmtIface:
-		// No second path exists. Not a fault: a single-NIC node cannot run this
-		// test safely, which is exactly what a declared skip is for.
+		// No second path exists, and we are looking at the node's own
+		// interfaces. Not a fault: a single-NIC node cannot run this test
+		// safely, which is exactly what a declared skip is for.
 		return guardResult{
 			decision:  routeIsManagement,
 			iface:     peerIface,

@@ -160,7 +160,17 @@ func guardPath(peerHost, role string) (int, bool) {
 			"management interface (%s), and the guard fails closed rather than binding everywhere", mgmt), false
 	}
 
-	result := classifyRoute(testIface, mgmt, explicit != "")
+	// Which network namespace this is, established positively where it can be.
+	// The routing table above describes whatever namespace we are in, and in a
+	// pod that is the pod's — see netnsKind (#285).
+	selfNS, _ := os.Readlink("/proc/self/ns/net")
+	pid1NS, _ := os.Readlink("/proc/1/ns/net")
+	ns := netnsFromLinks(selfNS, pid1NS)
+	if selfNS != "" {
+		metric("tcpNetNamespace", selfNS)
+	}
+
+	result := classifyRoute(testIface, mgmt, explicit != "", ns)
 
 	// Recorded on every path, including the refusals: the guard's decision is
 	// only auditable if the interfaces are in the result.
