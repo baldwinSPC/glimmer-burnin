@@ -9,16 +9,22 @@ import (
 
 // WHICH PUBLIC PACKAGES COST A CONSUMER KUBERNETES — as a ledger, not a claim.
 //
-// The documentation asserted for a while that pkg/verdict was Kubernetes-free.
-// It was not, and still is not: `Evaluate` takes []burninv1alpha1.Threshold, so
-// the CRD package is in its signature and travels with it, bringing
-// apimachinery and controller-runtime to every consumer. #274 measured it (0,
-// 0 and 9 modules for contract, runner and verdict) and CLAUDE.md now says so
-// plainly.
+// The documentation asserted for a while that pkg/verdict was Kubernetes-free
+// when it was not: `Evaluate` took []v1alpha1.Threshold, so the CRD package sat
+// in its signature and travelled with it, bringing apimachinery and
+// controller-runtime to every consumer. #274 measured that at 0, 0 and 9
+// modules for contract, runner and verdict.
 //
-// Documentation was corrected; nothing was ever enforced. pkg/report has
-// carried its own TestNoKubernetesDependency since it was written — and that
-// test's comment names pkg/verdict as the hazard — but the property was
+// It is true NOW, and by construction rather than by luck: the acceptance
+// vocabulary moved to pkg/contract (#342), so verdict measures 0. This comment
+// itself asserted the old state for one commit after that landed — which is the
+// failure mode this file exists to prevent, occurring inside it. The lists below
+// are executable and were correct throughout; the prose was not. That is the
+// argument for the ledger in one paragraph.
+//
+// Documentation was corrected after #274; nothing was ever enforced. pkg/report
+// has carried its own TestNoKubernetesDependency since it was written — and
+// that test's comment names pkg/verdict as the hazard — but the property was
 // guarded for exactly one package while three others held it by luck.
 //
 // So this is a two-sided ledger, the same shape as cmd/burnin's envelope

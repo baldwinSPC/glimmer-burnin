@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -135,6 +136,9 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 		return nil, err
 	}
 	if err := refuseGatedBaseline(tests, baseline); err != nil {
+		return nil, err
+	}
+	if err := refuseUnreachableAxes(tests); err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}
@@ -759,4 +763,60 @@ func refuseGatedBaseline(tests []resolvedTest, baseline bool) error {
 			"boolean. Either clear spec.baseline and let the gates decide, or point this run at a "+
 			"thresholdless profile",
 		len(gated), strings.Join(shown, "; "))
+}
+
+// refuseUnreachableAxes rejects a variant axis whose name cannot become an
+// environment variable.
+//
+// variantEnv skips such an axis rather than mangling it, which is the right
+// instinct — a mangled name would silently configure the WRONG thing — but the
+// axis was still copied into TestResult.VariantAxes and delivered in the
+// envelope. So the cell ran the runner's default configuration while the run
+// reported it under a distinct axis label (#296).
+//
+// That is a confident wrong answer dressed as evidence, and worse than a
+// crash. pkg/contract tells a consumer to group a sweep's cells BY these
+// labels, so a precision sweep or a message-size sweep reports N cells that all
+// measured the same thing — and if the cells carry per-variant thresholds, as
+// config/samples/variant-sweep.yaml demonstrates, those gates are applied to a
+// run that was never told which measurand to take. It is the sample's own
+// warning ("a sweep certified against measurements nobody took") reached
+// through the axis name rather than through the kind.
+//
+// Refused at plan time, before any node is cordoned, for the reason every other
+// rule here is: a run that quietly produces a meaningless sweep is a much worse
+// report than one that refuses at start and says which axis and why. The skip
+// in variantEnv stays as the backstop — this makes it unreachable rather than
+// replacing it.
+func refuseUnreachableAxes(tests []resolvedTest) error {
+	for _, t := range tests {
+		for _, k := range sortedAxisKeys(t.axes) {
+			if envSafeAxis(k) {
+				continue
+			}
+			return fmt.Errorf(
+				"test %q declares variant axis %q, which cannot become an environment variable, so the runner "+
+					"would never receive it: the cell would run the default configuration while the run reported "+
+					"it under this axis label, and any threshold on the cell would gate a measurement nobody asked "+
+					"for. An axis name must be letters, digits and underscores, and must not start with a digit "+
+					"(it becomes BURNIN_VARIANT_<NAME>)",
+				t.name, k)
+		}
+	}
+	return nil
+}
+
+// sortedAxisKeys makes the refusal deterministic: Go randomises map iteration,
+// and a run that refuses naming a different axis on each attempt is a run
+// nobody can act on.
+func sortedAxisKeys(axes map[string]string) []string {
+	if len(axes) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(axes))
+	for k := range axes {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
