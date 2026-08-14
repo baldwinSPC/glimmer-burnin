@@ -76,7 +76,13 @@ RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \
       $(for t in ${GPU_TARGETS}; do printf -- '--offload-arch=%s ' "$t"; done) \
       -o /out/rccl_pair rccl_pair.cc -lrccl
 
-RUN ldd /out/rccl_pair | tee /out/ldd.txt \
+# LD_LIBRARY_PATH is REQUIRED here, not decoration. The devel image does not
+# put /opt/rocm/lib on the default search path, so a bare `ldd` reports
+# librccl and libamdhip64 as "not found" on a binary that linked against them
+# perfectly well — and the collection step below, which reads field 3 of this
+# same output, would then read the word "found" and quietly collect NOTHING.
+# The runtime image would ship with no ROCm libraries at all.
+RUN LD_LIBRARY_PATH=/opt/rocm/lib ldd /out/rccl_pair | tee /out/ldd.txt \
     && grep -q librccl /out/ldd.txt \
     && grep -q libamdhip64 /out/ldd.txt \
     && ! grep -q 'not found' /out/ldd.txt
@@ -105,14 +111,22 @@ RUN ldd /out/rccl_pair | tee /out/ldd.txt \
 # where that gets confirmed.
 RUN set -eu; \
     mkdir -p /rocm-runtime; \
-    ldd /out/rccl_pair | awk '{print $3}' | grep -E '^/opt/rocm' | while read -r lib; do \
+    LD_LIBRARY_PATH=/opt/rocm/lib ldd /out/rccl_pair | awk '{print $3}' | \
+      grep -E '^/opt/rocm' | while read -r lib; do \
       cp -L "$lib" /rocm-runtime/; \
     done; \
     for extra in libhsakmt.so.1 libamd_comgr.so.3 librocprofiler-register.so.0 \
                  libhsa-runtime64.so.1 librccl.so.1; do \
       if [ -f "/opt/rocm/lib/$extra" ]; then cp -L "/opt/rocm/lib/$extra" /rocm-runtime/; fi; \
     done; \
-    ls -la /rocm-runtime
+    ls -la /rocm-runtime; \
+    n=$(find /rocm-runtime -name '*.so*' | wc -l); \
+    echo "collected $n ROCm libraries"; \
+    if [ "$n" -lt 2 ]; then \
+      echo "ERROR: collected $n ROCm libraries, which cannot be right." >&2; \
+      echo "The ldd above resolved nothing under /opt/rocm — check LD_LIBRARY_PATH." >&2; \
+      exit 1; \
+    fi
 
 # RCCL is BSD-3-Clause (NVIDIA 2015-2020, AMD modifications 2019-2026).
 RUN found=0; \
