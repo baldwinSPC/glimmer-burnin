@@ -37,6 +37,7 @@ on:
           # amd64); the publish job's two-platform assertion fails on it today
           # and must learn per-runner platforms before this is ever published.
           - clockprobe-rocm
+          - compute-smoke-rocm
       version:
         description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
         required: true
