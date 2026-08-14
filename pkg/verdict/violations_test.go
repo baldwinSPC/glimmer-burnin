@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
 // ─── The compatibility proof ─────────────────────────────────────────────────
@@ -27,7 +27,7 @@ import (
 func evaluateFrozenReference(
 	metrics map[string]string,
 	unmeasurable map[string]bool,
-	thresholds []burninv1alpha1.Threshold,
+	thresholds []contract.Threshold,
 ) (passed bool, message string, notEvaluated []NotEvaluated) {
 	fail := func(format string, args ...any) (bool, string, []NotEvaluated) {
 		return false, fmt.Sprintf(format, args...), notEvaluated
@@ -40,7 +40,7 @@ func evaluateFrozenReference(
 			if reported {
 				return fail("metric %q was reported as %q AND declared unmeasurable; the runner's output is self-contradictory", th.Metric, raw)
 			}
-			if th.Applicability == burninv1alpha1.RequiredIfMeasurable {
+			if th.Applicability == contract.RequiredIfMeasurable {
 				notEvaluated = append(notEvaluated, NotEvaluated{
 					Metric: th.Metric,
 					Reason: ReasonUnmeasurable,
@@ -95,18 +95,18 @@ var (
 
 // corpusThresholds covers every route through Evaluate: one satisfied, all
 // eight violation kinds, and both not-evaluated gates.
-var corpusThresholds = []burninv1alpha1.Threshold{
-	th("goodMetricGBs", burninv1alpha1.GTE, "20"),        // satisfied
-	th("busBandwidthGBs", burninv1alpha1.GTE, "20"),      // Unsatisfied
-	th("missingMetricGBs", burninv1alpha1.GTE, "20"),     // NotReported
-	th("textMetricGBs", burninv1alpha1.GTE, "20"),        // NonNumeric
-	th("nanMetricGBs", burninv1alpha1.GTE, "20"),         // NonFinite
-	th("contradictoryCount", burninv1alpha1.EQ, "0"),     // Contradictory
-	th("eccErrors", burninv1alpha1.EQ, "0"),              // UnmeasurableRequired
-	th("goodMetricGBs", burninv1alpha1.GTE, "twenty"),    // ThresholdValueNonNumeric
-	th("goodMetricGBs", burninv1alpha1.GTE, "NaN"),       // ThresholdValueNonFinite
-	ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),    // NotEvaluated
-	ifMeasurable("remappedRows", burninv1alpha1.EQ, "0"), // NotEvaluated
+var corpusThresholds = []contract.Threshold{
+	th("goodMetricGBs", contract.GTE, "20"),        // satisfied
+	th("busBandwidthGBs", contract.GTE, "20"),      // Unsatisfied
+	th("missingMetricGBs", contract.GTE, "20"),     // NotReported
+	th("textMetricGBs", contract.GTE, "20"),        // NonNumeric
+	th("nanMetricGBs", contract.GTE, "20"),         // NonFinite
+	th("contradictoryCount", contract.EQ, "0"),     // Contradictory
+	th("eccErrors", contract.EQ, "0"),              // UnmeasurableRequired
+	th("goodMetricGBs", contract.GTE, "twenty"),    // ThresholdValueNonNumeric
+	th("goodMetricGBs", contract.GTE, "NaN"),       // ThresholdValueNonFinite
+	ifMeasurable("eccErrors", contract.EQ, "0"),    // NotEvaluated
+	ifMeasurable("remappedRows", contract.EQ, "0"), // NotEvaluated
 }
 
 // Every ordered triple drawn from the corpus — 11^3 = 1331 profiles, which is
@@ -119,7 +119,7 @@ func TestEvaluate_FrozenFieldsMatchFirstViolationSemantics(t *testing.T) {
 	for a := 0; a < n; a++ {
 		for b := 0; b < n; b++ {
 			for c := 0; c < n; c++ {
-				thresholds := []burninv1alpha1.Threshold{
+				thresholds := []contract.Threshold{
 					corpusThresholds[a], corpusThresholds[b], corpusThresholds[c],
 				}
 				got := Evaluate(corpusMetrics, corpusUnmeasurable, thresholds)
@@ -150,7 +150,7 @@ func TestEvaluate_ViolationsEmptyExactlyWhenPassed(t *testing.T) {
 	n := len(corpusThresholds)
 	for a := 0; a < n; a++ {
 		for b := 0; b < n; b++ {
-			thresholds := []burninv1alpha1.Threshold{corpusThresholds[a], corpusThresholds[b]}
+			thresholds := []contract.Threshold{corpusThresholds[a], corpusThresholds[b]}
 			got := Evaluate(corpusMetrics, corpusUnmeasurable, thresholds)
 
 			if got.Passed != (len(got.Violations) == 0) {
@@ -178,10 +178,10 @@ func TestEvaluate_ReportsEveryViolationNotJustTheFirst(t *testing.T) {
 			"eccErrors":       "3",
 		},
 		nil,
-		[]burninv1alpha1.Threshold{
-			th("busBandwidthGBs", burninv1alpha1.GTE, "20"),
-			th("gpuTempC", burninv1alpha1.LTE, "85"),
-			th("eccErrors", burninv1alpha1.EQ, "0"),
+		[]contract.Threshold{
+			th("busBandwidthGBs", contract.GTE, "20"),
+			th("gpuTempC", contract.LTE, "85"),
+			th("eccErrors", contract.EQ, "0"),
 		},
 	)
 
@@ -216,10 +216,10 @@ func TestEvaluate_CauseSeparatesHardwareFromProfileFromRunner(t *testing.T) {
 	got := Evaluate(
 		map[string]string{"busBandwidthGBs": "12.0", "goodMetricGBs": "50"},
 		nil,
-		[]burninv1alpha1.Threshold{
-			th("busBandwidthGBs", burninv1alpha1.GTE, "20"),   // hardware fell short
-			th("goodMetricGBs", burninv1alpha1.GTE, "twenty"), // the profile is broken
-			th("absentMetricGBs", burninv1alpha1.GTE, "20"),   // the runner told us nothing
+		[]contract.Threshold{
+			th("busBandwidthGBs", contract.GTE, "20"),   // hardware fell short
+			th("goodMetricGBs", contract.GTE, "twenty"), // the profile is broken
+			th("absentMetricGBs", contract.GTE, "20"),   // the runner told us nothing
 		},
 	)
 
@@ -251,22 +251,22 @@ func TestEvaluate_CauseSeparatesHardwareFromProfileFromRunner(t *testing.T) {
 func TestEvaluate_ViolationKindAndCausePerRoute(t *testing.T) {
 	cases := []struct {
 		name      string
-		threshold burninv1alpha1.Threshold
+		threshold contract.Threshold
 		wantKind  ViolationKind
 		wantCause Cause
 	}{
-		{"comparison failed", th("busBandwidthGBs", burninv1alpha1.GTE, "20"), KindUnsatisfied, CauseMeasurement},
-		{"absent", th("missingMetricGBs", burninv1alpha1.GTE, "20"), KindNotReported, CauseEvidence},
-		{"non-numeric metric", th("textMetricGBs", burninv1alpha1.GTE, "20"), KindNonNumeric, CauseEvidence},
-		{"non-finite metric", th("nanMetricGBs", burninv1alpha1.GTE, "20"), KindNonFinite, CauseEvidence},
-		{"contradictory", th("contradictoryCount", burninv1alpha1.EQ, "0"), KindContradictory, CauseEvidence},
-		{"unmeasurable under Required", th("eccErrors", burninv1alpha1.EQ, "0"), KindUnmeasurableRequired, CauseEvidence},
-		{"threshold value non-numeric", th("goodMetricGBs", burninv1alpha1.GTE, "twenty"), KindThresholdValueNonNumeric, CauseAuthoring},
-		{"threshold value non-finite", th("goodMetricGBs", burninv1alpha1.GTE, "NaN"), KindThresholdValueNonFinite, CauseAuthoring},
+		{"comparison failed", th("busBandwidthGBs", contract.GTE, "20"), KindUnsatisfied, CauseMeasurement},
+		{"absent", th("missingMetricGBs", contract.GTE, "20"), KindNotReported, CauseEvidence},
+		{"non-numeric metric", th("textMetricGBs", contract.GTE, "20"), KindNonNumeric, CauseEvidence},
+		{"non-finite metric", th("nanMetricGBs", contract.GTE, "20"), KindNonFinite, CauseEvidence},
+		{"contradictory", th("contradictoryCount", contract.EQ, "0"), KindContradictory, CauseEvidence},
+		{"unmeasurable under Required", th("eccErrors", contract.EQ, "0"), KindUnmeasurableRequired, CauseEvidence},
+		{"threshold value non-numeric", th("goodMetricGBs", contract.GTE, "twenty"), KindThresholdValueNonNumeric, CauseAuthoring},
+		{"threshold value non-finite", th("goodMetricGBs", contract.GTE, "NaN"), KindThresholdValueNonFinite, CauseAuthoring},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Evaluate(corpusMetrics, corpusUnmeasurable, []burninv1alpha1.Threshold{c.threshold})
+			got := Evaluate(corpusMetrics, corpusUnmeasurable, []contract.Threshold{c.threshold})
 			if len(got.Violations) != 1 {
 				t.Fatalf("Violations = %+v, want exactly one", got.Violations)
 			}
@@ -291,7 +291,7 @@ func TestEvaluate_ViolationKindAndCausePerRoute(t *testing.T) {
 // rules once it has failed one.
 func TestEvaluate_OneThresholdYieldsAtMostOneViolation(t *testing.T) {
 	for i, th := range corpusThresholds {
-		got := Evaluate(corpusMetrics, corpusUnmeasurable, []burninv1alpha1.Threshold{th})
+		got := Evaluate(corpusMetrics, corpusUnmeasurable, []contract.Threshold{th})
 		if len(got.Violations) > 1 {
 			t.Errorf("threshold %d (%s) produced %d violations: %+v", i, th.Metric, len(got.Violations), got.Violations)
 		}
@@ -307,10 +307,10 @@ func TestEvaluate_NotEvaluatedStaysTruncatedAtTheFirstViolation(t *testing.T) {
 	got := Evaluate(
 		map[string]string{"xidEvents": "7"},
 		unmeasured("eccErrors", "remappedRows"),
-		[]burninv1alpha1.Threshold{
-			ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),    // before the violation
-			th("xidEvents", burninv1alpha1.EQ, "0"),              // the violation
-			ifMeasurable("remappedRows", burninv1alpha1.EQ, "0"), // after it
+		[]contract.Threshold{
+			ifMeasurable("eccErrors", contract.EQ, "0"),    // before the violation
+			th("xidEvents", contract.EQ, "0"),              // the violation
+			ifMeasurable("remappedRows", contract.EQ, "0"), // after it
 		},
 	)
 
@@ -349,13 +349,13 @@ func TestViolationKind_UnknownIsEvidenceNotMeasurement(t *testing.T) {
 func TestOutcome_ViolationSummaryIsEmptyBelowTwoViolations(t *testing.T) {
 	// Nothing to summarise: Message already says all of it.
 	none := Evaluate(map[string]string{"goodMetricGBs": "50"}, nil,
-		[]burninv1alpha1.Threshold{th("goodMetricGBs", burninv1alpha1.GTE, "20")})
+		[]contract.Threshold{th("goodMetricGBs", contract.GTE, "20")})
 	if s := none.ViolationSummary(); s != "" {
 		t.Errorf("a passing outcome summarised %q, want empty", s)
 	}
 
 	one := Evaluate(map[string]string{"busBandwidthGBs": "12"}, nil,
-		[]burninv1alpha1.Threshold{th("busBandwidthGBs", burninv1alpha1.GTE, "20")})
+		[]contract.Threshold{th("busBandwidthGBs", contract.GTE, "20")})
 	if s := one.ViolationSummary(); s != "" {
 		t.Errorf("a single violation summarised %q, want empty — Message already names it", s)
 	}
@@ -367,10 +367,10 @@ func TestOutcome_ViolationSummaryNamesCauses(t *testing.T) {
 	got := Evaluate(
 		map[string]string{"busBandwidthGBs": "12", "goodMetricGBs": "50"},
 		nil,
-		[]burninv1alpha1.Threshold{
-			th("busBandwidthGBs", burninv1alpha1.GTE, "20"),   // first — in Message
-			th("gpuTempC", burninv1alpha1.LTE, "85"),          // Evidence: not reported
-			th("goodMetricGBs", burninv1alpha1.GTE, "twenty"), // Authoring
+		[]contract.Threshold{
+			th("busBandwidthGBs", contract.GTE, "20"),   // first — in Message
+			th("gpuTempC", contract.LTE, "85"),          // Evidence: not reported
+			th("goodMetricGBs", contract.GTE, "twenty"), // Authoring
 		},
 	)
 	s := got.ViolationSummary()
@@ -392,9 +392,9 @@ func TestOutcome_ViolationSummaryAgreesInNumber(t *testing.T) {
 	got := Evaluate(
 		map[string]string{"busBandwidthGBs": "12"},
 		nil,
-		[]burninv1alpha1.Threshold{
-			th("busBandwidthGBs", burninv1alpha1.GTE, "20"),
-			th("gpuTempC", burninv1alpha1.LTE, "85"),
+		[]contract.Threshold{
+			th("busBandwidthGBs", contract.GTE, "20"),
+			th("gpuTempC", contract.LTE, "85"),
 		},
 	)
 	if s := got.ViolationSummary(); !strings.Contains(s, "1 more gate failed") {
@@ -406,11 +406,11 @@ func TestOutcome_ViolationSummaryAgreesInNumber(t *testing.T) {
 // a status field — but the COUNT stays exact even when the names are elided.
 func TestOutcome_ViolationSummaryBoundsTheNamesNotTheCount(t *testing.T) {
 	metrics := map[string]string{}
-	var thresholds []burninv1alpha1.Threshold
+	var thresholds []contract.Threshold
 	for i := 0; i < 12; i++ {
 		name := fmt.Sprintf("metric%dGBs", i)
 		metrics[name] = "1"
-		thresholds = append(thresholds, th(name, burninv1alpha1.GTE, "20"))
+		thresholds = append(thresholds, th(name, contract.GTE, "20"))
 	}
 	got := Evaluate(metrics, nil, thresholds)
 	if len(got.Violations) != 12 {

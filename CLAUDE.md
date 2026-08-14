@@ -237,23 +237,34 @@ pkg/contract/        versioned delivery envelope + metric-name registry
 pkg/runner/          runner exit-code + key=value stdout parsing
                      NO Kubernetes dependency. Measured: 0 k8s modules.
 pkg/verdict/         threshold evaluation, no I/O
-                     DEPENDS ON api/v1alpha1, and so on apimachinery and
-                     controller-runtime — nine modules a consumer links.
+                     NO Kubernetes dependency. Measured: 0 k8s modules.
 ```
 
-**`pkg/verdict` is not Kubernetes-free, and this file used to say it was.**
-`Evaluate` takes `[]burninv1alpha1.Threshold`, so the CRD package is in its
-signature and travels with it. That is measurable rather than arguable: a fresh
-module importing each package alone and running `go mod tidy` gets 0, 0 and 9
-(issue #274). Say what is true here — an adopter reads this before depending on
-the project, and the cost falls hardest on the bare-metal dispatcher, which
-links controller-runtime it cannot use.
+**`pkg/verdict` was not Kubernetes-free until #274 was fixed, and this file has
+said so in both directions.** `Evaluate` took `[]burninv1alpha1.Threshold`, so
+the CRD package was in its signature and travelled with it — a fresh module
+importing each package alone measured 0, 0 and 9 k8s modules.
 
-Whether to FIX it — by moving the threshold types down into `pkg/contract` so
-`pkg/verdict` becomes genuinely standalone — is open in #274. It breaks every
-caller that constructs `Evaluate`'s arguments today, Glimmer included, so it
-needs a deprecation path rather than a rename. Until then, the description above
-is the honest one.
+The fix was to move the ACCEPTANCE VOCABULARY — `TestKind`, `Comparison`,
+`Applicability`, `Threshold` — into `pkg/contract`, with `api/v1alpha1` keeping
+every name as a type ALIAS. A Go alias is the same type, so the CRD wire format
+is byte-identical (the regenerated manifests showed zero drift), controller-gen
+reads the kubebuilder markers where they now live, and no caller had to change.
+
+It was cheap only because it was done early: Glimmer imported `pkg/contract`
+alone, so there were zero external callers of `Evaluate` to break. That window
+would have closed the moment Path A adopted `pkg/localrun`.
+
+`pkg/localrun` and `pkg/runnerimages` are STILL coupled, through the EXECUTION
+vocabulary rather than the acceptance one — `BurnInTestSpec`, `RunnerSpec`,
+`VendorImage`. Freeing them would make the CRD a thin Kubernetes wrapper over a
+neutral core, which is a larger decision left to the GEP-0178 amendment and to
+the moment Path A can say what it actually needs.
+
+The claim is no longer prose: `hack/invariants/kubernetesfree_test.go` is a
+two-sided ledger — a clean package that acquires a Kubernetes dependency fails,
+and a coupled one that becomes clean fails until its entry is deleted. Nothing
+was enforcing this when the original wrong claim survived a release.
 
 `pkg/verdict` and `pkg/runner` are public because Glimmer's pre-Kubernetes
 burn-in path runs the same runner images: if the two dispatchers derived

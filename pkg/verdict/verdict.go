@@ -3,7 +3,7 @@
 // unit-testable in isolation.
 //
 // IT IS NOT KUBERNETES-FREE, unlike pkg/contract and pkg/runner, and this
-// comment used to claim otherwise. Evaluate takes []burninv1alpha1.Threshold,
+// comment used to claim otherwise. Evaluate takes []contract.Threshold,
 // so importing this package brings api/v1alpha1 and with it apimachinery and
 // controller-runtime — nine modules a consumer links. Issue #274 tracks whether
 // to move the threshold types down into pkg/contract and make this genuinely
@@ -74,7 +74,7 @@ import (
 	"strconv"
 	"strings"
 
-	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
 // ReasonUnmeasurable is why a threshold went un-evaluated: the runner declared,
@@ -310,7 +310,7 @@ func (o Outcome) ViolationSummary() string {
 func Evaluate(
 	metrics map[string]string,
 	unmeasurable map[string]bool,
-	thresholds []burninv1alpha1.Threshold,
+	thresholds []contract.Threshold,
 ) Outcome {
 	var out Outcome
 
@@ -319,7 +319,7 @@ func Evaluate(
 	var notEvaluated []NotEvaluated
 	notEvaluatedAtFirstViolation := -1
 
-	fail := func(i int, th burninv1alpha1.Threshold, kind ViolationKind, format string, args ...any) {
+	fail := func(i int, th contract.Threshold, kind ViolationKind, format string, args ...any) {
 		if len(out.Violations) == 0 {
 			notEvaluatedAtFirstViolation = len(notEvaluated)
 		}
@@ -345,7 +345,7 @@ func Evaluate(
 			}
 			// Only the runner's explicit declaration reaches here; absence is
 			// handled below and stays a failure regardless of Applicability.
-			if th.Applicability == burninv1alpha1.RequiredIfMeasurable {
+			if th.Applicability == contract.RequiredIfMeasurable {
 				notEvaluated = append(notEvaluated, NotEvaluated{
 					Metric: th.Metric,
 					Reason: ReasonUnmeasurable,
@@ -403,11 +403,11 @@ func Evaluate(
 
 // applicabilityOf reports the threshold's effective applicability. An unset or
 // unrecognised value is Required: the relaxation must be asked for explicitly.
-func applicabilityOf(th burninv1alpha1.Threshold) burninv1alpha1.Applicability {
-	if th.Applicability == burninv1alpha1.RequiredIfMeasurable {
-		return burninv1alpha1.RequiredIfMeasurable
+func applicabilityOf(th contract.Threshold) contract.Applicability {
+	if th.Applicability == contract.RequiredIfMeasurable {
+		return contract.RequiredIfMeasurable
 	}
-	return burninv1alpha1.Required
+	return contract.Required
 }
 
 // compare applies the comparison with no tolerance. EQ and NEQ are exact by
@@ -415,15 +415,15 @@ func applicabilityOf(th burninv1alpha1.Threshold) burninv1alpha1.Applicability {
 // they are the wrong tool for a continuous measurement. The package doc says
 // why there is no epsilon, and ValidateThresholds says so to the author of a
 // threshold that misuses them. Callers reach this only with finite values.
-func compare(got float64, op burninv1alpha1.Comparison, want float64) bool {
+func compare(got float64, op contract.Comparison, want float64) bool {
 	switch op {
-	case burninv1alpha1.GTE:
+	case contract.GTE:
 		return got >= want
-	case burninv1alpha1.LTE:
+	case contract.LTE:
 		return got <= want
-	case burninv1alpha1.EQ:
+	case contract.EQ:
 		return got == want
-	case burninv1alpha1.NEQ:
+	case contract.NEQ:
 		return got != want
 	default:
 		return false // unknown comparison fails closed

@@ -4,17 +4,17 @@ import (
 	"strings"
 	"testing"
 
-	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
-func th(metric string, op burninv1alpha1.Comparison, val string) burninv1alpha1.Threshold {
-	return burninv1alpha1.Threshold{Metric: metric, Comparison: op, Value: val}
+func th(metric string, op contract.Comparison, val string) contract.Threshold {
+	return contract.Threshold{Metric: metric, Comparison: op, Value: val}
 }
 
 // ifMeasurable is th() with the only applicability that relaxes anything.
-func ifMeasurable(metric string, op burninv1alpha1.Comparison, val string) burninv1alpha1.Threshold {
+func ifMeasurable(metric string, op contract.Comparison, val string) contract.Threshold {
 	t := th(metric, op, val)
-	t.Applicability = burninv1alpha1.RequiredIfMeasurable
+	t.Applicability = contract.RequiredIfMeasurable
 	return t
 }
 
@@ -32,7 +32,7 @@ func TestEvaluate(t *testing.T) {
 	cases := []struct {
 		name       string
 		metrics    map[string]string
-		thresholds []burninv1alpha1.Threshold
+		thresholds []contract.Threshold
 		wantPass   bool
 	}{
 		{
@@ -43,37 +43,37 @@ func TestEvaluate(t *testing.T) {
 		{
 			name:       "nccl bus bandwidth meets floor",
 			metrics:    map[string]string{"busBandwidthGBs": "23.4"},
-			thresholds: []burninv1alpha1.Threshold{th("busBandwidthGBs", burninv1alpha1.GTE, "20")},
+			thresholds: []contract.Threshold{th("busBandwidthGBs", contract.GTE, "20")},
 			wantPass:   true,
 		},
 		{
 			name:       "nccl bus bandwidth below floor fails",
 			metrics:    map[string]string{"busBandwidthGBs": "12.0"},
-			thresholds: []burninv1alpha1.Threshold{th("busBandwidthGBs", burninv1alpha1.GTE, "20")},
+			thresholds: []contract.Threshold{th("busBandwidthGBs", contract.GTE, "20")},
 			wantPass:   false,
 		},
 		{
 			name:       "ecc errors must be zero",
 			metrics:    map[string]string{"eccErrors": "0"},
-			thresholds: []burninv1alpha1.Threshold{th("eccErrors", burninv1alpha1.EQ, "0")},
+			thresholds: []contract.Threshold{th("eccErrors", contract.EQ, "0")},
 			wantPass:   true,
 		},
 		{
 			name:       "ecc errors nonzero fails",
 			metrics:    map[string]string{"eccErrors": "3"},
-			thresholds: []burninv1alpha1.Threshold{th("eccErrors", burninv1alpha1.EQ, "0")},
+			thresholds: []contract.Threshold{th("eccErrors", contract.EQ, "0")},
 			wantPass:   false,
 		},
 		{
 			name:       "missing metric fails closed (must not silently pass acceptance)",
 			metrics:    map[string]string{},
-			thresholds: []burninv1alpha1.Threshold{th("busBandwidthGBs", burninv1alpha1.GTE, "20")},
+			thresholds: []contract.Threshold{th("busBandwidthGBs", contract.GTE, "20")},
 			wantPass:   false,
 		},
 		{
 			name:       "non-numeric metric fails",
 			metrics:    map[string]string{"busBandwidthGBs": "fast"},
-			thresholds: []burninv1alpha1.Threshold{th("busBandwidthGBs", burninv1alpha1.GTE, "20")},
+			thresholds: []contract.Threshold{th("busBandwidthGBs", contract.GTE, "20")},
 			wantPass:   false,
 		},
 	}
@@ -104,16 +104,16 @@ func TestEvaluate(t *testing.T) {
 // every broken probe into an acceptance, which is the exact false negative this
 // project exists to prevent.
 func TestEvaluate_AbsentMetricFailsClosedUnderEveryApplicability(t *testing.T) {
-	for _, th := range []burninv1alpha1.Threshold{
-		th("eccErrors", burninv1alpha1.EQ, "0"),
-		ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
+	for _, th := range []contract.Threshold{
+		th("eccErrors", contract.EQ, "0"),
+		ifMeasurable("eccErrors", contract.EQ, "0"),
 	} {
 		applicability := string(th.Applicability)
 		if applicability == "" {
 			applicability = "(unset)"
 		}
 		t.Run(applicability, func(t *testing.T) {
-			got := Evaluate(map[string]string{}, unmeasured(), []burninv1alpha1.Threshold{th})
+			got := Evaluate(map[string]string{}, unmeasured(), []contract.Threshold{th})
 			if got.Passed {
 				t.Fatal("an absent metric passed; absence is not a declaration of unmeasurability")
 			}
@@ -134,7 +134,7 @@ func TestEvaluate_UnmeasurableUnderRequiredFails(t *testing.T) {
 	got := Evaluate(
 		map[string]string{"xidEvents": "0"},
 		unmeasured("eccErrors"),
-		[]burninv1alpha1.Threshold{th("eccErrors", burninv1alpha1.EQ, "0")},
+		[]contract.Threshold{th("eccErrors", contract.EQ, "0")},
 	)
 	if got.Passed {
 		t.Fatal("a Required threshold on an unmeasurable metric passed")
@@ -157,10 +157,10 @@ func TestEvaluate_UnmeasurableUnderRequiredIfMeasurableIsNotEvaluated(t *testing
 	got := Evaluate(
 		map[string]string{"xidEvents": "0"},
 		unmeasured("eccErrors", "remappedRows"),
-		[]burninv1alpha1.Threshold{
-			th("xidEvents", burninv1alpha1.EQ, "0"),
-			ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
-			ifMeasurable("remappedRows", burninv1alpha1.EQ, "0"),
+		[]contract.Threshold{
+			th("xidEvents", contract.EQ, "0"),
+			ifMeasurable("eccErrors", contract.EQ, "0"),
+			ifMeasurable("remappedRows", contract.EQ, "0"),
 		},
 	)
 	if !got.Passed {
@@ -189,7 +189,7 @@ func TestEvaluate_UnmeasurableUnderRequiredIfMeasurableIsNotEvaluated(t *testing
 // Case 4: everything else unchanged. RequiredIfMeasurable is not "optional": on
 // hardware that CAN measure, the gate is applied exactly as Required.
 func TestEvaluate_RequiredIfMeasurableStillGatesAMeasuredMetric(t *testing.T) {
-	thresholds := []burninv1alpha1.Threshold{ifMeasurable("eccErrors", burninv1alpha1.EQ, "0")}
+	thresholds := []contract.Threshold{ifMeasurable("eccErrors", contract.EQ, "0")}
 
 	clean := Evaluate(map[string]string{"eccErrors": "0"}, unmeasured(), thresholds)
 	if !clean.Passed || len(clean.NotEvaluated) != 0 {
@@ -212,14 +212,14 @@ func TestEvaluate_RequiredIfMeasurableStillGatesAMeasuredMetric(t *testing.T) {
 // self-contradictory runner. pkg/runner cannot produce it, but a hand-built
 // caller can, and ambiguity resolves toward failing.
 func TestEvaluate_ContradictoryRunnerOutputFailsClosed(t *testing.T) {
-	for _, th := range []burninv1alpha1.Threshold{
-		th("eccErrors", burninv1alpha1.EQ, "0"),
-		ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
+	for _, th := range []contract.Threshold{
+		th("eccErrors", contract.EQ, "0"),
+		ifMeasurable("eccErrors", contract.EQ, "0"),
 	} {
 		got := Evaluate(
 			map[string]string{"eccErrors": "0"},
 			unmeasured("eccErrors"),
-			[]burninv1alpha1.Threshold{th},
+			[]contract.Threshold{th},
 		)
 		if got.Passed {
 			t.Errorf("applicability %q: contradictory output passed", th.Applicability)
@@ -233,10 +233,10 @@ func TestEvaluate_ContradictoryRunnerOutputFailsClosed(t *testing.T) {
 // The enum is validated by the apiserver, but the verdict must not depend on
 // that: a value nobody recognises is Required, never the relaxed one.
 func TestEvaluate_UnknownApplicabilityFailsClosed(t *testing.T) {
-	th := th("eccErrors", burninv1alpha1.EQ, "0")
-	th.Applicability = burninv1alpha1.Applicability("Optional")
+	th := th("eccErrors", contract.EQ, "0")
+	th.Applicability = contract.Applicability("Optional")
 
-	got := Evaluate(map[string]string{}, unmeasured("eccErrors"), []burninv1alpha1.Threshold{th})
+	got := Evaluate(map[string]string{}, unmeasured("eccErrors"), []contract.Threshold{th})
 	if got.Passed {
 		t.Fatal("an unrecognised applicability relaxed the gate")
 	}
@@ -248,9 +248,9 @@ func TestEvaluate_NotEvaluatedSurvivesALaterFailure(t *testing.T) {
 	got := Evaluate(
 		map[string]string{"xidEvents": "7"},
 		unmeasured("eccErrors"),
-		[]burninv1alpha1.Threshold{
-			ifMeasurable("eccErrors", burninv1alpha1.EQ, "0"),
-			th("xidEvents", burninv1alpha1.EQ, "0"),
+		[]contract.Threshold{
+			ifMeasurable("eccErrors", contract.EQ, "0"),
+			th("xidEvents", contract.EQ, "0"),
 		},
 	)
 	if got.Passed {
@@ -263,7 +263,7 @@ func TestEvaluate_NotEvaluatedSurvivesALaterFailure(t *testing.T) {
 
 func TestOutcome_NotEvaluatedMessageIsEmptyWhenEverythingRan(t *testing.T) {
 	got := Evaluate(map[string]string{"eccErrors": "0"}, nil,
-		[]burninv1alpha1.Threshold{ifMeasurable("eccErrors", burninv1alpha1.EQ, "0")})
+		[]contract.Threshold{ifMeasurable("eccErrors", contract.EQ, "0")})
 	if msg := got.NotEvaluatedMessage(); msg != "" {
 		t.Errorf("NotEvaluatedMessage = %q, want empty", msg)
 	}

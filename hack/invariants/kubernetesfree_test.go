@@ -45,18 +45,29 @@ var kubernetesFree = []string{
 	"pkg/runner",
 	"pkg/report",
 	"pkg/hostinfo",
+	// Freed by the #274 hoist: the acceptance vocabulary moved to pkg/contract,
+	// so the shared verdict brain no longer imports the CRD to get its own
+	// words. This is the entry that had to move for the ledger to stay exact.
+	"pkg/verdict",
 }
 
 // kubernetesCoupled are the packages that DO cost a consumer Kubernetes, each
 // with the reason. Every one of these is a design decision open in #274 rather
 // than an accident, and the amendment to GEP-0178 proposes the fix.
 var kubernetesCoupled = map[string]string{
-	"pkg/verdict": "Evaluate takes []v1alpha1.Threshold, so the CRD package is in its " +
-		"signature — the coupling #274 is about",
-	"pkg/localrun": "the bare-metal engine consumes v1alpha1.BurnInTestSpec verbatim, and it " +
-		"is the package GEP-0178 has Glimmer's Path A adopt — so this is #274's coupling on " +
-		"the path that can use Kubernetes least",
-	"pkg/runnerimages": "keyed by v1alpha1.TestKind, which is a CRD type today",
+	// Both remaining entries are coupled through the EXECUTION vocabulary —
+	// BurnInTestSpec, RunnerSpec, VendorImage — not the acceptance vocabulary
+	// #274 was about. Hoisting Threshold and TestKind freed pkg/verdict and did
+	// not touch these, which is the honest boundary of that change.
+	//
+	// Freeing them is a larger decision (the GEP-0178 amendment's option C):
+	// it would make the CRD a thin Kubernetes wrapper over a neutral core, and
+	// the right time to design that seam is when Path A is built and can say
+	// what it actually needs — not speculatively.
+	"pkg/localrun": "PlannedTest holds api.BurnInTestSpec whole, plus RunPhase, Violation, " +
+		"TestScope and AttemptTrigger. This is the package GEP-0178 has Glimmer's Path A " +
+		"adopt, so the coupling lands on the path that can use Kubernetes least",
+	"pkg/runnerimages": "resolution is expressed over api.RunnerSpec and api.VendorImage",
 }
 
 func TestPublicPackagesDeclareWhatTheyCostAConsumer(t *testing.T) {
