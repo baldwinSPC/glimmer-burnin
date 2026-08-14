@@ -103,3 +103,18 @@ Same rules as clockprobe, with the vocabulary sysfs supports:
   group-restricted may need `runAsUser: 0` or a supplemental group until the
   hardware pass settles the least privilege that works — record what is
   measured, then narrow.
+
+## Build note: the distro shadow
+
+Ubuntu noble/universe ships its own `hipcc` package (5.7.1-3, installed to
+`/usr/bin`). On this image's first CI build every ROCm package resolved from
+`repo.radeon.com` at 6.4.4 **except** `hipcc`, which apt took from
+`archive.ubuntu.com`; the compile then failed with `/opt/rocm/bin/hipcc: not
+found`. The Dockerfile now pins the `repo.radeon.com` origin at priority 1000
+and asserts the compiler identifies as ROCm/AMD **before** compiling with it.
+
+The pin matters beyond that one package: a missing path fails loudly, but a
+distro-shadowed `hsa-rocr` or `comgr` would build fine and then misbehave
+against a 6.4.4 runtime — the same shape as the container-toolkit version-skew
+faults this project already tracks. If you re-pin `ROCM_VERSION`, keep both the
+pin and the assertion.

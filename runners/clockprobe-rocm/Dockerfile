@@ -33,9 +33,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       | gpg --dearmor > /usr/share/keyrings/rocm.gpg \
   && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} noble main" \
       > /etc/apt/sources.list.d/rocm.list \
+  # AMD's own documented origin pin, and it is load-bearing rather than
+  # defensive.  Ubuntu noble/universe ships its OWN `hipcc` package (5.7.1-3,
+  # installed to /usr/bin) and without this pin apt is free to prefer it: on
+  # the first build of this image every other ROCm package resolved from
+  # repo.radeon.com at 6.4.4 while hipcc alone came from archive.ubuntu.com,
+  # and the compile below then died with `/opt/rocm/bin/hipcc: not found`.
+  # Pinning the ORIGIN closes the whole class rather than that one symptom —
+  # a distro-shadowed hsa-rocr or comgr would be far subtler than a missing
+  # path, since it would build and then misbehave against a 6.4.4 runtime.
+  && printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' \
+      > /etc/apt/preferences.d/rocm \
+  # rocm-hip-runtime-dev is AMD's documented package set for COMPILING HIP
+  # applications; the math libraries in rocm-hip-sdk are not needed here.
   && apt-get update && apt-get install -y --no-install-recommends \
-      hipcc hip-dev hip-runtime-amd \
+      rocm-hip-runtime-dev \
   && rm -rf /var/lib/apt/lists/*
+
+# Assert the compiler is the ROCm one BEFORE compiling with it, so a shadowed
+# or relocated toolchain fails here — naming what it found — instead of at the
+# compile step with a bare "not found", or worse, succeeding against a distro
+# HIP whose runtime does not match the one the final stage ships.
+RUN set -eu; \
+    hipcc=/opt/rocm/bin/hipcc; \
+    if [ ! -x "$hipcc" ]; then \
+      echo "ERROR: $hipcc is missing. \`command -v hipcc\` resolves to: $(command -v hipcc || echo none)." >&2; \
+      echo "A hipcc outside /opt/rocm is the distro package shadowing AMD's; check the origin pin above." >&2; \
+      exit 1; \
+    fi; \
+    "$hipcc" --version; \
+    "$hipcc" --version | grep -qi 'rocm\|AMD clang' || { \
+      echo "ERROR: $hipcc does not identify as a ROCm/AMD compiler; refusing to build device code with it." >&2; \
+      exit 1; \
+    }
 
 # The offload targets this image carries device code for.  HIP has no PTX-style
 # JIT fallback: a part whose gfx target is not in this list gets NO code from
@@ -55,6 +85,15 @@ RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \
       $(for t in ${GPU_TARGETS}; do printf -- '--offload-arch=%s ' "$t"; done) \
       -o /out/clockprobe-rocm clockprobe_rocm.cc
 
+# Record what the shipped binary actually links, and assert the one dependency
+# that decides whether the final stage is complete: libamdhip64.  The runtime
+# stage installs rocm-hip-runtime for exactly this, and an image that reached a
+# node without it would fail at exec — read as an infrastructure fault on the
+# hardware rather than as the packaging mistake it is.
+RUN ldd /out/clockprobe-rocm | tee /out/ldd.txt \
+    && grep -q libamdhip64 /out/ldd.txt \
+    && ! grep -q 'not found' /out/ldd.txt
+
 # ── final: the binary plus the MIT HIP runtime, nothing else ─────────────────
 FROM ubuntu:24.04
 
@@ -65,8 +104,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       | gpg --dearmor > /usr/share/keyrings/rocm.gpg \
   && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} noble main" \
       > /etc/apt/sources.list.d/rocm.list \
+  # The same origin pin as the build stage, for the same reason: the runtime
+  # the binary loads must be the 6.4.4 one it was compiled against, not
+  # whatever version the distro happens to ship under the same package name.
+  && printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' \
+      > /etc/apt/preferences.d/rocm \
   && apt-get update && apt-get install -y --no-install-recommends \
-      hip-runtime-amd \
+      rocm-hip-runtime \
   && apt-get purge -y wget gnupg && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 
