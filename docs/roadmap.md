@@ -74,27 +74,33 @@ Duration classes: **smoke** (≤5 min) · **standard** (~30 min) · **extended**
 (2–8 h) · **soak** (24–72 h) · **marathon** (1–2 weeks). Anything past
 *extended* depends on the segmented-soak engine ([#157]).
 
-Three states, and the middle one is the reason this table is worth reading:
+Four states, and the two middle ones are the reason this table is worth reading:
 
 - **shipped** — an image is published and has been run on real hardware of at
   least one supported kind.
+- **verified** — the runner has executed on real hardware and its output is
+  captured as a fixture, but **no image is published yet**. Operationally it
+  behaves exactly like *in tree*: the kind is on
+  `pkg/runnerimages.WithoutDefault()` and still requires an explicit
+  `spec.runner.image`, because an unpublished image cannot be pulled by a node's
+  readiness gate. What differs is the evidence behind it, which is the expensive
+  half to obtain.
 - **in tree** — the runner, its tests and its image build all exist and are
   green in CI, but **no image is published and nothing has run on hardware**.
-  The kind is on `pkg/runnerimages.WithoutDefault()`, so a BurnInTest naming it
-  fails at plan time asking for an explicit `spec.runner.image` rather than
-  pull-failing on every targeted node. Each one carries an open verification
-  issue.
+  Each one carries an open verification issue.
 - **planned** — not written.
 
-The middle state exists because publishing is manual and hardware-gated by
+The two middle states exist because publishing is manual and hardware-gated by
 policy: a runner image is executed by a node's readiness gate, so a bad tag
-degrades a whole fleet at once. Collapsing "in tree" into "shipped" would make
-this table claim hardware coverage the project does not have.
+degrades a whole fleet at once. Collapsing either of them into "shipped" would
+make this table claim coverage the project does not have — and collapsing
+*verified* into *in tree* understates the kinds that have already spent the
+scarce resource, which is time on silicon.
 
 | TestKind | Measures | Scope | NVIDIA | AMD | Intel | Status |
 |---|---|---|---|---|---|---|
 | `compute-smoke` | FP4 block-scaled GEMM, exact instruction path | Node | shipped | — | — | shipped (burst-only) |
-| `gemm-sweep` | GEMM across FP64→FP4/INT8 | Node | in tree | later | — | in tree · verify [#265] |
+| `gemm-sweep` | GEMM across FP64→FP4/INT8 | Node | verified | later | — | verified on GB10, five precisions; publish [#350] |
 | `gpu-burn` | Sustained compute, SDC detection | Node | shipped | later | — | shipped |
 | `thermal-soak` | Power and thermal behaviour, throttling | Node | shipped | later | — | shipped |
 | `clockprobe` | Sustained clock under load | Node | shipped | later | — | shipped |
@@ -112,6 +118,7 @@ this table claim hardware coverage the project does not have.
 | `fabric-soak` | Iterated RDMA writes over hours | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#283] |
 | `tcp-baseline` | Plain TCP throughput and retransmits | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#237] |
 | `disk-io` | Storage throughput and latency (direct I/O) | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#242] |
+| `fingerprint-probe` | What the hardware says about itself | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#354] |
 
 Beyond the kinds themselves, the matrix has axes: **variants** ([#155]) express
 one test across precisions, message sizes or duration classes; **baseline mode**
@@ -190,8 +197,9 @@ ends the week, and a retry starts it over.
 
 ### R5 — Suite expansion
 
-- [#160] One precision is not a compute verdict: sweep the GEMM — the runner is
-  in tree across five precisions; publishing waits on hardware ([#265])
+- [#160] One precision is not a compute verdict: sweep the GEMM — all five
+  precisions have now been measured on a GB10 and their output is captured as
+  fixtures ([#265], closed); only publication remains ([#350])
 - [#161] `memory-bw` never measures the links between devices — the all-pairs
   peer matrix is in tree, reporting the worst cell; unmeasurable (`n/a`) on a
   single-GPU node rather than absent, so a gate does not condemn a Spark
@@ -348,4 +356,6 @@ version, never a re-push.
 [#283]: https://github.com/baldwinSPC/glimmer-burnin/issues/283
 [#279]: https://github.com/baldwinSPC/glimmer-burnin/issues/279
 [#265]: https://github.com/baldwinSPC/glimmer-burnin/issues/265
+[#350]: https://github.com/baldwinSPC/glimmer-burnin/issues/350
+[#354]: https://github.com/baldwinSPC/glimmer-burnin/issues/354
 [docs/dev/new-testkind-playbook.md]: dev/new-testkind-playbook.md

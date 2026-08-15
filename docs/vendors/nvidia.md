@@ -6,21 +6,37 @@ what is written here.
 
 ## Coverage
 
+Every built-in `TestKind` appears here. The state vocabulary — shipped,
+verified, in tree, planned — is defined once in
+[the roadmap](../roadmap.md#the-test-matrix); this table does not invent its own.
+
 | Kind | Measures | State |
 |---|---|---|
 | `compute-smoke` | FP4 block-scaled GEMM, exact instruction path | shipped (burst-only) |
+| `gemm-sweep` | GEMM across FP64→FP4/INT8, one precision per cell | **verified** on GB10; publish [#350] |
 | `gpu-burn` | sustained compute, SDC detection | shipped |
 | `thermal-soak` | power and thermal behaviour, throttling | shipped |
 | `clockprobe` | sustained clock under load | shipped |
-| `memory-bw` | host↔device and device-local bandwidth | shipped |
+| `memory-bw` | host↔device and device-local bandwidth | shipped; p2p cases in tree, verify [#279] |
 | `host-health` | Xid, ECC, PCIe AER, NIC counters | shipped |
 | `dcgm-diag` | vendor diagnostic suite | shipped, **site-supplied image** |
 | `gpudirect-rdma` | GPU↔NIC peer-memory path | shipped |
 | `nccl` | collective bandwidth (Pair and Group) | shipped |
 | `memory-stress`, `ib-write-bw` | host memory, RDMA wire | shipped (vendor-free) |
-| `tcp-baseline`, `disk-io` | TCP path, storage | in tree (vendor-free) |
+| `fabric-soak` | iterated RDMA writes over hours | in tree (vendor-free), verify [#283] |
+| `tcp-baseline` | plain TCP throughput and retransmits | in tree (vendor-free), verify [#237] |
+| `disk-io` | storage throughput and latency (direct I/O) | in tree (vendor-free), verify [#242] |
+| `fingerprint-probe` | what the hardware says about itself | in tree (vendor-free), verify [#354] |
 
-Planned, not written: `gemm-sweep`, `power-swing`, `fabric-soak`, p2p cases.
+Planned, not written: `power-swing` ([#166]).
+
+[#166]: https://github.com/baldwinSPC/glimmer-burnin/issues/166
+[#237]: https://github.com/baldwinSPC/glimmer-burnin/issues/237
+[#242]: https://github.com/baldwinSPC/glimmer-burnin/issues/242
+[#279]: https://github.com/baldwinSPC/glimmer-burnin/issues/279
+[#283]: https://github.com/baldwinSPC/glimmer-burnin/issues/283
+[#350]: https://github.com/baldwinSPC/glimmer-burnin/issues/350
+[#354]: https://github.com/baldwinSPC/glimmer-burnin/issues/354
 
 ## What has to be on the node
 
