@@ -72,6 +72,9 @@ type config struct {
 	startEngine    bool
 	duration       time.Duration
 	level          string
+	tests          string
+	params         string
+	diagTimeout    time.Duration
 	sampleInterval time.Duration
 	engineTimeout  time.Duration
 	prunedManifest string
@@ -82,9 +85,27 @@ func loadConfig() (config, error) {
 		dcgmiBin:       envOr("BURNIN_DCGM_BIN", "dcgmi"),
 		hostEngineBin:  envOr("BURNIN_NV_HOSTENGINE_BIN", "nv-hostengine"),
 		level:          os.Getenv("BURNIN_DCGM_LEVEL"),
+		tests:          os.Getenv("BURNIN_DCGM_TESTS"),
 		sampleInterval: 5 * time.Second,
 		engineTimeout:  30 * time.Second,
 		prunedManifest: envOr("BURNIN_DCGM_PRUNED_MANIFEST", prunedManifestPath),
+	}
+
+	// Validated here rather than at the call site so a mistyped parameter costs
+	// nothing: the run ends before a host engine is started and before the GPU
+	// is touched, instead of after DCGM has rejected the argument.
+	params, err := resolveParams(os.Getenv("BURNIN_DCGM_ALLOW"), os.Getenv("BURNIN_DCGM_PARAMS"))
+	if err != nil {
+		return c, err
+	}
+	c.params = params
+
+	if v := os.Getenv("BURNIN_DCGM_TIMEOUT_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("BURNIN_DCGM_TIMEOUT_SECONDS=%q is not a positive integer", v)
+		}
+		c.diagTimeout = time.Duration(n) * time.Second
 	}
 
 	if v := os.Getenv("BURNIN_DURATION_SECONDS"); v != "" {
@@ -141,12 +162,26 @@ func run() int {
 		return finish(out, rep, exitError, markerError, err.Error())
 	}
 
-	level, levelSource, err := resolveLevel(cfg.level, cfg.duration)
+	spec, err := resolveRun(cfg.level, cfg.tests, cfg.duration)
 	if err != nil {
 		return finish(out, rep, exitError, markerError, err.Error())
 	}
-	rep.setInt(keyDiagLevel, int64(level))
-	rep.set(keyDiagLevelSource, levelSource)
+	// Omitted rather than zeroed for a named-test run: no level ran, and a
+	// diag_level a profile could threshold on would be describing a suite that
+	// was never asked for.
+	if spec.level > 0 {
+		rep.setInt(keyDiagLevel, int64(spec.level))
+	}
+	rep.set(keyDiagLevelSource, spec.source)
+	if spec.tests != "" {
+		rep.set(keyDiagTests, spec.tests)
+	}
+	if cfg.params != "" {
+		// The exact string handed to dcgmi, so "which plugins did this run
+		// actually enable?" is answerable from the result rather than from
+		// whatever the profile is believed to have set.
+		rep.set(keyDiagParams, cfg.params)
+	}
 
 	// The runner bounds itself at the duration it was given. The pod's
 	// activeDeadlineSeconds sits 120s further out, so this timer always fires
@@ -155,8 +190,12 @@ func run() int {
 	// SIGKILL that publishes nothing at all.
 	budget := cfg.duration
 	if budget <= 0 {
-		budget = 4 * levelBudget(level)
+		budget = 4 * levelBudget(spec.level)
 		logf("BURNIN_DURATION_SECONDS is unset; bounding the diagnostic at %s", budget)
+	}
+	diagTimeout := resolveDiagTimeout(cfg.diagTimeout, budget)
+	if diagTimeout > 0 {
+		rep.setInt(keyDiagTimeoutS, int64(diagTimeout.Seconds()))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
@@ -209,7 +248,7 @@ func run() int {
 	s.run(ctx)
 
 	start := time.Now()
-	stdout, stderr, code, runErr := runDiag(ctx, cfg, level)
+	stdout, stderr, code, runErr := runDiag(ctx, cfg, spec, diagTimeout)
 	elapsed := time.Since(start)
 
 	s.shutdown()
@@ -416,13 +455,18 @@ func verdict(
 		if len(res.skipReasons) > 0 {
 			rep.set(keySkipReason, strings.Join(res.skipReasons, " | "))
 		}
+		// The remedy comes BEFORE the reasons, because sanitize truncates the
+		// displayed message at 300 bytes and the reasons are already carried
+		// whole by diag_skip_reason. Naming BURNIN_DCGM_ALLOW pushed
+		// "is_allowed" past that cut once; the assertion in verdict_test.go is
+		// what keeps the actionable half inside it.
 		return finish(out, rep, exitError, markerError, fmt.Sprintf(
-			"%d of %d DCGM subtests were SKIPPED, so this node is only partly checked (%d executed, "+
-				"%d skipped). Passing it would certify hardware DCGM never tested. If the skips are the "+
-				"per-SKU plugin allowlist (GB10 and other unlisted parts), enable them explicitly with "+
-				"`-p <plugin>.is_allowed=true`; if they genuinely do not apply to this part, target the "+
-				"profile with a node selector rather than accepting an unverified pass. Reasons: %s",
-			c.Skipped, c.Total, c.Executed, c.Skipped, orNone(strings.Join(res.skipReasons, "; "))))
+			"%d of %d DCGM subtests were SKIPPED (%d executed), so this node is only partly checked "+
+				"and a pass would certify hardware DCGM never tested. If DCGM's per-SKU allowlist "+
+				"gated them off, set BURNIN_DCGM_ALLOW=<plugin>,... to pass -p "+
+				"<plugin>.is_allowed=true. Otherwise target the profile with a node selector rather "+
+				"than accepting an unverified pass. Reasons: %s",
+			c.Skipped, c.Total, c.Executed, orNone(strings.Join(res.skipReasons, "; "))))
 	}
 
 	if code != 0 {
@@ -458,10 +502,33 @@ func dcgmiArgs(subsystem, address string, rest ...string) []string {
 	return append(args, rest...)
 }
 
+// diagArgs builds the diagnostic's command line.
+//
+// Separate from runDiag so a test can assert the argv, which is the only place
+// the -p string can be checked to have actually reached dcgmi: the runner
+// reports it as a metric, and a metric that disagrees with what was passed
+// would be worse than not reporting it at all.
+//
+// -p and -t are appended, never substituted for a default. dcgmi's own timeout
+// is unlimited when -t is absent, so omitting it is a real setting rather than
+// a neutral one.
+func diagArgs(cfg config, spec runSpec, diagTimeout time.Duration) []string {
+	args := dcgmiArgs("diag", cfg.address, "-r", spec.arg, "-j")
+	if cfg.params != "" {
+		args = append(args, "-p", cfg.params)
+	}
+	if diagTimeout > 0 {
+		args = append(args, "-t", strconv.Itoa(int(diagTimeout.Seconds())))
+	}
+	return args
+}
+
 // runDiag executes the diagnostic. The returned error is reserved for failures
 // to execute dcgmi at all; a non-zero exit is a result, not an error.
-func runDiag(ctx context.Context, cfg config, level int) (string, string, int, error) {
-	args := dcgmiArgs("diag", cfg.address, "-r", strconv.Itoa(level), "-j")
+func runDiag(
+	ctx context.Context, cfg config, spec runSpec, diagTimeout time.Duration,
+) (string, string, int, error) {
+	args := diagArgs(cfg, spec, diagTimeout)
 	logf("running %s %s", cfg.dcgmiBin, strings.Join(args, " "))
 	return runCmd(ctx, 0, cfg.dcgmiBin, args...)
 }
