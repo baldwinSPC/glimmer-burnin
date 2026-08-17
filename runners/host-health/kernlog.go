@@ -111,11 +111,14 @@ type kernelLogProbe struct {
 //
 //	ENOENT  the path is not in the container — the hostPaths mount is missing
 //	        or names a different path
-//	EACCES  it is there and this process may not read it. On /dev/kmsg that is
-//	        almost always kernel.dmesg_restrict=1, which requires CAP_SYSLOG,
-//	        which a container running as a NON-ROOT uid does not have in its
-//	        effective set even when the pod is privileged. On a text kern.log it
-//	        is the file's own mode — Debian ships -rw-r----- syslog:adm.
+//	EACCES  it is there and this process may not read it. On /dev/kmsg there are
+//	        TWO independent causes and they are indistinguishable by errno:
+//	        kernel.dmesg_restrict=1, which requires CAP_SYSLOG (and a capability
+//	        does nothing for a non-root uid, even in a privileged pod); and the
+//	        runtime's DEVICE CGROUP, which denies a character device that was
+//	        never granted. Satisfying one and not the other still reports none.
+//	        On a text kern.log it is the file's own mode — Debian ships
+//	        -rw-r----- syslog:adm.
 //
 // Both are configuration, both are fixable, and neither is visible from
 // "xid_source=none".
@@ -174,16 +177,22 @@ func (k *kernelLogProbe) why() string {
 		// the effective set is dropped on the switch away from root — so
 		// "privileged: true" looks like it should be enough and is not.
 		out += ". This image runs as uid 65532 by design, and reading /dev/kmsg needs THREE " +
-			"things at once — measured on GB10, issue #134: (1) a DEVICE-CGROUP GRANT, so " +
-			"hostPaths type: CharDevice and not a plain bind mount, which the runtime denies " +
-			"for a character device; (2) uid 0, because a capability added to the bounding " +
-			"set does nothing for a non-root uid; and (3) CAP_SYSLOG wherever " +
-			"kernel.dmesg_restrict=1. Any two of the three still report none. So: " +
-			"hostPaths[type: CharDevice] + runAsUser: 0 + capabilities: [SYSLOG] — or " +
-			"privileged: true WITH runAsUser: 0, which grants all three at once and is why " +
-			"privileged alone, as a non-root uid, buys nothing. Alternatively mount a text " +
-			"kernel log this uid can read and point BURNIN_KERN_LOG_PATHS at it, though one " +
-			"is usually mode -rw-r----- syslog:adm and unreadable for the same reason"
+			"things at once — measured on GB10, issues #134 and #302: (1) a DEVICE-CGROUP " +
+			"GRANT, because the runtime denies a character device that was never granted; " +
+			"(2) uid 0, because a capability added to the bounding set does nothing for a " +
+			"non-root uid; and (3) CAP_SYSLOG wherever kernel.dmesg_restrict=1. Any two of " +
+			"the three still report none. HOW TO GET (1) DEPENDS ON WHO STARTED THIS POD. " +
+			"In Kubernetes it is privileged: true, and ONLY that: a hostPath volume grants " +
+			"no device cgroup even with type: CharDevice, which makes the kubelet assert " +
+			"the path is a character device and nothing more — measured, with CAP_SYSLOG " +
+			"effective and klogctl working while this open still returned EPERM. So " +
+			"in-cluster the one working recipe is privileged: true WITH runAsUser: 0, and " +
+			"privileged alone buys nothing because it grants everything to root and nothing " +
+			"to uid 65532. Under the burnin CLI the least-privilege form does work, because " +
+			"hostPaths type: CharDevice becomes --device there, which really is a grant. " +
+			"Alternatively mount a text kernel log this uid can read and point " +
+			"BURNIN_KERN_LOG_PATHS at it, though one is usually mode -rw-r----- syslog:adm " +
+			"and unreadable for the same reason"
 	}
 	return out
 }
