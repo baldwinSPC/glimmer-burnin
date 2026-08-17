@@ -63,9 +63,9 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// Eight images are v0.6.0 and three are v0.6.2, all published to GHCR, public,
-// and anonymously pullable. The split is not drift: see the three numbered
-// reasons on the table below, which is where it is decided.
+// Eight images are v0.6.0, two are v0.6.2 and one is v0.6.3, all published to
+// GHCR, public, and anonymously pullable. The split is not drift: see the three
+// numbered reasons on the table below, which is where it is decided.
 //
 // v0.6.0 IS THE FIRST RELEASE WHERE SOME OF THESE RAN ON REAL SILICON BEFORE
 // PUBLICATION — the rule below ("publish only after the kernel has been verified
@@ -139,13 +139,20 @@ var defaults = map[contract.TestKind]image{
 
 	// This table is deliberately MIXED, and the three reasons are different.
 	//
-	// (1) THREE Go runners moved to v0.6.2 — dcgm-diag, host-health,
-	// memory-stress. Every published v0.6.0 Go image was built on go1.24.13, the
-	// last patch of an end-of-life branch which none of the advisories were ever
-	// fixed on, and measured 29 reachable vulnerabilities (#309). A rebuild off
-	// golang:1.26 (#335) is clean, verified on the PUBLISHED artefacts rather
-	// than the builds, since the artefact is what a node pulls. host-health
-	// additionally carries a corrected kmsg remedy (#362).
+	// (1) THREE Go runners moved off v0.6.0 — host-health and memory-stress to
+	// v0.6.2, and dcgm-diag to v0.6.3 because its source moved AGAIN after that
+	// publish (#364, plugin parameters, verified on GB10). Every published v0.6.0
+	// Go image was built on go1.24.13, the last patch of an end-of-life branch
+	// which none of the advisories were ever fixed on, and measured 29 reachable
+	// vulnerabilities (#309). A rebuild off golang:1.26 (#335) is clean, verified
+	// on the PUBLISHED artefacts rather than the builds, since the artefact is
+	// what a node pulls. host-health additionally carries a corrected kmsg
+	// remedy (#362).
+	//
+	// dcgm-diag is the worked example of why this table is checked against source
+	// drift rather than assumed stable: its image was current for about nine
+	// hours. A pin equal to the newest tag is not the same claim as a pin whose
+	// image was built from the source in this tree.
 	//
 	// (2) The C++/CUDA runners stay at v0.6.0 because they contain NO Go binary
 	// at all. There is no stdlib in them to patch, so a republish would spend a
@@ -169,7 +176,7 @@ var defaults = map[contract.TestKind]image{
 	// publish — so it was dropped rather than kept. Move all three pins together
 	// when the fabric is fixed and a run is green.
 	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.2", Vendor: VendorNVIDIA},
+	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.3", Vendor: VendorNVIDIA},
 	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.2", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
