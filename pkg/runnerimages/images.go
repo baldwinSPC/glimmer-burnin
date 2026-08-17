@@ -136,16 +136,38 @@ var defaults = map[contract.TestKind]image{
 	// repushed ones.
 	contract.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0", Vendor: VendorNVIDIA},
 
+	// This table is deliberately MIXED, and the split is the point.
+	//
+	// The Go runners moved to v0.6.2 because every published v0.6.0 one was
+	// built on go1.24.13 — the last patch of an end-to-end-of-life branch, which
+	// none of the advisories were ever fixed on — and measured 29 reachable
+	// vulnerabilities (#309). A rebuild off golang:1.26 (#335) is clean:
+	// verified on the PUBLISHED artefacts, not on the builds, since the
+	// published artefact is the thing a node pulls. host-health additionally
+	// carries a corrected kmsg remedy (#362).
+	//
+	// The C++/CUDA runners stay at v0.6.0 because they contain NO Go binary at
+	// all. There is no stdlib in them to patch, so a republish would spend a
+	// fleet-wide risk to change nothing.
+	//
+	// nccl stays at v0.6.0 for a THIRD reason, and it is not that it is fine.
+	// Its rebuild is as clean as the others; it simply has not been published,
+	// because it is the one runner tonight's hardware pass could not exercise —
+	// the fleet's two RoCE links are crossed relative to their addressing, so
+	// no collective completes on it at all (#360). Publishing a fabric runner
+	// whose collective nobody has watched run is exactly what the
+	// hardware-gate policy exists to prevent. Move this pin when that is fixed
+	// and the run is green, not before.
 	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.2", Vendor: VendorNVIDIA},
+	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.2", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.0", Vendor: VendorAny},
+	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.0", Vendor: VendorAny},
+	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.2", Vendor: VendorAny},
 	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.2", Vendor: VendorNVIDIA},
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
