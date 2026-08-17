@@ -191,8 +191,34 @@ func (r *diagResults) walk(node any, inheritedName string, depth int) {
 		if raw, ok := n["status"].(string); ok {
 			r.record(inheritedName, parseStatus(raw), n)
 		}
-		for _, v := range n {
-			r.walk(v, inheritedName, depth+1)
+		// SIBLING KEYS ARE WALKED IN SORTED ORDER, so a byte-identical document
+		// parses to a byte-identical result.
+		//
+		// This is the same rule collectAllStrings and driverVersionField already
+		// apply, and the one the "shallowest wins" note above states outright:
+		// "the first one we happened to see" is not reproducible across runs.
+		// walk() was the one iteration left unordered, and it is the one that
+		// decides the ORDER of everything the document produces — findings
+		// within a subtest, the reason lists, and r.order, which is what Counts
+		// ranges over to pick FailedNames, SkippedNames and the cross-subtest
+		// BlockingFinding.
+		//
+		// The verdict itself was safe without this and stays safe with it:
+		// excusal is set-based (a subtest is excused only when EVERY finding is)
+		// and the per-entity status aggregation takes a max, so neither depends
+		// on order. What was not safe is everything downstream that reads the
+		// slices — an operator-facing message assembled in slice order differed
+		// between two runs over the same document, and a test indexing
+		// findings[0] inherited the randomness silently, which is exactly how it
+		// was found. Ordering it here costs one sort per object and removes the
+		// whole class.
+		keys := make([]string, 0, len(n))
+		for k := range n {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			r.walk(n[k], inheritedName, depth+1)
 		}
 	case []any:
 		for _, v := range n {

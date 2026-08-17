@@ -129,21 +129,44 @@ func TestParse_RealGB10Level2PartialSkip(t *testing.T) {
 // on DCGM 4.2.3: they are numbers. This test fails if a future capture drifts,
 // which is the moment to re-read that decision rather than the moment a fleet
 // gets a wrong verdict.
+//
+// THE SLICE IS SEARCHED, NEVER INDEXED, and that is not a style preference. The
+// software subtest carries TWO findings on this document, arriving by the two
+// different routes findings.go describes: the persistence one is an object in a
+// `warnings` array under `results` and carries the enums, the unreadable-SRAM
+// one is a bare string in `test_summary.info` and carries nothing. They are
+// appended by separate record() calls, and walk() reaches those two branches in
+// Go's randomised map order — so `findings[0]` was the metadata-less one in
+// roughly 1 run in 15, and the test failed claiming the numeric fields "were not
+// read" on a document that plainly carries them. Assert what the fixture MEANS —
+// exactly one finding bears metadata, and it is the persistence one.
 func TestParse_RealGB10CarriesNumericClassificationFields(t *testing.T) {
 	res, err := parseDiagJSON(testdataDoc(t, "gb10-level1.json"))
 	if err != nil {
 		t.Fatalf("parseDiagJSON: %v", err)
 	}
 	findings := res.findings["software"]
-	if len(findings) == 0 {
-		t.Fatal("no findings recorded for the software subtest")
+	if len(findings) != 2 {
+		t.Fatalf("recorded %d findings for the software subtest, want 2 "+
+			"(persistence mode with metadata, unreadable SRAM count without): %+v",
+			len(findings), findings)
 	}
 
-	f := findings[0]
-	if !f.HasMeta {
-		t.Fatal("HasMeta is false: the numeric classification fields were not read, " +
-			"so classification silently fell back to matching English prose")
+	var withMeta []finding
+	for _, f := range findings {
+		if f.HasMeta {
+			withMeta = append(withMeta, f)
+		}
 	}
+	if len(withMeta) != 1 {
+		t.Fatalf("%d of %d findings carry metadata, want exactly 1: %+v; "+
+			"at 0 the numeric classification fields were not read and classification "+
+			"silently fell back to matching English prose, and above 1 the bare-string "+
+			"finding acquired enums DCGM never attached to it",
+			len(withMeta), len(findings), findings)
+	}
+
+	f := withMeta[0]
 	if f.Severity != 5 {
 		t.Errorf("Severity = %d, want 5 (CONFIG)", f.Severity)
 	}

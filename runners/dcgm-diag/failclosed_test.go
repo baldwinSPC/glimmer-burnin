@@ -300,6 +300,51 @@ func TestTheBlockingFindingIsDeterministic(t *testing.T) {
 	}
 }
 
+// NOR MAY THE ORDER OF THE FINDINGS THEMSELVES.
+//
+// The test above pinned the one CONSUMER that was known to be order-sensitive.
+// This one pins the parse, because the next consumer inherits the randomness
+// silently: walk() descends into an object's children, and Go randomises map
+// iteration, so a subtest whose findings arrive by two different routes — a
+// `warnings` array under `results` and a bare string under `test_summary`, which
+// is what a real GB10 level-1 document carries — recorded them in either order.
+// The verdict survived that because excusal is set-based, and a capture test
+// reading findings[0] did not: it failed about 1 run in 15, claiming the numeric
+// classification fields "were not read" on a document that plainly carries them.
+//
+// A parse is a pure function of its input and should read as one. Asserting the
+// order here means an operator-facing message built in slice order cannot start
+// varying between two runs over the same document without something going red.
+func TestFindingOrderIsDeterministic(t *testing.T) {
+	const doc = `{"tests":[{"name":"software","results":[{"status":"Fail",
+		"warnings":[{"warning":"Persistence Mode: Persistence mode for GPU 0 is disabled",
+		  "error_severity":5,"error_category":8,"error_id":29}]}],
+		"test_summary":{"status":"Fail",
+		  "info":["Error getting the SRAM Threshold Count for GPU 0"]}}]}`
+
+	seen := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		res, err := parseDiagJSON(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var order []string
+		for _, f := range res.findings["software"] {
+			order = append(order, fmt.Sprintf("%q meta=%v", f.Text, f.HasMeta))
+		}
+		if len(order) != 2 {
+			t.Fatalf("recorded %d findings, want 2: %v", len(order), order)
+		}
+		seen[strings.Join(order, " | ")] = true
+	}
+	if len(seen) != 1 {
+		t.Errorf("finding order varied across runs over a byte-identical document:")
+		for s := range seen {
+			t.Errorf("  %s", s)
+		}
+	}
+}
+
 // A DOCUMENT WE CANNOT PARSE IS NOT A PART DCGM REFUSED TO TEST.
 //
 // Both statements used to arrive as Total == 0, and the runner then scanned the
