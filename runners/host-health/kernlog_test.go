@@ -637,6 +637,29 @@ func TestKernelLogProbeSaysWhyItFoundNoSource(t *testing.T) {
 		if !strings.Contains(detail, "dmesg_restrict") {
 			t.Errorf("the explanation does not name the host setting that causes it: %q", detail)
 		}
+		// The remedy has to say WHICH DISPATCHER it is talking about, and this
+		// is the assertion that would have caught the version before it.
+		//
+		// #134's truth table was measured under `docker run --device`, where
+		// hostPaths type: CharDevice really does grant the device cgroup, and
+		// the advice was written from it as though it were universal. In
+		// Kubernetes it is not: a hostPath volume grants no device cgroup even
+		// with type: CharDevice, so the least-privilege recipe this text used
+		// to recommend reports xid_source=none on every node. Measured on GB10
+		// with CAP_SYSLOG effective and klogctl working while the open still
+		// returned EPERM (#302).
+		//
+		// Advice that sends a reader to the one configuration that looks right
+		// and does not work is worse than no advice, because they stop looking.
+		if !strings.Contains(detail, "Kubernetes") {
+			t.Errorf("the explanation does not say which dispatcher its remedy applies to, "+
+				"and the two genuinely differ — in-cluster needs privileged: true, under "+
+				"the CLI type: CharDevice is enough: %q", detail)
+		}
+		if !strings.Contains(detail, "privileged") {
+			t.Errorf("the explanation does not name the only thing that opens the device "+
+				"cgroup in-cluster: %q", detail)
+		}
 	})
 
 	t.Run("a working source says nothing extra", func(t *testing.T) {
