@@ -63,8 +63,9 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// All eleven images are v0.6.0, published to GHCR, public, and anonymously
-// pullable.
+// Eight images are v0.6.0 and three are v0.6.2, all published to GHCR, public,
+// and anonymously pullable. The split is not drift: see the three numbered
+// reasons on the table below, which is where it is decided.
 //
 // v0.6.0 IS THE FIRST RELEASE WHERE SOME OF THESE RAN ON REAL SILICON BEFORE
 // PUBLICATION — the rule below ("publish only after the kernel has been verified
@@ -136,11 +137,42 @@ var defaults = map[contract.TestKind]image{
 	// repushed ones.
 	contract.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0", Vendor: VendorNVIDIA},
 
+	// This table is deliberately MIXED, and the three reasons are different.
+	//
+	// (1) THREE Go runners moved to v0.6.2 — dcgm-diag, host-health,
+	// memory-stress. Every published v0.6.0 Go image was built on go1.24.13, the
+	// last patch of an end-of-life branch which none of the advisories were ever
+	// fixed on, and measured 29 reachable vulnerabilities (#309). A rebuild off
+	// golang:1.26 (#335) is clean, verified on the PUBLISHED artefacts rather
+	// than the builds, since the artefact is what a node pulls. host-health
+	// additionally carries a corrected kmsg remedy (#362).
+	//
+	// (2) The C++/CUDA runners stay at v0.6.0 because they contain NO Go binary
+	// at all. There is no stdlib in them to patch, so a republish would spend a
+	// fleet-wide risk to change nothing.
+	//
+	// (3) THE THREE FABRIC RUNNERS STAY AT v0.6.0, AND NOT BECAUSE THEY ARE
+	// FINE. nccl, ib-write-bw and gpudirect-rdma rebuild as cleanly as the
+	// others, and v0.6.2 images for ib-write-bw and gpudirect-rdma were in fact
+	// published — those tags exist and are immutable. Nothing points at them.
+	//
+	// They are held because not one of the three could be exercised on the
+	// fleet: its two RoCE links are crossed relative to their addressing, so a
+	// queue pair never reaches RTR and no fabric test completes at all (#360).
+	// The hardware gate exists precisely because a bad runner tag degrades a
+	// whole fleet at once, and a fabric runner nobody has watched carry traffic
+	// is the case it was written for.
+	//
+	// The honest form of that rule is all three or none. Two of them were
+	// briefly defended as "toolchain rebuilds of already-verified kernels",
+	// which is true and is also the argument that would excuse any unverified
+	// publish — so it was dropped rather than kept. Move all three pins together
+	// when the fabric is fixed and a run is green.
 	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.2", Vendor: VendorNVIDIA},
+	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.2", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.0", Vendor: VendorAny},
+	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.0", Vendor: VendorAny},
