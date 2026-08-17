@@ -1,0 +1,129 @@
+{
+	"DCGM Diagnostic" : 
+	{
+		"test_categories" : 
+		[
+			{
+				"category" : "Deployment",
+				"tests" : 
+				[
+					{
+						"name" : "software",
+						"results" : 
+						[
+							{
+								"entity_group" : "GPU",
+								"entity_group_id" : 1,
+								"entity_id" : 0,
+								"status" : "Fail",
+								"warnings" : 
+								[
+									{
+										"error_category" : 8,
+										"error_id" : 29,
+										"error_severity" : 5,
+										"warning" : "Persistence Mode: Persistence mode for GPU 0 is disabled. Enable persistence mode by running \"nvidia-smi -i <gpuId> -pm 1 \" as root."
+									}
+								]
+							}
+						],
+						"test_summary" : 
+						{
+							"info" : 
+							[
+								"Error getting the SRAM Threshold Count for GPU 0. Status = 0. Value = 9223372036854775794. SRAM Threshold checking was skipped."
+							],
+							"status" : "Fail",
+							"warnings" : 
+							[
+								{
+									"error_category" : 8,
+									"error_id" : 29,
+									"error_severity" : 5,
+									"warning" : "Persistence Mode: Persistence mode for GPU 0 is disabled. Enable persistence mode by running \"nvidia-smi -i <gpuId> -pm 1 \" as root."
+								}
+							]
+						}
+					}
+				]
+			},
+			{
+				"category" : "Hardware",
+				"tests" : 
+				[
+					{
+						"name" : "memory",
+						"results" : 
+						[
+							{
+								"entity_group" : "GPU",
+								"entity_group_id" : 1,
+								"entity_id" : 0,
+								"info" : 
+								[
+									"Allocated 112427837082 bytes (87.5%)"
+								],
+								"status" : "Pass"
+							}
+						],
+						"test_summary" : 
+						{
+							"status" : "Pass"
+						}
+					}
+				]
+			},
+			{
+				"category" : "Integration",
+				"tests" : 
+				[
+					{
+						"name" : "pcie",
+						"results" : 
+						[
+							{
+								"entity_group" : "GPU",
+								"entity_group_id" : 1,
+								"entity_id" : 0,
+								"info" : 
+								[
+									"GPU to Host bandwidth:\t\t58.62 GB/s",
+									"Host to GPU bandwidth:\t\t58.88 GB/s",
+									"bidirectional bandwidth:\t58.69 GB/s",
+									"GPU to Host latency:\t\t1.563 us",
+									"Host to GPU latency:\t\t1.740 us",
+									"bidirectional latency:\t\t3.078 us"
+								],
+								"status" : "Pass"
+							}
+						],
+						"test_summary" : 
+						{
+							"status" : "Pass"
+						}
+					}
+				]
+			}
+		]
+	},
+	"entity_groups" : 
+	[
+		{
+			"entities" : 
+			[
+				{
+					"device_id" : "2e12",
+					"entity_id" : 0,
+					"serial_num" : "<<<NOT_SUPPORTED>>>"
+				}
+			],
+			"entity_group" : "GPU",
+			"entity_group_id" : 1
+		}
+	],
+	"metadata" : 
+	{
+		"Driver Version Detected" : "580.82.09",
+		"version" : "4.5.2"
+	}
+}

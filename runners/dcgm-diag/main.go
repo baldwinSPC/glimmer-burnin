@@ -378,6 +378,23 @@ func verdict(
 	if len(res.warnReasons) > 0 {
 		rep.set(keyWarnFindings, strings.Join(res.warnReasons, " | "))
 	}
+	// And again for the SKIPPED subtests, which used to be recorded only inside
+	// the partial-skip branch below.
+	//
+	// That branch does not win on a real GB10 document. Persistence mode is
+	// disabled on these machines, so the software subtest fails, every finding
+	// against it is excused as a node setting (#304), and the excused-NotRun
+	// branch returns first — leaving a result that says "fix persistence mode"
+	// and does not mention that the memory and PCIe plugins never ran at all.
+	// The verdict is right either way (Error, unjudged, fails closed); it was
+	// the EVIDENCE that went missing, on exactly the part this runner exists to
+	// qualify. Measured on spark-043a, DCGM 4.5.2 — see gb10_plugins_test.go.
+	if len(c.SkippedNames) > 0 {
+		rep.set(keySkippedSubtests, strings.Join(c.SkippedNames, ","))
+	}
+	if len(res.skipReasons) > 0 {
+		rep.set(keySkipReason, strings.Join(res.skipReasons, " | "))
+	}
 	if len(c.UnreadableFindings) > 0 {
 		// UNMEASURABLE, not zero. `n/a` is the reserved value this project uses
 		// for exactly this, and it is what lets a threshold with
@@ -446,15 +463,6 @@ func verdict(
 	// which is right for a kind that does not apply to this part at all. This is
 	// the PARTIAL case, where some of the node was checked and some was not.
 	if c.Skipped > 0 {
-		// Emitted HERE rather than beside the counts, so the names travel with
-		// the verdict that depends on them — verdict() is reachable on its own
-		// and a caller that never ran run()'s reporting still gets the evidence.
-		if len(c.SkippedNames) > 0 {
-			rep.set(keySkippedSubtests, strings.Join(c.SkippedNames, ","))
-		}
-		if len(res.skipReasons) > 0 {
-			rep.set(keySkipReason, strings.Join(res.skipReasons, " | "))
-		}
 		// The remedy comes BEFORE the reasons, because sanitize truncates the
 		// displayed message at 300 bytes and the reasons are already carried
 		// whole by diag_skip_reason. Naming BURNIN_DCGM_ALLOW pushed

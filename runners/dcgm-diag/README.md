@@ -232,6 +232,56 @@ report figures calibrated for different silicon. That is a verdict to read, not
 one to assume — which is why this is a profile's explicit statement about its
 hardware rather than a default.
 
+#### Measured on GB10
+
+Verified on spark-043a (NVIDIA GB10, driver 580.82.09, DCGM 4.5.2) on
+2026-08-16. Same command, same part, minutes apart, differing only in `-p`:
+
+| `-p` | `software` | `memory` | `pcie` | wall |
+|------|-----------|----------|--------|------|
+| *(none)* | Fail | **Skip** | **Skip** | 2s |
+| `memory.is_allowed=true` | Fail | **Pass** | Skip | 285s |
+| `memory.is_allowed=true;pcie.is_allowed=true` | Fail | **Pass** | **Pass** | 28s |
+
+The enabled `memory` plugin allocates ~87–90% of the part's 119 GB of unified
+LPDDR5X and passes; `pcie` returns real figures (58.6 GB/s host-to-device,
+1.6 µs latency). Both documents are kept verbatim as fixtures in
+`testdata/gb10-level2-plugins-{gated,allowed}.json`.
+
+Three things that verification turned up, none of which were expected:
+
+- **The plugins skip with no reason at all** — no warning, no info, just
+  `"status": "Skip"`. So the runner cannot quote DCGM about the allowlist, and
+  the partial-skip message has to explain it unaided. That is why the message
+  names `BURNIN_DCGM_ALLOW` rather than passing DCGM's prose through.
+- **On a real GB10 document the partial-skip verdict does not fire.**
+  Persistence mode is disabled on these machines, so the `software` subtest
+  fails, every finding against it is excused as a node setting (#304), and the
+  excused-`NotRun` branch returns first. The verdict is still `Error` and still
+  fails closed, but the message is about persistence mode. The skipped plugin
+  names are therefore recorded alongside the counts rather than inside that
+  branch, so they survive whichever verdict wins.
+- **Wall time is not predictable from the configuration.** Six runs of the same
+  command ranged from 19s to 301s, with `memory` reporting the same work
+  (~87–90% allocated, Pass) every time. Two identical back-to-back runs from
+  matched 47 °C starts took 301s and 286s; two others took 19s and 28s. The
+  spread does not track run order, temperature, or the parameter string, and it
+  is **not** explained here.
+
+That last point has a direct consequence for the budget. `levelBudgets[2]` is
+2 minutes, which is DCGM's nominal figure for a supported SKU with these plugins
+gated OFF. Enabling them invalidates it: a profile that lets the level be
+derived from a 2-minute duration gets a derived `-t` of 105s, and a `memory`
+plugin that wanted 300s is cut short. **Set `BURNIN_DURATION_SECONDS` explicitly
+and generously — 600s or more — whenever `BURNIN_DCGM_ALLOW` is set.** The
+failure is at least honest: a cut-short run reports `Error`, not a pass.
+
+Temperature is not a concern for these runs. The part started at 45–47 °C and
+peaked at 61 °C, nowhere near the 81 °C seen under the soak runner. It does not
+return to its cold-start temperature between runs, though — it floors at 47 °C
+after nine minutes idle, which is the chassis heat soak recorded in
+glimmer-burnin#280.
+
 ### Why `-t` is derived rather than left unset
 
 Without `-t`, **DCGM's own timeout is unlimited**, so the only thing bounding
@@ -500,14 +550,11 @@ Three things in that output are the whole point of the wrapper:
    `unsupportedSignatures`, GB10 will report `Error` (unjudged) rather than
    `Skip`. That is the safe direction to be wrong in, but it is still wrong, and
    it is the first thing to check on real silicon.
-8. **Whether `is_allowed=true` actually runs a gated plugin on GB10.** The flags
-   are confirmed to exist — `-p`, `-t` and named `-r` were read from
-   `dcgmi diag --help` on DCGM 4.5.2 running on spark-043a — but whether DCGM
-   honours `memory.is_allowed=true` on an unlisted SKU, or refuses it by another
-   route, has not been run. Until it has, a profile setting `BURNIN_DCGM_ALLOW`
-   may still land on the partial-skip `Error`, which is the same outcome as not
-   setting it (#307).
-9. **Whether `dcgmi` prints a JSON document when it hits its own `-t`.** The
-   derived timeout is worth nothing if it does not. If DCGM prints nothing, the
-   run lands on the same "no readable JSON result" `Error` it reaches today, so
-   the derivation cannot make the outcome worse — but the benefit is unproven.
+8. **How long an enabled plugin actually takes.** See the section below: the
+   same command took between 19s and 301s across six runs on one part, and
+   nothing in the configuration explains the spread. Until that is understood,
+   the budget for a run with plugins enabled has to be set from the worst case
+   rather than from the level table.
+9. **Multi-plugin timing.** `memory` alone and `memory`+`pcie` were both
+   measured; the longer plugins (`targeted_stress`, `sm_stress`,
+   `targeted_power`) have not been enabled on this part at all.
