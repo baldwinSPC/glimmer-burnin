@@ -169,6 +169,15 @@ func reconcilePCIeReplay(out *emitter, gpu0, gpu1 gpuSample, aer0, aer1 aerSampl
 
 type nicSample struct {
 	present bool
+	// ethSeen records that the scan found at least one interface with a backing
+	// device, i.e. that it was looking at a namespace where physical NICs exist.
+	//
+	// Kept apart from present, which the InfiniBand scan alone can set:
+	// /sys/class/infiniband is not network-namespaced and /sys/class/net is, so
+	// a pod without hostNetwork discovers every IB port and no ethernet at all.
+	// "We found four IB ports" is not evidence about how many NICs the node has
+	// (#277).
+	ethSeen bool
 	count   int // physical ethernet interfaces considered
 	up      int
 
@@ -289,6 +298,7 @@ func probeNIC(sysfsRoot string) nicSample {
 				continue // virtual interface
 			}
 			s.present = true
+			s.ethSeen = true
 			s.count++
 			if state, ok := readSysfsString(filepath.Join(ifdir, "operstate")); ok && state == "up" {
 				s.up++
@@ -337,13 +347,34 @@ func emitNIC(out *emitter, before, after nicSample) {
 		return
 	}
 	total, totalOK := after.linkDownTotal()
-	if totalOK {
-		out.set("nic_status", "ok")
+	if !after.ethSeen {
+		// NOT nic_count=0. No interface in this namespace has a backing device,
+		// so the scan never looked at the node's NICs — and the same reasoning
+		// that withholds eth_link_down_total rather than reporting "a confident
+		// zero measured from a virtual interface that could never have failed"
+		// applies to the count itself.
+		//
+		// Measured on spark-043a: nic_count=0 and nic_up=0 alongside ib_ports=4,
+		// on a node with four RoCE ports and WiFi up. Reported as zero it looks
+		// like a node with no NICs, a threshold on nic_up fails every node in
+		// the fleet, and nothing in the output says the pod simply was not on
+		// the host's network namespace (#277).
+		//
+		// Omitted rather than zeroed, so verdict evaluation fails closed the way
+		// it does for every other unmeasured metric here.
+		out.set("nic_status", "absent")
+		out.set("nic_absent_reason",
+			"no interface in this network namespace has a backing device, so the host's "+
+				"NICs were never visible: set hostNetwork: true on the BurnInTest")
 	} else {
-		out.set("nic_status", "partial")
+		if totalOK {
+			out.set("nic_status", "ok")
+		} else {
+			out.set("nic_status", "partial")
+		}
+		out.setInt("nic_count", int64(after.count))
+		out.setInt("nic_up", int64(after.up))
 	}
-	out.setInt("nic_count", int64(after.count))
-	out.setInt("nic_up", int64(after.up))
 	if after.ibPorts > 0 {
 		out.setInt("ib_ports", int64(after.ibPorts))
 		out.setInt("ib_ports_active", int64(after.ibActive))

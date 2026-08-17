@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -335,5 +336,91 @@ func TestUnexposedFabricCounterIsWithheldAlone(t *testing.T) {
 	}
 	if v, ok := out.get("ib_port_rcv_errors"); ok {
 		t.Errorf("ib_port_rcv_errors=%q was emitted for a counter this kernel does not expose", v)
+	}
+}
+
+// The shape a real GB10 Spark produces, and the one the existing pod-netns test
+// above does NOT reach.
+//
+// /sys/class/infiniband is not network-namespaced and /sys/class/net is, so a
+// pod without hostNetwork discovers every IB port and no ethernet at all. That
+// sets present via the IB scan, so emitNIC skips the absent early-return and
+// used to fall through to nic_count=0 / nic_up=0 — a confident zero about NICs
+// nothing ever looked at.
+//
+// Measured on spark-043a (#277): nic_count=0, nic_up=0, ib_ports=4,
+// ib_ports_active=4, on a node with four RoCE ports and WiFi up. A threshold on
+// nic_up would have failed every node in the fleet.
+func TestPodNetnsWithInfinibandDoesNotReportZeroNICs(t *testing.T) {
+	root := t.TempDir()
+	// The pod's own veth and loopback: neither has a backing device.
+	mustWrite(t, filepath.Join(root, "class", "net", "eth0", "operstate"), "up\n")
+	mustWrite(t, filepath.Join(root, "class", "net", "lo", "operstate"), "unknown\n")
+	// Four IB ports, all active — visible regardless of the network namespace.
+	for _, p := range []string{"1", "2", "3", "4"} {
+		port := filepath.Join(root, "class", "infiniband", "mlx5_0", "ports", p)
+		mustWrite(t, filepath.Join(port, "state"), "4: ACTIVE\n")
+		mustWrite(t, filepath.Join(port, "counters", "link_downed"), "0\n")
+	}
+
+	s := probeNIC(root)
+	if !s.present {
+		t.Fatal("the IB scan must still mark the sample present")
+	}
+	if s.ethSeen {
+		t.Fatal("no interface has a backing device, so ethSeen must be false")
+	}
+
+	out := newEmitter()
+	emitNIC(out, s, s)
+
+	if v, ok := out.get("nic_count"); ok {
+		t.Errorf("nic_count = %q on a node whose NICs were never visible; it must be "+
+			"omitted so a threshold fails closed rather than reading zero", v)
+	}
+	if v, ok := out.get("nic_up"); ok {
+		t.Errorf("nic_up = %q, want it omitted for the same reason", v)
+	}
+	if got, _ := out.get("nic_status"); got != "absent" {
+		t.Errorf("nic_status = %q, want absent", got)
+	}
+	// The WHY, which is what made this cost a hardware session to diagnose.
+	reason, ok := out.get("nic_absent_reason")
+	if !ok {
+		t.Fatal("nic_absent_reason is missing: the result says the NICs are absent and " +
+			"gives an operator nothing to act on")
+	}
+	if !strings.Contains(reason, "hostNetwork") {
+		t.Errorf("nic_absent_reason = %q; it must name the fix", reason)
+	}
+	// The InfiniBand evidence is real and must survive.
+	if got, _ := out.get("ib_ports"); got != "4" {
+		t.Errorf("ib_ports = %q, want 4 — the IB scan is unaffected by the namespace", got)
+	}
+	if got, _ := out.get("ib_ports_active"); got != "4" {
+		t.Errorf("ib_ports_active = %q, want 4", got)
+	}
+}
+
+// A node that really does have NICs still reports them, so the fix above does
+// not turn every healthy node's count into an absence.
+func TestVisibleNICsStillReportTheirCount(t *testing.T) {
+	s := probeNIC(nicFixture(t, "3", "2"))
+	if !s.ethSeen {
+		t.Fatal("a tree with a physical NIC must set ethSeen")
+	}
+	out := newEmitter()
+	emitNIC(out, s, s)
+	if got, _ := out.get("nic_count"); got != "1" {
+		t.Errorf("nic_count = %q, want 1", got)
+	}
+	if got, _ := out.get("nic_up"); got != "1" {
+		t.Errorf("nic_up = %q, want 1", got)
+	}
+	if got, _ := out.get("nic_status"); got != "ok" {
+		t.Errorf("nic_status = %q, want ok", got)
+	}
+	if _, ok := out.get("nic_absent_reason"); ok {
+		t.Error("nic_absent_reason must not appear when the NICs were visible")
 	}
 }

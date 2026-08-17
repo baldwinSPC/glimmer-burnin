@@ -100,8 +100,13 @@ acceptance, which is the exact false-negative this project forbids. Concretely:
 - a node-level total is only emitted if **every** GPU answered, because the GPU
   that did not answer is the one most likely to be broken;
 - a pod without `hostNetwork` sees only its own veth, so no physical NIC is
-  visible and `nicLinkDownEvents` is omitted rather than reported as a confident
-  zero measured from an interface that could never fail;
+  visible and `nicLinkDownEvents`, **`nicCount` and `nicUp`** are omitted rather
+  than reported as a confident zero measured from an interface that could never
+  fail. `nic_absent_reason` says why and names the fix. This bites hardest on a
+  node with InfiniBand: `/sys/class/infiniband` is **not** network-namespaced
+  while `/sys/class/net` is, so such a pod discovers every IB port and no
+  ethernet at all — measured on a GB10 Spark as `nicCount=0` alongside
+  `ibPorts=4` on a node with four RoCE ports up (#277);
 - an unresponsive driver (`nvml_status=timeout` — itself a real symptom) leaves
   every NVML counter omitted rather than guessed.
 
@@ -206,7 +211,7 @@ Xid or ECC error provoked by that load is still in the log.
 | Probe | Requirement | If missing |
 |-------|-------------|------------|
 | PCIe AER | nothing — `/sys` is already mounted read-only in any container | `aer_status=absent` |
-| NIC link state | `hostNetwork: true` | `nic_status=absent`, `nicLinkDownEvents` omitted |
+| NIC link state | `hostNetwork: true` | `nic_status=absent` + `nic_absent_reason`; `nicCount`, `nicUp` and `nicLinkDownEvents` omitted |
 | NVML | NVIDIA Container Toolkit; the image requests `NVIDIA_DRIVER_CAPABILITIES=utility` | `nvml_status=absent`, all NVML counters omitted |
 | Xid scan | a readable `/dev/kmsg`, mounted with `spec.runner.hostPaths` — see below | `xid_source=none`, `xidEvents` omitted (never a false zero) |
 
