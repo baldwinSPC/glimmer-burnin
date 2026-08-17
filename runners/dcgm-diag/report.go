@@ -17,16 +17,24 @@ import (
 const (
 	keyDiagLevel       = "diag_level"
 	keyDiagLevelSource = "diag_level_source"
-	keyDcgmVersion     = "dcgm_version"
-	keyDriverVersion   = "driver_version"
-	keyGPUCount        = "gpu_count"
-	keyTestsRun        = "tests_run"
-	keyTestsFailed     = "tests_failed"
-	keyTestsWarned     = "tests_warned"
-	keyTestsNotRun     = "tests_not_run"
-	keyTestsSkipped    = "tests_skipped"
-	keyDcgmiExitCode   = "dcgmi_exit_code"
-	keySampleCount     = "sample_count"
+	// What was asked of dcgmi beyond the level: the tests named instead of a
+	// level, the exact -p string, and the -t it was given. Evidence, so a stored
+	// result answers "which plugins did this run enable?" on its own rather than
+	// by re-deriving it from whatever the profile is believed to have said
+	// (#307).
+	keyDiagTests     = "diag_tests"
+	keyDiagParams    = "diag_params"
+	keyDiagTimeoutS  = "diag_timeout_s"
+	keyDcgmVersion   = "dcgm_version"
+	keyDriverVersion = "driver_version"
+	keyGPUCount      = "gpu_count"
+	keyTestsRun      = "tests_run"
+	keyTestsFailed   = "tests_failed"
+	keyTestsWarned   = "tests_warned"
+	keyTestsNotRun   = "tests_not_run"
+	keyTestsSkipped  = "tests_skipped"
+	keyDcgmiExitCode = "dcgmi_exit_code"
+	keySampleCount   = "sample_count"
 	// #304: findings DCGM reported that are not verdicts about the part.
 	keyConfigFindings   = "diag_config_findings"
 	keyUnreadableFields = "diag_unreadable_fields"
@@ -67,7 +75,8 @@ const metricUnmeasurable = "n/a"
 // emittedKeys is every key this runner can print. It exists so a test can
 // enumerate them; nothing at runtime iterates it.
 var emittedKeys = []string{
-	keyDiagLevel, keyDiagLevelSource, keyDcgmVersion, keyDriverVersion,
+	keyDiagLevel, keyDiagLevelSource, keyDiagTests, keyDiagParams,
+	keyDiagTimeoutS, keyDcgmVersion, keyDriverVersion,
 	keyGPUCount, keyTestsRun, keyTestsFailed, keyTestsWarned, keyTestsNotRun,
 	keyTestsSkipped, keyDcgmiExitCode, keySampleCount, keyCounterReset,
 	keyPrunedObjects, keyElapsedS, keyReason, keyWarnFindings,

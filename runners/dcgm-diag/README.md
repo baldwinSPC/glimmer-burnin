@@ -78,7 +78,10 @@ threshold is written against.
 | `ecc_dbe_total` | `eccDbeTotal` | Uncorrectable ECC errors during the test |
 | `elapsed_s` | `elapsedS` | Wall-clock seconds the diagnostic ran |
 | `tests_run` / `tests_warned` / `tests_not_run` / `tests_skipped` | `testsRun`, `testsWarned`, … | Subtest tallies. `testsWarned` is registered and gateable: a `Warn` subtest exits **0**, so a node DCGM warned about passes unless a profile gates it. `diag_warn_findings` carries what it said. See #323. |
-| `diag_level` / `diag_level_source` | `diagLevel`, `diagLevelSource` | Which level ran, and whether it was asked for or derived |
+| `diag_level` / `diag_level_source` | `diagLevel`, `diagLevelSource` | Which level ran, and whether it was asked for, derived, or replaced by named tests. `diag_level` is **absent** on a named-test run: no level was executed, and reporting one a profile could threshold on would describe a suite that was never asked for |
+| `diag_tests` | `diagTests` | The test list passed to `-r`, when tests were named instead of a level. Absent otherwise |
+| `diag_params` | `diagParams` | The exact `-p` string passed to `dcgmi`. Absent when none was |
+| `diag_timeout_s` | `diagTimeoutS` | The `-t` passed to `dcgmi`, so a run that ended at DCGM's own timeout can be told from one that ended at the runner's |
 | `dcgm_version` / `driver_version` / `gpu_count` | `dcgmVersion`, … | Provenance |
 | `dcgmi_exit_code` / `sample_count` / `counter_baseline_reset` | `dcgmiExitCode`, … | Evidence about the run itself |
 | `pruned_objects` | `prunedObjects` | Only if the site's DCGM tree carries `/usr/share/glimmer-burnin/dcgm-pruned.txt`, listing objects removed for licensing reasons. Absent otherwise |
@@ -172,11 +175,125 @@ from acceptance.
 |----------|---------|---------|
 | `BURNIN_DURATION_SECONDS` | *(set by the operator)* | Bounds the run; derives the level |
 | `BURNIN_DCGM_LEVEL` | *(derived)* | `1`–`4` or `short`/`medium`/`long`/`xlong` |
+| `BURNIN_DCGM_TESTS` | *(unset)* | Named DCGM tests for `-r` instead of a level, comma-separated (`memory,pcie`). Mutually exclusive with `BURNIN_DCGM_LEVEL` |
+| `BURNIN_DCGM_ALLOW` | *(unset)* | Comma-separated test names to enable past DCGM's per-SKU allowlist. Each becomes `<name>.is_allowed=true` in `-p`. See [Enabling gated plugins](#enabling-gated-plugins) |
+| `BURNIN_DCGM_PARAMS` | *(unset)* | Raw `-p` string in DCGM's own vocabulary, `test.variable=value` separated by `;` |
+| `BURNIN_DCGM_TIMEOUT_SECONDS` | *(derived)* | `dcgmi`'s own `-t`. Derived as the run's budget less 15s, so DCGM ends its own run and reports what it got |
 | `BURNIN_DCGM_HOSTENGINE_ADDRESS` | *(unset)* | Connect to an existing host engine instead of starting one — use this on nodes already running `dcgm-exporter`, so two engines do not compete for the same device watches |
 | `BURNIN_DCGM_PORT` | `5555` | Port for the host engine this runner starts |
 | `BURNIN_NV_HOSTENGINE_ARGS` | `-n -b 127.0.0.1 -p <port>` | Full argv override. Bound to loopback deliberately: the host engine protocol is unauthenticated and this pod may run with `hostNetwork` |
 | `BURNIN_DCGM_SAMPLE_INTERVAL_SECONDS` | `5` | Field-sampling period |
 | `BURNIN_DCGM_BIN`, `BURNIN_NV_HOSTENGINE_BIN` | `dcgmi`, `nv-hostengine` | Binary paths |
+
+### Enabling gated plugins
+
+DCGM gates every CUDA-backed plugin behind a **per-SKU allowlist**, and GB10 is
+not on it. A level-2 run on a DGX Spark therefore executes the `software`
+deployment check and skips the memory, PCIe and stress plugins — which the
+verdict reports as `Error` (see case 6 above), because a node that had no memory
+test run against it has not passed one.
+
+A profile says what its hardware supports:
+
+```yaml
+spec:
+  runner:
+    env:
+      - name: BURNIN_DCGM_ALLOW
+        value: memory,pcie,targeted_stress
+```
+
+which becomes `-p memory.is_allowed=true;pcie.is_allowed=true;targeted_stress.is_allowed=true`.
+
+**The runner holds no list of plugin names and no per-SKU knowledge.** The
+expansion is uniform — `<name>` becomes `<name>.is_allowed=true` — so the
+allowlist stays DCGM's, and nothing here needs maintaining when DCGM adds a
+plugin or NVIDIA adds a part. `BURNIN_DCGM_PARAMS` takes anything `is_allowed`
+does not cover, in DCGM's own vocabulary:
+
+```yaml
+      - name: BURNIN_DCGM_PARAMS
+        value: diagnostic.test_duration=60;pcie.h2d_d2h_single_pinned.min_bandwidth=8000
+```
+
+Both may be set together. **A parameter set by both is an error**, not a
+precedence rule: DCGM documents no order for a repeated key, so a runner that
+picked one would be guessing which of two contradictory instructions was meant.
+A malformed parameter fails before the host engine starts, so a typo costs no
+burn-in slot.
+
+The `-p` string the run actually used is reported as `diag_params`, so "which
+plugins did this run enable?" is answerable from the stored result rather than
+from whatever the profile is believed to have said.
+
+**Enabling a plugin is not the same as it passing.** DCGM gates them per SKU for
+its own reasons; a plugin that runs on an unlisted part may fail, warn, or
+report figures calibrated for different silicon. That is a verdict to read, not
+one to assume — which is why this is a profile's explicit statement about its
+hardware rather than a default.
+
+#### Measured on GB10
+
+Verified on spark-043a (NVIDIA GB10, driver 580.82.09, DCGM 4.5.2) on
+2026-08-16. Same command, same part, minutes apart, differing only in `-p`:
+
+| `-p` | `software` | `memory` | `pcie` | wall |
+|------|-----------|----------|--------|------|
+| *(none)* | Fail | **Skip** | **Skip** | 2s |
+| `memory.is_allowed=true` | Fail | **Pass** | Skip | 285s |
+| `memory.is_allowed=true;pcie.is_allowed=true` | Fail | **Pass** | **Pass** | 28s |
+
+The enabled `memory` plugin allocates ~87–90% of the part's 119 GB of unified
+LPDDR5X and passes; `pcie` returns real figures (58.6 GB/s host-to-device,
+1.6 µs latency). Both documents are kept verbatim as fixtures in
+`testdata/gb10-level2-plugins-{gated,allowed}.json`.
+
+Three things that verification turned up, none of which were expected:
+
+- **The plugins skip with no reason at all** — no warning, no info, just
+  `"status": "Skip"`. So the runner cannot quote DCGM about the allowlist, and
+  the partial-skip message has to explain it unaided. That is why the message
+  names `BURNIN_DCGM_ALLOW` rather than passing DCGM's prose through.
+- **On a real GB10 document the partial-skip verdict does not fire.**
+  Persistence mode is disabled on these machines, so the `software` subtest
+  fails, every finding against it is excused as a node setting (#304), and the
+  excused-`NotRun` branch returns first. The verdict is still `Error` and still
+  fails closed, but the message is about persistence mode. The skipped plugin
+  names are therefore recorded alongside the counts rather than inside that
+  branch, so they survive whichever verdict wins.
+- **Wall time is not predictable from the configuration.** Six runs of the same
+  command ranged from 19s to 301s, with `memory` reporting the same work
+  (~87–90% allocated, Pass) every time. Two identical back-to-back runs from
+  matched 47 °C starts took 301s and 286s; two others took 19s and 28s. The
+  spread does not track run order, temperature, or the parameter string, and it
+  is **not** explained here.
+
+That last point has a direct consequence for the budget. `levelBudgets[2]` is
+2 minutes, which is DCGM's nominal figure for a supported SKU with these plugins
+gated OFF. Enabling them invalidates it: a profile that lets the level be
+derived from a 2-minute duration gets a derived `-t` of 105s, and a `memory`
+plugin that wanted 300s is cut short. **Set `BURNIN_DURATION_SECONDS` explicitly
+and generously — 600s or more — whenever `BURNIN_DCGM_ALLOW` is set.** The
+failure is at least honest: a cut-short run reports `Error`, not a pass.
+
+Temperature is not a concern for these runs. The part started at 45–47 °C and
+peaked at 61 °C, nowhere near the 81 °C seen under the soak runner. It does not
+return to its cold-start temperature between runs, though — it floors at 47 °C
+after nine minutes idle, which is the chassis heat soak recorded in
+glimmer-burnin#280.
+
+### Why `-t` is derived rather than left unset
+
+Without `-t`, **DCGM's own timeout is unlimited**, so the only thing bounding
+the diagnostic is the runner's context — and that expires as a `SIGKILL`, which
+takes `dcgmi`'s JSON with it and leaves the node unjudged with no record of
+which subtests had already run. Placing DCGM's timeout 15s inside the runner's
+budget lets the tool end its own run and report what it got.
+
+An explicit `BURNIN_DCGM_TIMEOUT_SECONDS` is honoured even when it sits outside
+the budget, on the same rule as an explicit level: the operator asked for it. It
+is logged, because a `-t` beyond the budget can never fire and silently restores
+the `SIGKILL` this exists to avoid.
 
 ## Supplying DCGM
 
@@ -433,3 +550,11 @@ Three things in that output are the whole point of the wrapper:
    `unsupportedSignatures`, GB10 will report `Error` (unjudged) rather than
    `Skip`. That is the safe direction to be wrong in, but it is still wrong, and
    it is the first thing to check on real silicon.
+8. **How long an enabled plugin actually takes.** See the section below: the
+   same command took between 19s and 301s across six runs on one part, and
+   nothing in the configuration explains the spread. Until that is understood,
+   the budget for a run with plugins enabled has to be set from the worst case
+   rather than from the level table.
+9. **Multi-plugin timing.** `memory` alone and `memory`+`pcie` were both
+   measured; the longer plugins (`targeted_stress`, `sm_stress`,
+   `targeted_power`) have not been enabled on this part at all.
