@@ -1119,7 +1119,7 @@ func (r *BurnInRunReconciler) harvestPod(ctx context.Context, t plannedTest, pod
 	exitCode, _, reason, detail := podOutcome(pod)
 	stdout, logErr := r.fetchLogs(ctx, pod)
 	parsed := runner.Parse(string(t.Spec.Kind), stdout, exitCode)
-	if parsed.Verdict == runner.VerdictError && parsed.Message == "" {
+	if parsed.Verdict == runner.VerdictError {
 		// THE KUBELET'S OWN DETAIL, and it is the whole point of carrying it
 		// (#52). A container that never started produces no stdout at all, so
 		// this is the ONLY thing that can say why: for a StartError the message
@@ -1128,9 +1128,29 @@ func (r *BurnInRunReconciler) harvestPod(ctx context.Context, t plannedTest, pod
 		// container recorded the same sentence, and a fleet-wide outage caused
 		// by a broken CDI hook was indistinguishable from a typo in
 		// spec.runner.image.
-		parsed.Message = fmt.Sprintf("runner terminated abnormally (exit %d, reason %q)", exitCode, reason)
+		account := fmt.Sprintf("runner terminated abnormally (exit %d, reason %q)", exitCode, reason)
 		if d := strings.TrimSpace(detail); d != "" {
-			parsed.Message += ": " + clampPodDetail(d)
+			account += ": " + clampPodDetail(d)
+		}
+		switch {
+		case parsed.Message == "":
+			parsed.Message = account
+		case !runnerChoseExitCode(exitCode):
+			// The runner said something AND the exit code is not one it can
+			// produce, so the process was ended by something outside it and the
+			// kubelet is the only witness to what. Both are kept: the runner's
+			// last words say how far it got, the kubelet's account says what
+			// stopped it.
+			//
+			// This branch used to be missing, and the omission cost exactly the
+			// evidence #280 is short of. A pod SIGKILLed after printing its
+			// marker parses as Error (137 is not a contract code) with a
+			// non-empty Message, so it took the FIRST branch's place and the
+			// kubelet's reason was dropped — including "OOMKilled", which is the
+			// one field that distinguishes an out-of-memory kill from every
+			// other 137. The stored result read as though the runner had had its
+			// say and ended itself.
+			parsed.Message += " [" + account + "]"
 		}
 	}
 	if reason == "DeadlineExceeded" {
@@ -2617,6 +2637,19 @@ const maxPodDetail = 512
 // maxNamedInvalidMetrics bounds how many rejected metric names a message spells
 // out. The count is always exact.
 const maxNamedInvalidMetrics = 8
+
+// runnerChoseExitCode reports whether an exit code is one the runner contract
+// defines, i.e. whether the runner picked it.
+//
+// 0 pass, 1 fail, 2 not applicable, 3 the runner's own error — see pkg/runner's
+// VerdictFor, which maps everything else onto Error. Anything outside that range
+// came from somewhere other than the runner: a signal (137, 143), a container
+// that never started (128), a wrapped tool's own code (dcgmi's 226), or -1 for a
+// pod with no terminated runner container at all. In those cases the runner did
+// not report an outcome, whatever it may have printed first.
+func runnerChoseExitCode(exitCode int) bool {
+	return exitCode >= 0 && exitCode <= 3
+}
 
 func clampPodDetail(s string) string {
 	// truncateAtRune, not a byte slice: the kubelet's message is whatever the

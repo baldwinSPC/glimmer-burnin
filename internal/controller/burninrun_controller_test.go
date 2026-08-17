@@ -4870,6 +4870,115 @@ func TestPodDetailReachesTheStoredResult(t *testing.T) {
 	}
 }
 
+// A pod killed AFTER the runner had its say must record both accounts.
+//
+// This is the evidence #280 is short of. The soak runner prints its metrics and
+// its marker, and only then is the container killed — so stdout is not empty,
+// the message is not empty, and exit 137 still parses as Error because 137 is
+// not a code the runner can choose. The kubelet's reason was therefore dropped,
+// and "OOMKilled" is the ONE field that separates an out-of-memory kill from
+// every other 137. Confirmed on spark-043a: a real cgroup OOM reports
+// reason="OOMKilled" with exitCode 137, and the kubelet emits no Event at all,
+// so the terminated state is the only place that fact exists.
+func TestAKillAfterTheRunnerSpokeRecordsBothAccounts(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("smoke"),
+		profile("acceptance", nil, false, testRef("smoke")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	pod := h.pods("run1")["spark-a"]
+	h.startPod(pod)
+	// The runner got as far as its marker, then the container was OOM-killed.
+	h.finishPod(pod, 137, "gpu_temp_c=68\nCOMPUTE_SMOKE_PASS\n", "OOMKilled")
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if res.Phase != burninv1alpha1.RunError {
+		t.Fatalf("phase = %q, want Error: %s", res.Phase, res.Message)
+	}
+	if !strings.Contains(res.Message, "OOMKilled") {
+		t.Errorf("the kubelet's reason was dropped because the runner had spoken first, so an "+
+			"out-of-memory kill is indistinguishable from any other 137:\n  %s", res.Message)
+	}
+	// The runner's last words survive too: they are what says how far it got.
+	if !strings.Contains(res.Message, "COMPUTE_SMOKE_PASS") {
+		t.Errorf("the runner's own message was overwritten:\n  %s", res.Message)
+	}
+	if !strings.Contains(res.Message, "137") {
+		t.Errorf("the exit code was lost:\n  %s", res.Message)
+	}
+}
+
+// The mirror image, and the reason this is gated on the exit code rather than
+// applied to every Error: when the runner CHOSE exit 3 it reported an outcome,
+// and appending "runner terminated abnormally" to its explanation would assert
+// something untrue about a process that ended itself deliberately.
+func TestARunnerChosenErrorIsNotAnnotated(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		smokeTest("smoke"),
+		profile("acceptance", nil, false, testRef("smoke")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	pod := h.pods("run1")["spark-a"]
+	h.startPod(pod)
+	h.finishPod(pod, 3, "COMPUTE_SMOKE_ERROR: could not open the device\n", "Error")
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if !strings.Contains(res.Message, "could not open the device") {
+		t.Fatalf("the runner's own explanation is missing:\n  %s", res.Message)
+	}
+	if strings.Contains(res.Message, "terminated abnormally") {
+		t.Errorf("a runner that chose exit 3 was described as terminating abnormally:\n  %s", res.Message)
+	}
+}
+
+// Pair scope gets the same treatment, because every scope routes its message
+// through harvestPod.
+//
+// Worth its own test rather than trusting that: the existing Pair 137 test
+// (TestPair_MachineryFailureOnOneSideIsErrorNotFail) gives the dying server the
+// stdout "OOMKilled", so its assertion is satisfied by the RUNNER's output and
+// would pass even if the kubelet's reason were dropped. Here the server prints a
+// marker instead, so "OOMKilled" can only have come from the terminated state.
+func TestPair_AKillAfterTheRunnerSpokeRecordsTheKubeletReason(t *testing.T) {
+	h := newPairHarness(t)
+	server, client := runPairToStart(h)
+	h.finishPod(server, 137, "IB_WRITE_BW_PASS\n", "OOMKilled")
+	h.finishPod(client, 1, "Unable to connect the QPs\n", "Error")
+	h.reconcileUntilSettled("run1")
+
+	res := h.run("run1").Status.Results[0]
+	if !strings.Contains(res.Message, "OOMKilled") {
+		t.Errorf("the server's kubelet reason did not reach the pair result, so an "+
+			"out-of-memory kill on one end looks like any other abnormal exit:\n  %s", res.Message)
+	}
+}
+
+func TestRunnerChosenExitCodes(t *testing.T) {
+	for _, code := range []int{0, 1, 2, 3} {
+		if !runnerChoseExitCode(code) {
+			t.Errorf("exit %d is a runner contract code", code)
+		}
+	}
+	// 137/143 are signals, 128 is a container that never started, 226 is dcgmi's
+	// own code surfacing through a wrapper, -1 is a pod with no terminated
+	// runner container at all.
+	for _, code := range []int{-1, 4, 128, 137, 143, 226} {
+		if runnerChoseExitCode(code) {
+			t.Errorf("exit %d is not a code the runner can choose", code)
+		}
+	}
+}
+
 // The kubelet does not bound that field, and a status write the apiserver
 // refuses loses the whole verdict rather than the tail of one sentence.
 func TestPodDetailIsBounded(t *testing.T) {
