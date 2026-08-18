@@ -495,7 +495,17 @@ jobs:
           # A C++/CUDA runner has no Go binary and nothing to say here. That is a
           # legitimate clean result, and distinguishing it from a scan that failed
           # is the whole point of the branches above.
-          if ! go version "${bin}" >/dev/null 2>&1; then
+          #
+          # `go version -m`, NOT `go version`. This guard existed and never fired,
+          # because `go version <non-Go file>` writes "not a Go executable" to
+          # stderr and EXITS 0 — so the negation was always false and every
+          # C++/CUDA runner fell through to govulncheck, which then died with
+          # "unrecognized binary format" AFTER the tag was already pushed.
+          # Measured: `go version /bin/ls` exits 0, `go version -m /bin/ls` exits
+          # 1, and both exit 0 on a real Go binary. Publishing gemm-sweep:v0.6.4
+          # is what surfaced it (#386) — a correct, signed, two-platform tag
+          # reported as a failed publish.
+          if ! go version -m "${bin}" >/dev/null 2>&1; then
             echo "${entry} is not a Go binary (C++/CUDA runner) — no Go standard library to check"
             exit 0
           fi
