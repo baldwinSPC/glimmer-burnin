@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 )
 
@@ -611,6 +613,29 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 		}
 	}
 
+	// Now that every rank has been read, elect each key's value by what the
+	// metric SAYS it is rather than by which rank happened to write last.
+	//
+	// pkg/contract.Combination is the missing half of the classification #121
+	// named. Aggregation cannot stand in for it: elapsedS is Sum across windows
+	// and Max across ranks — eight ranks running 300s took 300s, not 2400s — and
+	// eccErrors is Last across windows, which across ranks means "whatever rank 0
+	// said", the defect itself.
+	//
+	// An UNCLASSIFIED key keeps rank 0's value only while the ranks agree, which
+	// is the case where there is nothing to decide. The moment they disagree it
+	// is dropped and declared unmeasurable, so a threshold fails closed rather
+	// than certifying every node on one node's evidence.
+	for k, vals := range reported {
+		merged, ok := combineRanks(k, vals)
+		if !ok {
+			delete(out.Metrics, k)
+			out.Unmeasurable[k] = true
+			continue
+		}
+		out.Metrics[k] = merged
+	}
+
 	// DEDUPED, because attemptOutcome joins the WHOLE list into the message and
 	// that append happens after everything this function bounds. pkg/runner adds
 	// an entry per OFFENDING LINE and progressive reporting is expected there, so
@@ -828,25 +853,91 @@ func disagreementNote(reported map[string][]rankValue, kept map[string]string) s
 			others = append(append([]string{}, others[:groupMaxNamedRanks]...),
 				fmt.Sprintf("and %d more", total-groupMaxNamedRanks))
 		}
-		// Naming the rank that produced the stored value matters as much as naming
-		// the ones that did not: an earlier version said "the value stored is
-		// rank 0's" unconditionally, which is FALSE whenever rank 0 omitted the
-		// metric or declared it unmeasurable — and it then sent an engineer to
-		// the one node that had nothing to do with the reading.
-		keptBy := -1
+		// HOW the value was reached, not merely which rank held it. Since #121 a
+		// combined key may hold a value NO rank reported — a Sum is nobody's
+		// reading — so naming a rank as its source would be false. The rule that
+		// produced it is the honest attribution, and for the keys that are still
+		// elected rather than computed the rank is still named.
+		if v, stored := kept[k]; stored {
+			switch c := contract.CombinationFor(k); c {
+			case contract.CombineSum, contract.CombineMax, contract.CombineMin:
+				// EVERY rank, not only the dissenters. A combined value may be
+				// one no rank reported, and for a Max the rank that set it is
+				// precisely the one worth naming — listing only the others would
+				// hide the hot node in a note about the hot node.
+				// The rank(s) holding the elected value FIRST, then the rest.
+				// Truncation cuts the tail, and on a Max the rank that set the
+				// value is the node an engineer has to go and look at — sorting
+				// the list plainly put "rank 10" ahead of "rank 2" and cut the
+				// hot one.
+				var lead, rest []string
+				for _, rv := range reported[k] {
+					entry := fmt.Sprintf("rank %d=%s", rv.rank, rv.value)
+					if rv.value == v {
+						lead = append(lead, entry)
+					} else {
+						rest = append(rest, entry)
+					}
+				}
+				sort.Strings(lead)
+				sort.Strings(rest)
+				all := append(lead, rest...)
+				if len(all) > groupMaxNamedRanks {
+					all = append(append([]string{}, all[:groupMaxNamedRanks]...),
+						fmt.Sprintf("and %d more", len(all)-groupMaxNamedRanks))
+				}
+				parts = append(parts, fmt.Sprintf("%s combined to %s by %s across %s",
+					k, v, c, strings.Join(all, ", ")))
+			default:
+				keptBy := -1
+				for _, rv := range reported[k] {
+					if rv.value == v && (keptBy < 0 || rv.rank < keptBy) {
+						keptBy = rv.rank
+					}
+				}
+				parts = append(parts, fmt.Sprintf("%s recorded as %s (rank %d) but %s",
+					k, v, keptBy, strings.Join(others, ", ")))
+			}
+			continue
+		}
+		// Dropped: no rule says how this metric combines across ranks, so no
+		// single value may stand for the group and a threshold on it fails closed.
+		// Terse on purpose: a status grows per attempt, and the reasoning behind
+		// each of these belongs in this file rather than in every stored record.
+		why := "no across-rank rule"
 		for _, rv := range reported[k] {
-			if rv.value == kept[k] && (keptBy < 0 || rv.rank < keptBy) {
-				keptBy = rv.rank
+			if rv.value == runner.Unmeasurable {
+				why = "a rank could not measure it"
+				break
 			}
 		}
-		parts = append(parts, fmt.Sprintf("%s recorded as %s (rank %d) but %s",
-			k, kept[k], keptBy, strings.Join(others, ", ")))
+		// The rank that could not measure it leads, for the same reason the hot
+		// rank leads above: it is the node this note exists to name, and the
+		// tail is what truncation takes.
+		var lead, rest []string
+		for _, rv := range reported[k] {
+			entry := fmt.Sprintf("rank %d=%s", rv.rank, rv.value)
+			if rv.value == runner.Unmeasurable {
+				lead = append(lead, entry)
+			} else {
+				rest = append(rest, entry)
+			}
+		}
+		sort.Strings(lead)
+		sort.Strings(rest)
+		shownRanks := append(lead, rest...)
+		if len(shownRanks) > groupMaxNamedRanks {
+			shownRanks = append(append([]string{}, shownRanks[:groupMaxNamedRanks]...),
+				fmt.Sprintf("and %d more", len(shownRanks)-groupMaxNamedRanks))
+		}
+		parts = append(parts, fmt.Sprintf("%s DROPPED as unmeasurable (%s; ranks reported %s)",
+			k, why, strings.Join(shownRanks, ", ")))
 	}
 	if elided := len(keys) - len(shown); elided > 0 {
 		parts = append(parts, fmt.Sprintf("and %d more metric(s)", elided))
 	}
-	return fmt.Sprintf("ranks DISAGREED about %d metric(s), and the value stored is the LOWEST "+
-		"reporting rank's: %s. A per-node reading cannot be attributed to a group — see issue #121",
+	return fmt.Sprintf("ranks DISAGREED about %d metric(s), combined by each metric's "+
+		"registered rule: %s. A per-node reading cannot be attributed to a group — see issue #121",
 		len(keys), strings.Join(parts, "; "))
 }
 
@@ -913,4 +1004,83 @@ func dedupeStrings(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// combineRanks elects the value that describes the group for one metric key,
+// from every rank that reported it.
+//
+// The second return is false when no single value can honestly stand for the
+// group, and the caller then drops the key and marks it unmeasurable.
+//
+// The lowest rank wins for a Collective metric because that is what collective
+// means: every rank measured the same quantity and rank 0 is its conventional
+// reporting rank. For Sum/Max/Min the direction comes from the registry, not
+// from this function guessing a polarity it cannot know — which was the reason
+// #121 could not be fixed by "take the worst value".
+func combineRanks(key string, vals []rankValue) (string, bool) {
+	if len(vals) == 0 {
+		return "", false
+	}
+	// A rank that declared the metric unmeasurable has not measured it, and a
+	// number elected past that declaration would certify the node that said it
+	// could not tell.
+	for _, rv := range vals {
+		if rv.value == runner.Unmeasurable {
+			return "", false
+		}
+	}
+
+	lowest := vals[0]
+	unanimous := true
+	for _, rv := range vals[1:] {
+		if rv.rank < lowest.rank {
+			lowest = rv
+		}
+		if rv.value != vals[0].value {
+			unanimous = false
+		}
+	}
+
+	switch contract.CombinationFor(key) {
+	case contract.CombineCollective:
+		return lowest.value, true
+	case contract.CombineSum, contract.CombineMax, contract.CombineMin:
+		return combineNumeric(contract.CombinationFor(key), vals)
+	default:
+		// Unclassified. Unanimity is not a decision about the metric, it is the
+		// absence of anything to decide.
+		if unanimous {
+			return lowest.value, true
+		}
+		return "", false
+	}
+}
+
+// combineNumeric applies a numeric Combination. A value that is not a number
+// cannot be summed or compared, and inventing an ordering for it would be the
+// same silent guess the classification exists to prevent.
+func combineNumeric(c contract.Combination, vals []rankValue) (string, bool) {
+	acc, err := strconv.ParseFloat(vals[0].value, 64)
+	if err != nil {
+		return "", false
+	}
+	for _, rv := range vals[1:] {
+		f, err := strconv.ParseFloat(rv.value, 64)
+		if err != nil {
+			return "", false
+		}
+		switch c {
+		case contract.CombineSum:
+			acc += f
+		case contract.CombineMax:
+			if f > acc {
+				acc = f
+			}
+		case contract.CombineMin:
+			if f < acc {
+				acc = f
+			}
+		}
+	}
+	return strconv.FormatFloat(acc, 'f', -1, 64), true
 }

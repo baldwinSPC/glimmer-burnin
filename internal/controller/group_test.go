@@ -821,15 +821,19 @@ func TestGroup_RankDisagreementIsRecorded(t *testing.T) {
 	out := combineGroup([]groupMember{mk(0, "70"), mk(1, "72"), mk(2, "95")},
 		nil, &burninv1alpha1.BurnInTestSpec{})
 
-	// The stored value is still rank 0's — the merge rule did not change.
-	if got := out.Metrics["gpuTempC"]; got != "70" {
-		t.Errorf("gpuTempC = %q, want rank 0's 70", got)
+	// The HOTTEST rank now defines the group. Rank 0's 70 standing for all three
+	// was the #121 defect: a `gpuTempC LessThanOrEqual 85` gate passed while
+	// rank 2 sat at 95, and all three nodes were certified on rank 0's evidence.
+	// gpuTempC is registered CombineMax, so the gate now fails, which is the
+	// whole point.
+	if got := out.Metrics["gpuTempC"]; got != "95" {
+		t.Errorf("gpuTempC = %q, want 95 — the hottest rank defines the group", got)
 	}
 	// But the fact that it was contested is now visible.
 	if !strings.Contains(out.Message, "DISAGREED") {
 		t.Errorf("the message does not record the disagreement: %q", out.Message)
 	}
-	for _, want := range []string{"gpuTempC", "rank 2=95", "#121"} {
+	for _, want := range []string{"gpuTempC", "Max", "#121"} {
 		if !strings.Contains(out.Message, want) {
 			t.Errorf("the message does not mention %q: %q", want, out.Message)
 		}
@@ -936,15 +940,23 @@ func TestGroup_DisagreementNamesTheRankThatProducedTheStoredValue(t *testing.T) 
 
 	out := combineGroup([]groupMember{root, warm, hot}, nil, &burninv1alpha1.BurnInTestSpec{})
 
-	if out.Metrics["gpuTempC"] != "72" {
-		t.Fatalf("gpuTempC = %q, want rank 1's 72 (the lowest rank that reported it)",
+	// gpuTempC is CombineMax, so the group takes the hottest rank — and rank 0,
+	// which never reported it, is credited with nothing.
+	if out.Metrics["gpuTempC"] != "95" {
+		t.Fatalf("gpuTempC = %q, want 95 (the hottest rank that reported it)",
 			out.Metrics["gpuTempC"])
 	}
 	if strings.Contains(out.Message, "rank 0's") {
 		t.Errorf("the note credits rank 0 for a value rank 0 never produced: %q", out.Message)
 	}
-	if !strings.Contains(out.Message, "(rank 1)") {
-		t.Errorf("the note does not name the rank that produced the stored value: %q", out.Message)
+	if strings.Contains(out.Message, "rank 0=") {
+		t.Errorf("rank 0 is listed as reporting gpuTempC, which it never did: %q", out.Message)
+	}
+	// Both reporting ranks are named, including the one that set the value.
+	for _, want := range []string{"rank 1=72", "rank 2=95"} {
+		if !strings.Contains(out.Message, want) {
+			t.Errorf("the note omits %q: %q", want, out.Message)
+		}
 	}
 }
 
@@ -1215,5 +1227,100 @@ func TestGroup_UndeclaredSkipSummaryIsClampedToo(t *testing.T) {
 		t.Errorf("an undeclared-skip summary is %d bytes against %d for the same message on the "+
 			"ordinary path — the branch most likely to carry a raw stack trace is the one not "+
 			"being clamped", undeclaredSkip, ordinary)
+	}
+}
+
+// The registry's across-rank rule decides the group's value, per metric.
+//
+// This is the half of #121 that could not be fixed by "take the worst value":
+// polarity is the metric's property, not something this operator can infer. The
+// registry states it, so each key combines in its own direction.
+func TestGroup_CombinationRuleDecidesTheGroupValue(t *testing.T) {
+	mk := func(rank int, m map[string]string) groupMember {
+		return groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictPass, Metrics: m,
+				Unmeasurable: map[string]bool{}}}
+	}
+	out := combineGroup([]groupMember{
+		mk(0, map[string]string{"gpuTempC": "70", "miscompares": "0", "busBandwidthGBs": "15.97", "elapsedS": "300"}),
+		mk(1, map[string]string{"gpuTempC": "95", "miscompares": "7", "busBandwidthGBs": "15.97", "elapsedS": "300"}),
+	}, nil, &burninv1alpha1.BurnInTestSpec{})
+
+	// Max: the hottest node defines the group, so a gpuTempC gate can fail.
+	if got := out.Metrics["gpuTempC"]; got != "95" {
+		t.Errorf("gpuTempC = %q, want 95 (CombineMax)", got)
+	}
+	// Sum: rank 1's seven miscompares are not hidden by rank 0's clean run.
+	if got := out.Metrics["miscompares"]; got != "7" {
+		t.Errorf("miscompares = %q, want 7 (CombineSum)", got)
+	}
+	// Collective: every rank measured the same quantity, so it stands as one.
+	if got := out.Metrics["busBandwidthGBs"]; got != "15.97" {
+		t.Errorf("busBandwidthGBs = %q, want 15.97 (CombineCollective)", got)
+	}
+	// Max, NOT Sum — which is exactly where Aggregation would have got it wrong:
+	// elapsedS aggregates Sum across windows, but two ranks running 300s took
+	// 300s, not 600s.
+	if got := out.Metrics["elapsedS"]; got != "300" {
+		t.Errorf("elapsedS = %q, want 300 — two ranks running 300s took 300s", got)
+	}
+}
+
+// An unclassified metric is kept while the ranks agree and dropped the moment
+// they do not. Unanimity is the absence of anything to decide, not a decision.
+func TestGroup_UnclassifiedMetricFailsClosedOnlyWhenContested(t *testing.T) {
+	mk := func(rank int, v string) groupMember {
+		return groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictPass,
+				Metrics:      map[string]string{"someVendorMetric": v},
+				Unmeasurable: map[string]bool{}}}
+	}
+	agreed := combineGroup([]groupMember{mk(0, "5"), mk(1, "5")}, nil, &burninv1alpha1.BurnInTestSpec{})
+	if got := agreed.Metrics["someVendorMetric"]; got != "5" {
+		t.Errorf("an unanimous unclassified metric was dropped: %q", got)
+	}
+	if agreed.Unmeasurable["someVendorMetric"] {
+		t.Error("an unanimous unclassified metric was marked unmeasurable")
+	}
+
+	split := combineGroup([]groupMember{mk(0, "5"), mk(1, "9")}, nil, &burninv1alpha1.BurnInTestSpec{})
+	if v, ok := split.Metrics["someVendorMetric"]; ok {
+		t.Errorf("someVendorMetric = %q; a contested key with no rule must not stand for the group", v)
+	}
+	if !split.Unmeasurable["someVendorMetric"] {
+		t.Error("a dropped key must be marked unmeasurable so a threshold fails closed")
+	}
+	if !strings.Contains(split.Message, "DROPPED") {
+		t.Errorf("the drop is not recorded: %q", split.Message)
+	}
+}
+
+// A rank declaring the metric unmeasurable stops the election outright, even for
+// a classified metric — the worked example in CLAUDE.md, where ranks 0 and 1
+// report eccErrors=0 and a GB10 at rank 2 correctly reports n/a. Summing past
+// that declaration certifies the node that said it could not tell.
+func TestGroup_AnUnmeasurableRankStopsTheElection(t *testing.T) {
+	ok := func(rank int) groupMember {
+		return groupMember{rank: rank, node: fmt.Sprintf("spark-%d", rank),
+			result: &runner.Result{Verdict: runner.VerdictPass,
+				Metrics:      map[string]string{"eccErrors": "0"},
+				Unmeasurable: map[string]bool{}}}
+	}
+	blind := groupMember{rank: 2, node: "spark-2",
+		result: &runner.Result{Verdict: runner.VerdictPass,
+			Metrics:      map[string]string{},
+			Unmeasurable: map[string]bool{"eccErrors": true}}}
+
+	out := combineGroup([]groupMember{ok(0), ok(1), blind}, nil, &burninv1alpha1.BurnInTestSpec{})
+
+	if v, stored := out.Metrics["eccErrors"]; stored {
+		t.Errorf("eccErrors = %q; an `eccErrors Equal 0` gate would pass and certify "+
+			"rank 2, whose gate never ran", v)
+	}
+	if !out.Unmeasurable["eccErrors"] {
+		t.Error("eccErrors must be unmeasurable so the gate fails closed")
+	}
+	if !strings.Contains(out.Message, "rank 2=n/a") {
+		t.Errorf("the note does not name the rank that could not measure it: %q", out.Message)
 	}
 }
