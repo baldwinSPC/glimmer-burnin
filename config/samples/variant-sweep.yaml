@@ -72,11 +72,21 @@ spec:
   # repeated correctness trials and a stable TFLOP/s figure. It is NOT a
   # thermal soak — thermal-soak and gpu-burn own sustained load.
   durationSeconds: 60
-  runner:
-    image: ghcr.io/baldwinspc/glimmer-burnin-gemm-sweep:REPLACE-ME
+  # No spec.runner.image: gemm-sweep has a pinned default since #350. It was
+  # REPLACE-ME here for as long as the kind had no published tag, which made the
+  # flagship demonstration of the variants feature the one sample nobody could
+  # apply.
+  #
   # No thresholds. Every number in this repo is measured, never taken from a
-  # spec sheet; no measured baselines exist yet for these precisions on any SKU
-  # in the fleet. When they do, remember thresholds are PER VARIANT: an FP4
+  # spec sheet. Baselines now EXIST for these five precisions on GB10 — measured
+  # 2026-08-17 through this very profile, both nodes:
+  #
+  #   fp4 94.87 / 90.13   fp8 69.59 / 68.25   bf16 46.91 / 46.25
+  #   tf32 29.41 / 29.31  fp64 0.321 / 0.321      (Tflops, 043a / 85a9)
+  #
+  # They are recorded on #353 and deliberately NOT pinned here. Two nodes cannot
+  # separate part-to-part variation from run-to-run variation, and fp4 already
+  # spreads 5% between them — a floor taken from the faster node fails the other. When they do, remember thresholds are PER VARIANT: an FP4
   # throughput floor and an FP64 throughput floor are different numbers about
   # different silicon, and a variant that sets `thresholds` REPLACES the
   # parent's list entirely.

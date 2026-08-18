@@ -195,6 +195,13 @@ var defaults = map[contract.TestKind]image{
 	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.4", Vendor: VendorNVIDIA},
 	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
+	// gemm-sweep joins the table because its gate is met twice over: the five
+	// captures #265 took, and a run through the OPERATOR on 2026-08-17 where all
+	// five precisions passed on both nodes as variant cells. Until now the
+	// flagship demonstration of the variants feature — variant-sweep.yaml —
+	// pointed at REPLACE-ME.
+	contract.KindGemmSweep: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gemm-sweep:v0.6.4", Vendor: VendorNVIDIA},
+
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
 }
@@ -236,7 +243,7 @@ func All() map[contract.TestKind]string {
 // KindCustom exists so a user can point any image at the runner contract;
 // inventing a default for it would defeat the point.
 //
-// KindTCPBaseline, KindDiskIO, KindFingerprintProbe and KindGemmSweep have
+// KindTCPBaseline, KindDiskIO, KindFingerprintProbe and KindFabricSoak have
 // runner source in this repo but NO PUBLISHED IMAGE yet.
 // Publishing is manual and hardware-gated by policy, and a default pointing at
 // a tag that does not exist is worse than no default at all: it turns a
@@ -247,7 +254,6 @@ func WithoutDefault() []contract.TestKind {
 	return []contract.TestKind{
 		contract.KindCustom, contract.KindTCPBaseline, contract.KindDiskIO, contract.KindFingerprintProbe,
 		contract.KindFabricSoak,
-		contract.KindGemmSweep,
 	}
 }
 
