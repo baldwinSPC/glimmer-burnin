@@ -2,6 +2,7 @@ package envtest
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -295,6 +296,102 @@ func TestDeletingARunReleasesEveryCordonItHeld(t *testing.T) {
 	assertNoOperatorAnnotations(t, node)
 }
 
+// TestAHeldNodeDeclaresTheHeatAndStopsWhenReleased is issue #280 against a real
+// apiserver.
+//
+// The Glimmer agent's thermal watchdog drains a node whose part passes its trip
+// point, and a soak drives the part past that point on purpose — so every soak
+// on this fleet was drained by the safety system and its runner pods killed with
+// SIGKILL, which read back as `Error — hardware unjudged`. The operator's half
+// of the fix is to say on the node that the heat is deliberate.
+//
+// It is asserted HERE as well as in the unit tests because the declaration is
+// read by a DIFFERENT PROGRAM off a real Node object. What the fake client
+// cannot say anything about is whether the value the operator writes survives a
+// round trip through the apiserver intact — and a value the agent cannot parse
+// is a value the agent refuses, which restores the exact bug being fixed.
+func TestAHeldNodeDeclaresTheHeatAndStopsWhenReleased(t *testing.T) {
+	ns := newNamespace(t)
+	node := nodeName(t, "declared")
+	newNode(t, node)
+
+	// A kind that HOLDS a load, because that is the only kind the declaration is
+	// written for — a burst or a passive read heats nothing and claims nothing.
+	create(t,
+		customTest(ns, "soak", func(bt *burninv1alpha1.BurnInTest) {
+			bt.Spec.Kind = burninv1alpha1.KindThermalSoak
+			bt.Spec.Runner = nil
+			bt.Spec.DurationSeconds = 600
+		}),
+		profile(ns, "acceptance", nil, burninv1alpha1.ProfileTest{TestRef: "soak"}),
+		runFor(ns, "run", "acceptance", []string{node}, nil),
+	)
+
+	d := newDriver(t, ns)
+	// A pod that never finishes, so the node is still under load — and still
+	// owed a declaration — while it is inspected.
+	d.script("", script{linger: true})
+	d.reconcilerOver(admin)
+
+	for i := 0; i < 10 && !getNode(t, node).Spec.Unschedulable; i++ {
+		if _, err := d.reconcile("run"); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+		d.playKubelet("run")
+	}
+	if !getNode(t, node).Spec.Unschedulable {
+		t.Fatal("the run never cordoned its target, so no declaration is owed")
+	}
+
+	run := getRun(t, ns, "run")
+	held := getNode(t, node)
+	raw, present := held.Annotations[burninv1alpha1.AnnotationHeatExpected]
+	if !present {
+		t.Fatalf("node %s is under a burn-in and declares no heat — the watchdog reads the soak as a "+
+			"cooling failure, drains the node and kills the runner", node)
+	}
+
+	// Parsed the way the agent must: four fields, the owning run, and an expiry
+	// that has not passed.
+	parts := strings.Split(raw, "/")
+	if len(parts) != 4 {
+		t.Fatalf("declaration %q is not <namespace>/<name>/<uid>/<expiry>", raw)
+	}
+	if got, want := strings.Join(parts[:3], "/"), ns+"/run/"+string(run.UID); got != want {
+		t.Errorf("declaration names %q, want %q — a reader cannot tell which run is producing the heat", got, want)
+	}
+	expiry, err := time.Parse(time.RFC3339, parts[3])
+	if err != nil {
+		t.Fatalf("declaration expiry %q is not RFC3339: %v — the agent refuses what it cannot parse, "+
+			"which is the drain this change exists to stop", parts[3], err)
+	}
+	if !expiry.After(time.Now()) {
+		t.Errorf("declaration expired at %s while the run is still loading the node", expiry)
+	}
+
+	if err := admin.Delete(context.Background(), getRun(t, ns, "run")); err != nil {
+		t.Fatalf("delete run: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := d.reconcile("run"); err != nil {
+			t.Fatalf("post-delete reconcile %d: %v", i, err)
+		}
+		var gone burninv1alpha1.BurnInRun
+		if apierrors.IsNotFound(admin.Get(context.Background(),
+			types.NamespacedName{Namespace: ns, Name: "run"}, &gone)) {
+			break
+		}
+	}
+
+	// assertNoOperatorAnnotations covers the declaration; the node also has to
+	// be back in the scheduler, because a node returned to service still
+	// declaring heat is the worse of the two half-released states.
+	if getNode(t, node).Spec.Unschedulable {
+		t.Errorf("node %s is still cordoned after its run was deleted", node)
+	}
+	assertNoOperatorAnnotations(t, node)
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 func countCordoned(t *testing.T, names ...string) int {
@@ -363,6 +460,11 @@ func assertNoOperatorAnnotations(t *testing.T, name string) {
 	for _, key := range []string{
 		burninv1alpha1.AnnotationCordonOwner,
 		burninv1alpha1.AnnotationPriorUnschedulable,
+		// The heat declaration is released with the cordon, in the same update.
+		// A node back in the scheduler still declaring heat is one the agent's
+		// thermal watchdog has been told to stand down for while ordinary
+		// workload lands on it.
+		burninv1alpha1.AnnotationHeatExpected,
 	} {
 		if v, ok := node.Annotations[key]; ok {
 			t.Errorf("node %s still carries %s=%q — an ownership stamp with no owner misleads the next run",

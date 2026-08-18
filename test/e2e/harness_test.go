@@ -364,6 +364,10 @@ func assertNoStrandedCordon(t *testing.T, ns, runName string, nodes ...string) {
 			for _, key := range []string{
 				burninv1alpha1.AnnotationCordonOwner,
 				burninv1alpha1.AnnotationPriorUnschedulable,
+				// Released with the cordon, in the same update: a node back in
+				// the scheduler still declaring heat has had its thermal
+				// watchdog told to stand down while ordinary workload lands.
+				burninv1alpha1.AnnotationHeatExpected,
 			} {
 				if v, ok := node.Annotations[key]; ok {
 					return fmt.Errorf("node %s still carries %s=%q — an ownership stamp with no owner "+

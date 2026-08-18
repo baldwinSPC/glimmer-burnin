@@ -311,6 +311,64 @@ func (k TestKind) BurstOnly() bool {
 	return k == KindComputeSmoke || k == KindFingerprintProbe
 }
 
+// sustainedLoadKinds are the kinds whose runner deliberately HOLDS a load for
+// the length of its window, rather than measuring something and stopping.
+//
+// ADD A NEW KIND HERE, or to the list in the test, when you add its constant
+// above. TestEveryKindDeclaresWhetherItHoldsLoad fails otherwise, because
+// forgetting is the failure mode that matters: a new soak kind that nobody
+// classified is a soak that gets drained.
+var sustainedLoadKinds = map[TestKind]bool{
+	// The shared duration-honouring load wrapper (runners/*/soak_core.cuh).
+	KindThermalSoak: true,
+	KindGPUBurn:     true,
+
+	// Holds a known, steady, clock-bound load for its whole window — that is
+	// how it judges sustained clocks at all. Short, but short is not cool: on a
+	// chassis that has already heat-soaked it reaches the trip point too.
+	KindClockProbe: true,
+
+	// The same RDMA measurement ib-write-bw takes, iterated over HOURS, and it
+	// exists specifically to find the parts that fail once they are warm.
+	KindFabricSoak: true,
+
+	// stressapptest for the whole window. Host RAM rather than the
+	// accelerator — which matters here rather than exempting it, because the
+	// watchdog reading this declaration judges the host CPU package too.
+	KindMemoryStress: true,
+
+	// Levels 3 and 4 run DCGM's targeted_stress and sm_stress plugins for
+	// ~15 minutes, and the level is a runner env var. Whether THIS execution
+	// drives load is therefore not a property of the kind — so it is declared
+	// by its worst case, because the operator must not read a runner's
+	// environment to decide what a kind is.
+	KindDCGMDiag: true,
+}
+
+// DrivesSustainedLoad reports whether this kind's runner holds the part under
+// deliberate load for its window, rather than taking a measurement and stopping.
+//
+// It exists for ONE consumer: the heat declaration the operator writes on a node
+// it is loading (AnnotationHeatExpected), which tells a node-local thermal
+// watchdog that a trip here is the test working rather than the cooling failing.
+// It is a statement about what the RUNNER does, and it belongs beside BurstOnly
+// for the same reason that one does — the fact is the kind's, and a controller
+// deciding it from a name would go stale the moment a runner changed.
+//
+// It is not the inverse of BurstOnly. host-health honours a duration and applies
+// no load at all; memory-bw and gemm-sweep take measurements that end when the
+// measurement ends; nccl, ib-write-bw, gpudirect-rdma and tcp-baseline are short
+// fabric measurements, and fabric-soak is the one that iterates for hours.
+//
+// KindCustom answers FALSE, and an unrecognised kind with it. The whole point of
+// custom is an image this project knows nothing about, and this answer would
+// suppress a safety action on somebody else's behalf — which is a worse guess to
+// get wrong than BurstOnly's. A site running a custom soak asserts the hold on
+// the node itself instead.
+func (k TestKind) DrivesSustainedLoad() bool {
+	return sustainedLoadKinds[k]
+}
+
 // Comparison is the operator applied by a Threshold. Metric and value are both
 // parsed as float64 and compared with NO TOLERANCE — there is no epsilon
 // anywhere in this API, and that is what makes each operator right for exactly

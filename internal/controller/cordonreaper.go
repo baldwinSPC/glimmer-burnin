@@ -109,13 +109,26 @@ func reapOrphanedCordon(
 	// it. A node an administrator had already drained stays drained.
 	prior := node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] == burninv1alpha1.PriorUnschedulableTrue
 
-	// One update carries the restored schedulability AND the removal of both
-	// annotations, exactly as releaseCordons does. Splitting them would leave a
-	// window in which the node is cordoned and unstamped, which is the one state
-	// nothing in this system can recover from.
+	// One update carries the restored schedulability AND the removal of all
+	// three annotations, exactly as releaseCordons does. Splitting them would
+	// leave a window in which the node is cordoned and unstamped, which is the
+	// one state nothing in this system can recover from.
+	//
+	// The heat declaration goes with them, under the same UID check: the run
+	// that made it is the run just proved absent, so it will never be back to
+	// take it off, and a node returned to the scheduler still declaring heat is
+	// a node the thermal watchdog has been told to ignore while ordinary
+	// workload lands on it.
+	//
+	// A declaration with no cordon stamp beside it is not reached here at all —
+	// the stamp is what this function keys on. That pair can only come apart by
+	// an out-of-band edit, and the expiry is what covers it: an abandoned
+	// marker stops being honoured on its own, which is the property it carries
+	// an expiry for.
 	node.Spec.Unschedulable = prior
 	delete(node.Annotations, burninv1alpha1.AnnotationCordonOwner)
 	delete(node.Annotations, burninv1alpha1.AnnotationPriorUnschedulable)
+	dropHeatExpected(ctx, node, owner.uid)
 	if updErr := c.Update(ctx, node); updErr != nil {
 		if apierrors.IsNotFound(updErr) {
 			return false, nil
