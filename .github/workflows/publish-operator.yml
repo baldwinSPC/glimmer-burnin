@@ -225,6 +225,17 @@ jobs:
             echo "::error::could not locate the entrypoint binary (${entry:-none}) inside ${REF}. NOT a verdict about the image."
             exit 1
           fi
+          # Checked rather than echoed. The manager is always a Go binary, so
+          # this is not the C++/CUDA case publish-runner has to handle (#386) —
+          # but inside $( ) the failure is swallowed, the line prints "built
+          # with:" and nothing, and the real complaint arrives from govulncheck
+          # as "unrecognized binary format" several lines later. If the
+          # entrypoint ever stops being a Go binary, say so here where it is
+          # legible, and say it is not a verdict about the image.
+          if ! go version -m "${workdir}${entry}" >/dev/null 2>&1; then
+            echo "::error::${entry} in ${REF} is not a Go binary, so there is no Go build info to read. The operator is always Go, so this means the image or this step is wrong — NOT that the image ships vulnerable code."
+            exit 1
+          fi
           echo "${entry} was built with: $(go version -m "${workdir}${entry}" | head -1 | awk '{print $2}')"
 
           if go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -mode=binary "${workdir}${entry}"; then
