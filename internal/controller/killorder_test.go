@@ -198,26 +198,117 @@ func TestKillOrder_TheRetryBudgetIsChargedForAnOverduePod(t *testing.T) {
 	}
 }
 
-// The six remaining paths are NOT covered here, and this note is the honest
-// half of #372 Gap B.
+// The FOUR remaining paths are not covered here — three Group, and the Pair
+// lingering-server case — and this note is the honest half of #372 Gap B.
 //
-// I wrote the Pair ready-gate one. It SKIPPED — the harness never reaches that
-// timeout — and a test that skips itself is the same trap as one that passes
-// vacuously: the suite reports green and the path is untested. CLAUDE.md
-// already says a suite that silently skips is worse than no suite.
+// An earlier version of this note said the harness could not drive a rendezvous
+// to its timeout, and used a SKIPPING Pair test as the evidence. That was
+// wrong, and the two Pair tests below are the correction: both condemn sites go
+// through podOverdue exactly like the Node one, so what was missing was
+// backdate() rather than a harness capability. I read a skip as a limitation
+// instead of checking what the code gates on. Recorded because the failure mode
+// — a test that skips itself and is then believed — is the one this file is
+// otherwise about.
 //
 // Still owed, each able to regress independently:
 //
-//	server ready-gate timeout        Pair
-//	client timeout                   Pair
-//	lingering server after client    Pair
-//	root timeout                     Group
-//	hung collective                  Group
-//	root exited before its workers   Group
+//	lingering server after client exit   Pair
+//	root timeout                         Group
+//	hung collective                      Group
+//	root exited before its workers       Group
 //
-// What stands in the way is setup rather than the assertion: killOrderWatcher
-// above works for any of them, but the harness has no way to drive a Pair or
-// Group execution to its timeout — the rendezvous needs a Ready server, and
-// making one Ready then stalling the other side is not something these helpers
-// express yet. That is the work, and it is worth doing: the assertion is three
-// lines once a path can be reached.
+// killOrderWatcher works unchanged for all four. What Group needs is a harness
+// that can create N ranks and make rank 0 Ready, which pairPod's two-role shape
+// does not express.
+// ─── Pair scope ───────────────────────────────────────────────────────────────
+//
+// CORRECTION to the note above, which claimed the harness could not drive a
+// rendezvous to its timeout. It can. Both Pair condemn sites go through
+// podOverdue, exactly like the Node one, so what was missing was backdate() and
+// not a harness capability. The earlier Pair attempt skipped because it never
+// backdated the pods, and I read the skip as a limitation rather than checking
+// what the code actually gates on.
+
+// TestKillOrder_APairServerThatNeverBecameReadyIsRecordedBeforeItIsDestroyed.
+//
+// The ready-gate timeout: the server started but never reported Ready, so the
+// client was never created and the link was never measured. The Error saying so
+// is about the LINK, and it has to be durable before the server pod goes.
+func TestKillOrder_APairServerThatNeverBecameReadyIsRecordedBeforeItIsDestroyed(t *testing.T) {
+	w := &killOrderWatcher{}
+	h := newHarnessWithInterceptor(t, func(inner client.Client) interceptor.Funcs { return w.funcs(inner) },
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		pairTest("link"),
+		profile("acceptance", nil, false, testRef("link")),
+		withNodeCap(newRun("run1", "acceptance", "spark-a", "spark-b"), 2),
+	)
+
+	h.reconcile("run1")
+	h.reconcile("run1")
+	server := h.pairPod("run1", pairRoleServer)
+	if server == nil {
+		t.Fatal("setup: no server pod was created")
+	}
+	// STARTED but never READY — that is the gate under test. A server whose
+	// container is up has not necessarily bound its socket.
+	h.startPod(server)
+	backdate(t, h, server, h.nowVal)
+
+	h.nowVal = h.nowVal.Add(24 * time.Hour)
+	for i := 0; i < 5; i++ {
+		h.reconcile("run1")
+	}
+
+	if w.deletes == 0 {
+		t.Fatal("no pod was deleted, so the ready-gate timeout never fired and this proved nothing")
+	}
+	for _, v := range w.violations {
+		t.Errorf("issue #247 on the Pair ready-gate path: %s", v)
+	}
+}
+
+// TestKillOrder_APairClientTimeoutRecordsBeforeTakingDownBothEnds.
+//
+// The client timeout takes its PEER down with it, because a pair is one unit —
+// which is the case the durability rule matters most for. Losing the record
+// restarts the whole unit and destroys a server that was measuring fine.
+func TestKillOrder_APairClientTimeoutRecordsBeforeTakingDownBothEnds(t *testing.T) {
+	w := &killOrderWatcher{}
+	h := newHarnessWithInterceptor(t, func(inner client.Client) interceptor.Funcs { return w.funcs(inner) },
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		pairTest("link"),
+		profile("acceptance", nil, false, testRef("link")),
+		withNodeCap(newRun("run1", "acceptance", "spark-a", "spark-b"), 2),
+	)
+
+	h.reconcile("run1")
+	h.reconcile("run1")
+	server := h.pairPod("run1", pairRoleServer)
+	if server == nil {
+		t.Fatal("setup: no server pod was created")
+	}
+	// Ready this time, so the client is actually created.
+	h.readyPod(server)
+	h.reconcile("run1")
+
+	client := h.pairPod("run1", pairRoleClient)
+	if client == nil {
+		t.Fatal("setup: the client was never created, so the client-timeout path is unreachable")
+	}
+	h.startPod(client)
+	backdate(t, h, server, h.nowVal)
+	backdate(t, h, client, h.nowVal)
+
+	h.nowVal = h.nowVal.Add(24 * time.Hour)
+	for i := 0; i < 5; i++ {
+		h.reconcile("run1")
+	}
+
+	if w.deletes < 2 {
+		t.Fatalf("deletes = %d, want both ends destroyed: a client timeout takes its peer "+
+			"down with it, because a pair is one unit", w.deletes)
+	}
+	for _, v := range w.violations {
+		t.Errorf("issue #247 on the Pair client-timeout path: %s", v)
+	}
+}
