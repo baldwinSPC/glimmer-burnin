@@ -126,6 +126,35 @@ spec:
   kind: dcgm-diag
   scope: Node
   durationSeconds: 600
+  # THIS IMAGE SHIPS NO DCGM, so without these mounts the test cannot judge
+  # anything: the runner exits 3 with "the DCGM client (\"dcgmi\") is not
+  # executable on PATH, so this node is unjudged". That is correct behaviour and
+  # it is also a wasted burn-in slot, and this sample used to produce it on the
+  # very fleet it was written for (#349).
+  #
+  # NVIDIA's DCGM binaries carry a licence that grants installation and use but
+  # no right to redistribute, so the site supplies the tree and the test points
+  # at it. /opt/dcgm-runtime is where the Spark fleet keeps it; change the two
+  # `path:` values to wherever yours lives.
+  #
+  # Both mounts are needed. The second is not a convenience: DCGM 4 looks for
+  # its diagnostic plugins under an ABSOLUTE /usr/libexec/datacenter-gpu-manager-4,
+  # so mounting only the first gives a dcgmi that starts and then finds no
+  # plugins to run.
+  runner:
+    hostPaths:
+      - path: /opt/dcgm-runtime
+        mountPath: /usr/local/dcgm
+        # The image's PATH and LD_LIBRARY_PATH already lead here, so nothing
+        # else needs configuring — lay the tree out as bin/ and lib/.
+        readOnly: true
+        # Assert-only: the kubelet will not create it. A node without DCGM
+        # should fail and say so, not have an empty directory invented for it.
+        type: Directory
+      - path: /opt/dcgm-runtime/libexec
+        mountPath: /usr/libexec/datacenter-gpu-manager-4
+        readOnly: true
+        type: Directory
   thresholds:
     - metric: diagTestsFailed
       comparison: Equal
