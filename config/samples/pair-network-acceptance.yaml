@@ -53,6 +53,42 @@
 # by-path differ. Declaring the mount is still worth doing: it documents intent
 # and survives a future tightening of the privileged path.
 #
+# BUT THE MOUNT IS NOT A SUBSTITUTE FOR `privileged`, and this sample used to
+# set neither. The sentence above is about what a PRIVILEGED pod sees; it says
+# nothing about an unprivileged one, and an unprivileged one cannot open these
+# devices at all. `/dev/infiniband/uverbs*` are CHARACTER DEVICES, and a
+# Kubernetes hostPath volume grants visibility, never a device-cgroup rule —
+# the same finding as #302 for /dev/kmsg, on a different device. Measured on
+# these nodes 2026-08-17, applying this sample unmodified:
+#
+#   IB_WRITE_BW_ERROR: bw phase: ib_write_bw did not begin listening on 18515
+#   (output: Couldn't get context for the device)
+#
+# So both are required and neither alone is sufficient: the mount to see the
+# nodes, `privileged` to open them.
+#
+# ─── AND WHY hostNetwork IS REQUIRED, WHICH IS LESS OBVIOUS ───────────────────
+#
+# rdma.go picks the RDMA device from THE ROUTE TO THE PEER, deliberately,
+# because the same cable lands on roceP2p1s0f1 at one end and roceP2p1s0f0 at
+# the other — port numbering is not symmetric across a link, so a hard-coded
+# device measures the right link from one node and a dead port from the other.
+#
+# That question can only be answered in the HOST network namespace. Inside a
+# pod, the route to the peer is the CNI veth, which is not a fabric interface;
+# selectPort finds no answer, falls back, and both ends pick their first RDMA
+# device — which on a fleet cabled like this one are two ports on DIFFERENT
+# links. The queue pair then cannot reach RTR and the symptom is
+# indistinguishable from a bad link:
+#
+#   Failed to modify QP 475 to RTR / Unable to Connect the HCA's through the link
+#
+# With `hostNetwork: true` and `privileged: true` the same two nodes measured
+# 99.63 Gbps at 1.58 us, and nccl 11.63 GB/s Pair / 11.97 GB/s Group. Neither
+# field is a preference; both are preconditions for what these runners do.
+# fabric-soak.yaml and tcp-baseline.yaml already set hostNetwork — this sample
+# was the odd one out. See #381.
+#
 # THE ACTUAL BLOCKER WAS `RLIMIT_MEMLOCK`, and it is worth understanding because
 # it will bite any RDMA workload on this cluster, not just burn-in.
 #
@@ -88,7 +124,13 @@ spec:
   kind: ib-write-bw
   scope: Pair
   durationSeconds: 60
+  # Required, not preferred: rdma.go selects its device from the route to the
+  # peer, and that route is only answerable in the host netns. See the header.
+  hostNetwork: true
   runner:
+    # Required to OPEN the uverbs character devices; the mount only makes them
+    # visible. See the header.
+    privileged: true
     # No image on purpose — see the header. This block exists for the mount.
     #
     # The mount is applied to BOTH pods of the pair, server and client alike: a
@@ -130,11 +172,13 @@ spec:
   kind: nccl
   scope: Pair
   durationSeconds: 120
+  hostNetwork: true
   resources:
     limits:
       nvidia.com/gpu: "1"
       rdma/rdma_shared_device_a: "1"
   runner:
+    privileged: true
     # Same mount, same reason: NCCL's net_ib plugin goes through the verbs
     # layer, so without uverbs* it fails to create its resources exactly as
     # ib_write_bw does — and an RDMA plugin that cannot initialise falls back to
