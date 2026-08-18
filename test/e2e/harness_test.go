@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,9 +40,10 @@ const (
 var runnerImage = envOr("E2E_RUNNER_IMAGE", "busybox:1.37.0")
 
 var (
-	k8s    client.Client
-	scheme *runtime.Scheme
-	uniq   atomic.Int64
+	k8s       client.Client
+	clientset *kubernetes.Clientset
+	scheme    *runtime.Scheme
+	uniq      atomic.Int64
 )
 
 func TestMain(m *testing.M) {
@@ -60,6 +63,13 @@ func TestMain(m *testing.M) {
 	k8s, err = client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		fatal("build client: %v", err)
+	}
+	// A typed clientset alongside the controller-runtime client, for ONE thing
+	// it cannot do: read a pod's log. That is the evidence a failing Group
+	// rendezvous leaves behind and nothing was capturing it (#385).
+	clientset, err = kubernetes.NewForConfig(cfg)
+	if err != nil {
+		fatal("build clientset: %v", err)
 	}
 	os.Exit(m.Run())
 }
@@ -114,6 +124,18 @@ func newNamespace(t *testing.T) string {
 		// Not waited on: a wedged namespace must not mask the assertion that
 		// already ran.
 		_ = k8s.Delete(context.Background(), ns)
+	})
+	// Registered AFTER the delete, and therefore runs BEFORE it: t.Cleanup is
+	// LIFO. That ordering is the whole point — the namespace teardown reaps the
+	// pods, so a dump that ran afterwards would find nothing.
+	//
+	// Only on failure. A green run's logs are noise, and CI output that is
+	// mostly noise is output nobody reads.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		dumpNamespace(t, name)
 	})
 	return name
 }
@@ -462,4 +484,96 @@ func (w *cordonWatcher) finish() {
 func (w *cordonWatcher) sawCordon(node string) bool {
 	w.finish()
 	return w.saw[node]
+}
+
+// dumpNamespace prints what a failing run left behind: every BurnInRun's status
+// and every pod's phase, termination state and log.
+//
+// It exists because a Group rendezvous that hangs is undiagnosable from the
+// assertion alone. "1 of 3 rank(s) did not report (rank 0 never finished)" does
+// not say whether the workers reached the root and it miscounted, or whether a
+// worker never got in — and those are different bugs with different fixes. The
+// root's last `rank joined (N of 2)` line and each worker's own verdict pick
+// between them, and both live in logs the teardown was destroying (#385).
+//
+// Every failure is best-effort and reported rather than fatal: this runs when
+// the test has ALREADY failed, and a diagnostic that panics replaces the real
+// assertion with its own.
+func dumpNamespace(t *testing.T, ns string) {
+	t.Helper()
+	ctx := context.Background()
+
+	var runs burninv1alpha1.BurnInRunList
+	if err := k8s.List(ctx, &runs, client.InNamespace(ns)); err != nil {
+		t.Logf("DIAG: list runs in %s: %v", ns, err)
+	}
+	for i := range runs.Items {
+		r := &runs.Items[i]
+		t.Logf("DIAG run %s: phase=%s passed=%d failed=%d",
+			r.Name, r.Status.Phase, r.Status.Passed, r.Status.Failed)
+		for _, res := range r.Status.Results {
+			t.Logf("DIAG   result %s scope=%s nodes=%v phase=%s: %s",
+				res.Name, res.Scope, res.Nodes, res.Phase, res.Message)
+		}
+	}
+
+	var pods corev1.PodList
+	if err := k8s.List(ctx, &pods, client.InNamespace(ns)); err != nil {
+		t.Logf("DIAG: list pods in %s: %v", ns, err)
+		return
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		t.Logf("DIAG pod %s: phase=%s node=%s", p.Name, p.Status.Phase, p.Spec.NodeName)
+		for _, cs := range p.Status.ContainerStatuses {
+			switch {
+			case cs.State.Terminated != nil:
+				tm := cs.State.Terminated
+				t.Logf("DIAG   container %s terminated: exit=%d reason=%s %s",
+					cs.Name, tm.ExitCode, tm.Reason, tm.Message)
+			case cs.State.Waiting != nil:
+				t.Logf("DIAG   container %s waiting: reason=%s %s",
+					cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message)
+			default:
+				t.Logf("DIAG   container %s running, ready=%t", cs.Name, cs.Ready)
+			}
+		}
+		t.Logf("DIAG   log for %s:\n%s", p.Name, indentLines(podLog(ctx, ns, p.Name)))
+	}
+}
+
+// maxDiagLogBytes bounds ONE pod's log in the dump. A rank that spun in a retry
+// loop for its whole window prints thousands of identical lines, and burying the
+// one line that differs is the same failure as capturing nothing.
+const maxDiagLogBytes = 4096
+
+func podLog(ctx context.Context, ns, pod string) string {
+	if clientset == nil {
+		return "(no clientset)"
+	}
+	tail := int64(80)
+	rc, err := clientset.CoreV1().Pods(ns).
+		GetLogs(pod, &corev1.PodLogOptions{TailLines: &tail}).Stream(ctx)
+	if err != nil {
+		// A pod that never started has no log, and saying so is more useful than
+		// an empty block that reads like a runner which printed nothing.
+		return fmt.Sprintf("(unavailable: %v)", err)
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(io.LimitReader(rc, maxDiagLogBytes))
+	if err != nil {
+		return fmt.Sprintf("(read failed after %d bytes: %v)", len(b), err)
+	}
+	s := string(b)
+	if len(b) == maxDiagLogBytes {
+		s += "\n(truncated)"
+	}
+	if strings.TrimSpace(s) == "" {
+		return "(empty)"
+	}
+	return s
+}
+
+func indentLines(s string) string {
+	return "      " + strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", "\n      ")
 }
