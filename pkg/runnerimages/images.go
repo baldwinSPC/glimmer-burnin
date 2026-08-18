@@ -63,37 +63,61 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// Eight images are v0.6.0, two are v0.6.2 and one is v0.6.3, all published to
-// GHCR, public, and anonymously pullable. The split is not drift: see the three
-// numbered reasons on the table below, which is where it is decided.
+// Five images are v0.6.0, one is v0.6.2, one is v0.6.3 and four are v0.6.4, all
+// published to GHCR, public, and anonymously pullable. The spread is not drift:
+// see the numbered reasons on the table below, which is where it is decided.
 //
-// v0.6.0 IS THE FIRST RELEASE WHERE SOME OF THESE RAN ON REAL SILICON BEFORE
-// PUBLICATION — the rule below ("publish only after the kernel has been verified
-// on real hardware") is now partly satisfied rather than knowingly broken, and
-// the split is recorded here rather than left for a reader to assume.
+// EVERY ONE OF THESE HAS NOW RUN ON REAL SILICON. That sentence was not true
+// until 2026-08-17, and the list of exceptions this comment used to carry is
+// gone rather than shortened. A full-fleet pass on a two-node DGX Spark (GB10,
+// CC 12.1, driver 580.82.09, operator v0.6.3) executed all sixteen built-in
+// kinds. What each runner actually established:
 //
-// Verified on a two-node DGX Spark (GB10, CC 12.1, driver 580.82.09) against
-// THESE sources before the tag:
+//	compute-smoke   FP4_GEMM_PASS, 104 TFLOPS — the sm_121a path executed and
+//	                got the right answer, which is its one claim
+//	gemm-sweep      all five precisions, both nodes, 10 cells green
+//	host-health     passed both nodes, with #377's nicCount fix in the build
+//	clockprobe      passed both nodes
+//	memory-bw       passed both nodes
+//	memory-stress   passed both nodes
+//	disk-io         passed both nodes
+//	dcgm-diag       DCGM_DIAG_PASS with 3 of 3 subtests RUN — reached only with
+//	                persistence mode enabled AND #364's BURNIN_DCGM_ALLOW
+//	                clearing the per-SKU gate. Three distinct verdict paths were
+//	                observed in sequence: unjudged-on-config, partly-checked, pass
+//	ib-write-bw     99.63 Gbps, 1.58 us avg, p99 2.02 us
+//	nccl            Pair 11.63 GB/s; GROUP 11.97 GB/s over 2 ranks
+//	gpudirect-rdma  correctly SKIPPED — GB10 exposes no peer-memory provider,
+//	                so a skip is the right answer and a pass would be a lie
+//	fingerprint-probe  FAILED, and the runner is wrong rather than the part: a
+//	                GB10 enumerates as PCI class 0x030000 (VGA), which pci.go
+//	                deliberately excludes, so it reports acceleratorCount=0 on a
+//	                node compute-smoke measured at 104 TFLOPS. See #380.
+//	thermal-soak,
+//	gpu-burn        SIGKILLed mid-window — see the #280 note below
 //
-//	compute-smoke   FP4_GEMM_PASS — the sm_121a path executed and got the right
-//	                answer, which is the one claim this runner exists to make
-//	host-health     passed on both nodes, 28 metrics, nvmlStatus=ok
-//	thermal-soak    a full 300 s window, peaking at 80 C
+// THE N-RANK PATH HAS NOW EXECUTED. This comment used to say no collective had
+// ever run through Group scope on any hardware. One has, at two ranks. THREE
+// ranks remains untested, and two nodes cannot test it.
 //
-// NOT verified on hardware, and shipping on the unit, envtest and kind e2e tiers
-// alone: clockprobe, dcgm-diag, memory-bw, memory-stress, gpu-burn, ib-write-bw,
-// nccl, gpudirect-rdma. Two further gaps that no tier covers: NO 3-RANK
-// COLLECTIVE HAS EVER EXECUTED through the N-rank path on any hardware, and CI
-// builds runner images by CHANGED DIRECTORY — so a runner whose source did not
-// move is republished from sources CI did not rebuild for this release.
+// The fabric three (ib-write-bw, nccl, gpudirect-rdma) were held back from
+// v0.6.2 and v0.6.3 precisely because nobody had watched them carry traffic.
+// They now have, so they move together at v0.6.4 — but note WHAT the pass
+// required: hostNetwork AND privileged, neither of which the shipped Pair
+// sample sets. Without both, route-based device selection cannot work inside a
+// pod netns and uverbs cannot be opened at all. That is #381, and until it is
+// fixed a user following the sample gets an Error that reads like a bad link.
 //
 // One measured caveat that belongs with these tags rather than in a release
 // note, because it decides how a soak is scheduled: on this fleet a
-// thermal-soak pod is SIGKILLed after 60-106 s IN KUBERNETES while the identical
+// thermal-soak pod is SIGKILLed after 45-106 s IN KUBERNETES while the identical
 // image runs its full window under the bare-metal CLI on the same GPU. That is
 // not thermal — it was reproduced from a 53 C start, dying at 68 C — and it is
-// unresolved (issue #280). A long soak scheduled through the operator on a
-// GB10 will not complete today.
+// unresolved (issue #280). Re-measured 2026-08-17 with a NEW fact: gpu-burn
+// completed its full 300 s window on spark-85a9 and was killed at 60 s on
+// spark-043a in the SAME run, so the kill is not universal and not a property
+// of the image or the duration. A long soak scheduled through the operator on a
+// GB10 still will not reliably complete.
 //
 // The v0.3.0 tags remain published and immutable, and the measurements behind
 // THEM were taken on a two-node DGX Spark cluster with the v0.2.0 build of the
@@ -137,54 +161,39 @@ var defaults = map[contract.TestKind]image{
 	// repushed ones.
 	contract.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0", Vendor: VendorNVIDIA},
 
-	// This table is deliberately MIXED, and the three reasons are different.
+	// This table is deliberately MIXED, and the reasons are different.
 	//
-	// (1) THREE Go runners moved off v0.6.0 — host-health and memory-stress to
-	// v0.6.2, and dcgm-diag to v0.6.3 because its source moved AGAIN after that
-	// publish (#364, plugin parameters, verified on GB10). Every published v0.6.0
-	// Go image was built on go1.24.13, the last patch of an end-of-life branch
-	// which none of the advisories were ever fixed on, and measured 29 reachable
-	// vulnerabilities (#309). A rebuild off golang:1.26 (#335) is clean, verified
-	// on the PUBLISHED artefacts rather than the builds, since the artefact is
-	// what a node pulls. host-health additionally carries a corrected kmsg
-	// remedy (#362).
+	// (1) FOUR runners are at v0.6.4 because their source moved AND tonight's
+	// full-fleet pass cleared their hardware gate: host-health (#377's nicCount
+	// fix) and the fabric three, which had been held at v0.6.0 since #363 with
+	// nothing having watched them carry traffic. They have now — 99.63 Gbps,
+	// 11.63 GB/s Pair, 11.97 GB/s Group, and a correct Skip respectively.
 	//
-	// dcgm-diag is the worked example of why this table is checked against source
-	// drift rather than assumed stable: its image was current for about nine
-	// hours. A pin equal to the newest tag is not the same claim as a pin whose
-	// image was built from the source in this tree.
+	// (2) dcgm-diag is at v0.6.3 and memory-stress at v0.6.2 because their
+	// sources have not moved since those images were built. Republishing an
+	// unchanged runner spends fleet-wide risk to change nothing.
 	//
-	// (2) The C++/CUDA runners stay at v0.6.0 because they contain NO Go binary
-	// at all. There is no stdlib in them to patch, so a republish would spend a
-	// fleet-wide risk to change nothing.
+	// (3) The C++/CUDA runners stay at v0.6.0 because they contain NO Go binary
+	// at all. There is no stdlib in them to patch. Every published v0.6.0 GO
+	// image was built on go1.24.13, an end-of-life branch none of the advisories
+	// were fixed on, measuring 29 reachable vulnerabilities (#309) — which is
+	// why every Go runner here has moved off it.
 	//
-	// (3) THE THREE FABRIC RUNNERS STAY AT v0.6.0, AND NOT BECAUSE THEY ARE
-	// FINE. nccl, ib-write-bw and gpudirect-rdma rebuild as cleanly as the
-	// others, and v0.6.2 images for ib-write-bw and gpudirect-rdma were in fact
-	// published — those tags exist and are immutable. Nothing points at them.
-	//
-	// They are held because not one of the three could be exercised on the
-	// fleet: its two RoCE links are crossed relative to their addressing, so a
-	// queue pair never reaches RTR and no fabric test completes at all (#360).
-	// The hardware gate exists precisely because a bad runner tag degrades a
-	// whole fleet at once, and a fabric runner nobody has watched carry traffic
-	// is the case it was written for.
-	//
-	// The honest form of that rule is all three or none. Two of them were
-	// briefly defended as "toolchain rebuilds of already-verified kernels",
-	// which is true and is also the argument that would excuse any unverified
-	// publish — so it was dropped rather than kept. Move all three pins together
-	// when the fabric is fixed and a run is green.
+	// A pin equal to the newest tag is NOT the same claim as a pin whose image
+	// was built from the source in this tree, and only the second means anything
+	// to a node that pulls it. Both drifted within one day (#374, and again
+	// here), each caught by hand while doing something else. #379 is the guard
+	// that should be doing the catching.
 	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.3", Vendor: VendorNVIDIA},
-	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.2", Vendor: VendorNVIDIA},
+	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.4", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.0", Vendor: VendorAny},
-	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
+	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.4", Vendor: VendorNVIDIA},
+	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
