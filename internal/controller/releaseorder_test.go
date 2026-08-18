@@ -48,9 +48,21 @@ func newHarnessWithInterceptor(t *testing.T, mk func(client.Client) interceptor.
 		nowVal: time.Unix(1750000000, 0).UTC(),
 	}
 	var inner client.Client
+	// Update AND Delete, each guarded: a watcher that sets only one of them
+	// used to panic on a nil func pointer rather than say what was missing,
+	// which is a poor thing to hand the next person writing one.
 	c := build(interceptor.Funcs{
 		Update: func(ctx context.Context, wc client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			return mk(inner).Update(ctx, wc, obj, opts...)
+			if f := mk(inner).Update; f != nil {
+				return f(ctx, wc, obj, opts...)
+			}
+			return wc.Update(ctx, obj, opts...)
+		},
+		Delete: func(ctx context.Context, wc client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if f := mk(inner).Delete; f != nil {
+				return f(ctx, wc, obj, opts...)
+			}
+			return wc.Delete(ctx, obj, opts...)
 		},
 	})
 	inner = c
