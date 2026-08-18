@@ -81,10 +81,16 @@ func run() int {
 			sysfs, err)
 	}
 
-	devices := scanPCI(sysfs)
-	report(devices)
+	res := scan(sysfs)
+	report(res)
 
-	logf("fingerprint-probe: %d accelerator(s) under %s", len(devices), sysfs)
+	if len(res.Ambiguous) > 0 {
+		logf("fingerprint-probe: %d accelerator(s) under %s, and %d display-class device(s) "+
+			"from an accelerator vendor with no DRM render node — the count is UNMEASURABLE",
+			len(res.Devices), sysfs, len(res.Ambiguous))
+		return exitPass
+	}
+	logf("fingerprint-probe: %d accelerator(s) under %s", len(res.Devices), sysfs)
 	return exitPass
 }
 
@@ -98,12 +104,37 @@ func run() int {
 //
 // The joined forms are stable — scanPCI sorts by slot — so two reads of an
 // unchanged node produce identical strings and a diff means the hardware moved.
-func report(devices []device) {
-	// Always emitted, including zero. Unlike the identity strings, a count of
-	// zero IS a measurement here: the runner reached sysfs and found no
-	// accelerator, which is a true and useful thing to say about a CPU-only
-	// node. The skip path above is what covers "could not look".
-	metric("acceleratorCount", strconv.Itoa(len(devices)))
+func report(res scanResult) {
+	devices := res.Devices
+
+	// Emitted as the reserved unmeasurable value when the node holds a
+	// display-class device from an accelerator vendor with no render node.
+	//
+	// That device is either a display adapter or an accelerator whose driver
+	// never bound, and sysfs cannot say which. Emitting a NUMBER would pick one
+	// silently: too low if it was an accelerator, too high if it was not. `n/a`
+	// puts it in Result.Unmeasurable instead, so a threshold with the default
+	// Required applicability still FAILS CLOSED rather than certifying a guess,
+	// and one marked RequiredIfMeasurable is honestly not evaluated.
+	if len(res.Ambiguous) > 0 {
+		metric("acceleratorCount", "n/a")
+		var parts []string
+		for _, d := range res.Ambiguous {
+			parts = append(parts, fmt.Sprintf("%s (vendor %s, device %s, class %s, driver %q)",
+				d.PCIAddress, d.VendorID, d.DeviceID, d.Class, d.Driver))
+		}
+		metric("acceleratorCountDetail", "display-class device(s) from an accelerator vendor "+
+			"exposing no DRM render node, so this node cannot be counted from sysfs alone: "+
+			strings.Join(parts, "; ")+". Either a display adapter or an accelerator whose "+
+			"driver did not bind; check that the vendor driver is loaded")
+	} else {
+		// Always emitted, including zero. Unlike the identity strings, a count
+		// of zero IS a measurement here: the runner reached sysfs, found no
+		// accelerator and nothing it could not classify, which is a true and
+		// useful thing to say about a CPU-only node. The skip path above is
+		// what covers "could not look".
+		metric("acceleratorCount", strconv.Itoa(len(devices)))
+	}
 	if len(devices) == 0 {
 		return
 	}
