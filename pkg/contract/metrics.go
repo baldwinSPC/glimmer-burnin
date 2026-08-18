@@ -202,6 +202,62 @@ type Metric struct {
 	// Aggregation says how the metric combines across repeated windows. Every
 	// registered metric must state one explicitly; see Aggregation.
 	Aggregation Aggregation
+	// Combination says how the metric combines across the REPORTERS of one
+	// test — the ranks of a Group — as distinct from Aggregation, which is
+	// across repeated windows of one reporter. See Combination.
+	//
+	// Unlike ThresholdUse and Aggregation this may be left unset, because its
+	// zero value is the SAFE answer rather than a silent guess: an unclassified
+	// metric is not merged at all, and a threshold on it fails closed.
+	Combination Combination
+}
+
+// Combination says how a metric combines across the reporters of a single
+// test — today, the ranks of a Group.
+//
+// It exists because Aggregation cannot answer this question, and the two
+// disagree in exactly the cases that matter. gpuTempC aggregates Max across
+// windows and Max is also right across ranks; miscompares is Sum on both. But
+// elapsedS is Sum across windows and Max across ranks — eight ranks running 300s
+// took 300s, not 2400s — and eccErrors is Last across windows, which across
+// ranks means "whatever rank 0 said", the precise defect this type was added to
+// fix (#121).
+//
+// The zero value is unclassified and is deliberately the conservative one. A
+// Group merge drops an unclassified key rather than electing a winner for it, so
+// a metric nobody has thought about fails a threshold closed instead of
+// certifying every node in the group on one rank's evidence.
+type Combination string
+
+const (
+	// CombineUnclassified is the zero value: nobody has said how this metric
+	// combines across ranks, so nothing may claim it describes the group.
+	CombineUnclassified Combination = ""
+	// CombineCollective means one value describes the whole group and every
+	// rank is reporting the same measurand — a collective's bus bandwidth, or a
+	// label like gpuName. The lowest rank's answer stands.
+	CombineCollective Combination = "Collective"
+	// CombineSum, CombineMax and CombineMin combine per-reporter readings the
+	// obvious way. The direction is the metric's, not the operator's guess:
+	// Max for a temperature keeps the hottest node, Sum for a fault counter
+	// keeps every rank's faults, Min for a bandwidth keeps the slowest.
+	CombineSum Combination = "Sum"
+	CombineMax Combination = "Max"
+	CombineMin Combination = "Min"
+)
+
+// CombinationFor returns how a metric combines across the reporters of one test.
+//
+// An UNREGISTERED metric is unclassified, and so is a registered one that has
+// not stated a Combination. Both mean the same thing and both fail closed: this
+// operator inventing Sum or Max semantics for a measurement nobody declared is
+// how a group-wide claim comes to rest on one member, which is the whole of
+// #121.
+func CombinationFor(name string) Combination {
+	if m, ok := registry[name]; ok {
+		return m.Combination
+	}
+	return CombineUnclassified
 }
 
 // SafeToThresholdOn reports whether a threshold against this metric decides
@@ -221,18 +277,21 @@ var registry = map[string]Metric{
 		Name: "bandwidthGbps", Unit: UnitGigabitsPerSecond,
 		Description:  "raw RDMA write throughput on a link, as reported by ib_write_bw",
 		Aggregation:  AggMin,
+		Combination:  CombineMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"tcpThroughputGbps": {
 		Name: "tcpThroughputGbps", Unit: UnitGigabitsPerSecond,
 		Description:  "TCP throughput between two nodes, as reported by iperf3. Deliberately NOT bandwidthGbps: that is an RDMA verbs measurement and this is a kernel-stack one over a different path, and a profile running both would otherwise have the second silently overwrite the first — which is exactly the comparison the test exists to enable",
 		Aggregation:  AggMin,
+		Combination:  CombineMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"minBandwidthGbps": {
 		Name: "minBandwidthGbps", Unit: UnitGigabitsPerSecond,
 		Description:  "the WORST window of a fabric soak. The figure a link is accepted on: a soak that averaged fine and spent ninety seconds at a third of line rate has found a marginal optic, and the mean hides it completely",
 		Aggregation:  AggMin,
+		Combination:  CombineMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"meanBandwidthGbps": {
@@ -263,12 +322,14 @@ var registry = map[string]Metric{
 		Name: "busBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "NCCL bus bandwidth: algorithm bandwidth scaled by the collective's communication pattern",
 		Aggregation:  AggMin,
+		Combination:  CombineCollective,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"algBandwidthGBs": {
 		Name: "algBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "NCCL algorithm bandwidth: message size over collective time, with no scaling for the communication pattern; unlike busBandwidthGBs it is not comparable across collectives or rank counts",
 		Aggregation:  AggMin,
+		Combination:  CombineCollective,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
@@ -319,6 +380,7 @@ var registry = map[string]Metric{
 		Name: "memoryBandwidthGBs", Unit: UnitGigabytesPerSecond,
 		Description:  "sustained device memory bandwidth achieved over the whole measurement window, not a peak sample",
 		Aggregation:  AggMin,
+		Combination:  CombineMin,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"readBandwidthMBs": {
@@ -339,6 +401,7 @@ var registry = map[string]Metric{
 		Name: "latencyUs", Unit: UnitMicroseconds,
 		Description:  "round-trip latency",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"minLatencyUs": {
@@ -351,18 +414,21 @@ var registry = map[string]Metric{
 		Name: "maxLatencyUs", Unit: UnitMicroseconds,
 		Description:  "the slowest single round trip observed. A single outlier is normal on a shared fabric — a scheduler tick, an interrupt — so this is evidence that qualifies p99LatencyUs rather than a gate of its own; a fleet gating on one worst sample fails healthy links on noise",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"p99LatencyUs": {
 		Name: "p99LatencyUs", Unit: UnitMicroseconds,
 		Description:  "99th-percentile round-trip latency: the number a collective actually runs at. A collective proceeds at the speed of its slowest participant on EVERY iteration, so a link with a healthy mean and a p99 an order of magnitude worse degrades every job on the fleet while passing a bandwidth gate outright. This is the acceptance-grade latency figure; latencyUs is the mean and is not",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"tcpRttUs": {
 		Name: "tcpRttUs", Unit: UnitMicroseconds,
 		Description:  "mean smoothed round-trip time the sender's TCP stack observed during the test. A path property rather than a fabric one — it includes host stack and scheduling — so it is a useful ceiling gate and a poor floor",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"messageRateMpps": {
@@ -375,12 +441,14 @@ var registry = map[string]Metric{
 		Name: "ioLatencyUs", Unit: UnitMicroseconds,
 		Description:  "mean per-operation latency of the test's read/write loop; distinct from latencyUs, which is a network round trip",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"elapsedS": {
 		Name: "elapsedS", Unit: UnitSeconds,
 		Description:  "wall-clock seconds the test body ran, excluding image pull and container start; a soak that exits early has not proven what its duration claims",
 		Aggregation:  AggSum,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"durationRequestedS": {
@@ -407,12 +475,14 @@ var registry = map[string]Metric{
 		Name: "gpuTempC", Unit: UnitCelsius,
 		Description:  "peak GPU temperature observed during the test",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"meanTempUnderLoadC": {
 		Name: "meanTempUnderLoadC", Unit: UnitCelsius,
 		Description:  "GPU temperature averaged across the load window; distinct from gpuTempC, which is the peak — a part that runs hot throughout and one that spikes once are different findings and must not share a name",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"tempAtMinClockC": {
@@ -431,6 +501,7 @@ var registry = map[string]Metric{
 		Name: "powerDrawW", Unit: UnitWatts,
 		Description:  "peak board power draw observed during the test",
 		Aggregation:  AggMax,
+		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"meanPowerW": {
@@ -630,18 +701,21 @@ var registry = map[string]Metric{
 		Name: "nonfiniteCount", Unit: UnitNone,
 		Description:  "count of NaN or Inf values in a kernel's output",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"miscompares": {
 		Name: "miscompares", Unit: UnitNone,
 		Description:  "count of computed values that did not match the reference — a wrong answer from hardware that reported success",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"sdcDetections": {
 		Name: "sdcDetections", Unit: UnitNone,
 		Description:  "count of distinct silent-data-corruption incidents; miscompares counts every mismatched value, so one corrupted region can produce many miscompares and a single detection",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 
@@ -650,18 +724,21 @@ var registry = map[string]Metric{
 		Name: "eccErrors", Unit: UnitNone,
 		Description:  "count of ECC errors observed during the test",
 		Aggregation:  AggLast,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"memoryErrors": {
 		Name: "memoryErrors", Unit: UnitNone,
 		Description:  "count of hardware memory errors reported by the host memory stress tool (stressapptest hardware incidents); host memory, not device ECC",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"xidEvents": {
 		Name: "xidEvents", Unit: UnitNone,
 		Description:  "count of NVIDIA Xid errors the driver logged during the test window",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	// The CODE, which is a different quantity from the COUNT above and must not
@@ -685,18 +762,21 @@ var registry = map[string]Metric{
 		Name: "remappedRows", Unit: UnitNone,
 		Description:  "count of device memory rows the driver has remapped; a rising count is a degrading part even while every test still passes",
 		Aggregation:  AggLast,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"pcieReplayErrors": {
 		Name: "pcieReplayErrors", Unit: UnitNone,
 		Description:  "count of PCIe replay events on the device's link — a link-integrity signal that usually precedes a bandwidth shortfall",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"tcpRetransmits": {
 		Name: "tcpRetransmits", Unit: UnitNone,
 		Description:  "count of TCP segment retransmissions during the test. The signal worth gating on: a link that reaches line rate while retransmitting heavily has a problem that throughput alone will not show, and it will surface later as tail latency in a collective",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"acceleratorCount": {
@@ -709,12 +789,14 @@ var registry = map[string]Metric{
 		Name: "ioErrors", Unit: UnitNone,
 		Description:  "count of I/O errors observed during a storage test. A zero here IS a measurement — the run reached the device and counted none — unlike a bandwidth figure, which is omitted when nothing moved rather than reported as zero",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"nicLinkDownEvents": {
 		Name: "nicLinkDownEvents", Unit: UnitNone,
 		Description:  "count of link-down transitions on the node's fabric NICs during the test window",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"soakIterations": {
@@ -727,6 +809,7 @@ var registry = map[string]Metric{
 		Name: "soakFailedIterations", Unit: UnitNone,
 		Description:  "windows that failed or timed out during a fabric soak. A counter, so a healthy soak reports exactly zero and Equal 0 is safe from day one — unlike the bandwidth figures, which need a measured baseline first",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"soakServerRestarts": {
@@ -739,12 +822,14 @@ var registry = map[string]Metric{
 		Name: "linkErrorEvents", Unit: UnitNone,
 		Description:  "sum of the port error counters that MOVED during the soak — symbol errors, link recoveries, link-downs, receive errors. A DELTA, never a lifetime total: a NIC up for two hundred days carries a large count that says nothing about the last four hours. Unmeasurable (n/a) when no sysfs counter could be read, or when a counter went backwards because the port was reset mid-soak",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"throttleEvents": {
 		Name: "throttleEvents", Unit: UnitNone,
 		Description:  "count of clock-throttle events observed during the test",
 		Aggregation:  AggSum,
+		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"throttledSamples": {
