@@ -278,7 +278,7 @@ func (r *BurnInRunReconciler) startGroup(
 	// it is cordoned as a unit: cordoning only the root would leave every worker
 	// node accepting workload right up to the moment a rank lands on it, and a
 	// competing workload on one rank perturbs the measurement for all of them.
-	cordoned, cordonErr := r.cordonWave(ctx, run, nodes)
+	cordoned, cordonErr := r.cordonWave(ctx, run, nodes, &t.Spec)
 	if cordonErr != nil {
 		return advancePending, advanceEffect{dirty: cordoned}, cordonErr
 	}

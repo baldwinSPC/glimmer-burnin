@@ -256,7 +256,7 @@ func (r *BurnInRunReconciler) startPair(
 	// the client's node accepting workload right up to the moment the client
 	// lands on it, and the traffic it measures is exactly what a competing
 	// workload would perturb.
-	cordoned, cordonErr := r.cordonWave(ctx, run, nodes)
+	cordoned, cordonErr := r.cordonWave(ctx, run, nodes, &t.Spec)
 	if cordonErr != nil {
 		return advancePending, advanceEffect{dirty: cordoned}, cordonErr
 	}

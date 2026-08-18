@@ -70,6 +70,40 @@ const (
 	// PriorUnschedulableTrue and PriorUnschedulableFalse.
 	AnnotationPriorUnschedulable = "burnin.glimmer.ai/prior-unschedulable"
 
+	// AnnotationHeatExpected is written on a NODE, declaring that a burn-in is
+	// putting deliberate thermal load on it right now, as
+	// "<namespace>/<name>/<uid>/<RFC3339 expiry>".
+	//
+	// It exists because the two safety systems on this fleet were fighting each
+	// other. The Glimmer agent runs a thermal watchdog that drains a node when
+	// it passes its trip point, and a thermal soak drives the part past that
+	// point BY DESIGN — so every soak was drained, its runner pods SIGKILLed,
+	// and the hardware recorded as "Error — hardware unjudged". The watchdog was
+	// working; it simply had no way to tell a soak from a cooling failure. This
+	// annotation is that way: the operator declares the heat, the agent gates
+	// its drain on the declaration. See issue #280.
+	//
+	// THE VALUE CARRIES AN ABSOLUTE EXPIRY, AND THAT IS WHAT MAKES IT SAFE TO
+	// SHIP. The reader is on the node and knows nothing about whether the run is
+	// still alive. A bare marker left behind by an operator that crashed, lost
+	// its lease, or was deleted mid-flight would disable thermal protection on
+	// that node forever, and the failure would be silent until the part cooked.
+	// With an expiry the worst case is bounded by one pod's window: the reader
+	// refuses to honour a marker whose expiry has passed, so a marker nothing
+	// ever removes stops mattering on its own.
+	//
+	// It is written, refreshed and removed on exactly the cordon's lifecycle,
+	// in the same updates, for the same reasons and under the same ownership
+	// rule — the UID is here for the reason it is on AnnotationCordonOwner, so
+	// a run that never placed this marker can never remove it. A run whose pods
+	// outlive one window re-stamps a later expiry as it goes; the marker never
+	// grants more than the window it can currently justify.
+	//
+	// THE KEY MUST MATCH THE AGENT'S READER BYTE FOR BYTE. A mismatch fails
+	// OPEN — the drain still happens, the pod still dies — and looks exactly
+	// like the bug this fixes.
+	AnnotationHeatExpected = "burnin.glimmer.ai/heat-expected"
+
 	// PriorUnschedulableTrue means the node was already unschedulable when the
 	// run found it, and must be left unschedulable on cleanup.
 	PriorUnschedulableTrue = "true"

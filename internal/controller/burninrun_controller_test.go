@@ -356,6 +356,13 @@ func (h *harness) assertNoStrandedCordons() {
 		if _, ok := n.Annotations[burninv1alpha1.AnnotationPriorUnschedulable]; ok {
 			h.t.Errorf("node %s still carries the prior-unschedulable record", n.Name)
 		}
+		// The heat declaration comes off with the cordon, in the same update. A
+		// node back in the scheduler still declaring heat is one whose thermal
+		// watchdog has been told to stand down while ordinary workload lands.
+		if v, ok := n.Annotations[burninv1alpha1.AnnotationHeatExpected]; ok {
+			h.t.Errorf("node %s still declares heat as %q with no run left to produce it — the "+
+				"thermal watchdog is disabled on a node nothing is burning", n.Name, v)
+		}
 	}
 }
 

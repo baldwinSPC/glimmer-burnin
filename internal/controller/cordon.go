@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -68,6 +69,167 @@ func parseCordonOwner(value string) (cordonOwner, bool) {
 		}
 	}
 	return cordonOwner{namespace: parts[0], name: parts[1], uid: parts[2]}, true
+}
+
+// ─── The heat declaration ─────────────────────────────────────────────────────
+//
+// A burn-in drives a part past the temperature at which the Glimmer agent's
+// thermal watchdog drains the node — by design, because that is what a soak is.
+// The watchdog cannot tell that from a cooling failure on its own, so the
+// operator says so on the node: AnnotationHeatExpected is present for as long as
+// this run is loading it, and carries the instant after which the statement
+// stops being true. See issue #280 and the annotation's own documentation.
+//
+// It rides the cordon's lifecycle exactly — same write, same release, same reap,
+// same ownership rule — and that is the whole reason it is safe. The cordon
+// lifecycle has already been hardened against a manager that dies mid-sequence
+// (#59, #84), a stale informer (#245), a run deleted mid-flight (#60) and a
+// release that outran its own load (#246). A second lifecycle would have to
+// re-earn all of it.
+
+// heatReleaseMargin is how much longer than its pod a heat declaration stands.
+//
+// The marker is taken off by the reconcile pass that finds the pod gone, so the
+// window it must cover is the pod's own life PLUS one pass, and
+// settledPollInterval is the longest this operator waits between passes while
+// work is outstanding. Sized from that constant rather than restated, so a
+// change to the poll cannot silently make every marker expire mid-run — which
+// would drain a node during a soak, the exact failure this is here to stop.
+const heatReleaseMargin = settledPollInterval
+
+// heatExpiry is the absolute instant a declaration written now stops being true.
+//
+// It is derived from the run's OWN window and not from a fixed constant, because
+// a 60-second smoke test and a seven-day segmented soak are the same code path
+// and need very different answers. podWindow is the operator's own outer bound
+// on one pod's life — the point at which podOverdue gives up and reaps it — so a
+// marker sized from it cannot outlast a pod by more than the margin above, and
+// cannot expire under a pod that is still within its budget.
+func heatExpiry(now time.Time, spec *burninv1alpha1.BurnInTestSpec) time.Time {
+	return now.Add(podWindow(spec) + heatReleaseMargin)
+}
+
+// heatExpectedID is the value written into AnnotationHeatExpected: the ownership
+// triple cordonOwnerID produces, plus the expiry, as
+// "<namespace>/<name>/<uid>/<RFC3339 expiry>".
+//
+// UTC, always. The reader is a separate program on the node comparing this
+// against its own clock, and a local offset here is a difference of opinion
+// about what the timestamp means that nothing in either half would notice.
+func heatExpectedID(run *burninv1alpha1.BurnInRun, expiry time.Time) string {
+	return cordonOwnerID(run) + "/" + expiry.UTC().Format(time.RFC3339)
+}
+
+// heatMarker is a parsed AnnotationHeatExpected value.
+type heatMarker struct {
+	cordonOwner
+	expiry time.Time
+}
+
+// parseHeatExpected reads a declaration back into the run that made it and the
+// instant it stops being true.
+//
+// STRICT, for parseCordonOwner's reason: the only consumers remove the marker on
+// the strength of owning it, and a value that does not parse cannot be proved to
+// belong to anyone. "I cannot read this" is not evidence that the heat is over.
+//
+// The expiry must parse too, and that is not tidiness either — an expiry the
+// operator cannot read is one the AGENT cannot read, and the agent's rule is to
+// refuse a marker it cannot read. A value that reaches here malformed is already
+// doing nothing on the node; treating it as ours and rewriting it would be this
+// operator laundering something it did not write into something that looks like
+// a live declaration.
+func parseHeatExpected(value string) (heatMarker, bool) {
+	parts := strings.Split(value, "/")
+	if len(parts) != 4 {
+		return heatMarker{}, false
+	}
+	owner, ok := parseCordonOwner(strings.Join(parts[:3], "/"))
+	if !ok {
+		return heatMarker{}, false
+	}
+	expiry, err := time.Parse(time.RFC3339, parts[3])
+	if err != nil {
+		return heatMarker{}, false
+	}
+	return heatMarker{cordonOwner: owner, expiry: expiry}, true
+}
+
+// stampHeatExpected puts this run's declaration on a node it is holding, or
+// pushes an existing one out to a later expiry, and reports whether it changed
+// anything. The caller writes the node.
+//
+// EXTENDING IS THE POINT, not an optimisation. A run outlives one pod window
+// whenever it is segmented, repeated or retried, and a declaration that covered
+// only the first pod would expire under a soak that is still running — the
+// watchdog would drain the node mid-measurement, which is the bug being fixed,
+// arriving late instead of immediately. The expiry only ever moves FORWARD, so
+// a marker never grants more than the window the run can currently justify and
+// a re-stamp can never shorten one already in force.
+//
+// It will not overwrite a declaration it cannot prove is this run's. A marker
+// naming another run is that run's thermal protection and removing it — which
+// is what rewriting it amounts to — would hand that run's soak to the watchdog.
+// One this operator cannot parse says nothing about anything, and is left as
+// found for parseCordonOwner's reason. Both cases are logged, because the
+// consequence is a soak of this run's that gets drained, and the node is the
+// only place that would otherwise say why.
+func stampHeatExpected(ctx context.Context, node *corev1.Node, run *burninv1alpha1.BurnInRun, expiry time.Time) bool {
+	if raw, present := node.Annotations[burninv1alpha1.AnnotationHeatExpected]; present && raw != "" {
+		existing, ok := parseHeatExpected(raw)
+		switch {
+		case !ok:
+			log.FromContext(ctx).Info("node carries a heat declaration this operator cannot parse; leaving it alone",
+				"node", node.Name, "marker", raw)
+			return false
+		case existing.uid != string(run.UID):
+			log.FromContext(ctx).Info("node carries another run's heat declaration; leaving it alone",
+				"node", node.Name, "marker", raw)
+			return false
+		case !existing.expiry.Before(expiry):
+			// Already covers the window this pod needs.
+			return false
+		}
+	}
+	if node.Annotations == nil {
+		node.Annotations = map[string]string{}
+	}
+	node.Annotations[burninv1alpha1.AnnotationHeatExpected] = heatExpectedID(run, expiry)
+	return true
+}
+
+// dropHeatExpected removes a heat declaration belonging to `uid` from the node
+// in memory, so the caller's update carries it away with the cordon.
+//
+// TOGETHER OR NOT AT ALL. A node handed back with the declaration still on it is
+// a node the scheduler is filling with ordinary workload while its thermal
+// watchdog is switched off, and that is worse than the failure the marker exists
+// to fix: a soak dying to a drain is a lost measurement, a cooling failure
+// nothing acts on is lost hardware.
+//
+// The exception is the same one everywhere else in this file: authority is by
+// UID. A marker naming a different run is that run's protection and is left
+// alone, and one that does not parse is left alone because it is not evidence.
+// It reports whether it removed anything, so a caller whose only reason to write
+// the node is the withdrawal can skip the update.
+func dropHeatExpected(ctx context.Context, node *corev1.Node, uid string) bool {
+	raw, present := node.Annotations[burninv1alpha1.AnnotationHeatExpected]
+	if !present {
+		return false
+	}
+	marker, ok := parseHeatExpected(raw)
+	switch {
+	case !ok:
+		log.FromContext(ctx).Info("node carries a heat declaration this operator cannot parse; leaving it alone",
+			"node", node.Name, "marker", raw)
+	case marker.uid != uid:
+		log.FromContext(ctx).Info("node carries another run's heat declaration; leaving it alone",
+			"node", node.Name, "marker", raw)
+	default:
+		delete(node.Annotations, burninv1alpha1.AnnotationHeatExpected)
+		return true
+	}
+	return false
 }
 
 // capturePriorSchedulability records how the run FOUND its targets, before it
@@ -222,11 +384,33 @@ func restoredUnschedulable(run *burninv1alpha1.BurnInRun, node *corev1.Node) boo
 // is what cleanup searches on. The other order leaves a cordoned node with no
 // owner, which nothing in the system is able to release.
 //
+// It also declares the heat: the node is about to be driven at full power on
+// purpose, and the agent's thermal watchdog has to be told so it does not read a
+// soak as a cooling failure and drain the node out from under it. `spec` is the
+// test whose pod is about to be created, and it is what sizes the declaration's
+// expiry — see heatExpiry. It travels with the node name rather than being
+// derived here because a run is many tests long and their windows differ by
+// orders of magnitude.
+//
 // It mutates run.Status.CordonedNodes and reports whether it changed anything;
 // the caller persists the status.
-func (r *BurnInRunReconciler) cordonNode(ctx context.Context, run *burninv1alpha1.BurnInRun, name string) (bool, error) {
+func (r *BurnInRunReconciler) cordonNode(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	name string,
+	spec *burninv1alpha1.BurnInTestSpec,
+) (bool, error) {
 	logger := log.FromContext(ctx)
 	owner := cordonOwnerID(run)
+	expiry := heatExpiry(r.now(), spec)
+
+	// WHETHER THE HEAT IS DECLARED AT ALL IS THE KIND'S ANSWER, NOT THIS
+	// FUNCTION'S. The declaration says a burn-in is deliberately holding this
+	// part under load right now, and that is only true of kinds whose runner
+	// holds a load — see TestKind.DrivesSustainedLoad. A host-health read or a
+	// millisecond GEMM would be claiming heat it does not produce, and it would
+	// suppress a real thermal response on a node that was not being loaded.
+	declareHeat := spec.Kind.DrivesSustainedLoad()
 	held := map[string]bool{}
 	for _, n := range run.Status.CordonedNodes {
 		held[n] = true
@@ -259,9 +443,34 @@ func (r *BurnInRunReconciler) cordonNode(ctx context.Context, run *burninv1alpha
 	switch existing := node.Annotations[burninv1alpha1.AnnotationCordonOwner]; {
 	case existing == owner:
 		// Ours already. Re-assert the cordon in case a crash landed between the
-		// stamp and the cordon, and make sure we still owe the release.
+		// stamp and the cordon, push the heat declaration out to cover the pod
+		// about to be created, and make sure we still owe the release.
+		//
+		// This is the arm every segment of a soak after the first lands in, and
+		// therefore the one that keeps a multi-day run declared. One update
+		// carries both, so the node never goes through a state where it is
+		// cordoned for a run whose declaration has lapsed.
+		//
+		// It is also where a declaration is WITHDRAWN. A run holds a node across
+		// its tests, so the same node passes from a soak to a host-health read
+		// without being released in between; leaving the soak's declaration
+		// standing would keep the drain held over a test that is not heating
+		// anything. Expiry would clear it eventually, but "eventually" is a
+		// whole pod window of suppressed thermal response bought by a test that
+		// never asked for it.
+		reasserted := false
+		if declareHeat {
+			reasserted = stampHeatExpected(ctx, &node, run, expiry)
+		} else if dropHeatExpected(ctx, &node, string(run.UID)) {
+			reasserted = true
+			logger.Info("this test does not hold the part under load; withdrawing the heat declaration",
+				"node", name, "kind", spec.Kind)
+		}
 		if !node.Spec.Unschedulable {
 			node.Spec.Unschedulable = true
+			reasserted = true
+		}
+		if reasserted {
 			if err := r.Update(ctx, &node); err != nil {
 				return false, err
 			}
@@ -292,6 +501,16 @@ func (r *BurnInRunReconciler) cordonNode(ctx context.Context, run *burninv1alpha
 		node.Annotations[burninv1alpha1.AnnotationCordonOwner] = owner
 		node.Annotations[burninv1alpha1.AnnotationPriorUnschedulable] =
 			strconv.FormatBool(priorUnschedulable(run, name, node.Spec.Unschedulable))
+		if declareHeat {
+			stampHeatExpected(ctx, &node, run, expiry)
+		} else {
+			// A node this run has not held before can still carry a stale
+			// declaration of ours — a manager that died between the release's
+			// two writes, say. Take it with the same update that claims the
+			// node, so a cordon of ours never coexists with a declaration this
+			// test cannot justify.
+			dropHeatExpected(ctx, &node, string(run.UID))
+		}
 		if err := r.Update(ctx, &node); err != nil {
 			return false, err
 		}
@@ -319,10 +538,15 @@ func (r *BurnInRunReconciler) cordonNode(ctx context.Context, run *burninv1alpha
 // A pair is cordoned as a UNIT and before either pod is created, because a pair
 // under test occupies both of its nodes for the whole test: releasing or
 // admitting half of one would be a state the test cannot be run in.
-func (r *BurnInRunReconciler) cordonWave(ctx context.Context, run *burninv1alpha1.BurnInRun, nodes []string) (bool, error) {
+func (r *BurnInRunReconciler) cordonWave(
+	ctx context.Context,
+	run *burninv1alpha1.BurnInRun,
+	nodes []string,
+	spec *burninv1alpha1.BurnInTestSpec,
+) (bool, error) {
 	changed := false
 	for _, n := range nodes {
-		c, err := r.cordonNode(ctx, run, n)
+		c, err := r.cordonNode(ctx, run, n, spec)
 		if err != nil {
 			return changed, err
 		}
@@ -393,6 +617,7 @@ func (r *BurnInRunReconciler) releaseNode(ctx context.Context, run *burninv1alph
 		node.Spec.Unschedulable = prior
 		delete(node.Annotations, burninv1alpha1.AnnotationCordonOwner)
 		delete(node.Annotations, burninv1alpha1.AnnotationPriorUnschedulable)
+		dropHeatExpected(ctx, &node, string(run.UID))
 		if updErr := r.Update(ctx, &node); updErr != nil && !apierrors.IsNotFound(updErr) {
 			return false, updErr
 		}
@@ -470,13 +695,16 @@ func (r *BurnInRunReconciler) releaseCordons(ctx context.Context, run *burninv1a
 		}
 		prior := restoredUnschedulable(run, node)
 
-		// One update carries both the restored schedulability and the removal
-		// of the stamp. Splitting them would open a window where the node is
-		// unstamped and still cordoned, which is the unrecoverable state this
-		// whole scheme exists to avoid.
+		// One update carries the restored schedulability, the removal of the
+		// stamp and the removal of the heat declaration. Splitting them would
+		// open a window where the node is unstamped and still cordoned, which
+		// is the unrecoverable state this whole scheme exists to avoid — or one
+		// where it is back in the scheduler with its thermal watchdog still
+		// told to stand down, which is worse.
 		node.Spec.Unschedulable = prior
 		delete(node.Annotations, burninv1alpha1.AnnotationCordonOwner)
 		delete(node.Annotations, burninv1alpha1.AnnotationPriorUnschedulable)
+		dropHeatExpected(ctx, node, string(run.UID))
 		if err := r.Update(ctx, node); err != nil {
 			if apierrors.IsNotFound(err) {
 				// The node was deleted under us. There is nothing left to

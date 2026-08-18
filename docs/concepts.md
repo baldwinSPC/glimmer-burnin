@@ -431,6 +431,66 @@ deadlock the operator builds for itself.
 
 ---
 
+## Declaring the heat
+
+A node held for a test that **holds the part under load** also carries
+`burnin.glimmer.ai/heat-expected` = `<namespace>/<name>/<uid>/<RFC3339 expiry>`,
+written, refreshed and removed in the same updates as the cordon stamp and under
+the same ownership rule.
+
+Which kinds those are is the kind's own answer — `TestKind.DrivesSustainedLoad`,
+beside `BurstOnly`, because the fact belongs to the runner and a controller
+deciding it from a name would go stale the moment a runner changed. Today:
+`thermal-soak`, `gpu-burn`, `clockprobe`, `fabric-soak`, `memory-stress` and
+`dcgm-diag` (whose levels 3 and 4 run `targeted_stress` for ~15 minutes, and the
+level is a runner env var this operator must not read, so it is declared by its
+worst case). A `host-health` read, a `compute-smoke` GEMM or a `memory-bw`
+measurement declares nothing — claiming heat it does not produce would suppress
+a real thermal response on a node nobody is loading.
+
+`custom` declares nothing either. The whole point of it is an image this project
+knows nothing about, and this answer suppresses a safety action on somebody
+else's behalf; a site running a custom soak asserts the hold on the node itself.
+
+A run holds a node across its tests, so the declaration is **withdrawn** when
+the same node passes from a soak to a passive read without being released in
+between. Expiry would clear it eventually, but eventually is a whole pod window
+of suppressed thermal response bought by a test that never asked for it.
+
+It exists because two safety systems were fighting each other. The Glimmer agent
+runs a thermal watchdog that drains a node when the part passes its trip point,
+and a thermal soak drives the part past that point **by design** — so every soak
+on a fleet running both was drained by the watchdog, its runner pods killed with
+SIGKILL, and the hardware recorded as `Error — hardware unjudged`. The watchdog
+was not wrong; it had no way to tell a soak from a cooling failure. This
+annotation is that way. The operator declares the heat; the reader gates its
+drain on the declaration.
+
+**The value carries an absolute expiry, and that is what makes it safe.** The
+reader is on the node and knows nothing about whether the run is still alive. A
+bare marker left by an operator that crashed, lost its lease or was deleted
+mid-flight would disable thermal protection on that node indefinitely, silently,
+until the part cooked. The expiry bounds that to one pod's window: a reader must
+refuse a declaration whose expiry has passed, so a marker nothing ever removes
+stops counting on its own.
+
+The window is derived from the run's own per-pod duration — one **segment** for
+a segmented soak — plus the grace the operator already allows that pod and one
+reconcile pass to take the marker off. A sixty-second smoke test and a seven-day
+soak therefore get very different windows, and a run that outlives one pod
+re-stamps a later expiry as it goes. The expiry only ever moves forward.
+
+Two rules mirror the cordon's exactly, and for the same reasons: a declaration
+naming a **different** run is that run's thermal protection and is never removed
+(authority is by UID), and one this operator **cannot parse** is left as found —
+"I cannot read this" is not evidence that the heat is over.
+
+The key is a cross-repository contract. A mismatch between the writer here and
+the reader on the node fails **open** — the drain still happens, the pod still
+dies — and looks exactly like the bug it fixes.
+
+---
+
 ## The concurrency interlock
 
 **`maxConcurrentNodes` counts NODES, and it is a facility safety interlock, not

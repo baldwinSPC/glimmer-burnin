@@ -1042,7 +1042,7 @@ func (r *BurnInRunReconciler) advance(
 		}
 		// Hold the node BEFORE the pod exists, so nothing else can be scheduled
 		// beside a burn-in that is about to saturate it.
-		cordoned, cordonErr := r.cordonNode(ctx, run, node)
+		cordoned, cordonErr := r.cordonNode(ctx, run, node, &t.Spec)
 		if cordonErr != nil {
 			return advancePending, none, cordonErr
 		}
@@ -1207,6 +1207,20 @@ func (r *BurnInRunReconciler) fetchLogs(ctx context.Context, pod *corev1.Pod) (s
 	return out, nil
 }
 
+// podWindow is the whole life this operator allows ONE pod of a test: its
+// execution duration, plus the deadline grace the kubelet gets for start-up,
+// plus the scheduling grace it gets for being placed at all.
+//
+// One SEGMENT's window for a segmented soak; podForTest sizes the pod's own
+// deadline from the same executionDurationSeconds, and the two must not
+// disagree about the same pod. It is a function rather than an expression
+// because the heat declaration's expiry is sized from it too (see heatExpiry),
+// and a marker that could expire before the operator itself gave up on the pod
+// would let a soak be drained mid-measurement.
+func podWindow(spec *burninv1alpha1.BurnInTestSpec) time.Duration {
+	return time.Duration(executionDurationSeconds(spec)+deadlineGraceSeconds)*time.Second + schedulingGracePeriod
+}
+
 // podOverdue reports whether a non-terminated pod has outlived its whole
 // window: duration + deadline grace + scheduling grace since creation.
 func (r *BurnInRunReconciler) podOverdue(pod *corev1.Pod, spec *burninv1alpha1.BurnInTestSpec) bool {
@@ -1215,12 +1229,7 @@ func (r *BurnInRunReconciler) podOverdue(pod *corev1.Pod, spec *burninv1alpha1.B
 	if pod.CreationTimestamp.IsZero() {
 		return false
 	}
-	// One SEGMENT's window for a segmented soak; podForTest sized the pod's own
-	// deadline from the same function, and the two must not disagree about the
-	// same pod.
-	duration := executionDurationSeconds(spec)
-	window := time.Duration(duration+deadlineGraceSeconds)*time.Second + schedulingGracePeriod
-	return r.now().Sub(pod.CreationTimestamp.Time) > window
+	return r.now().Sub(pod.CreationTimestamp.Time) > podWindow(spec)
 }
 
 // ─── Attempts ─────────────────────────────────────────────────────────────────
