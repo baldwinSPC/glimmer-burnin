@@ -505,6 +505,14 @@ func expandVariants(
 	required bool,
 	variants []burninv1alpha1.TestVariant,
 ) []resolvedTest {
+	// An empty scope is Node. The apiserver defaults it, but the plan must not
+	// depend on that having happened: settleWithoutPod and pkg/localrun already
+	// read "" as Node, and a real TestResult must carry the scope it ran at now
+	// that the schema no longer refuses one without (see TestResult.Scope). One
+	// place, before variants are expanded, so every cell inherits it.
+	if spec.Scope == "" {
+		spec.Scope = burninv1alpha1.ScopeNode
+	}
 	if len(variants) == 0 {
 		return []resolvedTest{{name: name, spec: spec, required: required}}
 	}
@@ -2138,11 +2146,13 @@ func (r *BurnInRunReconciler) finalize(ctx context.Context, run *burninv1alpha1.
 // finalizeError terminates a run the operator cannot execute at all.
 func (r *BurnInRunReconciler) finalizeError(ctx context.Context, run *burninv1alpha1.BurnInRun, sinks []string, cause error) (ctrl.Result, error) {
 	log.FromContext(ctx).Error(cause, "run cannot be executed")
-	// Kind is required on every real BurnInTest, so an empty Kind marks this
-	// result as synthetic — a real test named "resolve" cannot shadow it.
+	// A synthetic result: no Kind (which is the marker — see
+	// TestResult.IsSynthetic), no Scope, no Nodes. It is a result and not a
+	// condition because it is the only carrier of the reason that reaches a
+	// sink.
 	now := metav1.NewTime(r.now())
 	run.Status.Results = append(run.Status.Results, burninv1alpha1.TestResult{
-		Name:       "resolve",
+		Name:       burninv1alpha1.SyntheticResultResolve,
 		Phase:      burninv1alpha1.RunError,
 		FinishedAt: &now,
 		Message:    cause.Error(),
@@ -2603,10 +2613,9 @@ func hasRequiredError(run *burninv1alpha1.BurnInRun, p *plan) bool {
 		if res.Phase != burninv1alpha1.RunError {
 			continue
 		}
-		// The synthetic resolve result is marked by its empty Kind — every
-		// real BurnInTest has one (the field is required) — so a real test
-		// that happens to be named "resolve" gates on its own required flag.
-		if res.Name == "resolve" && res.Kind == "" {
+		// A synthetic result is marked by its empty Kind, so a real test that
+		// happens to be named "resolve" gates on its own required flag.
+		if res.IsSynthetic() && res.Name == burninv1alpha1.SyntheticResultResolve {
 			return true
 		}
 		if req[res.Name] {

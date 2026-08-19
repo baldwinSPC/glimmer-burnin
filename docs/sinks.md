@@ -201,8 +201,8 @@ until anybody aggregates, replays or archives envelopes.
 | Field | What it means to a consumer |
 |---|---|
 | `name` | The test name from the profile. Together with `nodes` it is result identity. |
-| `kind` | The `TestKind` — `clockprobe`, `nccl`, `dcgm-diag`, … |
-| `scope` | `Node`, `Pair` or `Group`. |
+| `kind` | The `TestKind` — `clockprobe`, `nccl`, `dcgm-diag`, … **Empty on a synthetic result** (below). |
+| `scope` | `Node`, `Pair` or `Group`. **Absent on a synthetic result.** |
 | `phase` | `Running`, `Passed`, `Failed`, `Error`, `Skipped`, `Cancelled`. |
 | `nodes` | Every node this result covers. **One entry for a Node test; two for a Pair; all of them for a Group** — a Pair verdict is about the *link* and a Group verdict is about the *collective*, and splitting either per node sends an engineer to the wrong part. |
 | `startedAt` / `finishedAt` | The first attempt's start and the last attempt's end, so the pair spans the test's real occupancy of the hardware — errored attempts and the gaps between repeats included. `startedAt` is when execution actually began, not when the pod was created. |
@@ -214,6 +214,31 @@ until anybody aggregates, replays or archives envelopes.
 | `artifacts` | Non-metric evidence, **by reference**. The payload is not in the envelope. |
 | `variantAxes` | The matrix labels this cell came from — `{"precision": "fp4"}`. Group a sweep by these rather than by splitting test names on a hyphen, which works until a variant is called `fp8-dense` and then works wrongly and silently. |
 | `segments` | Present **only for a segmented soak**, absent for an ordinary execution. See below. |
+
+### Synthetic results — a run that never got as far as hardware
+
+A run that cannot start records *why* as a result, because a result is the
+only thing in the envelope that carries a message. There are exactly two, and
+both are about the **run**, not about any part:
+
+```json
+{ "name": "resolve",   "kind": "", "phase": "Error", "message": "testRef \"dcgm-diag\": burnintests.burnin.glimmer.ai \"dcgm-diag\" not found" }
+{ "name": "admission", "kind": "", "phase": "Error", "message": "refused: BurnInRun ns/other is already testing spark-a. …" }
+```
+
+- `resolve` — the run's own spec could not be resolved: a missing profile, a
+  `testRef` naming a test that does not exist in the run's namespace, a
+  malformed threshold, an unsatisfiable topology.
+- `admission` — the run was fine and the fleet was busy: another run already
+  held its targets and `spec.force` was not set.
+
+**`kind` is empty and `scope` and `nodes` are absent**, and that emptiness is the
+marker: every real `BurnInTest` has a kind, so a consumer tells a synthetic
+result from a real one by `kind == ""`, never by `name` — a real test may be
+called `resolve`. Do not validate `kind` as non-empty or `scope` as one of three
+values on a terminal `Error` envelope, or you will reject exactly the delivery
+that says the run was misconfigured. The run's `phase` is `Error` and no
+hardware verdict was produced; nothing here is a reason to touch a node.
 
 ### `results[].segments` — a soak, and how much of it burned
 

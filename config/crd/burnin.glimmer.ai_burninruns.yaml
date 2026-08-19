@@ -668,13 +668,9 @@ spec:
                       format: date-time
                       type: string
                     kind:
-                      description: |-
-                        Kind is the executed test's kind. It is EMPTY on a synthetic result — one
-                        that is about the run rather than about any hardware: "resolve" when the
-                        spec could not be resolved, "admission" when the fleet was busy. Every
-                        real BurnInTest has a Kind, so an empty one is how the controller (and a
-                        consumer) tells the two apart; a real test named "resolve" cannot shadow
-                        it.
+                      description: |
+                        Kind is the executed test's kind. It is empty on a SYNTHETIC result — one
+                        that is about the run rather than about any hardware (see IsSynthetic).
                       type: string
                     lastCheckpointAt:
                       description: |-
@@ -768,17 +764,9 @@ spec:
                       minimum: 0
                       type: integer
                     scope:
-                      description: |-
-                        Scope is the topology the test ran at, from the pinned plan. It is ABSENT
-                        on a synthetic result, and the schema has to allow that: an unresolvable
-                        testRef is not a Node, a Pair or a Group, and when this field was a
-                        required enum the operator wrote a status its own CRD refused — the
-                        reconcile errored, requeued, built the same status and was refused again,
-                        forever, and the run sat with an empty status looking queued rather than
-                        broken (#391). Inventing a scope to satisfy the schema would be a lie a
-                        consumer might act on. Every real result carries one by construction: it
-                        is copied from the planned test, whose scope the apiserver defaults and
-                        plan.go validates.
+                      description: |
+                        Scope is the topology the test ran at. It is absent on a synthetic result,
+                        which is about the run and not about a node, a link or a collective.
                       enum:
                       - Node
                       - Pair

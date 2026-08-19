@@ -44,10 +44,20 @@ func TestUnresolvableTestRefSettlesTheRunWithAReason(t *testing.T) {
 	d := newDriver(t, ns)
 	d.reconcilerOver(admin)
 
-	// A young NotFound is given resolveGracePeriod to wait out the apply race.
-	// That grace is not what is under test; move the clock past it.
-	d.advanceClock(5 * time.Minute)
+	// A young NotFound is given resolveGracePeriod to wait out the apply race:
+	// the run is requeued, nothing is written, nothing is terminal.
+	if res, err := d.reconcile("run"); err != nil {
+		t.Fatalf("young reconcile: %v", err)
+	} else if res.RequeueAfter == 0 {
+		t.Fatal("a young run with an unresolvable testRef was not given the apply-race grace period")
+	}
+	if young := getRun(t, ns, "run"); isTerminalPhase(young.Status.Phase) || len(young.Status.Results) != 0 {
+		t.Fatalf("young run was settled inside the grace period: phase=%q results=%s",
+			young.Status.Phase, summarise(young))
+	}
 
+	// Past the grace period the missing test is a real config error.
+	d.advanceClock(5 * time.Minute)
 	run := d.run("run", 8)
 
 	if run.Status.Phase != burninv1alpha1.RunError {
@@ -58,7 +68,7 @@ func TestUnresolvableTestRefSettlesTheRunWithAReason(t *testing.T) {
 		t.Fatalf("results = %s, want exactly the synthetic resolve result", summarise(run))
 	}
 	res := run.Status.Results[0]
-	if res.Name != "resolve" || res.Kind != "" || res.Phase != burninv1alpha1.RunError {
+	if res.Name != burninv1alpha1.SyntheticResultResolve || !res.IsSynthetic() || res.Phase != burninv1alpha1.RunError {
 		t.Errorf("result = %+v, want the synthetic resolve result in Error", res)
 	}
 	if !strings.Contains(res.Message, "does-not-exist") {
@@ -106,9 +116,24 @@ func TestAdmissionRefusalSettlesTheRunWithAReason(t *testing.T) {
 		}
 		d.playKubelet("first")
 	}
-	if got := getRun(t, ns, "first").Status.Phase; got != burninv1alpha1.RunRunning {
-		t.Fatalf("first run phase = %q, want Running before the second arrives", got)
+	// "Holding" has to be real before the refusal means anything: a Running
+	// phase, a pod on the node, and the cordon carrying this run's stamp.
+	holding := func(when string) {
+		t.Helper()
+		if got := getRun(t, ns, "first").Status.Phase; got != burninv1alpha1.RunRunning {
+			t.Fatalf("%s: first run phase = %q, want Running", when, got)
+		}
+		if n := len(d.pods("first")); n != 1 {
+			t.Fatalf("%s: first run has %d pod(s), want 1 on the contested node", when, n)
+		}
+		n := getNode(t, node)
+		if !n.Spec.Unschedulable || n.Annotations[burninv1alpha1.AnnotationCordonOwner] == "" {
+			t.Fatalf("%s: node %s unschedulable=%v owner=%q — the first run is not holding it",
+				when, node, n.Spec.Unschedulable, n.Annotations[burninv1alpha1.AnnotationCordonOwner])
+		}
 	}
+	holding("before the second run arrives")
+	ownerBefore := getNode(t, node).Annotations[burninv1alpha1.AnnotationCordonOwner]
 
 	// The second run wants the same node and is not forced.
 	create(t, runFor(ns, "second", "acceptance", []string{node}, nil))
@@ -121,17 +146,23 @@ func TestAdmissionRefusalSettlesTheRunWithAReason(t *testing.T) {
 		t.Fatalf("results = %s, want exactly the synthetic admission result", summarise(second))
 	}
 	res := second.Status.Results[0]
-	if res.Name != "admission" || res.Kind != "" || res.Phase != burninv1alpha1.RunError {
+	if res.Name != burninv1alpha1.SyntheticResultAdmission || !res.IsSynthetic() || res.Phase != burninv1alpha1.RunError {
 		t.Errorf("result = %+v, want the synthetic admission result in Error", res)
 	}
-	if !strings.Contains(res.Message, "first") || !strings.Contains(res.Message, node) {
+	if !strings.Contains(res.Message, ns+"/first") || !strings.Contains(res.Message, node) {
 		t.Errorf("message = %q, want it to name the run in the way and the contested node", res.Message)
 	}
-	if res.Scope != "" {
-		t.Errorf("scope = %q on a synthetic result, want none", res.Scope)
+	if res.Scope != "" || len(res.Nodes) != 0 {
+		t.Errorf("scope = %q nodes = %v on a synthetic result, want none — the refused run held nothing", res.Scope, res.Nodes)
 	}
-	// The first run must be untouched by the refusal.
-	if got := getRun(t, ns, "first").Status.Phase; got != burninv1alpha1.RunRunning {
-		t.Errorf("first run phase = %q after the second was refused, want still Running", got)
+	if n := len(d.pods("second")); n != 0 {
+		t.Errorf("a refused run created %d pod(s)", n)
+	}
+	// The refusal's own teardown (terminate: kill pods, release cordons) must
+	// have touched nothing of the first run's: it keys on run label and cordon
+	// owner, never on the target node — and the node is shared.
+	holding("after the second run was refused")
+	if got := getNode(t, node).Annotations[burninv1alpha1.AnnotationCordonOwner]; got != ownerBefore {
+		t.Errorf("cordon owner changed from %q to %q across a refusal that held nothing", ownerBefore, got)
 	}
 }

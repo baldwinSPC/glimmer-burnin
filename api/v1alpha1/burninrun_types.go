@@ -2,6 +2,8 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
 // RunPhase is the lifecycle of a BurnInRun, and doubles as the phase of an
@@ -378,23 +380,30 @@ type TestAttempt struct {
 // attempts.
 type TestResult struct {
 	Name string `json:"name"`
-	// Kind is the executed test's kind. It is EMPTY on a synthetic result — one
-	// that is about the run rather than about any hardware: "resolve" when the
-	// spec could not be resolved, "admission" when the fleet was busy. Every
-	// real BurnInTest has a Kind, so an empty one is how the controller (and a
-	// consumer) tells the two apart; a real test named "resolve" cannot shadow
-	// it.
+	// Kind is the executed test's kind. It is empty on a SYNTHETIC result — one
+	// that is about the run rather than about any hardware (see IsSynthetic).
+	//
+	// ---
+	//
+	// Every real BurnInTest has a Kind, so an empty one is how the controller
+	// and a consumer tell the two apart; a real test named "resolve" cannot
+	// shadow it. The two synthetic names are the constants below.
 	Kind TestKind `json:"kind"`
-	// Scope is the topology the test ran at, from the pinned plan. It is ABSENT
-	// on a synthetic result, and the schema has to allow that: an unresolvable
-	// testRef is not a Node, a Pair or a Group, and when this field was a
-	// required enum the operator wrote a status its own CRD refused — the
-	// reconcile errored, requeued, built the same status and was refused again,
-	// forever, and the run sat with an empty status looking queued rather than
-	// broken (#391). Inventing a scope to satisfy the schema would be a lie a
-	// consumer might act on. Every real result carries one by construction: it
-	// is copied from the planned test, whose scope the apiserver defaults and
-	// plan.go validates.
+	// Scope is the topology the test ran at. It is absent on a synthetic result,
+	// which is about the run and not about a node, a link or a collective.
+	//
+	// ---
+	//
+	// The schema has to allow the absence: an unresolvable testRef is not a
+	// Node, a Pair or a Group, and when this field was a required enum the
+	// operator wrote a status its own CRD refused — the reconcile errored,
+	// requeued, built the same status and was refused again, forever, and the
+	// run sat with an empty status looking queued rather than broken (#391).
+	// Inventing a scope to satisfy the schema would be a lie a consumer might
+	// act on. Every REAL result carries one: the controller normalises an empty
+	// spec scope to Node when it resolves the profile, the same reading
+	// settleWithoutPod and pkg/localrun already give it, so the guarantee does
+	// not rest on the apiserver having defaulted the BurnInTest.
 	// +optional
 	Scope TestScope `json:"scope,omitempty"`
 	// Phase is the test's verdict across all attempts. With repeats it is the
@@ -567,6 +576,28 @@ type TestResult struct {
 	// Attempts is the per-execution history, in order.
 	Attempts []TestAttempt `json:"attempts,omitempty"`
 }
+
+// The names of the two SYNTHETIC results — results the controller mints about
+// the run itself rather than about any hardware. Both are always Error, both
+// carry no Kind, no Scope and no Nodes, and each is the only place the reason
+// for the run's terminal Error is recorded, which is why they are results (and
+// so reach a sink) rather than conditions (which do not). The values are the
+// contract's, because that is where a consumer reads them.
+const (
+	// SyntheticResultResolve records that the run's own spec could not be
+	// resolved: a missing profile, an unresolvable testRef, a malformed
+	// threshold, an unsatisfiable topology.
+	SyntheticResultResolve = contract.SyntheticResultResolve
+	// SyntheticResultAdmission records that the run was fine and the fleet was
+	// busy: another run already held its targets and spec.force was not set.
+	SyntheticResultAdmission = contract.SyntheticResultAdmission
+)
+
+// IsSynthetic reports whether this result is about the run rather than about
+// hardware. Every real BurnInTest has a Kind, so an empty one is the marker; a
+// real test that happens to be named "resolve" is not synthetic. The same
+// predicate exists on contract.TestResult for the envelope.
+func (r *TestResult) IsSynthetic() bool { return r.Kind == "" }
 
 // Violation is one threshold a test did not satisfy, as recorded on a result.
 //

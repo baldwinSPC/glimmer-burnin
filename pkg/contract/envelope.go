@@ -64,9 +64,22 @@ type RunRef struct {
 }
 
 // TestResult is one test's outcome, flattened out of the CRD status.
+//
+// A result is usually about hardware. Two are not: a run that could not START
+// records why as a SYNTHETIC result, because this is the only thing in the
+// envelope that carries a message. Name "resolve" means the run's own spec
+// could not be resolved (a missing profile, a testRef naming no test, a
+// malformed threshold); "admission" means the fleet was busy and spec.force
+// was not set. Both are Phase Error, both have an EMPTY Kind and no Scope and
+// no Nodes — and the empty Kind is the marker (see IsSynthetic), never the
+// name, because a real test may be called "resolve". A consumer that validates
+// Kind as non-empty or Scope as one of three values rejects exactly the
+// delivery that says the run was misconfigured.
 type TestResult struct {
-	Name       string     `json:"name"`
-	Kind       string     `json:"kind"`
+	Name string `json:"name"`
+	// Kind is the TestKind. Empty on a synthetic result.
+	Kind string `json:"kind"`
+	// Scope is Node, Pair or Group. Absent on a synthetic result.
 	Scope      string     `json:"scope,omitempty"`
 	Phase      string     `json:"phase"`
 	Nodes      []string   `json:"nodes,omitempty"`
@@ -122,6 +135,17 @@ type TestResult struct {
 	// holding.
 	Segments *SegmentSummary `json:"segments,omitempty"`
 }
+
+// The names of the two synthetic results. See TestResult.
+const (
+	SyntheticResultResolve   = "resolve"
+	SyntheticResultAdmission = "admission"
+)
+
+// IsSynthetic reports whether this result is about the run rather than about
+// hardware: no test was executed and Scope and Nodes are absent. The marker is
+// the empty Kind, which every real BurnInTest has.
+func (r *TestResult) IsSynthetic() bool { return r.Kind == "" }
 
 // Violation is one threshold a test failed.
 //

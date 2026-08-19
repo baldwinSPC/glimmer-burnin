@@ -258,7 +258,9 @@ A resolution failure is classified before it is acted on. Transient failures
 run waits out a two-minute grace period, because `kubectl apply -f dir/` creates
 the run and its profile together and the run's watch event can arrive first.
 Only a confirmed-permanent misconfiguration finalises the run as `Error`, with a
-synthetic result named `resolve`.
+synthetic result named `resolve` — no kind, no scope, no nodes, because it is
+about the run and not about any hardware; the message names what could not be
+resolved (see [sinks.md](sinks.md#synthetic-results--a-run-that-never-got-as-far-as-hardware)).
 
 ### 2. Admit
 
@@ -278,7 +280,9 @@ nothing to say the cause was another run.
 The check **refuses rather than queues**. A burn-in is scheduled maintenance
 against hardware somebody is waiting on, and a run that silently waits behind
 another has an unpredictable end time, which is exactly what a maintenance
-window cannot tolerate. `spec.force` admits anyway and is recorded as
+window cannot tolerate. A refusal settles the run `Error` with the second
+synthetic result, named `admission`, whose message names the run in the way
+and the contested nodes. `spec.force` admits anyway and is recorded as
 `Admitted=True` with reason `AdmittedByForce`, so a verdict produced under
 deliberate contention is identifiable as such months later.
 
