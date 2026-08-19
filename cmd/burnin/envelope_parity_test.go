@@ -58,10 +58,15 @@ var cliDoesNotDeliver = map[string][]string{
 		"CheckpointSequence",
 	},
 	"TestResult": {
-		// Variants are expanded by the operator's profile resolution, which
-		// the CLI does not implement yet.
-		"VariantAxes",
-		// Segmented soaks are pod-lifecycle machinery.
+		// Segmented soaks are pod-lifecycle machinery, and they stay here
+		// DELIBERATELY rather than for want of effort. segmentSeconds exists to
+		// mitigate Kubernetes evictions — an evicted pod costs one segment
+		// instead of the week — and a local run has no evictions to mitigate:
+		// pkg/localrun runs a segmented soak as ONE execution on purpose (see
+		// TestASegmentedSoakRunsAsOneLocalExecution). Slicing it here would add
+		// a second aggregation implementation for no gain, and the Aggregation
+		// rules are exactly what keep the two dispatchers agreeing on a soak's
+		// verdict. docs/bare-metal.md says the same thing to a user.
 		"Segments",
 		// The artifact channel rides in a run-owned ConfigMap.
 		"Artifacts",
@@ -219,8 +224,9 @@ func maximalReport() localrun.Report {
 			Name: "ib-write-bw", Kind: "ib-write-bw", Scope: api.ScopePair,
 			Phase: api.RunFailed, Nodes: []string{"spark-a", "spark-b"},
 			StartedAt: start, FinishedAt: time.Now(),
-			Metrics: map[string]string{"bandwidthGbps": "97.2"},
-			Message: "bandwidthGbps below floor",
+			Metrics:     map[string]string{"bandwidthGbps": "97.2"},
+			Message:     "bandwidthGbps below floor",
+			VariantAxes: map[string]string{"measurand": "bandwidth"},
 			Violations: []api.Violation{{
 				Index: 0, Metric: "bandwidthGbps", Cause: "BelowFloor",
 				Kind: "ib-write-bw", Reason: "97.2 < 99",
@@ -236,8 +242,11 @@ func maximalReport() localrun.Report {
 // CONTRACT — a new field the CLI will never deliver — and should hurt a
 // little: update this count in the same commit, with the reason in the ledger.
 func TestTheLedgerOnlyShrinks(t *testing.T) {
-	if n := len(cliDoesNotDeliver["Envelope"]) + len(cliDoesNotDeliver["TestResult"]); n > 7 {
-		t.Errorf("the cliDoesNotDeliver ledger grew to %d entries; it starts at 7 and is meant to "+
+	// 7 at the start; 6 once variant expansion moved to pkg/plan and both
+	// dispatchers began calling it. Lower this in the same commit as each entry
+	// that goes.
+	if n := len(cliDoesNotDeliver["Envelope"]) + len(cliDoesNotDeliver["TestResult"]); n > 6 {
+		t.Errorf("the cliDoesNotDeliver ledger grew to %d entries; it started at 7 and is meant to "+
 			"shrink as the CLI gains features. If a new contract field genuinely cannot be delivered "+
 			"locally, raise this bound in the same commit as the ledger entry and its reason", n)
 	}

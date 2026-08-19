@@ -662,6 +662,16 @@ verdict, delivery keys — works unchanged because none of them ever learns
 variants exist. A profile with no variants plans identically to one written
 before variants existed.
 
+**Both dispatchers expand, through the same code.** `burnin run` on a bare host
+resolves the same profile into the same cells as the operator does in-cluster,
+because expansion lives in `pkg/plan` and both call it. This was not always
+true: the CLI once read `variants`, let the schema validate them, and then
+discarded them — a four-cell sweep ran as one execution of the parent test,
+under the parent's name, with none of the cell's thresholds applied and no
+`BURNIN_VARIANT_*` reaching the runner. Nothing in the output said a cell was
+missing, so the only way to notice was to run the same profile in a cluster and
+count the results. `burnin run --dry-run` now prints each cell with its axes.
+
 **The arithmetic is invisible in the profile, so the run states it.** One entry
 with four variants across eight nodes at a cap of 1 is thirty-two sequential
 node-executions. The `PlanExpanded` condition says so at start — a condition
