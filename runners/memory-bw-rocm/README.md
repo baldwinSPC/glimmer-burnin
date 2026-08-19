@@ -51,8 +51,8 @@ discrete GPU's.
 
 That is not a reason to withhold it — DGX Spark is unified too, and the NVIDIA
 runner reports the same three figures there, so the numbers stay comparable
-across the fleet Glimmer actually runs. It *is* a reason to say plainly what the
-figure is, so nobody reads a healthy intra-pool copy rate as a degraded link.
+across a fleet mixing both. It *is* a reason to say plainly what the figure is,
+so nobody reads a healthy intra-pool copy rate as a degraded link.
 Set fleet thresholds from measured baselines per hardware class, never from a
 datasheet PCIe number.
 

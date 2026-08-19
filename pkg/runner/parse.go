@@ -24,7 +24,7 @@
 // here to look at" are different claims about the hardware.
 //
 // This is public and free of Kubernetes types — genuinely, unlike pkg/verdict,
-// which depends on api/v1alpha1 (issue #274). Glimmer's
+// which depends on api/v1alpha1 (issue #274). A separate,
 // pre-Kubernetes burn-in path runs the SAME runner images, and if the two
 // dispatchers derived different metrics from identical output they would reach
 // different verdicts about the same hardware. One brain, two dispatchers.

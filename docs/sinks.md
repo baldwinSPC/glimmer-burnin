@@ -558,8 +558,8 @@ One field in the worked example shows what that rule looks like in practice.
 character, even though every threshold is now evaluated. It is marked FROZEN in
 the source and the complete picture was added *beside* it, as `violations`,
 rather than by widening it — because the fields it derives from are public API
-with **two dispatchers** (this operator, and Glimmer's pre-Kubernetes burn-in
-path, which runs the same runner images), and silently widening a field they
+with **two dispatchers** (this operator, and a separate, pre-Kubernetes burn-in
+path that runs the same runner images), and silently widening a field they
 both read would change acceptance reporting for both.
 
 **What a consumer should do with a field it does not recognise: ignore it.** A

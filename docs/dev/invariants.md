@@ -24,22 +24,24 @@ to a specific place where it was once got wrong.
 
 ## 1. The standalone rule
 
-**This repository must never import the Glimmer control plane.**
+**This repository must never import its control-plane consumer.**
 
-CI greps every `*.go` file for `baldwinSPC/glimmer` and fails the build if it
-finds one. There is no exception — not "just for a type", not "just in a test".
+CI greps every `*.go` file for the consumer's module path and fails the build if
+it finds one. There is no exception — not "just for a type", not "just in a
+test".
 
-The dependency direction is one-way. Glimmer may depend on this project; this
-project may never depend on Glimmer. Integration happens through the `BurnInSink`
-export contract — a versioned delivery envelope over a webhook, described in
-[docs/sinks.md](../sinks.md) — and not through shared code.
+The dependency direction is one-way. A consuming control plane may depend on
+this project; this project may never depend on one. Integration happens through
+the `BurnInSink` export contract — a versioned delivery envelope over a webhook,
+described in [docs/sinks.md](../sinks.md) — and not through shared code.
 
-The reason matters more than the rule. Glimmer is private. If this repository
-imported it, it could not be published, and it could not be adopted by anyone
-whose fleet has nothing to do with Glimmer. That is the entire premise of the
-project. **So when something is needed from the control plane, the answer is to
-widen the contract, never to add an import** — a widened envelope is something
-every adopter gets, and an import is something only one consumer can use.
+The reason matters more than the rule. This project's first consumer is
+private. If this repository imported it, it could not be published, and it
+could not be adopted by anyone whose fleet has nothing to do with that consumer.
+That is the entire premise of the project. **So when something is needed from
+the control plane, the answer is to widen the contract, never to add an
+import** — a widened envelope is something every adopter gets, and an import is
+something only one consumer can use.
 
 ---
 
