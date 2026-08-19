@@ -141,6 +141,8 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		// Dimensional.
 		"algBandwidthGBs":            {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"busBandwidthGBs":            {UnitGigabytesPerSecond, ThresholdUseAcceptance},
+		"ranks":                      {UnitNone, ThresholdUseEvidence},
+		"ncclTransport":              {UnitNone, ThresholdUseEvidence},
 		"hostToDeviceBandwidthGBs":   {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"deviceToHostBandwidthGBs":   {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"deviceToDeviceBandwidthGBs": {UnitGigabytesPerSecond, ThresholdUseAcceptance},

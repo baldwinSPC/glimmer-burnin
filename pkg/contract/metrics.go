@@ -320,17 +320,35 @@ var registry = map[string]Metric{
 	},
 	"busBandwidthGBs": {
 		Name: "busBandwidthGBs", Unit: UnitGigabytesPerSecond,
-		Description:  "NCCL bus bandwidth: algorithm bandwidth scaled by the collective's communication pattern",
+		Description: "NCCL bus bandwidth: algorithm bandwidth scaled by the collective's communication pattern. " +
+			"NAMED THE SAME AT EVERY SCOPE AND FOR EVERY COLLECTIVE (Pair's cross-node all-reduce, Group's, and " +
+			"Node's intra-node all-reduce/allgather/reducescatter/alltoall), a deliberate decision against the " +
+			"registry's own 'two differently-obtained figures under one name' rule: it is warranted here because " +
+			"the SAME nccl-tests formula computes it in every case (busBandwidth(algbw, nranks) is one function, " +
+			"reused, not reimplemented per scope), Scope on the TestResult already discriminates a link's number " +
+			"from a collective's, and a threshold is written per BurnInTest rather than globally on the metric " +
+			"name — so nothing ever compares a Node-scope reading against a Pair-scope gate by accident. Contrast " +
+			"throughputTflops vs sustainedThroughputTflops, which stayed separate because they are measured by " +
+			"different PROTOCOLS on the same part; this is one protocol run in more places",
 		Aggregation:  AggMin,
 		Combination:  CombineCollective,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"algBandwidthGBs": {
 		Name: "algBandwidthGBs", Unit: UnitGigabytesPerSecond,
-		Description:  "NCCL algorithm bandwidth: message size over collective time, with no scaling for the communication pattern; unlike busBandwidthGBs it is not comparable across collectives or rank counts",
+		Description: "NCCL algorithm bandwidth: message size over collective time, with no scaling for the " +
+			"communication pattern; unlike busBandwidthGBs it is not comparable across collectives or rank " +
+			"counts on its own — busBandwidthGBs is. Shares its name across scopes and collectives for the same " +
+			"reason busBandwidthGBs does; see that entry",
 		Aggregation:  AggMin,
 		Combination:  CombineCollective,
 		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"ranks": {
+		Name: "ranks", Unit: UnitNone,
+		Description:  "how many ranks joined this collective. At Node scope this is the device count ncclCommInitAll actually used, printed so a fleet reading busBandwidthGBs from an intra-node run can tell an 8-GPU result from a 2-GPU one without cross-referencing the node's inventory. Evidence, not a gate: whether the count is what a profile expects is a plan-time or topology question, not this metric's job",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
 	},
 
 	// --- Memory copy and stress bandwidth ----------------------------------
@@ -1048,6 +1066,18 @@ var registry = map[string]Metric{
 	"throttleClassification": {
 		Name: "throttleClassification", Unit: UnitNone,
 		Description:  "why the runner believes the clock fell short: one of none|thermal|powerCap|applicationClocks|unknown. This is an ATTRIBUTION, and a label — it exists to send an engineer to a cable or to a cooling path rather than to a die, and the runner has already failed the node itself when it is anything but none. Gate the clock (sustainedClockPct) and read this to find out why",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"ncclTransport": {
+		Name: "ncclTransport", Unit: UnitNone,
+		Description: "which transport NCCL actually selected for an intra-node (Node-scope) collective: one of " +
+			"nvlink|p2p|shm|net. BEST-EFFORT and self-omitting, not a probe result: it is read from " +
+			"NCCL_DEBUG=INFO's own log text rather than from anything this runner measured directly, so an " +
+			"NCCL upgrade that changes its wording makes this label simply absent from a future run rather than " +
+			"wrong — it can never become a hardware verdict, because it is Evidence and nothing in this project " +
+			"gates on it. It answers the question an intra-node run raises that a cross-node one never does: did " +
+			"the collective cross NVLink, or silently fall back to something slower within the same box",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},

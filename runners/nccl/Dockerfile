@@ -150,6 +150,7 @@ COPY --from=nccl-build /nccl/build/lib/     /opt/nccl/lib/
 COPY --from=nccl-build /nccl/LICENSE.txt    /opt/nccl/LICENSE.txt
 
 COPY nccl_pair.cu /src/nccl_pair.cu
+COPY collective/collective.h /src/collective/collective.h
 
 # -cudart static and -lnccl_static: everything NVIDIA travels INSIDE the binary,
 # so the final image contains no NVIDIA shared object at all.  libcuda.so.1 (the
