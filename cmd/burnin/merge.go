@@ -370,11 +370,41 @@ func mergeOneTest(seed localrun.TestResult, records []rankRecord, nodes []string
 	out.Unmeasurable = sortedKeys(c.Unmeasurable)
 	out.Phase = phaseOf(c.Verdict)
 	out.Message = mergeMessage(ranks, c)
-	// Violations came from ONE rank's own evaluation of its own metrics and do
-	// not describe the collective. Cleared rather than merged: the gate belongs
-	// to the merged metrics, and re-running it here would need the thresholds,
-	// which a rank record does not carry.
+	// EVERYTHING BELOW IS RANK 0'S OWN, and rank 0 is not the collective.
+	//
+	// `out` starts as rank 0's result because that is where the name, kind and
+	// scope come from — but every field that describes a MEASUREMENT or a
+	// JUDGEMENT has to be replaced or dropped, or the merged result quietly
+	// reports one rank's evidence under all N nodes' names.
+	//
+	// Violations and NotEvaluated are one rank's evaluation of its OWN metrics.
+	// They do not describe the collective, and they cannot simply be merged: the
+	// gate belongs to the merged metrics, and re-running it here would need the
+	// thresholds, which a rank record does not carry.
 	out.Violations = nil
+	out.NotEvaluated = nil
+
+	// ONE attempt, describing the collective — not rank 0's list.
+	//
+	// Left as it was, a merged result could say Failed because rank 1 failed
+	// while its only attempt showed rank 0's exit 0. A reader checking the exit
+	// code against the phase would find them contradicting each other, and the
+	// exit code is the more concrete of the two, so it is the one they would
+	// believe.
+	//
+	// The per-rank detail is not lost: it is in each rank's own record, which is
+	// where a reader who wants it should look.
+	started, finished := out.StartedAt, out.FinishedAt
+	out.Attempts = []localrun.Attempt{{
+		Attempt:    1,
+		Trigger:    api.AttemptInitial,
+		Phase:      out.Phase,
+		ExitCode:   c.ExitCode,
+		StartedAt:  started,
+		FinishedAt: finished,
+		Metrics:    c.Metrics,
+		Message:    out.Message,
+	}}
 	return out, nil
 }
 

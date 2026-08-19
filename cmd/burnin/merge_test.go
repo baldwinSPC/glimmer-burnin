@@ -302,3 +302,62 @@ func TestMergeWithNoRecordedFingerprintCarriesNone(t *testing.T) {
 		t.Errorf("Fingerprint = %v, want nil", env.Fingerprint)
 	}
 }
+
+// The merged result's attempt describes THE COLLECTIVE, not rank 0.
+//
+// `out` starts as rank 0's result, so every field describing a measurement or a
+// judgement has to be replaced or dropped. Left alone, a merged result could
+// say Failed — because rank 1 failed — while its only attempt showed rank 0's
+// exit 0. A reader checking the exit code against the phase would find them
+// contradicting each other, and would believe the exit code.
+func TestMergeTheAttemptDescribesTheCollectiveNotRankZero(t *testing.T) {
+	failing := localrun.TestResult{
+		Name: "nccl", Kind: "nccl", Scope: api.ScopeGroup, Phase: api.RunFailed,
+		Attempts: []localrun.Attempt{{Attempt: 1, Phase: api.RunFailed, ExitCode: 1}},
+	}
+	records := []rankRecord{
+		rankRec(0, 2, "spark-a", passed("nccl", map[string]string{"busBandwidthGBs": "97.2"})),
+		rankRec(1, 2, "spark-b", failing),
+	}
+
+	rep, _, err := mergeRanks(records, 2)
+	if err != nil {
+		t.Fatalf("mergeRanks: %v", err)
+	}
+	got := rep.Results[0]
+	if len(got.Attempts) != 1 {
+		t.Fatalf("attempts = %d, want exactly 1 describing the collective", len(got.Attempts))
+	}
+	if got.Attempts[0].Phase != got.Phase {
+		t.Errorf("attempt phase %v disagrees with the result's %v", got.Attempts[0].Phase, got.Phase)
+	}
+	if got.Attempts[0].ExitCode != 1 {
+		t.Errorf("attempt exit = %d, want 1 (the failing rank's) — rank 0's 0 next to a Failed phase "+
+			"is a contradiction a reader resolves the wrong way", got.Attempts[0].ExitCode)
+	}
+}
+
+// Violations and NotEvaluated are one rank's evaluation of its OWN metrics. They
+// do not describe the collective, and they cannot be merged without the
+// thresholds — which a rank record does not carry.
+func TestMergeDropsOneRanksOwnJudgement(t *testing.T) {
+	judged := passed("nccl", map[string]string{"busBandwidthGBs": "97.2"})
+	judged.Violations = []api.Violation{{Metric: "busBandwidthGBs", Cause: "BelowFloor"}}
+	judged.NotEvaluated = []api.NotEvaluated{{Metric: "eccErrors", Reason: "unmeasurable"}}
+
+	records := []rankRecord{
+		rankRec(0, 2, "spark-a", judged),
+		rankRec(1, 2, "spark-b", passed("nccl", map[string]string{"busBandwidthGBs": "40.1"})),
+	}
+
+	rep, _, err := mergeRanks(records, 2)
+	if err != nil {
+		t.Fatalf("mergeRanks: %v", err)
+	}
+	if len(rep.Results[0].Violations) != 0 {
+		t.Errorf("rank 0's violations survived onto a result naming both nodes: %+v", rep.Results[0].Violations)
+	}
+	if len(rep.Results[0].NotEvaluated) != 0 {
+		t.Errorf("rank 0's notEvaluated survived: %+v", rep.Results[0].NotEvaluated)
+	}
+}
