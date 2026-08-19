@@ -1,6 +1,7 @@
 package hostinfo
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,5 +255,41 @@ func TestNoThirdPartyImports(t *testing.T) {
 		if strings.Contains(first, ".") {
 			t.Errorf("pkg/hostinfo depends on %s — it must stay standard-library only", dep)
 		}
+	}
+}
+
+// PrimaryIP answers a routing question, so a unit test cannot assert WHICH
+// address it returns without inheriting the CI machine's network. What it can
+// assert — and what actually matters — is that whatever comes back is a real,
+// usable address rather than a plausible-looking placeholder, because the
+// caller injects it into a runner's environment as status.hostIP.
+func TestPrimaryIPIsEitherAUsableAddressOrEmpty(t *testing.T) {
+	got := PrimaryIP()
+	if got == "" {
+		// Legitimate: a host with no default route and no global unicast
+		// address. Absence is the honest answer and the caller refuses rather
+		// than substituting one.
+		return
+	}
+	ip := net.ParseIP(got)
+	if ip == nil {
+		t.Fatalf("PrimaryIP() = %q, which does not parse as an IP", got)
+	}
+	if ip.IsLoopback() {
+		t.Errorf("PrimaryIP() = %q — a loopback address is never reachable from another machine, "+
+			"and handing it to a runner as status.hostIP would produce a peer address nothing can dial", got)
+	}
+	if ip.IsUnspecified() {
+		t.Errorf("PrimaryIP() = %q — the unspecified address is a bind wildcard, not a host address", got)
+	}
+	if ip.IsMulticast() {
+		t.Errorf("PrimaryIP() = %q is multicast", got)
+	}
+}
+
+// Probe carries it, so a caller needs one probe rather than two.
+func TestProbeCarriesThePrimaryIP(t *testing.T) {
+	if Probe(Options{}).PrimaryIP != PrimaryIP() {
+		t.Error("Probe().PrimaryIP disagrees with PrimaryIP()")
 	}
 }

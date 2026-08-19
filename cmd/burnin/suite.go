@@ -129,9 +129,15 @@ func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.
 		return localrun.Plan{}, nil, err
 	}
 
+	// Both host facts are probed ONCE, here, and pinned into the plan. The
+	// alternative — probing inside Translate — would make translation depend on
+	// the machine it happens to run on, and would re-answer the same question
+	// per test.
+	h := hostinfo.Probe(hostinfo.Options{})
 	p := localrun.Plan{
 		Node:              node,
-		Vendor:            hostVendor(),
+		Vendor:            vendorOf(h),
+		HostIP:            h.PrimaryIP,
 		FailFast:          profile.Spec.FailFast,
 		RetryOnErrorLimit: retries,
 		Rendezvous:        rz,
@@ -171,6 +177,7 @@ func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.
 			seen[cell.Name] = true
 
 			warnings = append(warnings, clusterOnlyFields(cell.Name, cell.Spec, rz)...)
+			warnings = append(warnings, unresolvableEnvWarnings(p, cell.Name, cell.Spec)...)
 			p.Tests = append(p.Tests, cell)
 		}
 	}
@@ -280,7 +287,26 @@ func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendez
 	return out
 }
 
-// hostVendor is this machine's accelerator vendor, read off the PCI bus.
+// unresolvableEnvWarnings names the variables a test declares that will NOT be
+// set on this machine.
+//
+// Warned about for the same reason clusterOnlyFields warns about a
+// nodeSelector: the author has a belief about what the runner will receive, and
+// letting it pass without a word would leave the belief intact and wrong. The
+// variable is left UNSET rather than set to "" — see localrun.ResolveEnv — so
+// this warning is the only thing standing between a profile that reads a Secret
+// and a runner that quietly behaves as if the Secret were blank.
+func unresolvableEnvWarnings(p localrun.Plan, name string, spec api.BurnInTestSpec) []string {
+	var out []string
+	for _, v := range localrun.UnresolvableEnv(p, spec) {
+		out = append(out, fmt.Sprintf(
+			"%s declares env %s, which has no meaning outside a cluster: it will be UNSET rather than "+
+				"empty, so a runner can tell it apart from a variable the cluster set to nothing", name, v))
+	}
+	return out
+}
+
+// vendorOf is this machine's accelerator vendor, read off the PCI bus.
 //
 // It decides which image a test resolves to, so the operator and this path must
 // answer the same question from equally authoritative sources: the operator asks
@@ -293,8 +319,10 @@ func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendez
 // vendors existed. Only the FIRST accelerator is consulted, matching the
 // operator's own vendorOf; a host with two vendors' cards in it is a case
 // neither side handles yet and neither should pretend to.
-func hostVendor() string {
-	h := hostinfo.Probe(hostinfo.Options{})
+//
+// It takes an ALREADY-PROBED host so buildPlan can take the vendor and the
+// primary IP from one probe rather than two.
+func vendorOf(h hostinfo.Host) string {
 	for _, a := range h.Accelerators {
 		if a.Vendor != "" {
 			return a.Vendor

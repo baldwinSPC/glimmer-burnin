@@ -503,3 +503,104 @@ spec:
 		t.Fatal("two variants named the same were accepted")
 	}
 }
+
+// ─── valueFrom environment ───────────────────────────────────────────────────
+
+// THE BUG THIS PINS: a BurnInTest whose spec.runner.env uses valueFrom rather
+// than value survives podForTest verbatim and is resolved by the kubelet in a
+// cluster. This dispatcher copied e.Value, and e.Value on a valueFrom entry is
+// the EMPTY STRING — so the variable was SET, and set to nothing. A runner
+// testing `if [ -n "$HOST_IP" ]` took the wrong branch; one that used it built
+// ":9000". The same BurnInTest worked in-cluster.
+func TestAnEnvValueFromIsWarnedAboutRatherThanSilentlyEmptied(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: p
+spec:
+  tests:
+    - testRef: t
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: t
+spec:
+  kind: custom
+  runner:
+    image: example.invalid/runner:test
+    env:
+      - name: TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: creds
+            key: token
+`
+	s, err := loadSuite([]string{writeSuite(t, body)})
+	if err != nil {
+		t.Fatalf("loadSuite: %v", err)
+	}
+	p, warnings, err := s.buildPlan("", "n1", 0, nil)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+
+	joined := strings.Join(warnings, " ")
+	if !strings.Contains(joined, "TOKEN") || !strings.Contains(joined, "secretKeyRef creds/token") {
+		t.Errorf("a valueFrom this dispatcher cannot resolve must be warned about by name: %v", warnings)
+	}
+
+	spec, err := localrun.Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if v, present := spec.Env["TOKEN"]; present {
+		t.Errorf("TOKEN = %q and is present; it must be ABSENT so a runner can tell "+
+			"\"nobody could answer this\" from \"the cluster set it to nothing\"", v)
+	}
+}
+
+// status.hostIP is the documented way a runner learns the address its peers
+// reach it on, and this dispatcher is standing on the machine — so it answers,
+// from the same routing question a kubelet answers.
+func TestTheHostsOwnFieldRefsAreResolvedFromTheMachine(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: p
+spec:
+  tests:
+    - testRef: t
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: t
+spec:
+  kind: custom
+  runner:
+    image: example.invalid/runner:test
+    env:
+      - name: NODE
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+`
+	s, _ := loadSuite([]string{writeSuite(t, body)})
+	p, warnings, err := s.buildPlan("", "spark-a", 0, nil)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+	if strings.Contains(strings.Join(warnings, " "), "NODE") {
+		t.Errorf("spec.nodeName is resolvable here and must not be warned about: %v", warnings)
+	}
+	spec, err := localrun.Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if spec.Env["NODE"] != "spark-a" {
+		t.Errorf("NODE = %q, want spark-a", spec.Env["NODE"])
+	}
+}
