@@ -138,7 +138,42 @@ func (h *harness) run(name string) *burninv1alpha1.BurnInRun {
 	if err := h.c.Get(context.Background(), types.NamespacedName{Namespace: "burnin", Name: name}, &run); err != nil {
 		h.t.Fatalf("get run: %v", err)
 	}
+	assertResultIdentities(h.t, &run)
 	return &run
+}
+
+// assertResultIdentities holds every result the controller wrote to the shape
+// a consumer is told to expect: a REAL result — one with a Kind — carries the
+// scope it ran at, and a SYNTHETIC one — no Kind — is one of the two the
+// controller mints about the run itself, and carries no scope because it has
+// none.
+//
+// This is checked on every read of every run in the suite because the CRD no
+// longer does it. TestResult.Scope used to be a required enum, which turned a
+// missing scope into a status the apiserver refused whole and a run that
+// wedged with nothing written (#391); making the field optional was the fix
+// for the synthetic results, and this is what keeps the real ones honest now
+// that the schema cannot.
+func assertResultIdentities(t *testing.T, run *burninv1alpha1.BurnInRun) {
+	t.Helper()
+	for _, res := range run.Status.Results {
+		if res.Kind == "" {
+			if res.Name != "resolve" && res.Name != "admission" {
+				t.Errorf("result %q has no Kind but is not a synthetic result the controller mints", res.Name)
+			}
+			if res.Scope != "" {
+				t.Errorf("synthetic result %q carries scope %q — it is about the run, not about any hardware", res.Name, res.Scope)
+			}
+			continue
+		}
+		// Non-empty, not "one of the three": the unsupported-scope path
+		// deliberately records the scope it REFUSED, and the value in the
+		// spec is one the CRD's own enum already admitted.
+		if res.Scope == "" {
+			t.Errorf("result %q (kind %s) has no scope — a real result must carry the scope it ran at; "+
+				"the CRD no longer refuses this, so nothing else would notice", res.Name, res.Kind)
+		}
+	}
 }
 
 func (h *harness) node(name string) *corev1.Node {

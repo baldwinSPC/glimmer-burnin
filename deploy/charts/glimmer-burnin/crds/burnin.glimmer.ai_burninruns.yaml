@@ -669,9 +669,12 @@ spec:
                       type: string
                     kind:
                       description: |-
-                        TestKind is a well-known category. The kind selects the default runner image
-                        and result parser; Runner may override the image. Unknown kinds are allowed
-                        (custom runners) but get no built-in parsing.
+                        Kind is the executed test's kind. It is EMPTY on a synthetic result — one
+                        that is about the run rather than about any hardware: "resolve" when the
+                        spec could not be resolved, "admission" when the fleet was busy. Every
+                        real BurnInTest has a Kind, so an empty one is how the controller (and a
+                        consumer) tells the two apart; a real test named "resolve" cannot shadow
+                        it.
                       type: string
                     lastCheckpointAt:
                       description: |-
@@ -766,16 +769,16 @@ spec:
                       type: integer
                     scope:
                       description: |-
-                        TestScope is the topology a test exercises.
-
-                        Acceptance of an interconnect — NCCL over RoCE/IB, ib_write_bw, GPUDirect —
-                        is only meaningful across at least two nodes, so the operator schedules and
-                        correlates multi-node tests, not just per-node ones.
-
-                        Node, Pair and Group all execute. A scope this operator version does not
-                        recognise is recorded as a terminal Error rather than skipped: a required
-                        acceptance test the operator cannot run must never let hardware pass by
-                        omission.
+                        Scope is the topology the test ran at, from the pinned plan. It is ABSENT
+                        on a synthetic result, and the schema has to allow that: an unresolvable
+                        testRef is not a Node, a Pair or a Group, and when this field was a
+                        required enum the operator wrote a status its own CRD refused — the
+                        reconcile errored, requeued, built the same status and was refused again,
+                        forever, and the run sat with an empty status looking queued rather than
+                        broken (#391). Inventing a scope to satisfy the schema would be a lie a
+                        consumer might act on. Every real result carries one by construction: it
+                        is copied from the planned test, whose scope the apiserver defaults and
+                        plan.go validates.
                       enum:
                       - Node
                       - Pair
@@ -931,7 +934,6 @@ spec:
                   - kind
                   - name
                   - phase
-                  - scope
                   type: object
                 type: array
               sinkStatus:

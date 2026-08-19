@@ -377,9 +377,26 @@ type TestAttempt struct {
 // TestResult is the outcome of one test within a run, aggregated over its
 // attempts.
 type TestResult struct {
-	Name  string    `json:"name"`
-	Kind  TestKind  `json:"kind"`
-	Scope TestScope `json:"scope"`
+	Name string `json:"name"`
+	// Kind is the executed test's kind. It is EMPTY on a synthetic result — one
+	// that is about the run rather than about any hardware: "resolve" when the
+	// spec could not be resolved, "admission" when the fleet was busy. Every
+	// real BurnInTest has a Kind, so an empty one is how the controller (and a
+	// consumer) tells the two apart; a real test named "resolve" cannot shadow
+	// it.
+	Kind TestKind `json:"kind"`
+	// Scope is the topology the test ran at, from the pinned plan. It is ABSENT
+	// on a synthetic result, and the schema has to allow that: an unresolvable
+	// testRef is not a Node, a Pair or a Group, and when this field was a
+	// required enum the operator wrote a status its own CRD refused — the
+	// reconcile errored, requeued, built the same status and was refused again,
+	// forever, and the run sat with an empty status looking queued rather than
+	// broken (#391). Inventing a scope to satisfy the schema would be a lie a
+	// consumer might act on. Every real result carries one by construction: it
+	// is copied from the planned test, whose scope the apiserver defaults and
+	// plan.go validates.
+	// +optional
+	Scope TestScope `json:"scope,omitempty"`
 	// Phase is the test's verdict across all attempts. With repeats it is the
 	// AND of every attempt; with retries it is the outcome of the last attempt
 	// after the Errors that preceded it.
