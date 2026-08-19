@@ -31,6 +31,7 @@ package hostinfo
 
 import (
 	"bufio"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,6 +50,20 @@ type Host struct {
 	CPUs    int
 	// MemoryBytes is total physical memory, or zero when it could not be read.
 	MemoryBytes int64
+
+	// PrimaryIP is the address another machine would reach this host on, or
+	// empty where none could be established.
+	//
+	// It is this package's answer to what a cluster calls a node's
+	// `status.hostIP`, and it exists because a BurnInTest may ask for that
+	// through the Downward API. In a cluster the kubelet fills it in; here
+	// there is no kubelet, and a dispatcher that substituted an empty string
+	// would hand a runner a variable that looks set and is not.
+	//
+	// EMPTY IS THE HONEST ANSWER for a host with no routable address, and the
+	// caller must treat it as absence rather than as a value — the same rule
+	// the rest of this package follows.
+	PrimaryIP string
 
 	Accelerators []Accelerator
 	NICs         []NIC
@@ -161,7 +176,66 @@ func Probe(opts Options) Host {
 	h.MemoryBytes = totalMemory(opts.proc())
 	h.Accelerators = accelerators(opts.sysfs())
 	h.NICs = nics(opts.sysfs())
+	h.PrimaryIP = PrimaryIP()
 	return h
+}
+
+// PrimaryIP is the address another machine would reach this host on, or empty.
+//
+// # Why the routing table and not the interface list
+//
+// A burn-in box has several addresses — a management NIC, one or more fabric
+// NICs, docker0, a loopback — and "the host's IP" is only well defined as a
+// question about ROUTING: which of them would a packet to another machine leave
+// from. Picking the first non-loopback address off the interface list answers a
+// different question, and on a two-NIC machine it answers it wrong about half
+// the time. A wrong address here is worse than none, because a runner handed
+// one has no way to tell it apart from a right one.
+//
+// So the routing table is asked directly. A UDP "connection" SENDS NOTHING:
+// connect(2) on a datagram socket only fixes the peer and makes the kernel
+// choose a route and therefore a source address, which is exactly the question.
+// The destination is a TEST-NET-1 address (RFC 5737) that exists to be
+// unroutable-in-practice and is never contacted; any address served by the
+// default route would do, and this one cannot be mistaken for a real service.
+//
+// This is also what a kubelet does to fill status.hostIP when it is not told
+// one, so the two dispatchers answer the same question the same way.
+//
+// The fallback is the interface list, for a host with no default route at all —
+// a lab machine on an isolated fabric, which is a real burn-in configuration.
+// There the heuristic is all there is, and it is better than nothing because a
+// host with exactly one global address has no ambiguity to get wrong.
+func PrimaryIP() string {
+	if c, err := net.Dial("udp4", "192.0.2.1:9"); err == nil {
+		defer c.Close()
+		if a, ok := c.LocalAddr().(*net.UDPAddr); ok && a.IP != nil && !a.IP.IsUnspecified() {
+			return a.IP.String()
+		}
+	}
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	// IPv4 first, then IPv6. Both are global unicast — loopback, multicast,
+	// link-local and unspecified are already excluded below — so a single pass
+	// would return whichever the interface ordering happened to put first, and
+	// hand a v6 address to a fleet whose peers are addressed in v4. A kubelet's
+	// status.hostIP is v4 on every cluster this runs against.
+	for _, want4 := range []bool{true, false} {
+		for _, a := range addrs {
+			n, ok := a.(*net.IPNet)
+			if !ok || n.IP == nil || !n.IP.IsGlobalUnicast() {
+				continue
+			}
+			if is4 := n.IP.To4() != nil; is4 != want4 {
+				continue
+			}
+			return n.IP.String()
+		}
+	}
+	return ""
 }
 
 // osPrettyName reads PRETTY_NAME from os-release.

@@ -159,6 +159,18 @@ the verdict; nothing in the reconciler branches on it.
 Every scope additionally gets `BURNIN_DURATION_SECONDS`, `BURNIN_ATTEMPT`, and
 one `BURNIN_VARIANT_<AXIS>` per variant axis.
 
+A test's own `spec.runner.env` is passed through on both dispatchers, including
+`valueFrom`. In a cluster the kubelet resolves it. On a bare host `burnin run`
+answers the two field paths that name the **machine** — `status.hostIP` (from
+the routing table, the same question a kubelet answers) and `spec.nodeName`
+(the run's `--node`) — and everything else, a Secret, a ConfigMap, or a field
+path that names a *pod*, is **left unset and warned about by name**. It is
+never set to the empty string: a runner meeting an unset variable can fail
+loudly, while one meeting an empty variable cannot tell "nobody could answer
+this" from "the cluster says it is blank". A test that asks for
+`status.hostIP` on a host with no routable address is refused at plan time
+rather than run without it.
+
 **Never split a Pair or Group result per node.** A point-to-point measurement is
 a property of the link, and attributing it to one endpoint sends an engineer to
 replace the wrong part. On a collective it is worse: every healthy rank blocks

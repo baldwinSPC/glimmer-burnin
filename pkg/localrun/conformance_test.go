@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runnerimages"
 )
@@ -603,5 +605,133 @@ func TestConformance_ATestWithNoVariantsCarriesNoAxes(t *testing.T) {
 		if strings.HasPrefix(k, "BURNIN_VARIANT_") {
 			t.Errorf("an unexpanded test received %s", k)
 		}
+	}
+}
+
+// ─── valueFrom environment (mirrors podForTest's verbatim env passthrough) ───
+//
+// The row: A VARIABLE THIS DISPATCHER CANNOT RESOLVE IS UNSET, NEVER EMPTY.
+//
+// In a cluster, spec.runner.env survives podForTest verbatim and the kubelet
+// resolves valueFrom. Here there is no kubelet, and this engine copied e.Value
+// — which on a valueFrom entry is the EMPTY STRING. So the variable was set,
+// and set to nothing: a runner testing `if [ -n "$HOST_IP" ]` took the wrong
+// branch and one that used it built ":9000". The same BurnInTest worked
+// in-cluster, which is exactly the drift the parity ledger exists to catch.
+//
+// This is the same rule the runners emit metrics under, applied one layer up:
+// absence is not a declaration, and a value nobody established must never be
+// presented as one.
+func TestConformance_AnUnresolvableValueFromIsUnsetNeverEmpty(t *testing.T) {
+	spec := testSpec()
+	spec.Runner.Env = []corev1.EnvVar{
+		{Name: "FROM_SECRET", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "token"},
+		}},
+		{Name: "FROM_POD_FIELD", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+		}},
+		{Name: "LITERAL", Value: "kept"},
+	}
+
+	p := Plan{Node: "n1", HostIP: "10.0.0.5", Tests: []PlannedTest{{Name: "t", Spec: spec, Required: true}}}
+	got, err := Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+
+	for _, name := range []string{"FROM_SECRET", "FROM_POD_FIELD"} {
+		if v, present := got.Env[name]; present {
+			t.Errorf("%s is present with value %q; it must be ABSENT, so a runner can tell "+
+				"\"nobody could answer this\" from \"the cluster says it is blank\"", name, v)
+		}
+	}
+	if got.Env["LITERAL"] != "kept" {
+		t.Errorf("a plain value must still be passed through, got %q", got.Env["LITERAL"])
+	}
+
+	// And the omission is ANNOUNCED, not discovered by a runner.
+	warned := UnresolvableEnv(p, spec)
+	if len(warned) != 2 {
+		t.Fatalf("UnresolvableEnv = %v, want both unresolvable variables named", warned)
+	}
+	if !strings.Contains(strings.Join(warned, " "), "secretKeyRef creds/token") {
+		t.Errorf("the warning must name what the profile wrote: %v", warned)
+	}
+}
+
+// The two field paths that name the MACHINE are answered, because this
+// dispatcher is standing on the machine. status.hostIP is the documented way a
+// runner learns the address its peers reach it on.
+func TestConformance_TheMachinesOwnFieldRefsAreResolved(t *testing.T) {
+	spec := testSpec()
+	spec.Runner.Env = []corev1.EnvVar{
+		{Name: "HOST_IP", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"}}},
+		{Name: "NODE", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}},
+	}
+
+	p := Plan{Node: "spark-a", HostIP: "10.0.0.5", Tests: []PlannedTest{{Name: "t", Spec: spec, Required: true}}}
+	got, err := Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if got.Env["HOST_IP"] != "10.0.0.5" {
+		t.Errorf("HOST_IP = %q, want the host's primary address", got.Env["HOST_IP"])
+	}
+	if got.Env["NODE"] != "spark-a" {
+		t.Errorf("NODE = %q, want the run's node name", got.Env["NODE"])
+	}
+	if w := UnresolvableEnv(p, spec); len(w) != 0 {
+		t.Errorf("nothing should be warned about here, got %v", w)
+	}
+}
+
+// A test that asks for status.hostIP on a host with no routable address is
+// REFUSED, not silently left unset. The dispatcher is standing on the machine;
+// if it cannot answer, the test cannot do what it was written to do, and that
+// is a plan-time refusal naming the variable rather than a hole discovered by a
+// runner hours later.
+func TestConformance_AskingForHostIPWithNoAddressIsRefused(t *testing.T) {
+	spec := testSpec()
+	spec.Runner.Env = []corev1.EnvVar{{Name: "HOST_IP", ValueFrom: &corev1.EnvVarSource{
+		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"}}}}
+
+	p := Plan{Node: "n1", Tests: []PlannedTest{{Name: "t", Spec: spec, Required: true}}}
+	_, err := Translate(p, p.Tests[0])
+	if err == nil {
+		t.Fatal("translation succeeded with no host address to answer status.hostIP with")
+	}
+	if !strings.Contains(err.Error(), "HOST_IP") || !strings.Contains(err.Error(), "status.hostIP") {
+		t.Errorf("the refusal must name the variable and the field path: %v", err)
+	}
+	// A refusal is not a warning: it is raised, not listed.
+	if w := UnresolvableEnv(p, spec); len(w) != 0 {
+		t.Errorf("a refusal must not also be warned about, got %v", w)
+	}
+}
+
+// A test cannot smuggle a contract variable in through valueFrom either — the
+// reserved check comes first, exactly as it does for a literal value.
+func TestConformance_ReservedVariablesAreRefusedThroughValueFromToo(t *testing.T) {
+	spec := testSpec()
+	spec.Scope = api.ScopePair
+	spec.Runner.Env = []corev1.EnvVar{{Name: "BURNIN_ROLE", ValueFrom: &corev1.EnvVarSource{
+		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}}}
+
+	p := Plan{
+		Node: "n1", HostIP: "10.0.0.5",
+		Rendezvous: &Rendezvous{Role: RoleServer},
+		Tests:      []PlannedTest{{Name: "t", Spec: spec, Required: true}},
+	}
+	got, err := Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if got.Env["BURNIN_ROLE"] != RoleServer {
+		t.Errorf("BURNIN_ROLE = %q, want %q — a profile that could set it could make both ends the client",
+			got.Env["BURNIN_ROLE"], RoleServer)
 	}
 }

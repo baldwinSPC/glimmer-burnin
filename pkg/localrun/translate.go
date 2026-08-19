@@ -180,7 +180,18 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 			if _, reserved := reservedEnv[e.Name]; reserved {
 				continue
 			}
-			spec.Env[e.Name] = e.Value
+			v, ok, err := ResolveEnv(p, e)
+			if err != nil {
+				return RunSpec{}, err
+			}
+			if !ok {
+				// Not resolvable here, and therefore NOT SET — never set to "".
+				// cmd/burnin warns about exactly these, from the same function,
+				// so the omission is announced rather than discovered by a
+				// runner. See ResolveEnv.
+				continue
+			}
+			spec.Env[e.Name] = v
 		}
 	}
 
@@ -236,6 +247,125 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 	sort.Slice(spec.Mounts, func(i, j int) bool { return spec.Mounts[i].Target < spec.Mounts[j].Target })
 	sort.Strings(spec.Devices)
 	return spec, nil
+}
+
+// Downward-API field paths this dispatcher can answer for itself.
+//
+// Deliberately the two that name the MACHINE, and no more. Everything else a
+// fieldRef can select — metadata.name, metadata.namespace, status.podIP,
+// spec.serviceAccountName — is a fact about a POD, and there is no pod here.
+// Inventing values for them would be inventing a cluster.
+const (
+	fieldHostIP   = "status.hostIP"
+	fieldNodeName = "spec.nodeName"
+)
+
+// ResolveEnv answers what one of a test's declared environment variables is
+// worth on this machine.
+//
+// It returns (value, true, nil) for a variable this dispatcher can set,
+// (_, false, nil) for one it cannot, and an error for one it SHOULD be able to
+// set and could not.
+//
+// # The bug this exists to end
+//
+// A BurnInTest may set spec.runner.env with a valueFrom rather than a value —
+// `status.hostIP` through the Downward API is the documented way for a runner
+// to learn the address its peers reach it on, and it survives podForTest
+// verbatim because Kubernetes resolves it. This dispatcher copied e.Value, and
+// e.Value on a valueFrom entry is the EMPTY STRING. So the variable was set,
+// and set to nothing: a runner that checked `if [ -n "$HOST_IP" ]` took the
+// wrong branch, and one that used it built an address of ":9000". The same
+// BurnInTest worked in a cluster, which is the shape of failure this project's
+// parity ledger exists to catch.
+//
+// # Why absence rather than empty
+//
+// A variable this cannot resolve is NOT SET AT ALL, and cmd/burnin warns about
+// it by name. That is the same rule the runners emit metrics under: absence is
+// not a declaration, and a value nobody established must never be presented as
+// one. A runner meeting an unset variable can fail loudly or skip honestly; a
+// runner meeting an empty one cannot tell the difference between "the cluster
+// says this is blank" and "nobody ever asked".
+//
+// # Why status.hostIP is an ERROR when unknown
+//
+// The two paths below are questions about the machine, and this dispatcher is
+// standing on the machine. If it cannot answer status.hostIP, the host has no
+// routable address at all, and a test that asked for it cannot do what it was
+// written to do. That is refused at plan time, naming the variable — not
+// silently omitted, which would leave the same hole this function closes.
+func ResolveEnv(p Plan, e corev1.EnvVar) (string, bool, error) {
+	if e.ValueFrom == nil {
+		return e.Value, true, nil
+	}
+	ref := e.ValueFrom.FieldRef
+	if ref == nil {
+		// secretKeyRef, configMapKeyRef, resourceFieldRef: each names an object
+		// in a namespace, and there is no apiserver here to hold one.
+		return "", false, nil
+	}
+
+	switch ref.FieldPath {
+	case fieldHostIP:
+		if p.HostIP == "" {
+			return "", false, fmt.Errorf(
+				"env %q asks for %s and this machine has no routable address to answer with — "+
+					"pkg/hostinfo found neither a default route nor a global unicast address. "+
+					"Set one, or give the variable a literal value for this run",
+				e.Name, fieldHostIP)
+		}
+		return p.HostIP, true, nil
+
+	case fieldNodeName:
+		if p.Node == "" {
+			return "", false, fmt.Errorf(
+				"env %q asks for %s and this run has no node name; pass --node", e.Name, fieldNodeName)
+		}
+		return p.Node, true, nil
+	}
+	return "", false, nil
+}
+
+// UnresolvableEnv names the variables a test declares that this dispatcher will
+// not set, each with the reason, so cmd/burnin can warn before anything runs.
+//
+// It asks ResolveEnv rather than restating its rules, so a path that becomes
+// resolvable stops being warned about in the same commit — a warning that
+// outlived its cause would send someone looking for a problem that is fixed.
+// An ERROR from ResolveEnv is not listed: that is a refusal, and Translate
+// raises it as one.
+func UnresolvableEnv(p Plan, spec api.BurnInTestSpec) []string {
+	if spec.Runner == nil {
+		return nil
+	}
+	var out []string
+	for _, e := range spec.Runner.Env {
+		if e.ValueFrom == nil {
+			continue
+		}
+		if _, ok, err := ResolveEnv(p, e); ok || err != nil {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s (%s)", e.Name, describeEnvSource(e.ValueFrom)))
+	}
+	return out
+}
+
+// describeEnvSource names what a valueFrom selects, in the words the profile
+// used, so the warning points at the line the author wrote.
+func describeEnvSource(src *corev1.EnvVarSource) string {
+	switch {
+	case src.FieldRef != nil:
+		return "fieldRef " + src.FieldRef.FieldPath
+	case src.SecretKeyRef != nil:
+		return "secretKeyRef " + src.SecretKeyRef.Name + "/" + src.SecretKeyRef.Key
+	case src.ConfigMapKeyRef != nil:
+		return "configMapKeyRef " + src.ConfigMapKeyRef.Name + "/" + src.ConfigMapKeyRef.Key
+	case src.ResourceFieldRef != nil:
+		return "resourceFieldRef " + src.ResourceFieldRef.Resource
+	}
+	return "valueFrom"
 }
 
 // reservedEnv are the variables the contract owns. A test cannot set them.
