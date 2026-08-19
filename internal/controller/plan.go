@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"time"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	burninplan "github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
 
@@ -110,19 +110,20 @@ func (p *plan) variantSummary() variantSummary {
 	return sum
 }
 
-type plannedTest struct {
-	Name     string                        `json:"name"`
-	Required bool                          `json:"required"`
-	Spec     burninv1alpha1.BurnInTestSpec `json:"spec"`
-	// Axes are the variant labels this execution came from, pinned like the rest
-	// of the spec so editing the profile mid-run cannot change what an in-flight
-	// cell reports it was.
-	Axes map[string]string `json:"axes,omitempty"`
-	// Parent is the profile entry this cell was expanded from, empty when the
-	// entry was not expanded. Recorded rather than recovered from Name; see
-	// resolvedTest.parent.
-	Parent string `json:"parent,omitempty"`
-}
+// plannedTest is one execution in the pinned plan.
+//
+// An ALIAS for pkg/plan.Test, not a copy, and the JSON shape is unchanged — a
+// Go alias is the same type, so a run in flight when this landed reads back
+// exactly what the older manager wrote. It is aliased rather than renamed
+// wholesale because "plannedTest" is what two dozen signatures in this package
+// already say, and a rename would bury the actual change (variant expansion
+// moving to a package the CLI can reach) under a mechanical diff.
+//
+// It also absorbed what used to be a SECOND, identical struct here —
+// `resolvedTest`, the pre-validation form. The two had the same five fields and
+// differed only in which side of buildPlan they sat on, which is a moment in
+// time rather than a difference in the thing.
+type plannedTest = burninplan.Test
 
 // buildPlan materialises a profile against resolved targets, validating the
 // invariants the rest of the controller depends on.
@@ -131,7 +132,7 @@ type plannedTest struct {
 // though it is read live elsewhere, because a Pair-scope test under a cap of 1
 // can never launch, and a run that quietly waits out its deadline to say so is
 // a much worse report than one that refuses at start with the reason.
-func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targets []string, nodeCap int, baseline bool) (*plan, error) {
+func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []plannedTest, targets []string, nodeCap int, baseline bool) (*plan, error) {
 	if err := refuseUnsatisfiableThresholds(tests); err != nil {
 		return nil, err
 	}
@@ -156,10 +157,10 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 		// Result identity is (test name, node). A duplicate name would make
 		// two different tests share results — the second would never run, and
 		// its required flag could be silently overwritten by the first's.
-		if seen[t.name] {
-			return nil, fmt.Errorf("profile lists test %q twice — test names are result identity and must be unique", t.name)
+		if seen[t.Name] {
+			return nil, fmt.Errorf("profile lists test %q twice — test names are result identity and must be unique", t.Name)
 		}
-		seen[t.name] = true
+		seen[t.Name] = true
 		if err := validateTopology(t, targets, nodeCap); err != nil {
 			return nil, err
 		}
@@ -170,13 +171,13 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 			return nil, err
 		}
 		p.Tests = append(p.Tests, plannedTest{
-			Name: t.name, Required: t.required, Spec: t.spec,
+			Name: t.Name, Required: t.Required, Spec: t.Spec,
 			// COPIED, not shared. The plan is pinned precisely so that editing
 			// the profile mid-run changes nothing in flight, and a map handed
 			// over by reference would leave a live pointer back into the thing
 			// the pinning exists to isolate it from.
-			Axes:   copyAxes(t.axes),
-			Parent: t.parent,
+			Axes:   copyAxes(t.Axes),
+			Parent: t.Parent,
 		})
 	}
 	return p, nil
@@ -189,8 +190,8 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []resolvedTest, targ
 // the wrong topology would not fail — it would produce a plausible-looking
 // number for a link or a collective nobody asked about, which is the one outcome
 // worse than no number.
-func validateTopology(t resolvedTest, targets []string, nodeCap int) error {
-	switch t.spec.Scope {
+func validateTopology(t plannedTest, targets []string, nodeCap int) error {
+	switch t.Spec.Scope {
 	case burninv1alpha1.ScopePair:
 		return validatePairTopology(t, targets, nodeCap)
 	case burninv1alpha1.ScopeGroup:
@@ -207,20 +208,20 @@ func validateTopology(t resolvedTest, targets []string, nodeCap int) error {
 // the interlock, which bites much harder here than at Pair scope: a group holds
 // all N of its nodes for its whole duration, so it needs N of the cap's slots,
 // and at any smaller cap it can never start.
-func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error {
+func validateGroupTopology(t plannedTest, targets []string, nodeCap int) error {
 	if len(targets) < 2 {
 		return fmt.Errorf(
 			"test %q is Group scope and needs at least two target nodes, but this run's target resolved to %d (%v) — "+
 				"a collective has no meaning with fewer; name more nodes in spec.target.nodeNames, or use a nodeSelector "+
 				"that matches them",
-			t.name, len(targets), targets)
+			t.Name, len(targets), targets)
 	}
 	if dup := firstDuplicate(targets); dup != "" {
 		return fmt.Errorf(
 			"test %q is Group scope but node %q appears in the target list more than once — every rank must be a "+
 				"DISTINCT node, or two ranks would contend for the same hardware and the collective would measure "+
 				"that contention instead of the fabric",
-			t.name, dup)
+			t.Name, dup)
 	}
 	// NO SHIPPED RUNNER IMAGE SPEAKS THE GROUP CONTRACT YET (#118), and a Group
 	// test that falls back to a default image does not fail — it SKIPS, which is
@@ -243,7 +244,7 @@ func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error 
 	// saying they have a runner that speaks the contract, and this operator has
 	// no business second-guessing that — it is also the documented way to run
 	// Group scope today.
-	if (t.spec.Runner == nil || t.spec.Runner.Image == "") && !groupCapableKinds[t.spec.Kind] {
+	if (t.Spec.Runner == nil || t.Spec.Runner.Image == "") && !groupCapableKinds[t.Spec.Kind] {
 		return fmt.Errorf(
 			"test %q is Group scope and names no spec.runner.image, so it would fall back to the "+
 				"default image for kind %q — and that image does not speak the Group rendezvous "+
@@ -253,7 +254,7 @@ func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error 
 				"would settle Passed around a collective that never executed. Set spec.runner.image "+
 				"to a runner that reads BURNIN_RANK, BURNIN_NRANKS and BURNIN_ROOT_HOST — or use "+
 				"kind %q, whose shipped runner does",
-			t.name, t.spec.Kind, burninv1alpha1.KindNCCL)
+			t.Name, t.Spec.Kind, burninv1alpha1.KindNCCL)
 	}
 	if nodeCap < len(targets) {
 		return fmt.Errorf(
@@ -261,7 +262,7 @@ func validateGroupTopology(t resolvedTest, targets []string, nodeCap int) error 
 				"unit of load that holds EVERY one of its nodes for the whole test, so it needs %d of the cap's slots "+
 				"and can never start at %d; set spec.maxConcurrentNodes to at least %d, having checked that %d nodes "+
 				"at full load is within the room's power and cooling headroom",
-			t.name, len(targets), nodeCap, len(targets), nodeCap, len(targets), len(targets))
+			t.Name, len(targets), nodeCap, len(targets), nodeCap, len(targets), len(targets))
 	}
 	return nil
 }
@@ -299,8 +300,8 @@ func firstDuplicate(targets []string) string {
 }
 
 // validatePairTopology enforces what a Pair-scope test needs from the run.
-func validatePairTopology(t resolvedTest, targets []string, nodeCap int) error {
-	if t.spec.Scope != burninv1alpha1.ScopePair {
+func validatePairTopology(t plannedTest, targets []string, nodeCap int) error {
+	if t.Spec.Scope != burninv1alpha1.ScopePair {
 		return nil
 	}
 	if len(targets) != 2 {
@@ -308,13 +309,13 @@ func validatePairTopology(t resolvedTest, targets []string, nodeCap int) error {
 			"test %q is Pair scope and needs exactly two target nodes, but this run's target resolved to %d (%v) — "+
 				"a point-to-point fabric test measures the link between two endpoints and has no meaning with %d; "+
 				"name exactly two nodes in spec.target.nodeNames, or use a nodeSelector that matches exactly two",
-			t.name, len(targets), targets, len(targets))
+			t.Name, len(targets), targets, len(targets))
 	}
 	if targets[0] == targets[1] {
 		return fmt.Errorf(
 			"test %q is Pair scope but both target nodes are %q — a link test needs two DISTINCT endpoints; "+
 				"a node paired with itself would measure a loopback, not the fabric",
-			t.name, targets[0])
+			t.Name, targets[0])
 	}
 	if nodeCap < 2 {
 		return fmt.Errorf(
@@ -322,7 +323,7 @@ func validatePairTopology(t resolvedTest, targets []string, nodeCap int) error {
 				"holds BOTH of its nodes for the whole test, so it needs two of the cap's slots and can never start at %d; "+
 				"set spec.maxConcurrentNodes to at least 2, having checked that two nodes at full load is within the "+
 				"room's power and cooling headroom",
-			t.name, nodeCap, nodeCap)
+			t.Name, nodeCap, nodeCap)
 	}
 	return nil
 }
@@ -337,28 +338,28 @@ func validatePairTopology(t resolvedTest, targets []string, nodeCap int) error {
 // the run retries the same rejection forever while holding a cordon. Refusing at
 // START instead turns that into one legible sentence at run start, which is the
 // same trade validatePairTopology makes.
-func validateHostPaths(t resolvedTest) error {
-	if t.spec.Runner == nil {
+func validateHostPaths(t plannedTest) error {
+	if t.Spec.Runner == nil {
 		return nil
 	}
 	byMountPath := map[string]bool{}
-	for _, m := range t.spec.Runner.HostPaths {
+	for _, m := range t.Spec.Runner.HostPaths {
 		switch {
 		case m.Path == "" || m.MountPath == "":
 			return fmt.Errorf(
 				"test %q declares a host mount with an empty path (host %q -> container %q) — "+
 					"both ends of a host mount have to be written down before this operator will grant it",
-				t.name, m.Path, m.MountPath)
+				t.Name, m.Path, m.MountPath)
 		case !strings.HasPrefix(m.Path, "/") || !strings.HasPrefix(m.MountPath, "/"):
 			return fmt.Errorf(
 				"test %q declares a host mount with a relative path (host %q -> container %q) — "+
 					"both must be absolute; a relative host path names nothing in particular on a node",
-				t.name, m.Path, m.MountPath)
+				t.Name, m.Path, m.MountPath)
 		case byMountPath[m.MountPath]:
 			return fmt.Errorf(
 				"test %q declares two host mounts at container path %q — a duplicate mount point is an invalid "+
 					"pod spec, so every attempt would be refused by the apiserver while the run held the node",
-				t.name, m.MountPath)
+				t.Name, m.MountPath)
 		}
 		byMountPath[m.MountPath] = true
 	}
@@ -398,14 +399,14 @@ const maxAdvisedThresholds = 5
 // because the caller is about to be told to go and fix a file: rediscovering the
 // second typo on the next run costs another cordon, another schedule, and
 // another wait.
-func refuseUnsatisfiableThresholds(tests []resolvedTest) error {
+func refuseUnsatisfiableThresholds(tests []plannedTest) error {
 	var bad []string
 	for _, t := range tests {
-		for _, p := range verdict.ValidateThresholdsForKind(t.spec.Kind, t.spec.Thresholds) {
+		for _, p := range verdict.ValidateThresholdsForKind(t.Spec.Kind, t.Spec.Thresholds) {
 			if p.Severity != verdict.SeverityMalformed {
 				continue
 			}
-			bad = append(bad, fmt.Sprintf("test %q %s", t.name, p.Error()))
+			bad = append(bad, fmt.Sprintf("test %q %s", t.Name, p.Error()))
 		}
 	}
 	if len(bad) == 0 {
@@ -738,14 +739,14 @@ func cancelRequested(run *burninv1alpha1.BurnInRun) bool {
 // So the two are kept mutually exclusive at the point where it costs nothing —
 // before a node is cordoned — and the error names the test, because "your
 // profile has gates somewhere" is not actionable on a twelve-test suite.
-func refuseGatedBaseline(tests []resolvedTest, baseline bool) error {
+func refuseGatedBaseline(tests []plannedTest, baseline bool) error {
 	if !baseline {
 		return nil
 	}
 	var gated []string
 	for _, t := range tests {
-		if len(t.spec.Thresholds) > 0 {
-			gated = append(gated, fmt.Sprintf("%q (%d threshold(s))", t.name, len(t.spec.Thresholds)))
+		if len(t.Spec.Thresholds) > 0 {
+			gated = append(gated, fmt.Sprintf("%q (%d threshold(s))", t.Name, len(t.Spec.Thresholds)))
 		}
 	}
 	if len(gated) == 0 {
@@ -765,58 +766,12 @@ func refuseGatedBaseline(tests []resolvedTest, baseline bool) error {
 		len(gated), strings.Join(shown, "; "))
 }
 
-// refuseUnreachableAxes rejects a variant axis whose name cannot become an
-// environment variable.
-//
-// variantEnv skips such an axis rather than mangling it, which is the right
-// instinct — a mangled name would silently configure the WRONG thing — but the
-// axis was still copied into TestResult.VariantAxes and delivered in the
-// envelope. So the cell ran the runner's default configuration while the run
-// reported it under a distinct axis label (#296).
-//
-// That is a confident wrong answer dressed as evidence, and worse than a
-// crash. pkg/contract tells a consumer to group a sweep's cells BY these
-// labels, so a precision sweep or a message-size sweep reports N cells that all
-// measured the same thing — and if the cells carry per-variant thresholds, as
-// config/samples/variant-sweep.yaml demonstrates, those gates are applied to a
-// run that was never told which measurand to take. It is the sample's own
-// warning ("a sweep certified against measurements nobody took") reached
-// through the axis name rather than through the kind.
-//
-// Refused at plan time, before any node is cordoned, for the reason every other
-// rule here is: a run that quietly produces a meaningless sweep is a much worse
-// report than one that refuses at start and says which axis and why. The skip
-// in variantEnv stays as the backstop — this makes it unreachable rather than
-// replacing it.
-func refuseUnreachableAxes(tests []resolvedTest) error {
-	for _, t := range tests {
-		for _, k := range sortedAxisKeys(t.axes) {
-			if envSafeAxis(k) {
-				continue
-			}
-			return fmt.Errorf(
-				"test %q declares variant axis %q, which cannot become an environment variable, so the runner "+
-					"would never receive it: the cell would run the default configuration while the run reported "+
-					"it under this axis label, and any threshold on the cell would gate a measurement nobody asked "+
-					"for. An axis name must be letters, digits and underscores, and must not start with a digit "+
-					"(it becomes BURNIN_VARIANT_<NAME>)",
-				t.name, k)
-		}
-	}
-	return nil
-}
+// refuseUnreachableAxes and sortedAxisKeys are pkg/plan's, so cmd/burnin
+// refuses the same axis this operator refuses rather than accepting a plan the
+// cluster would reject. The full reasoning is in that package; the short
+// version is that an axis which cannot become an environment variable would run
+// the cell's DEFAULT configuration while the run reported it under a distinct
+// label (#296) — a confident wrong answer dressed as evidence.
+func refuseUnreachableAxes(tests []plannedTest) error { return burninplan.RefuseUnreachableAxes(tests) }
 
-// sortedAxisKeys makes the refusal deterministic: Go randomises map iteration,
-// and a run that refuses naming a different axis on each attempt is a run
-// nobody can act on.
-func sortedAxisKeys(axes map[string]string) []string {
-	if len(axes) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(axes))
-	for k := range axes {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
+func sortedAxisKeys(axes map[string]string) []string { return burninplan.SortedAxisKeys(axes) }

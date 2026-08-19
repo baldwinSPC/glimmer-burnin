@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runnerimages"
 )
 
@@ -107,6 +108,24 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 		// so a runner that would have been killed in-cluster is killed here too.
 		Timeout: time.Duration(duration+deadlineGraceSeconds) * time.Second,
 	}
+
+	// Variant axes, injected BEFORE the test's own env so an explicit setting
+	// still wins — the same ordering the operator uses, where variantEnv is
+	// appended before spec.Runner.Env and Kubernetes takes the last value.
+	//
+	// This is the half of variant support that reaches the RUNNER. A cell that
+	// planned correctly but never received BURNIN_VARIANT_PRECISION would run
+	// the default configuration and be reported as the fp4 cell — which is
+	// exactly the failure plan.RefuseUnreachableAxes exists to prevent, arrived
+	// at by forgetting to inject rather than by an unusable name.
+	//
+	// Which axes reach the runner, and under what name, is pkg/plan's decision,
+	// not this file's. An axis whose name cannot become an environment variable
+	// is skipped here as the backstop; cmd/burnin refuses such a plan outright.
+	for _, e := range plan.VariantEnv(t.Axes) {
+		spec.Env[e.Name] = e.Value
+	}
+
 	if t.Spec.Runner != nil {
 		spec.Command = t.Spec.Runner.Command
 		spec.Args = t.Spec.Runner.Args

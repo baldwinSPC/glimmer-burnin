@@ -14,6 +14,7 @@ import (
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
 
@@ -54,6 +55,12 @@ FLAGS
   --sink-url        POST the envelope to this URL when the run finishes
   --sink-token-file file holding the bearer token — a file, never a flag, so the
                     credential is not in every process listing on the box
+
+VARIANTS
+
+  A profile entry's variants: block expands here exactly as it does in a cluster —
+  one execution per cell, each with the cell's own name, thresholds and
+  BURNIN_VARIANT_<AXIS> variables. --dry-run lists the cells and their axes.
 
 TWO MACHINES (Pair-scope tests)
 
@@ -157,7 +164,7 @@ func runRun(args []string) error {
 	if err != nil {
 		return exitWith(exitError, err)
 	}
-	plan, warnings, err := s.buildPlan(f.profile, node, int32(f.retries), rz)
+	resolved, warnings, err := s.buildPlan(f.profile, node, int32(f.retries), rz)
 	if err != nil {
 		return exitWith(exitError, err)
 	}
@@ -166,7 +173,7 @@ func runRun(args []string) error {
 	// who passed --role believes a link is about to be measured, and running a
 	// profile of Node-scope tests instead would answer a question they did not
 	// ask while looking exactly like it answered theirs.
-	if rz != nil && !pairScoped(plan) {
+	if rz != nil && !pairScoped(resolved) {
 		return exitWith(exitError, fmt.Errorf(
 			"--role was given but no test in this profile is Pair- or Group-scope; nothing here measures a link"))
 	}
@@ -177,10 +184,10 @@ func runRun(args []string) error {
 	// Threshold linting before anything runs, so an unsatisfiable gate is
 	// reported while its author is still here rather than as a verdict on
 	// hardware hours later.
-	lintPlan(plan)
+	lintPlan(resolved)
 
 	if f.dryRun {
-		printPlan(plan)
+		printPlan(resolved)
 		return nil
 	}
 
@@ -192,12 +199,12 @@ func runRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Fprintf(os.Stderr, "burnin: %d test(s) on %s via %s\n", len(plan.Tests), node, rt.Name())
+	fmt.Fprintf(os.Stderr, "burnin: %d test(s) on %s via %s\n", len(resolved.Tests), node, rt.Name())
 	if rz != nil && rz.Role == localrun.RoleServer {
-		announceServerReady(ctx, os.Stderr, plan)
+		announceServerReady(ctx, os.Stderr, resolved)
 	}
 
-	report, runErr := localrun.Run(ctx, plan, rt, Hooks(os.Stderr))
+	report, runErr := localrun.Run(ctx, resolved, rt, Hooks(os.Stderr))
 	if runErr != nil && ctx.Err() == nil {
 		return exitWith(exitError, runErr)
 	}
@@ -233,13 +240,13 @@ func runRun(args []string) error {
 	if ctx.Err() != nil {
 		return exitWith(exitError, fmt.Errorf("interrupted before every test reached a verdict"))
 	}
-	return exitWith(codeFor(report, plan), nil)
+	return exitWith(codeFor(report, resolved), nil)
 }
 
 // codeFor turns a report into a process exit code.
-func codeFor(rep localrun.Report, plan localrun.Plan) int {
+func codeFor(rep localrun.Report, p localrun.Plan) int {
 	required := map[string]bool{}
-	for _, t := range plan.Tests {
+	for _, t := range p.Tests {
 		required[t.Name] = t.Required
 	}
 
@@ -369,6 +376,19 @@ func printPlan(p localrun.Plan) {
 			req = "required"
 		}
 		fmt.Printf("%d. %-24s %-9s %s\n", i+1, t.Name, req, image)
+		// The cell's axes, where this line is one cell of an expanded entry.
+		// Printed because the arithmetic is otherwise invisible: one profile
+		// entry with four precision variants is four numbered lines here, and
+		// without the labels a reader has only the names to tell them apart —
+		// which is exactly what TestResult.VariantAxes exists so that a
+		// consumer does not have to do.
+		if len(t.Axes) > 0 {
+			pairs := make([]string, 0, len(t.Axes))
+			for _, k := range plan.SortedAxisKeys(t.Axes) {
+				pairs = append(pairs, fmt.Sprintf("%s=%s", k, t.Axes[k]))
+			}
+			fmt.Printf("     variant of %s   %s\n", t.Parent, strings.Join(pairs, " "))
+		}
 		if len(t.Spec.Thresholds) > 0 {
 			for _, th := range t.Spec.Thresholds {
 				fmt.Printf("     gate %s %s %s\n", th.Metric, th.Comparison, th.Value)

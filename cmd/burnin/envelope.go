@@ -69,6 +69,7 @@ func toContractResult(r localrun.TestResult) contract.TestResult {
 		Metrics:      r.Metrics,
 		Message:      r.Message,
 		Unmeasurable: r.Unmeasurable,
+		VariantAxes:  r.VariantAxes,
 	}
 	if !r.StartedAt.IsZero() {
 		t := r.StartedAt.UTC()

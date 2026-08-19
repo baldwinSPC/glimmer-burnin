@@ -4726,8 +4726,8 @@ func TestThresholdReportsElideDetailButNeverTheCount(t *testing.T) {
 	}
 
 	// Malformed: refused, with the full count and a bounded list.
-	err := refuseUnsatisfiableThresholds([]resolvedTest{{
-		name: "many", spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindCustom, Thresholds: broken},
+	err := refuseUnsatisfiableThresholds([]plannedTest{{
+		Name: "many", Spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindCustom, Thresholds: broken},
 	}})
 	if err == nil {
 		t.Fatal("a profile of unsatisfiable gates was accepted")

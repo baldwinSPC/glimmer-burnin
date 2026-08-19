@@ -61,7 +61,7 @@ func testSpec(thresholds ...api.Threshold) api.BurnInTestSpec {
 	}
 }
 
-func plan(t PlannedTest, retries int32) Plan {
+func onePlan(t PlannedTest, retries int32) Plan {
 	return Plan{Node: "n1", Tests: []PlannedTest{t}, RetryOnErrorLimit: retries}
 }
 
@@ -106,7 +106,7 @@ func TestConformance_ExitCodeToPhase(t *testing.T) {
 
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+			got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
 				&fakeRuntime{steps: []Execution{r.exec}})
 			if got.Phase != r.want {
 				t.Errorf("phase = %s, want %s — %s", got.Phase, r.want, r.why)
@@ -121,7 +121,7 @@ func TestConformance_AnUndeclaredSkipIsAnError(t *testing.T) {
 	// the shape of a legitimate skip — whose normal form is no metrics at all.
 	//
 	// Mirrors: attemptOutcome's default arm plus explainUndeclaredSkip.
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
 		&fakeRuntime{steps: []Execution{exits(2, "panic: nil map\n/src/main.go:132 +0x1d\n")}})
 
 	if got.Phase != api.RunError {
@@ -139,7 +139,7 @@ func TestConformance_AnEmptyHarvestWithThresholdsIsAnError(t *testing.T) {
 	//
 	// Mirrors: attemptOutcome's ReportedNothing() branch.
 	th := api.Threshold{Metric: "tflops", Comparison: api.GTE, Value: "100"}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
 		&fakeRuntime{steps: []Execution{exits(0, "")}})
 
 	if got.Phase != api.RunError {
@@ -157,7 +157,7 @@ func TestConformance_SomeMetricsButAGatedOneMissingStillFails(t *testing.T) {
 	//
 	// Mirrors: the "THIS DOES NOT RELAX FAIL-CLOSED" comment in attemptOutcome.
 	th := api.Threshold{Metric: "eccErrors", Comparison: api.EQ, Value: "0"}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
 		&fakeRuntime{steps: []Execution{exits(0, "tflops=101\n")}})
 
 	if got.Phase != api.RunFailed {
@@ -172,7 +172,7 @@ func TestConformance_ASkipIsNotSubjectToTheEmptyHarvestRule(t *testing.T) {
 	//
 	// Mirrors: attemptOutcome's VerdictSkip arm.
 	th := api.Threshold{Metric: "tflops", Comparison: api.GTE, Value: "100"}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
 		&fakeRuntime{steps: []Execution{exits(2, "CUSTOM_SKIP no accelerator visible\n")}})
 
 	if got.Phase != api.RunSkipped {
@@ -187,7 +187,7 @@ func TestConformance_AFailKeepsTheRunnersOwnMessage(t *testing.T) {
 	//
 	// Mirrors: "THE RUNNER'S OWN MESSAGE IS KEPT" in attemptOutcome.
 	th := api.Threshold{Metric: "tflops", Comparison: api.GTE, Value: "100"}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 0),
 		&fakeRuntime{steps: []Execution{exits(0, "tflops=50\nthermal throttling detected\n")}})
 
 	if got.Phase != api.RunFailed {
@@ -206,7 +206,7 @@ func TestConformance_UnmeasurableIsRecordedOnEveryPhase(t *testing.T) {
 	// and is true of a passing run as much as a failing one.
 	//
 	// Mirrors: the loop above the switch in attemptOutcome.
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
 		&fakeRuntime{steps: []Execution{exits(0, "eccErrors=n/a\ntflops=101\n")}})
 
 	if got.Phase != api.RunPassed {
@@ -245,7 +245,7 @@ func TestConformance_OnlyErrorIsRetried(t *testing.T) {
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			rt := &fakeRuntime{steps: []Execution{r.first, exits(0, "ok=1\n")}}
-			got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 3), rt)
+			got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 3), rt)
 
 			if rt.calls != r.wantCalls {
 				t.Errorf("ran %d attempt(s), want %d — %s", rt.calls, r.wantCalls, r.why)
@@ -272,7 +272,7 @@ func TestConformance_AnErroredAttemptDoesNotConsumeARepeat(t *testing.T) {
 		exits(0, "ok=1\n"), // repeat 2
 		exits(0, "ok=1\n"), // repeat 3
 	}}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: spec, Required: true}, 1), rt)
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: spec, Required: true}, 1), rt)
 
 	if got.Phase != api.RunPassed {
 		t.Fatalf("phase = %s, want Passed", got.Phase)
@@ -303,7 +303,7 @@ func TestConformance_RepeatsAreANDNotOR(t *testing.T) {
 		exits(1, "MARKER_FAIL second time"),
 		exits(0, "ok=1\n"), // must never run
 	}}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0), rt)
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0), rt)
 
 	if got.Phase != api.RunFailed {
 		t.Fatalf("phase = %s, want Failed — repeats are AND", got.Phase)
@@ -319,7 +319,7 @@ func TestConformance_TheRetryBudgetIsPerTestAndDoesNotReset(t *testing.T) {
 	rt := &fakeRuntime{steps: []Execution{
 		exits(3, "broke"), exits(3, "broke"), exits(3, "broke"),
 	}}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 2), rt)
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 2), rt)
 
 	if got.Phase != api.RunError {
 		t.Fatalf("phase = %s, want Error once the budget is spent", got.Phase)
@@ -343,7 +343,7 @@ func TestConformance_ARetryThatPassesClearsItsPredecessorsEvidence(t *testing.T)
 		exits(3, "broke"),        // Error, retried
 		exits(0, "tflops=101\n"), // passes cleanly
 	}}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 1), rt)
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(th), Required: true}, 1), rt)
 
 	if got.Phase != api.RunPassed {
 		t.Fatalf("phase = %s, want Passed", got.Phase)
@@ -361,7 +361,7 @@ func TestConformance_TriggersRecordWhyEachAttemptHappened(t *testing.T) {
 	//
 	// Mirrors: triggerFor in the controller.
 	rt := &fakeRuntime{steps: []Execution{exits(3, "broke"), exits(0, "ok=1\n")}}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 1), rt)
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 1), rt)
 
 	if len(got.Attempts) != 2 {
 		t.Fatalf("got %d attempts, want 2", len(got.Attempts))
@@ -429,7 +429,7 @@ func TestConformance_AnUnresolvableImageIsAConfigurationError(t *testing.T) {
 	// The same phase the operator gives a kind with no default image: a
 	// configuration fault, not a hardware verdict.
 	spec := api.BurnInTestSpec{Kind: api.TestKind("nobody-registered-this")}
-	got := runOne(t, plan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0), &fakeRuntime{})
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0), &fakeRuntime{})
 
 	if got.Phase != api.RunError {
 		t.Fatalf("phase = %s, want Error", got.Phase)
@@ -528,5 +528,80 @@ func TestConformance_ImageResolutionAgreesWithTheOperator(t *testing.T) {
 					"same hardware is running two different images", got.Image, wantImg)
 			}
 		})
+	}
+}
+
+// ─── Variants (mirrors expandVariants + variantEnv, both now pkg/plan) ───────
+//
+// The row: A VARIANT CELL IS AN ORDINARY EXECUTION THAT CARRIES LABELS. Its
+// axes reach the runner as BURNIN_VARIANT_<AXIS> and are echoed onto the
+// result; nothing in this engine interprets them, and no verdict depends on
+// them. That is the same statement the controller makes — ensureResult copies
+// t.Axes onto TestResult.VariantAxes and podForTest injects variantEnv — and
+// it has to hold on both sides, because pkg/contract tells a consumer to group
+// a sweep's cells BY these labels.
+//
+// This dispatcher used to fail the row completely: cmd/burnin discarded
+// spec.tests[].variants before ever building a Plan, so a four-cell sweep ran
+// once with no labels at all.
+func TestConformance_AVariantCellsAxesAreCarriedAndNeverInterpreted(t *testing.T) {
+	rt := &fakeRuntime{steps: []Execution{exits(0, "achievedTflops=812.5\n")}}
+	cell := PlannedTest{
+		Name:     "gemm-fp4",
+		Spec:     testSpec(),
+		Required: true,
+		Axes:     map[string]string{"precision": "fp4", "class": "smoke"},
+		Parent:   "gemm",
+	}
+	got := runOne(t, onePlan(cell, 0), rt)
+
+	// Echoed onto the result, for the consumer that groups the sweep.
+	if got.VariantAxes["precision"] != "fp4" || got.VariantAxes["class"] != "smoke" {
+		t.Errorf("VariantAxes = %v, want the cell's own labels; a result carrying the cell's NAME but not "+
+			"its labels makes a four-cell sweep four results nothing can group", got.VariantAxes)
+	}
+	// Delivered to the runner, which is the half that changes what is measured.
+	if len(rt.specs) != 1 {
+		t.Fatalf("got %d executions, want 1", len(rt.specs))
+	}
+	if v := rt.specs[0].Env["BURNIN_VARIANT_PRECISION"]; v != "fp4" {
+		t.Errorf("BURNIN_VARIANT_PRECISION = %q, want fp4 — a cell that never receives its axis runs the "+
+			"DEFAULT configuration while being reported as the fp4 cell", v)
+	}
+
+	// And interpreted by nothing: the verdict is the exit code's, exactly as it
+	// would be for the same test with no variants at all.
+	if got.Phase != api.RunPassed {
+		t.Errorf("phase = %v, want Passed — an axis must never reach a verdict", got.Phase)
+	}
+}
+
+// The result's axes are a COPY. A consumer holding a Report must not be able to
+// reach back into the plan the run was executed from.
+func TestConformance_AResultsAxesDoNotAliasThePlan(t *testing.T) {
+	rt := &fakeRuntime{steps: []Execution{exits(0, "")}}
+	axes := map[string]string{"precision": "fp4"}
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true, Axes: axes}, 0), rt)
+
+	got.VariantAxes["precision"] = "mutated"
+	if axes["precision"] != "fp4" {
+		t.Error("TestResult.VariantAxes aliases the plan's map")
+	}
+}
+
+// A test with no variants carries NO axes — not an empty map. An empty map
+// delivers as an empty object in the envelope, which reads as "this cell had
+// labels and they were blank" rather than "this test was never expanded".
+func TestConformance_ATestWithNoVariantsCarriesNoAxes(t *testing.T) {
+	rt := &fakeRuntime{steps: []Execution{exits(0, "")}}
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0), rt)
+
+	if got.VariantAxes != nil {
+		t.Errorf("VariantAxes = %v, want nil", got.VariantAxes)
+	}
+	for k := range rt.specs[0].Env {
+		if strings.HasPrefix(k, "BURNIN_VARIANT_") {
+			t.Errorf("an unexpanded test received %s", k)
+		}
 	}
 }

@@ -74,6 +74,15 @@ var kubernetesCoupled = map[string]string{
 		"TestScope and AttemptTrigger. This is the package GEP-0178 has Glimmer's Path A " +
 		"adopt, so the coupling lands on the path that can use Kubernetes least",
 	"pkg/runnerimages": "resolution is expressed over api.RunnerSpec and api.VendorImage",
+	// Coupled by the same EXECUTION vocabulary as pkg/localrun, and not by a
+	// new decision: Test.Spec is the api.BurnInTestSpec a profile entry
+	// resolves to, and ExpandVariants overlays api.TestVariant onto it.
+	// pkg/localrun.PlannedTest is an ALIAS for plan.Test, so this entry and
+	// that one describe one coupling, not two — freeing either frees both,
+	// and they must leave this ledger together.
+	"pkg/plan": "Test holds api.BurnInTestSpec whole and ExpandVariants overlays " +
+		"api.TestVariant onto it; it is the profile-resolution half of the same " +
+		"execution vocabulary pkg/localrun is coupled through",
 }
 
 func TestPublicPackagesDeclareWhatTheyCostAConsumer(t *testing.T) {

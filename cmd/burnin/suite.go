@@ -14,6 +14,7 @@ import (
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/hostinfo"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 )
 
 // A suite file is multi-document YAML of the SAME objects the CRDs use.
@@ -144,26 +145,48 @@ func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.
 		if err != nil {
 			return localrun.Plan{}, nil, err
 		}
-		// Test name is result identity, and the operator enforces uniqueness at
-		// plan time. Enforced here too, or two results would collide in the
-		// report and one would silently win.
-		if seen[name] {
-			return localrun.Plan{}, nil, fmt.Errorf(
-				"profile %s names the test %q twice — a test name is a result's identity", profile.Name, name)
+
+		// Variants expand HERE, before anything downstream, exactly as they do
+		// in the operator — and through the same function, so the two
+		// dispatchers cannot plan a different number of executions from one
+		// profile. Until this call existed, spec.tests[].variants was read,
+		// parsed, validated by the CRD schema, and then silently discarded: a
+		// four-cell precision sweep ran once, under the parent's name, with
+		// none of the cell's thresholds and no BURNIN_VARIANT_* reaching the
+		// runner. Nothing in the output said a cell was missing.
+		//
+		// Every check below (the duplicate-name check, the cluster-only
+		// warnings) then applies PER CELL, which is what makes a cell's name a
+		// result identity here as well.
+		for _, cell := range plan.ExpandVariants(name, spec, pt.Required == nil || *pt.Required, pt.Variants) {
+			// Test name is result identity, and the operator enforces
+			// uniqueness at plan time. Enforced here too, or two results would
+			// collide in the report and one would silently win. After expansion
+			// this also catches two variants of one test sharing a name, which
+			// is the same failure by a different route.
+			if seen[cell.Name] {
+				return localrun.Plan{}, nil, fmt.Errorf(
+					"profile %s names the test %q twice — a test name is a result's identity", profile.Name, cell.Name)
+			}
+			seen[cell.Name] = true
+
+			warnings = append(warnings, clusterOnlyFields(cell.Name, cell.Spec, rz)...)
+			p.Tests = append(p.Tests, cell)
 		}
-		seen[name] = true
-
-		warnings = append(warnings, clusterOnlyFields(name, spec, rz)...)
-
-		p.Tests = append(p.Tests, localrun.PlannedTest{
-			Name:     name,
-			Spec:     spec,
-			Required: pt.Required == nil || *pt.Required,
-		})
 	}
 
 	if len(p.Tests) == 0 {
 		return localrun.Plan{}, nil, fmt.Errorf("profile %s lists no tests", profile.Name)
+	}
+
+	// The same refusal the operator makes, for the same reason and with the
+	// same message: an axis that cannot become an environment variable would
+	// run the cell's DEFAULT configuration while the run reported it under a
+	// distinct label. Refused before a single container starts, because a run
+	// that quietly produces a meaningless sweep is a much worse report than one
+	// that refuses at start and says which axis and why.
+	if err := plan.RefuseUnreachableAxes(p.Tests); err != nil {
+		return localrun.Plan{}, nil, err
 	}
 	return p, warnings, nil
 }

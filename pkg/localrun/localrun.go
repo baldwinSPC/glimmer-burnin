@@ -44,6 +44,7 @@ import (
 	"time"
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
@@ -131,13 +132,19 @@ func (r *Rendezvous) pairNodes(local string) []string {
 }
 
 // PlannedTest is one test, with its spec pinned.
-type PlannedTest struct {
-	Name string
-	Spec api.BurnInTestSpec
-	// Required tests participate in FailFast and in the run's own verdict. An
-	// optional test that fails is recorded and does not condemn the run.
-	Required bool
-}
+//
+// An ALIAS for plan.Test, which is the same type the operator materialises its
+// own plan into. It is the same type on purpose: variant expansion produces
+// these, and expansion is shared (see pkg/plan) precisely because this
+// dispatcher used to drop variants on the floor. A parallel struct here would
+// have made "the two dispatchers plan the same executions" a claim rather than
+// a fact.
+//
+// Required tests participate in FailFast and in the run's own verdict; an
+// optional test that fails is recorded and does not condemn the run. Axes and
+// Parent are the variant labels the cell came from, carried and echoed and
+// never interpreted.
+type PlannedTest = plan.Test
 
 // Hooks let an embedding agent observe a run as it happens.
 //
@@ -204,6 +211,12 @@ type TestResult struct {
 	FinishedAt time.Time
 	Metrics    map[string]string
 	Message    string
+
+	// VariantAxes are the labels of the variant cell this execution came from,
+	// or nil for a test with no variants. Delivered in the envelope so a report
+	// can group a sweep's cells without parsing them back out of names — see
+	// contract.TestResult.VariantAxes, which is the field this feeds.
+	VariantAxes map[string]string
 
 	Violations   []api.Violation
 	NotEvaluated []api.NotEvaluated
@@ -293,7 +306,13 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 		// defaults an unset scope to Node, and a dispatcher that reads the
 		// YAML verbatim must apply the same default or the two disagree about
 		// the same document.
-		Scope:           scopeOf(t.Spec),
+		Scope: scopeOf(t.Spec),
+		// COPIED, not shared: the result outlives the plan and a consumer must
+		// not be able to reach back into it. Echoed and never interpreted —
+		// pkg/contract tells a consumer to group a sweep's cells BY these, and
+		// a result that carried the name but not the labels would make a
+		// four-cell precision sweep four results nothing can group.
+		VariantAxes:     plan.CopyAxes(t.Axes),
 		Nodes:           NodesFor(p, t),
 		StartedAt:       now(),
 		RepeatsRequired: repeatCount(t.Spec),

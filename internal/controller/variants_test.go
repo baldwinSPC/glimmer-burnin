@@ -51,10 +51,10 @@ func TestFourVariantsPlanFourDistinctExecutions(t *testing.T) {
 	}
 	names := map[string]bool{}
 	for _, g := range got {
-		if names[g.name] {
-			t.Errorf("duplicate planned name %q — test names are result identity", g.name)
+		if names[g.Name] {
+			t.Errorf("duplicate planned name %q — test names are result identity", g.Name)
 		}
-		names[g.name] = true
+		names[g.Name] = true
 	}
 	for _, want := range []string{"gemm-fp4", "gemm-fp8", "gemm-bf16", "gemm-fp64"} {
 		if !names[want] {
@@ -67,29 +67,29 @@ func TestFourVariantsPlanFourDistinctExecutions(t *testing.T) {
 	// author believed replaced, and a node failed against a threshold nobody
 	// can find in the profile has a verdict with nothing to explain it.
 	fp4 := byName(t, got, "gemm-fp4")
-	if len(fp4.spec.Thresholds) != 1 || fp4.spec.Thresholds[0].Metric != "achievedTflops" {
+	if len(fp4.Spec.Thresholds) != 1 || fp4.Spec.Thresholds[0].Metric != "achievedTflops" {
 		t.Errorf("fp4 thresholds = %+v; an overlay REPLACES, it does not merge",
-			fp4.spec.Thresholds)
+			fp4.Spec.Thresholds)
 	}
-	if fp4.spec.Thresholds[0].Value != "700" {
-		t.Errorf("fp4 floor = %q, want 700", fp4.spec.Thresholds[0].Value)
+	if fp4.Spec.Thresholds[0].Value != "700" {
+		t.Errorf("fp4 floor = %q, want 700", fp4.Spec.Thresholds[0].Value)
 	}
 	// A different cell's floor is a different number about different silicon.
-	if v := byName(t, got, "gemm-fp8").spec.Thresholds[0].Value; v != "350" {
+	if v := byName(t, got, "gemm-fp8").Spec.Thresholds[0].Value; v != "350" {
 		t.Errorf("fp8 floor = %q, want 350 — the cells share a threshold list", v)
 	}
 
 	// A variant that set NO thresholds inherits the parent's.
-	if bf := byName(t, got, "gemm-bf16"); len(bf.spec.Thresholds) != 1 ||
-		bf.spec.Thresholds[0].Metric != "nonfiniteCount" {
-		t.Errorf("bf16 thresholds = %+v, want the parent's inherited", bf.spec.Thresholds)
+	if bf := byName(t, got, "gemm-bf16"); len(bf.Spec.Thresholds) != 1 ||
+		bf.Spec.Thresholds[0].Metric != "nonfiniteCount" {
+		t.Errorf("bf16 thresholds = %+v, want the parent's inherited", bf.Spec.Thresholds)
 	}
 
 	// Overlays apply, and do not leak between cells.
-	if d := byName(t, got, "gemm-fp64").spec.DurationSeconds; d != 300 {
+	if d := byName(t, got, "gemm-fp64").Spec.DurationSeconds; d != 300 {
 		t.Errorf("fp64 duration = %d, want 300", d)
 	}
-	if d := byName(t, got, "gemm-fp4").spec.DurationSeconds; d != 60 {
+	if d := byName(t, got, "gemm-fp4").Spec.DurationSeconds; d != 60 {
 		t.Errorf("fp4 duration = %d, want the parent's 60 — an overlay leaked between "+
 			"cells, so every cell after the first measures the wrong thing", d)
 	}
@@ -106,7 +106,7 @@ func TestAnEmptyThresholdOverlayClearsTheParentGates(t *testing.T) {
 		[]burninv1alpha1.TestVariant{
 			{Name: "explore", Thresholds: []burninv1alpha1.Threshold{}},
 		})
-	if n := len(got[0].spec.Thresholds); n != 0 {
+	if n := len(got[0].Spec.Thresholds); n != 0 {
 		t.Errorf("an empty overlay left %d thresholds; nil inherits and empty clears, "+
 			"and a variant that means to gate nothing has no other way to say so", n)
 	}
@@ -120,14 +120,14 @@ func TestNoVariantsPlansIdentically(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d executions with no variants, want 1", len(got))
 	}
-	if got[0].name != "gemm" {
+	if got[0].Name != "gemm" {
 		t.Errorf("name = %q, want the bare test name — a suffix would change result "+
-			"identity for every profile written before variants existed", got[0].name)
+			"identity for every profile written before variants existed", got[0].Name)
 	}
-	if got[0].axes != nil {
-		t.Errorf("axes = %v, want nil", got[0].axes)
+	if got[0].Axes != nil {
+		t.Errorf("axes = %v, want nil", got[0].Axes)
 	}
-	if !got[0].required {
+	if !got[0].Required {
 		t.Error("required was lost")
 	}
 }
@@ -246,7 +246,7 @@ func TestAxesRideInThePinnedPlan(t *testing.T) {
 		t.Fatalf("the plan does not carry the axes: %+v", p.Tests[0])
 	}
 	// Mutating the source afterwards cannot reach the plan.
-	tests[0].axes["precision"] = "fp64"
+	tests[0].Axes["precision"] = "fp64"
 	if p.Tests[0].Axes["precision"] != "fp4" {
 		t.Error("the plan shares an axes map with its input, so editing the profile " +
 			"mid-run would change what an in-flight cell reports it was")
@@ -294,7 +294,7 @@ func TestAnEnvOverlayReplaces(t *testing.T) {
 	got := expandVariants("gemm", spec, true, []burninv1alpha1.TestVariant{
 		{Name: "cell", Env: []corev1.EnvVar{{Name: "CELL", Value: "2"}}},
 	})
-	env := got[0].spec.Runner.Env
+	env := got[0].Spec.Runner.Env
 	if len(env) != 1 || env[0].Name != "CELL" {
 		t.Errorf("env = %+v; an overlay REPLACES, so the parent's PARENT is gone", env)
 	}
@@ -303,15 +303,15 @@ func TestAnEnvOverlayReplaces(t *testing.T) {
 	}
 }
 
-func byName(t *testing.T, in []resolvedTest, name string) resolvedTest {
+func byName(t *testing.T, in []plannedTest, name string) plannedTest {
 	t.Helper()
 	for _, r := range in {
-		if r.name == name {
+		if r.Name == name {
 			return r
 		}
 	}
 	t.Fatalf("no execution named %q", name)
-	return resolvedTest{}
+	return plannedTest{}
 }
 
 // A variant may overlay env or args onto a test that declares no runner block.
@@ -367,10 +367,10 @@ func TestVariants_OverlayOnATestWithNoRunnerBlock(t *testing.T) {
 			if len(cells) != 1 {
 				t.Fatalf("cells = %d, want 1", len(cells))
 			}
-			tc.check(t, cells[0].spec)
+			tc.check(t, cells[0].Spec)
 			// And the image still resolves: an empty RunnerSpec must behave
 			// exactly as a nil one did, or this fix would break every default.
-			if _, err := runnerImage(&cells[0].spec, ""); err != nil {
+			if _, err := runnerImage(&cells[0].Spec, ""); err != nil {
 				t.Errorf("image no longer resolves after the overlay: %v", err)
 			}
 		})
@@ -391,10 +391,10 @@ func TestPlan_RefusesAVariantAxisTheRunnerCouldNeverReceive(t *testing.T) {
 		{"nor may it start with a digit", "8bit"},
 		{"nor may it be empty", ""},
 	} {
-		tests := []resolvedTest{{
-			name: "sweep-cell",
-			spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
-			axes: map[string]string{tc.axis: "value"},
+		tests := []plannedTest{{
+			Name: "sweep-cell",
+			Spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
+			Axes: map[string]string{tc.axis: "value"},
 		}}
 		_, err := buildPlan(&burninv1alpha1.BurnInProfile{}, tests, []string{"node-a"}, 1, false)
 		if err == nil {
@@ -410,10 +410,10 @@ func TestPlan_RefusesAVariantAxisTheRunnerCouldNeverReceive(t *testing.T) {
 
 // The refusal must not fire on the axes the shipped samples actually use.
 func TestPlan_AcceptsTheAxisNamesTheSamplesUse(t *testing.T) {
-	tests := []resolvedTest{{
-		name: "gemm-precision-sweep-fp4",
-		spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
-		axes: map[string]string{"precision": "fp4", "class": "smoke", "measurand": "bandwidth"},
+	tests := []plannedTest{{
+		Name: "gemm-precision-sweep-fp4",
+		Spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
+		Axes: map[string]string{"precision": "fp4", "class": "smoke", "measurand": "bandwidth"},
 	}}
 	if _, err := buildPlan(&burninv1alpha1.BurnInProfile{}, tests, []string{"node-a"}, 1, false); err != nil {
 		t.Errorf("buildPlan refused axis names the shipped samples use: %v", err)
@@ -425,10 +425,10 @@ func TestPlan_AcceptsTheAxisNamesTheSamplesUse(t *testing.T) {
 func TestPlan_TheAxisRefusalIsDeterministic(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 30; i++ {
-		tests := []resolvedTest{{
-			name: "sweep-cell",
-			spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
-			axes: map[string]string{"bad-one": "a", "bad.two": "b", "9bad": "c"},
+		tests := []plannedTest{{
+			Name: "sweep-cell",
+			Spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindComputeSmoke},
+			Axes: map[string]string{"bad-one": "a", "bad.two": "b", "9bad": "c"},
 		}}
 		_, err := buildPlan(&burninv1alpha1.BurnInProfile{}, tests, []string{"node-a"}, 1, false)
 		if err == nil {
