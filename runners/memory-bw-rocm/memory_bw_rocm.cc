@@ -167,7 +167,7 @@ int main() {
 		return errored(std::string("hipGetDeviceProperties: ") + hipGetErrorString(e));
 	}
 
-	std::printf("gpu_name=%s\ngfx_target=%s\ngpu_count=%d\n", props.name, props.gcnArchName,
+	std::printf("gpu_name=%s\ngfx_target=%s\ndevice_count=%d\n", props.name, props.gcnArchName,
 	            devCount);
 	// Effective GPU-visible memory. On an APU this is the GTT allocation the
 	// kernel was configured for, not a VRAM size — it moves with

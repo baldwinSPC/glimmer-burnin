@@ -218,16 +218,30 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"soakIterations":       {UnitNone, ThresholdUseEvidence},
 		"soakServerRestarts":   {UnitNone, ThresholdUseEvidence},
 		"acceleratorCount":     {UnitNone, ThresholdUseAcceptance},
-		"throttleEvents":       {UnitNone, ThresholdUseAcceptance},
-		"throttledSamples":     {UnitNone, ThresholdUseAcceptance},
-		"throttleReasonsMask":  {UnitNone, ThresholdUseEvidence},
-		"unsupportedReads":     {UnitNone, ThresholdUseEvidence},
-		"diagTestsFailed":      {UnitNone, ThresholdUseAcceptance},
-		"iterationsCompleted":  {UnitNone, ThresholdUseAcceptance},
-		"samplesTaken":         {UnitNone, ThresholdUseEvidence},
-		"loadLaunches":         {UnitNone, ThresholdUseEvidence},
-		"loadThreads":          {UnitNone, ThresholdUseEvidence},
-		"loadItersPerLaunch":   {UnitNone, ThresholdUseEvidence},
+		// Multi-device iteration (docs/dev/multi-device.md). deviceCount is
+		// the one a fleet gates; the spreads are ceilings gated
+		// RequiredIfMeasurable; the rest is attribution and context.
+		"deviceCount":                    {UnitNone, ThresholdUseAcceptance},
+		"devicesVisible":                 {UnitNone, ThresholdUseEvidence},
+		"deviceWindowS":                  {UnitSeconds, ThresholdUseEvidence},
+		"worstDeviceIndex":               {UnitNone, ThresholdUseEvidence},
+		"worstDevicePciBusId":            {UnitNone, ThresholdUseEvidence},
+		"deviceHomogeneous":              {UnitNone, ThresholdUseEvidence},
+		"deviceConcurrency":              {UnitNone, ThresholdUseEvidence},
+		"sustainedClockSpreadPct":        {UnitPercent, ThresholdUseAcceptance},
+		"gemmThroughputSpreadPct":        {UnitPercent, ThresholdUseAcceptance},
+		"fmaThroughputSpreadPct":         {UnitPercent, ThresholdUseAcceptance},
+		"hostToDeviceBandwidthSpreadPct": {UnitPercent, ThresholdUseAcceptance},
+		"throttleEvents":                 {UnitNone, ThresholdUseAcceptance},
+		"throttledSamples":               {UnitNone, ThresholdUseAcceptance},
+		"throttleReasonsMask":            {UnitNone, ThresholdUseEvidence},
+		"unsupportedReads":               {UnitNone, ThresholdUseEvidence},
+		"diagTestsFailed":                {UnitNone, ThresholdUseAcceptance},
+		"iterationsCompleted":            {UnitNone, ThresholdUseAcceptance},
+		"samplesTaken":                   {UnitNone, ThresholdUseEvidence},
+		"loadLaunches":                   {UnitNone, ThresholdUseEvidence},
+		"loadThreads":                    {UnitNone, ThresholdUseEvidence},
+		"loadItersPerLaunch":             {UnitNone, ThresholdUseEvidence},
 
 		// Label-valued. Every one of these MUST be Evidence: their values are
 		// not numbers, so a threshold on one fails closed on every node forever
@@ -417,6 +431,13 @@ func TestAggregationOfTheEasilyMistakenMetrics(t *testing.T) {
 		"meanBandwidthGbps":    {AggLast, "a mean of means is not a mean; the last segment's is the honest one"},
 		"bandwidthStdDevGbps":  {AggMax, "the widest spread any segment saw"},
 		"acceleratorCount":     {AggLast, "an inventory fact, not a per-window count"},
+		// The device fold happens INSIDE a window; across windows these are
+		// facts about the last one, and the spreads are ceilings.
+		"deviceCount":             {AggLast, "how many devices the last window measured — a Sum would multiply the board by the segment count"},
+		"worstDeviceIndex":        {AggLast, "names the LAST window's worst device; no ArgMin exists to name the aggregate's"},
+		"deviceWindowS":           {AggLast, "one device's window, the same every segment"},
+		"sustainedClockSpreadPct": {AggMax, "the worst window's spread describes the board"},
+		"gemmThroughputSpreadPct": {AggMax, "likewise"},
 
 		// A floor: the WORST window is the verdict. A soak holding 83% for
 		// eleven hours and 40% for one hour is a part that dropped to 40%, and
@@ -460,5 +481,48 @@ func TestUnregisteredMetricAggregatesLast(t *testing.T) {
 	}
 	if got := AggregationFor("miscompares"); got != AggSum {
 		t.Errorf("AggregationFor(registered) = %q, want %q", got, AggSum)
+	}
+}
+
+// TestSpreadMetricsAreRegisteredCeilings holds SpreadMetrics to the registry.
+//
+// The set exists so verdict.ValidateThresholdsForKind can say, at authoring
+// time, that a Required gate on a spread fails every single-device node
+// forever. A member the registry does not know, or knows as something other
+// than an Acceptance ceiling in Pct, would make that advice wrong in the
+// direction that matters — and the two would drift silently, because nothing
+// else reads the set.
+func TestSpreadMetricsAreRegisteredCeilings(t *testing.T) {
+	if len(SpreadMetrics) == 0 {
+		t.Fatal("SpreadMetrics is empty; if the spreads were removed, remove this guard with them")
+	}
+	for _, name := range SpreadMetrics {
+		m, ok := Lookup(name)
+		if !ok {
+			t.Errorf("SpreadMetrics names %q, which is not registered", name)
+			continue
+		}
+		if m.Unit != UnitPercent {
+			t.Errorf("spread %q has unit %q, want Pct — a spread is (best − worst) / best × 100", name, m.Unit)
+		}
+		if m.Aggregation != AggMax {
+			t.Errorf("spread %q aggregates %q, want Max — the worst window's spread describes the board", name, m.Aggregation)
+		}
+		if m.ThresholdUse != ThresholdUseAcceptance {
+			t.Errorf("spread %q is %q, want Acceptance — a fleet gates homogeneity with LessThanOrEqual", name, m.ThresholdUse)
+		}
+		if !IsSpreadMetric(name) {
+			t.Errorf("IsSpreadMetric(%q) = false for a member of SpreadMetrics", name)
+		}
+		if !strings.Contains(m.Description, "n/a") || !strings.Contains(m.Description, "RequiredIfMeasurable") {
+			t.Errorf("spread %q's description does not say it is n/a on a single-device node and must be gated RequiredIfMeasurable; that is the one thing an author reading it needs to know", name)
+		}
+	}
+	// And the inverse: a registered name that looks like a spread must be in
+	// the set, or the linter stops applying to it.
+	for _, name := range Registered() {
+		if strings.HasSuffix(name, "SpreadPct") && !IsSpreadMetric(name) {
+			t.Errorf("%q is registered and named like a spread but is not in SpreadMetrics; the applicability lint would not see it", name)
+		}
 	}
 }

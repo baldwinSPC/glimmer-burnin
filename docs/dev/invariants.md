@@ -530,6 +530,60 @@ only declare what it positively established.
 
 ---
 
+## 14. A Node verdict covers every accelerator on the node
+
+**A Node verdict describes EVERY accelerator on the node, gated on the WORST;
+a single-device measurement on a multi-device node is a bug.**
+
+Every CUDA/HIP runner used to take device 0, and every shipped sample requested
+one GPU. On an eight-GPU node one arbitrary card was certified as the node and
+nothing in the stored result said so — a confident wrong answer of exactly the
+kind this page exists to prevent. The full design, reviewed before code, is
+[multi-device.md](multi-device.md); the rules that hold it up:
+
+- **The runner iterates over the devices it was ALLOCATED**, not the devices it
+  can see. The operator injects the pod's own resource limits verbatim as
+  `BURNIN_RESOURCE_LIMITS`, interpreting nothing (which name is the accelerator
+  is vendor knowledge, and it stays in the image); the runner sums its own
+  vendor's count-shaped names into a budget. **`budget ≠ visible` is exit 3.**
+  A budget is a count and not an identity: on a host where the legacy runtime
+  injects from the image's baked `NVIDIA_VISIBLE_DEVICES=all`, a pod handed one
+  card sees the whole board, and capping the iteration at one would still
+  iterate device 0 — which may be another pod's.
+- **The pod requests the SKU's board** — one profile and one run per SKU —
+  and a wrong count is an unschedulable pod whose `Error` carries the
+  scheduler's own reason (`Insufficient nvidia.com/gpu`).
+- **`durationSeconds` is the test's budget and does not grow with the board.**
+  A soak kind iterates concurrently (a soak sliced into `duration/8` windows is
+  not a soak); a measurement kind divides the window, and `deviceWindowS`
+  says what each device got.
+- **The gated metric keeps its name and is the worst device.** The direction
+  is the metric's, read off the registry's `Aggregation`; identity labels keep
+  the first device's meaning; `worstDeviceIndex` and `worstDevicePciBusId`
+  name the device behind the gated figure of one window, and the per-device
+  table is an **artifact**, never a suffix on a metric name.
+- **`deviceCount` is an acceptance gate.** A fleet writes `deviceCount Equal
+  8`, so a pod handed one card of eight fails instead of certifying that card.
+  It supersedes `gpu_count`, which is not aliased to it.
+- **Spreads are `n/a` on one device, under MIG and on a mixed board** — a
+  positive claim, "nothing to spread across" — so a threshold on one must be
+  `RequiredIfMeasurable`, and the threshold linter reports a `Required` gate on
+  a spread as `Unsound`.
+- **Across DEVICES the precedence is `Fail > Error > Skip > Pass`, and that
+  inverts Pair's `Error > Fail` deliberately.** A device is a *part*: a
+  measured miscompare on device 3 is a fact about device 3 that device 6's
+  enumeration failure does not erase. A Pair endpoint is *half a link*: a
+  machinery failure at either end means the link was never measured. Both
+  orders are invariants; the discriminator is what the reporters are.
+
+The fold lives in one CUDA-free header, `device_fold.h`, byte-identical across
+the runners that carry it and unit-tested under `make test`;
+`runners/devicefold_test.go` holds every runner directory to one of CONVERTED,
+EXEMPT with a reason, or PENDING with the delivery step, so a new accelerator
+runner cannot regress to device 0 silently.
+
+---
+
 ## Where these are enforced
 
 A rule with no guard is a rule that will be gone in a year. The tiers differ in

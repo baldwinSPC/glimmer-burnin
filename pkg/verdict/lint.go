@@ -175,6 +175,20 @@ func ValidateThresholdsForKind(kind contract.TestKind, thresholds []contract.Thr
 				th.Metric, kind, contract.KindCustom)
 		}
 
+		// A cross-device spread is n/a on every single-device node — a positive
+		// claim, "nothing to spread across" — and the default applicability is
+		// Required, which fails closed on n/a. A fleet profile that gates a
+		// spread and forgets RequiredIfMeasurable therefore fails every healthy
+		// single-GPU node forever, on the one phase that is never retried, and
+		// the failure reads as a hardware verdict. Advice, not a refusal: on an
+		// eight-GPU node the same gate is exactly right. See
+		// docs/dev/multi-device.md.
+		if contract.IsSpreadMetric(th.Metric) && th.Applicability != contract.RequiredIfMeasurable {
+			add(SeverityUnsound,
+				"%q is a cross-device spread and is n/a on every single-device node (and under MIG, and on a heterogeneous board); its applicability is %s, which fails closed on n/a, so this gate fails every healthy single-device node forever and the failure reads as a hardware verdict. Set applicability: %s, under which an n/a is reported as not evaluated",
+				th.Metric, applicabilityOrDefault(th.Applicability), contract.RequiredIfMeasurable)
+		}
+
 		// The registry's own opinion about what may decide acceptance. An
 		// unregistered name answers true — a third-party runner's author knows
 		// what their measurement means and this package does not.
@@ -189,4 +203,13 @@ func ValidateThresholdsForKind(kind contract.TestKind, thresholds []contract.Thr
 	}
 
 	return problems
+}
+
+// applicabilityOrDefault spells out the default so a finding about an unset
+// applicability names what the unset value MEANS rather than printing "".
+func applicabilityOrDefault(a contract.Applicability) contract.Applicability {
+	if a == "" {
+		return contract.Required
+	}
+	return a
 }

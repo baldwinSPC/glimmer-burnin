@@ -75,7 +75,7 @@ written for.
 `retiredPagesPending`, `pcieReplayTotal`, `pcieAerCorrectable`, `pcieAerNonfatal`,
 `pcieAerFatal` (and their `…Total` lifetime forms), `nicCount`, `nicUp`,
 `nicLinkDownTotal`, `ethLinkDownTotal`, `ibLinkDownTotal`, `ibPorts`,
-`ibPortsActive`, `gpuTempC`, `powerDrawW`, `gpuName`, `gpuCount`, `driverVersion`,
+`ibPortsActive`, `gpuTempC`, `powerDrawW`, `gpuName`, `deviceCount` (`gpu_count` before v0.7), `driverVersion`,
 `observationWindowS`, `elapsedS`, `nodeReady`, and the probe statuses
 `nvmlStatus`, `xidSource`, `aerStatus`, `nicStatus`, `pcieReplaySource`.
 

@@ -474,7 +474,7 @@ func emitGPU(out *emitter, before, after gpuSample) {
 	if drv, ok := t1.first(fDriver); ok {
 		out.set("driver_version", drv)
 	}
-	out.setInt("gpu_count", int64(t1.rows))
+	out.setInt("device_count", int64(t1.rows))
 
 	// --- ECC (lifetime; gated) ---------------------------------------------
 	// Uncorrected only. Correctable ECC events are expected on healthy HBM and

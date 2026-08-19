@@ -445,6 +445,22 @@ func podForTest(
 			Value: strconv.Itoa(int(attempt)),
 		}},
 	}
+	// The pod's OWN resource limits, verbatim, so a runner can tell the
+	// devices it was ALLOCATED from the devices it can SEE. On a host where
+	// the legacy runtime injects from the image's baked
+	// NVIDIA_VISIBLE_DEVICES=all, a pod handed one card sees the whole board;
+	// a runner iterating "everything visible" would then load devices that
+	// belong to other pods and report a device count the pod was never given.
+	// The reconciler interprets NOTHING here — it copies spec.resources the
+	// way variantEnv copies an axis — because which resource name is the
+	// accelerator is vendor knowledge, and that lives in the runner image.
+	// See docs/dev/multi-device.md.
+	if limits := resourceLimitsEnv(spec.Resources); limits != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "BURNIN_RESOURCE_LIMITS",
+			Value: limits,
+		})
+	}
 
 	// Variant axes, injected BEFORE the operator's own env so an explicit
 	// setting still wins — the same ordering as everything else here.
@@ -788,6 +804,35 @@ func ownedBy(pod *corev1.Pod, run *burninv1alpha1.BurnInRun) bool {
 		}
 	}
 	return false
+}
+
+// resourceLimitsEnv renders spec.resources.limits as "name=quantity,…" in
+// sorted key order, or "" when there are none.
+//
+// Limits, not requests: Kubernetes refuses a pod that requests an extended
+// resource without an equal limit, so limits are the one place a device count
+// is always present. Resource names contain '/' and '.' and never ',' or '=',
+// and a Quantity's canonical string has neither, so the format needs no
+// escaping. Sorted so two identical plans produce two identical pod specs.
+//
+// A runner reads only the names it knows are its vendor's accelerator; the
+// rest (rdma/hca, cpu, memory) ride along uninterpreted, which is cheaper than
+// deciding here what to leave out and safer than being wrong about it.
+func resourceLimitsEnv(res corev1.ResourceRequirements) string {
+	if len(res.Limits) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(res.Limits))
+	for n := range res.Limits {
+		names = append(names, string(n))
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		q := res.Limits[corev1.ResourceName(n)]
+		parts = append(parts, n+"="+q.String())
+	}
+	return strings.Join(parts, ",")
 }
 
 // variantEnv renders a variant's axes as BURNIN_VARIANT_<AXIS>=<value>.

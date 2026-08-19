@@ -60,8 +60,9 @@ a multi-GPU node the spread between the two is what distinguishes "this whole
 node is slow" from "one device on this node is slow".
 
 Also emitted, as context rather than as gates: `nvbandwidth_ref`, `gpu_name`,
-`gpu_count`, `cuda_driver_version`, `transfer_size_bytes`, `test_samples`,
-`elapsed_s`.
+`device_count` (registered as `deviceCount`, how many devices the runner
+measured; it was `gpu_count` before v0.7 — see docs/dev/multi-device.md),
+`cuda_driver_version`, `transfer_size_bytes`, `test_samples`, `elapsed_s`.
 
 > The two spellings on stdout are deliberate. The three acceptance keys use the
 > snake spelling the operator's alias table in

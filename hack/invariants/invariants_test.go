@@ -41,21 +41,22 @@ func TestThePublicPageCarriesEveryInvariant(t *testing.T) {
 	// Each entry is a rule CLAUDE.md states, keyed by a phrase that identifies
 	// the SUBJECT — and a distinctive token the public page must also carry.
 	subjects := map[string]string{
-		"the standalone rule":             "BurnInSink",
-		"permissive-only licensing":       "copyleft",
-		"Error is not Fail":               "retryOnErrorLimit",
-		"verdicts fail closed":            "fail",
-		"the n/a three-state rule":        "n/a",
-		"declared skips":                  "_SKIP",
-		"exact comparison, no epsilon":    "epsilon",
-		"Pair is about the link":          "endpoint",
-		"Group is about the collective":   "rank",
-		"cordoning follows the wave":      "cordon",
-		"destroy only after durable":      "resourceVersion",
-		"host access is named and narrow": "hostPaths",
-		"immutable published tags":        "immutable",
-		"deliberate arch targets":         "PTX",
-		"a pod is never safely evictable": "safe-to-evict",
+		"the standalone rule":                "BurnInSink",
+		"permissive-only licensing":          "copyleft",
+		"Error is not Fail":                  "retryOnErrorLimit",
+		"verdicts fail closed":               "fail",
+		"the n/a three-state rule":           "n/a",
+		"declared skips":                     "_SKIP",
+		"exact comparison, no epsilon":       "epsilon",
+		"Pair is about the link":             "endpoint",
+		"Group is about the collective":      "rank",
+		"cordoning follows the wave":         "cordon",
+		"destroy only after durable":         "resourceVersion",
+		"host access is named and narrow":    "hostPaths",
+		"immutable published tags":           "immutable",
+		"deliberate arch targets":            "PTX",
+		"a pod is never safely evictable":    "safe-to-evict",
+		"a Node verdict covers every device": "deviceCount",
 	}
 
 	for subject, token := range subjects {

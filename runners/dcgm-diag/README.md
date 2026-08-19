@@ -82,7 +82,7 @@ threshold is written against.
 | `diag_tests` | `diagTests` | The test list passed to `-r`, when tests were named instead of a level. Absent otherwise |
 | `diag_params` | `diagParams` | The exact `-p` string passed to `dcgmi`. Absent when none was |
 | `diag_timeout_s` | `diagTimeoutS` | The `-t` passed to `dcgmi`, so a run that ended at DCGM's own timeout can be told from one that ended at the runner's |
-| `dcgm_version` / `driver_version` / `gpu_count` | `dcgmVersion`, … | Provenance |
+| `dcgm_version` / `driver_version` / `device_count` | `dcgmVersion`, `driverVersion`, `deviceCount` | Provenance; `device_count` was `gpu_count` before v0.7 |
 | `dcgmi_exit_code` / `sample_count` / `counter_baseline_reset` | `dcgmiExitCode`, … | Evidence about the run itself |
 | `pruned_objects` | `prunedObjects` | Only if the site's DCGM tree carries `/usr/share/glimmer-burnin/dcgm-pruned.txt`, listing objects removed for licensing reasons. Absent otherwise |
 

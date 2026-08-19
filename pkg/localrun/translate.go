@@ -313,3 +313,18 @@ func setIf(env map[string]string, k, v string) {
 		env[k] = v
 	}
 }
+
+// VendorResourceNames lists the extended-resource names this package treats as
+// an accelerator request, sorted. Exported for the guard that holds this table
+// and the runners' own allow-sets (device_fold.h, nvidiaResources /
+// amdResources) to the same names: a resource the CLI maps to a vendor that a
+// runner then refuses as unrecognised — or the reverse — is one profile meaning
+// two things across the two dispatchers.
+func VendorResourceNames() []string {
+	names := make([]string, 0, len(vendorResources))
+	for n := range vendorResources {
+		names = append(names, string(n))
+	}
+	sort.Strings(names)
+	return names
+}

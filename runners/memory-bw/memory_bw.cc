@@ -499,7 +499,7 @@ int main() {
       break;
   }
 
-  std::printf("gpu_name=%s\ngpu_count=%d\ncuda_driver_version=%d\n", device.name.c_str(),
+  std::printf("gpu_name=%s\ndevice_count=%d\ncuda_driver_version=%d\n", device.name.c_str(),
               device.count, device.driverVersion);
 
   const long bufferMiB = clampLong(envLong("BURNIN_MEMORY_BW_BUFFER_MIB", kDefaultBufferMiB), 1, 65536);

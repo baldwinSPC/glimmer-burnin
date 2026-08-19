@@ -191,7 +191,7 @@ func TestEmitGPUHealthyNode(t *testing.T) {
 	out := newEmitter()
 	emitGPU(out, s, s)
 	want := map[string]string{
-		"gpu_count":         "1",
+		"device_count":      "1",
 		"gpu_name":          "NVIDIA GB10",
 		"driver_version":    "580.82.09",
 		keyECCErrors:        "0",
@@ -370,8 +370,8 @@ func TestEmitGPUMultiGPUSumsAndPeaks(t *testing.T) {
 	out := newEmitter()
 	emitGPU(out, s, s)
 
-	if got, _ := out.get("gpu_count"); got != "2" {
-		t.Errorf("gpu_count = %q, want 2", got)
+	if got, _ := out.get("device_count"); got != "2" {
+		t.Errorf("device_count = %q, want 2", got)
 	}
 	if got, _ := out.get(keyECCErrors); got != "2" {
 		t.Errorf("ecc_errors = %q, want 2 (summed across GPUs)", got)

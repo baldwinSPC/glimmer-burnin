@@ -878,6 +878,91 @@ var registry = map[string]Metric{
 		ThresholdUse: ThresholdUseEvidence,
 	},
 
+	// --- Multi-device iteration ---------------------------------------------
+	//
+	// A Node verdict describes EVERY accelerator on the node, gated on the
+	// worst (docs/dev/multi-device.md). The gated metric keeps its existing
+	// name — sustainedClockPct is the worst device's — and these entries are
+	// what say how many devices were behind it, which one it was, and how far
+	// the best was from the worst. Nothing here adds a device dimension to a
+	// name: a per-device table is an artifact, never a suffix.
+	"deviceCount": {
+		Name: "deviceCount", Unit: UnitNone,
+		Description:  "how many accelerator devices the runner MEASURED — iterated over and folded into the gated figures. An acceptance gate: a fleet writes deviceCount Equal 8 so a pod handed one card of eight FAILS instead of certifying that card as the node. Under MIG it counts instances, not parts. Distinct from acceleratorCount, which is what the node's PCI bus HAS, and from devicesVisible, which is what the runtime showed the pod; supersedes the unregistered gpuCount, which is not aliased to it",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"devicesVisible": {
+		Name: "devicesVisible", Unit: UnitNone,
+		Description:  "how many accelerator devices the container runtime showed the pod, before the runner applied its allocation budget from BURNIN_RESOURCE_LIMITS. Evidence: a value above deviceCount means the pod could see devices it was not allocated (a legacy-runtime host injecting NVIDIA_VISIBLE_DEVICES=all), which the runner reports as an Error rather than iterating past its budget",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"deviceWindowS": {
+		Name: "deviceWindowS", Unit: UnitSeconds,
+		Description:  "the load window ONE device actually got. Under sequential iteration it is durationRequestedS divided by deviceCount, so a 15-second clock window on an eight-GPU node is distinguishable from a 120-second one on a single-GPU part; under concurrent iteration it equals durationRequestedS. Evidence, not a gate: how long each device was loaded is context for the figures beside it",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"worstDeviceIndex": {
+		Name: "worstDeviceIndex", Unit: UnitNone,
+		Description:  "the runtime index of the device behind the gated figure of THIS window — the one whose reading the fold kept. Under Last across a segmented soak, or across an error-retry that re-runs a window, it names the LAST window's worst device, not the device behind a multi-window aggregate; per-device.json is the only sound attribution across windows. No ArgMin aggregation exists to change that and none should be added. Evidence: an index has no ordering a threshold could use",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"worstDevicePciBusId": {
+		Name: "worstDevicePciBusId", Unit: UnitNone,
+		Description:  "the PCI bus address of the device worstDeviceIndex names, so a consumer reading only metrics can dispatch an engineer to a slot. Same window caveat as worstDeviceIndex. pciBusId beside it keeps its existing meaning — the first device's — so its wire meaning on a single-device fleet does not move",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"deviceHomogeneous": {
+		Name: "deviceHomogeneous", Unit: UnitNone,
+		Description:  "\"true\" when every measured device reported the same product name and compute capability, \"false\" when the runner READ every identity and they differ. A positive establishment: an unreadable identity on one device is an omission and declares nothing. When false, every spread over an absolute figure is n/a, because a mixed board's spread reads as a fault on healthy hardware. A label",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"deviceConcurrency": {
+		Name: "deviceConcurrency", Unit: UnitNone,
+		Description:  "the iteration mode the runner resolved: \"sequential\" (one device at a time, each given deviceWindowS) or \"all\" (every device at once for the full duration). Declared per kind by the runner and overridden by BURNIN_DEVICE_CONCURRENCY. A label; the number a consumer wants is deviceWindowS",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// The spreads: (max − min) / max × 100 across the devices of ONE window,
+	// one name per measurand, formed by dropping the base metric's unit token
+	// and keeping its identity. Max across windows because the worst window's
+	// spread describes the board; a ceiling a fleet gates with LessThanOrEqual.
+	// Deliberately the inverse of throughputConsistencyPct (a consistency is a
+	// floor within one device across windows; a spread is a ceiling across
+	// devices within one window). n/a on a single-device node, under MIG, and
+	// on a heterogeneous board — a positive claim in each case — so a gate on
+	// one must be RequiredIfMeasurable, and verdict.ValidateThresholdsForKind
+	// reports a Required gate as Unsound. SpreadMetrics is the set.
+	"sustainedClockSpreadPct": {
+		Name: "sustainedClockSpreadPct", Unit: UnitPercent,
+		Description:  "spread of sustainedClockPct across the node's devices in one window: (best − worst) / best × 100. One part holding 60% of rated clock beside seven holding 95% is a board with a fault that the worst-device floor may still clear. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"gemmThroughputSpreadPct": {
+		Name: "gemmThroughputSpreadPct", Unit: UnitPercent,
+		Description:  "spread of achievedTflops across the node's devices in one window of the same GEMM at the same precision: (best − worst) / best × 100. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"fmaThroughputSpreadPct": {
+		Name: "fmaThroughputSpreadPct", Unit: UnitPercent,
+		Description:  "spread of sustainedFmaThroughputTflops across the node's devices in one window of the same soak: (best − worst) / best × 100. Its own name rather than a shared throughput spread for the reason sustainedFmaThroughputTflops is not sustainedThroughputTflops. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"hostToDeviceBandwidthSpreadPct": {
+		Name: "hostToDeviceBandwidthSpreadPct", Unit: UnitPercent,
+		Description:  "spread of hostToDeviceBandwidthGBs across the node's devices in one window: (best − worst) / best × 100. A device on a PCIe link that trained narrow reads low here while the worst-device floor may still clear. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+
 	// --- Test-execution counters --------------------------------------------
 	"diagTestsFailed": {
 		Name: "diagTestsFailed", Unit: UnitNone,
@@ -1186,6 +1271,32 @@ func SafeToThresholdOn(name string) bool {
 		return true
 	}
 	return m.SafeToThresholdOn()
+}
+
+// SpreadMetrics are the cross-device homogeneity spreads: (best − worst) /
+// best × 100 across the devices of one window. Every one of them is n/a — a
+// positive claim, "nothing to spread across" — on a single-device node, under
+// MIG, and on a heterogeneous board, so a threshold on any of them must be
+// RequiredIfMeasurable: the default Required fails closed on n/a and would fail
+// every healthy single-GPU node forever, on the one phase that is never
+// retried. verdict.ValidateThresholdsForKind reads this set to say so at
+// authoring time. TestSpreadMetricsAreRegisteredCeilings holds the set to the
+// registry: every member registered, Acceptance, Max, Pct.
+var SpreadMetrics = []string{
+	"sustainedClockSpreadPct",
+	"gemmThroughputSpreadPct",
+	"fmaThroughputSpreadPct",
+	"hostToDeviceBandwidthSpreadPct",
+}
+
+// IsSpreadMetric reports whether name is one of SpreadMetrics.
+func IsSpreadMetric(name string) bool {
+	for _, s := range SpreadMetrics {
+		if s == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Registered lists every registered metric name, sorted. Useful for generating

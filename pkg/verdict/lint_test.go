@@ -516,3 +516,45 @@ func TestValidateThresholds_ReportsEveryProblemWithItsIndex(t *testing.T) {
 		}
 	}
 }
+
+// A spread is n/a on every single-device node — a positive claim, "nothing to
+// spread across" — and the DEFAULT applicability is Required, which fails
+// closed on n/a. So a fleet profile that gates a spread and forgets
+// RequiredIfMeasurable fails every healthy single-GPU node forever, on the one
+// phase that is never retried, and the failure reads as a hardware verdict.
+// This is the authoring-time surface for that: advice, not a refusal, because
+// the gate does evaluate — on an eight-GPU node it is exactly the right gate.
+func TestValidateThresholds_FlagsARequiredGateOnASpread(t *testing.T) {
+	for _, metric := range contract.SpreadMetrics {
+		t.Run(metric, func(t *testing.T) {
+			// Default applicability (empty = Required).
+			ps := problemFor(t, th(metric, contract.LTE, "10"))
+			if len(ps) != 1 {
+				t.Fatalf("got %d problems, want 1: %v", len(ps), ps)
+			}
+			if ps[0].Severity != SeverityUnsound {
+				t.Errorf("severity = %q, want %q — the gate evaluates, so this is advice", ps[0].Severity, SeverityUnsound)
+			}
+			if !strings.Contains(ps[0].Reason, "RequiredIfMeasurable") || !strings.Contains(ps[0].Reason, "single-device") {
+				t.Errorf("reason = %q, want it to name RequiredIfMeasurable and the single-device node it would fail", ps[0].Reason)
+			}
+			// Explicit Required says the same thing.
+			explicit := th(metric, contract.LTE, "10")
+			explicit.Applicability = contract.Required
+			if ps := problemFor(t, explicit); len(ps) != 1 {
+				t.Errorf("explicit Required: got %d problems, want 1: %v", len(ps), ps)
+			}
+			// RequiredIfMeasurable is the gate the spreads are for: clean.
+			ok := th(metric, contract.LTE, "10")
+			ok.Applicability = contract.RequiredIfMeasurable
+			if ps := problemFor(t, ok); len(ps) != 0 {
+				t.Errorf("RequiredIfMeasurable gate on %s reported %v, want nothing", metric, ps)
+			}
+		})
+	}
+	// And the check is about spreads, not about every RequiredIfMeasurable-able
+	// metric: a Required floor on a plain acceptance metric is fine.
+	if ps := problemFor(t, th("sustainedClockPct", contract.GTE, "80")); len(ps) != 0 {
+		t.Errorf("a Required floor on sustainedClockPct reported %v, want nothing", ps)
+	}
+}

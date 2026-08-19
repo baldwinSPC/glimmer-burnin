@@ -578,6 +578,12 @@ MEMORY_BW_PASS
 			},
 		},
 		{
+			// Captured from host-health before v0.7, which printed gpu_count;
+			// the runner now prints device_count (registered deviceCount, see
+			// docs/dev/multi-device.md). The capture stays as captured: what
+			// this asserts is the generic snake→camel path, and gpuCount is
+			// deliberately NOT aliased to deviceCount, because two keys must
+			// never alias to one name.
 			kind: "host-health",
 			stdout: `node_ready=true
 gpu_count=1

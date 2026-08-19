@@ -71,7 +71,7 @@ PASS on a pod handed one card, which is the case that gate exists to fail. So:
 - Each runner — which knows its own vendor's resource names because it is
   that vendor's image — sums a declared ALLOW-SET of count-shaped names under
   its vendor's domain (`nvidia.com/gpu` and `nvidia.com/mig-*`; `amd.com/gpu`;
-  `gpu.intel.com/i915`) into a **budget**. (Refused: summing everything under
+  an Intel image adds its own the day one exists) into a **budget**. (Refused: summing everything under
   the vendor prefix — HAMi/vGPU stacks expose `nvidia.com/gpumem` and
   `nvidia.com/gpucores` beside `nvidia.com/gpu`, and the sum would be 8192.)
   A resource under the vendor's domain that is NOT in the allow-set is exit 3:
@@ -272,7 +272,7 @@ suffix-bearing name must never hold a non-float, and a dimension in
 ## Where the direction lives, and the guards
 
 The direction of every fold is declared ONCE, beside the name, in
-`pkg/contract`. `runners/<kind>/device_fold.h` — a CUDA-free header, byte-
+`pkg/contract`. `runners/gpu-burn/device_fold.h` — its home; every converting runner takes a copy — a CUDA-free header, byte-
 identical across every runner that carries it (`sharedsource_test.go` picks up
 any file duplicated across runner directories automatically and refuses drift),
 unit-tested by `device_fold_test.cc` under `make test` — holds the fold and a
@@ -280,7 +280,7 @@ table mapping each raw key to `Min`/`Max`/`Sum`/`Once` plus the `Last`
 allowlist. `runners/devicefold_test.go` reads that table and asserts every
 `Min`/`Max`/`Sum` entry agrees with `contract.AggregationFor(canonical(key))`,
 so a runner cannot decide, privately, that a floor is a ceiling.
-`runners/pins_test.go` carries a TOTAL table of accelerator-touching runner
+`runners/devicefold_test.go` carries a TOTAL table of accelerator-touching runner
 directories: each either uses the shared iteration helper, or is EXEMPT with
 its reason (`memory-bw`: nvbandwidth iterates; `dcgm-diag`: dcgmi enumerates;
 `host-health`: NVML per GPU already; `fingerprint-probe`: PCI; the fabric
