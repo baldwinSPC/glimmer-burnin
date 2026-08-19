@@ -244,7 +244,13 @@ func humanBytes(n int64) string {
 func classifyTransport(out string) (transport string, ok bool) {
 	upper := strings.ToUpper(out)
 	switch {
-	case strings.Contains(upper, "NVLS") || strings.Contains(upper, "NVLINK"):
+	// Anchored the same way as the other three branches, and for the same
+	// reason: NCCL_DEBUG_SUBSYS=INIT,GRAPH is set for this run so GRAPH's own
+	// topology dump names NVLink whenever the hardware HAS it, whether or not
+	// the collective actually used it as its transport. An unanchored match
+	// would read that topology line as a transport decision.
+	case strings.Contains(upper, "VIA NVLS") || strings.Contains(upper, "/NVLS/") ||
+		strings.Contains(upper, "VIA NVLINK") || strings.Contains(upper, "/NVLINK/"):
 		return "nvlink", true
 	case strings.Contains(upper, "VIA P2P") || strings.Contains(upper, "/P2P/"):
 		return "p2p", true

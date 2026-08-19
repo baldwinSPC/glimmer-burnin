@@ -173,7 +173,12 @@ inline double BusBandwidthFor(Collective c, double algbw, int nranks) {
 // runners/nccl/collective/collective.h's — see that file for the full
 // rationale (NCCL's and RCCL's ncclAllGather/ncclReduceScatter/ncclSend/
 // ncclRecv share the same buffer-size contract, since RCCL declares the same
-// C API).
+// C API) AND for the caller obligation that matters most: recompute this plan
+// per swept size and use that SAME plan for seeding, launching and reading
+// back one size's data. AllToAll's ChunkCount scales with totalCount, so
+// mixing a plan seeded at the largest size with one launched at a smaller
+// size reads every peer's chunk from the wrong offset — a real bug caught in
+// this project's own first draft of the intra-node path, in both languages.
 struct BufferPlan {
 	std::size_t SendCount;
 	std::size_t RecvCount;

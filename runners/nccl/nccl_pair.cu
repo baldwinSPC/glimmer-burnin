@@ -557,29 +557,27 @@ int runLocalMultiGpu(const Options &o) {
 		CUDA_CHECK(cudaMalloc(&sendBufs[i], maxPlan.BufElements * sizeof(float)));
 		CUDA_CHECK(cudaMalloc(&recvBufs[i], maxPlan.BufElements * sizeof(float)));
 
-		// Seeded ONCE, at the largest allocation, and never again: AllReduce and
-		// ReduceScatter sum a constant (1.0) so the input never needs to change,
-		// and AllGather/AllToAll seed an identity keyed on THIS device's index —
-		// fixed regardless of message size or which iteration this is. See
-		// collective.h for what each pattern proves.
+		// Seeded ONCE, at the largest allocation, and never again — for
+		// AllReduce, ReduceScatter and AllGather ONLY. AllReduce and
+		// ReduceScatter sum a constant (1.0), and AllGather fills the WHOLE
+		// buffer with one value keyed on this device's index; neither pattern
+		// depends on where a chunk boundary falls, so the same seed is correct
+		// at every swept size. AllToAll is NOT seeded here — see the per-size
+		// loop below for why.
 		std::vector<float> host(maxPlan.BufElements);
 		switch (o.collective) {
 		case burnin::Collective::AllReduce:
 		case burnin::Collective::ReduceScatter:
 			std::fill(host.begin(), host.end(), 1.0f);
+			CUDA_CHECK(cudaMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), cudaMemcpyHostToDevice));
 			break;
 		case burnin::Collective::AllGather:
 			std::fill(host.begin(), host.end(), burnin::SeedForAllGather(i));
+			CUDA_CHECK(cudaMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), cudaMemcpyHostToDevice));
 			break;
 		case burnin::Collective::AllToAll:
-			for (int j = 0; j < devices; ++j) {
-				const float v = burnin::SeedForAllToAll(i, j);
-				const size_t base = static_cast<size_t>(j) * maxPlan.ChunkCount;
-				for (size_t k = 0; k < maxPlan.ChunkCount && base + k < host.size(); ++k) host[base + k] = v;
-			}
-			break;
+			break;  // seeded per size, below — see why there
 		}
-		CUDA_CHECK(cudaMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), cudaMemcpyHostToDevice));
 	}
 
 	long long wrong = 0;
@@ -588,6 +586,31 @@ int runLocalMultiGpu(const Options &o) {
 		size_t totalCount = bytes / sizeof(float);
 		if (totalCount == 0) totalCount = 1;
 		const burnin::BufferPlan plan = burnin::PlanBuffers(o.collective, totalCount, devices);
+
+		// AllToAll's seed is keyed on CHUNK OFFSET (which peer a range of
+		// elements is destined for), and the chunk size varies with the swept
+		// message size — plan.ChunkCount here is smaller than maxPlan.ChunkCount
+		// at every size but the largest. Seeding once at the max layout and
+		// launching at a smaller layout would read each peer's data from the
+		// WRONG offset (every peer but the last would receive peer 0's chunk),
+		// which the correctness check would then report as a hardware
+		// miscompare that never happened — a fabricated Fail, permanent and
+		// never retried, on hardware that measured nothing wrong. So this is
+		// reseeded at THIS size's own chunk boundaries before every size.
+		if (o.collective == burnin::Collective::AllToAll) {
+			for (int i = 0; i < devices; ++i) {
+				// AllToAll's BufElements is SendCount == RecvCount == the full
+				// reconstructed total (ChunkCount * devices) — see PlanBuffers.
+				std::vector<float> host(plan.BufElements, 0.0f);
+				for (int j = 0; j < devices; ++j) {
+					const float v = burnin::SeedForAllToAll(i, j);
+					const size_t base = static_cast<size_t>(j) * plan.ChunkCount;
+					for (size_t k = 0; k < plan.ChunkCount && base + k < host.size(); ++k) host[base + k] = v;
+				}
+				CUDA_CHECK(cudaSetDevice(devList[i]));
+				CUDA_CHECK(cudaMemcpy(sendBufs[i], host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice));
+			}
+		}
 
 		for (int w = 0; w < o.warmup; ++w) {
 			int rc = launchGroup(o.collective, devices, devList, comms, streams, sendBufs, recvBufs, plan);
@@ -623,6 +646,14 @@ int runLocalMultiGpu(const Options &o) {
 		// already gives: a fault that only appears above a protocol switchover
 		// threshold would be invisible to a single-size check.
 		for (int i = 0; i < devices; ++i) {
+			// Every device is cudaSetDevice'd as current before the call that
+			// targets it, group or not — see launchGroup's own comment. The
+			// same rule applies here: cudaMemcpy is UVA-transparent across
+			// devices on this project's own toolchain, but this loop otherwise
+			// enters with whichever device the prior synchronize loop left
+			// current, and depending on that rather than stating it is the kind
+			// of implicit assumption this file elsewhere refuses to make.
+			CUDA_CHECK(cudaSetDevice(devList[i]));
 			std::vector<float> back(plan.RecvCount);
 			CUDA_CHECK(cudaMemcpy(back.data(), recvBufs[i], plan.RecvCount * sizeof(float), cudaMemcpyDeviceToHost));
 			switch (o.collective) {
@@ -664,8 +695,8 @@ int runLocalMultiGpu(const Options &o) {
 	std::fflush(stdout);
 
 	for (int i = 0; i < devices; ++i) {
-		ncclCommDestroy(comms[i]);
 		CUDA_CHECK(cudaSetDevice(devList[i]));
+		ncclCommDestroy(comms[i]);
 		CUDA_CHECK(cudaStreamDestroy(streams[i]));
 		CUDA_CHECK(cudaFree(sendBufs[i]));
 		CUDA_CHECK(cudaFree(recvBufs[i]));

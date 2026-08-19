@@ -119,6 +119,20 @@ Same naming decision as NVIDIA's runner: `busBandwidthGBs`/`algBandwidthGBs`
 keep their names at every scope and for every collective — see
 `pkg/contract/metrics.go`'s doc comment.
 
+**`BURNIN_DURATION_SECONDS` bounds this sweep, and NVIDIA's `nccl` does not
+follow the same shape.** This file's cross-node path has always swept sizes
+geometrically until the duration budget ran out, so the new Node-scope path
+follows that pre-existing convention; `nccl_pair.cu`'s Node-scope path instead
+follows NCCL's own pre-existing convention of a fixed 5-size list, unbounded by
+duration, matching how its Pair/Group paths have always worked (there,
+`BURNIN_DURATION_SECONDS` bounds only the rendezvous wait). Neither vendor's
+Node-scope path invented this difference — each inherited its own file's
+established sweep shape — but it means a profile setting `durationSeconds` on
+`nccl` gets a wall-clock-bounded sweep on AMD and a fixed one on NVIDIA. This
+is accepted rather than papered over: harmonising the two would mean rewriting
+one vendor's PRE-EXISTING cross-node sweep, which is out of scope for the
+Node-scope addition that motivated this note.
+
 At **n=2 the factor is exactly 1**, so `busBandwidthGBs == algBandwidthGBs` for
 a Pair. That is not a rounding artifact — a two-rank all-reduce moves each byte
 across the link once in each direction.

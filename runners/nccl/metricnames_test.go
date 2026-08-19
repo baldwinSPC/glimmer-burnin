@@ -140,11 +140,11 @@ const nodeScopeStdout = `[burnin-nccl] NCCL v2.27.7-1; Node scope, collective=al
 | RESULT size_bytes=8 time_us=12.400 algbw_gbs=0.0006 busbw_gbs=0.0011
 | RESULT size_bytes=268435456 time_us=9800.000 algbw_gbs=27.3934 busbw_gbs=47.9384
 ranks=8
+nccl_transport=nvlink
 busbw=47.94
 algbw=27.39
 latency_us=12.40
 wrong_count=0
-nccl_transport=nvlink
 NCCL_PASS: peak bus bandwidth 47.94 GB/s at 256 MiB over 8 ranks (allreduce) with 8 devices on this node; acceptance is the profile's thresholds to decide
 `
 

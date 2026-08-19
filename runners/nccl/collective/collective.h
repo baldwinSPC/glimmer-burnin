@@ -146,6 +146,21 @@ inline double BusBandwidth(Collective c, double algbw, int nranks) {
 // controls — the same "count" AllReduce has always used — so a fleet reading
 // busBandwidthGBs across scopes and collectives is reading it against the same
 // swept sizes.
+//
+// A CALLER MUST RECOMPUTE THIS PLAN FOR EVERY SWEPT SIZE, AND USE THAT SAME
+// PLAN FOR SEEDING, LAUNCHING AND READING BACK ONE SIZE'S DATA. This is not
+// advisory: AllToAll's ChunkCount SCALES WITH totalCount, so seeding a buffer
+// once at the LARGEST size's plan and then launching/reading at a SMALLER
+// size's plan reads every peer's chunk from the wrong offset — every peer but
+// the last receives peer 0's data — and the correctness check then reports a
+// hardware miscompare that never happened: a fabricated, permanent Fail on
+// hardware that measured nothing wrong. (This was a real bug in the first
+// version of nccl_pair.cu's runLocalMultiGpu, caught before publishing by a
+// second pair of eyes rather than by a test — collective.h's own functions
+// were each individually correct, so no unit test here could have caught a
+// caller mixing two DIFFERENT plans across seed and launch.) AllReduce,
+// AllGather and ReduceScatter do not depend on chunk boundaries and may be
+// seeded once at the largest plan; AllToAll may not.
 struct BufferPlan {
 	// SendCount / RecvCount are the arguments EACH device's NCCL call takes.
 	size_t SendCount;

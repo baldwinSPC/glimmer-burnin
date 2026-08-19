@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 using namespace burnin;
 
@@ -160,6 +161,72 @@ void testSeedAndExpect() {
 	check(SeedForAllToAll(63, 63) < (1 << 24), "even at 64 ranks every AllToAll seed value is exactly representable in float32");
 }
 
+// simulateAllToAll models, in plain C++, exactly what nccl_pair.cu's
+// runLocalMultiGpu does for one message size: fill sendBuf per BufferPlan's
+// ChunkCount, then read back the chunk this device received from each sender
+// using a (possibly DIFFERENT) plan. It returns the number of elements that
+// would read as a miscompare. Real device-to-device movement is not modelled
+// — the point is the OFFSET ARITHMETIC alone, which is exactly what the real
+// bug was: PlanBuffers itself was always correct, the defect was a caller
+// seeding at one plan's ChunkCount and reading at another's.
+std::size_t simulateAllToAll(int devices, const BufferPlan &seedPlan, const BufferPlan &usePlan) {
+	// One send buffer per device, seeded at seedPlan's layout — mirrors
+	// nccl_pair.cu's per-device host vector before the H2D copy.
+	std::vector<std::vector<float>> sendBufs(devices, std::vector<float>(seedPlan.BufElements, 0.0f));
+	for (int i = 0; i < devices; ++i) {
+		for (int j = 0; j < devices; ++j) {
+			const float v = SeedForAllToAll(i, j);
+			const std::size_t base = static_cast<std::size_t>(j) * seedPlan.ChunkCount;
+			for (std::size_t k = 0; k < seedPlan.ChunkCount && base + k < sendBufs[i].size(); ++k) {
+				sendBufs[i][base + k] = v;
+			}
+		}
+	}
+	// "Deliver" using usePlan's chunk size: what device `i` sends to peer `j`
+	// is the `usePlan.ChunkCount`-sized slice at offset `j*usePlan.ChunkCount`
+	// of sendBufs[i] — mirrors launchGroup's ncclSend/ncclRecv offsets.
+	std::size_t wrong = 0;
+	for (int receiver = 0; receiver < devices; ++receiver) {
+		for (int sender = 0; sender < devices; ++sender) {
+			const float expect = ExpectedAllToAllChunk(sender, receiver);
+			const std::size_t base = static_cast<std::size_t>(receiver) * usePlan.ChunkCount;
+			for (std::size_t k = 0; k < usePlan.ChunkCount && base + k < sendBufs[sender].size(); ++k) {
+				if (sendBufs[sender][base + k] != expect) ++wrong;
+			}
+		}
+	}
+	return wrong;
+}
+
+// THE REGRESSION TEST FOR THE REAL BUG: nccl_pair.cu's first draft of
+// runLocalMultiGpu seeded AllToAll ONCE at the largest swept size's plan and
+// then launched/read at each size's OWN (smaller) plan. This proves that
+// mismatch produces a nonzero miscompare count — a fabricated Fail on
+// hardware that measured nothing wrong, on the one verdict this project never
+// retries — and that using ONE plan throughout (the fix) does not.
+void testSeedPlanMustMatchUsePlan() {
+	const int devices = 4;
+	const BufferPlan maxPlan = PlanBuffers(Collective::AllToAll, 32 * 1024 * 1024, devices);
+	const BufferPlan smallPlan = PlanBuffers(Collective::AllToAll, 256 * 1024 / 4, devices);
+	check(smallPlan.ChunkCount < maxPlan.ChunkCount,
+	      "precondition: a realistic small sweep size has a strictly smaller chunk than the max");
+
+	// THE BUG: seed at the max layout, launch/read at a smaller one.
+	const std::size_t buggyWrong = simulateAllToAll(devices, /*seedPlan=*/maxPlan, /*usePlan=*/smallPlan);
+	check(buggyWrong > 0,
+	      "seeding at maxPlan and reading at a smaller plan DOES miscompare — this is the bug this test pins, "
+	      "not a property to preserve. If this ever reads 0, PlanBuffers' shape changed and this test needs "
+	      "rethinking, not deletion");
+
+	// THE FIX: seed and read using the SAME plan, whatever size it is for.
+	check(simulateAllToAll(devices, /*seedPlan=*/smallPlan, /*usePlan=*/smallPlan) == 0,
+	      "seeding and reading with the SAME plan (the fix: one plan per swept size, used throughout) "
+	      "produces zero miscompares");
+	check(simulateAllToAll(devices, /*seedPlan=*/maxPlan, /*usePlan=*/maxPlan) == 0,
+	      "the same holds at the largest size, where the old bug was invisible — which is exactly why "
+	      "it shipped past a sweep whose last size happened to be correct");
+}
+
 }  // namespace
 
 int main() {
@@ -167,6 +234,7 @@ int main() {
 	testBusBandwidthScale();
 	testPlanBuffers();
 	testSeedAndExpect();
+	testSeedPlanMustMatchUsePlan();
 	if (failures != 0) {
 		std::printf("%d failure(s)\n", failures);
 		return 1;

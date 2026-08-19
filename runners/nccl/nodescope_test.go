@@ -171,7 +171,13 @@ func TestClassifyTransport(t *testing.T) {
 		ok   bool
 	}{
 		{"NVLS wins as the most specific claim", "NCCL INFO Channel 00/16 : 0 1 2 3 via NVLS", "nvlink", true},
-		{"a literal NVLink mention also counts", "NCCL INFO topology: GPU 0 -- NVLink -- GPU 1", "nvlink", true},
+		{"an anchored NVLink transport line counts", "NCCL INFO Channel 00 : 0 1 via NVLink/GDRDMA", "nvlink", true},
+		// A bare topology mention must NOT count: NCCL_DEBUG_SUBSYS=INIT,GRAPH is
+		// set for this run, and GRAPH's own topology dump names NVLink whenever
+		// the hardware HAS it, whether or not the collective actually used it as
+		// its transport. Matching this unanchored would misclassify every node
+		// with NVLink present but not selected.
+		{"a bare topology mention does NOT count", "NCCL INFO topology: GPU 0 -- NVLink -- GPU 1", "", false},
 		{"P2P without NVLS", "NCCL INFO Channel 00 : 0 1 via P2P/CUMEM", "p2p", true},
 		{"SHM fallback", "NCCL INFO Channel 00 : 0 1 via SHM/direct/direct", "shm", true},
 		{"NET fallback", "NCCL INFO Channel 00 : 0 1 via NET/IB/0", "net", true},

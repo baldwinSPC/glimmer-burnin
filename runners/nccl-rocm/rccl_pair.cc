@@ -398,27 +398,26 @@ int runLocalMultiGpu(int devices, int durationSeconds, burnin::Collective collec
 		HIP_CHECK(hipMalloc(&sendBufs[i], maxPlan.BufElements * sizeof(float)));
 		HIP_CHECK(hipMalloc(&recvBufs[i], maxPlan.BufElements * sizeof(float)));
 
-		// Seeded ONCE — see runners/nccl/nccl_pair.cu's runLocalMultiGpu for why
-		// nothing here needs reseeding between warmup, timed iterations, or
-		// message sizes.
+		// Seeded ONCE — for AllReduce, ReduceScatter and AllGather ONLY, for
+		// the reason given at runners/nccl/nccl_pair.cu's runLocalMultiGpu:
+		// neither pattern depends on where a chunk boundary falls, so one seed
+		// at the largest layout is correct at every swept size. AllToAll is NOT
+		// seeded here — its seed is keyed on chunk OFFSET, which varies with
+		// the swept size, so it is reseeded per size below.
 		std::vector<float> host(maxPlan.BufElements);
 		switch (collective) {
 		case burnin::Collective::AllReduce:
 		case burnin::Collective::ReduceScatter:
 			std::fill(host.begin(), host.end(), 1.0f);
+			HIP_CHECK(hipMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), hipMemcpyHostToDevice));
 			break;
 		case burnin::Collective::AllGather:
 			std::fill(host.begin(), host.end(), burnin::SeedForAllGather(i));
+			HIP_CHECK(hipMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), hipMemcpyHostToDevice));
 			break;
 		case burnin::Collective::AllToAll:
-			for (int j = 0; j < devices; ++j) {
-				const float v = burnin::SeedForAllToAll(i, j);
-				const std::size_t base = static_cast<std::size_t>(j) * maxPlan.ChunkCount;
-				for (std::size_t k = 0; k < maxPlan.ChunkCount && base + k < host.size(); ++k) host[base + k] = v;
-			}
-			break;
+			break;  // seeded per size, below
 		}
-		HIP_CHECK(hipMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), hipMemcpyHostToDevice));
 	}
 
 	long long wrong = 0;
@@ -427,6 +426,24 @@ int runLocalMultiGpu(int devices, int durationSeconds, burnin::Collective collec
 	for (std::size_t count = 256 * 1024; count <= maxCount; count *= 4) {
 		const burnin::BufferPlan plan = burnin::PlanBuffers(collective, count, devices);
 		const std::size_t bytes = count * sizeof(float);
+
+		// See the identical comment in runners/nccl/nccl_pair.cu: seeding
+		// AllToAll once at the max layout and launching at a smaller one reads
+		// every peer's chunk from the wrong offset (every peer but the last
+		// receives peer 0's data), which the correctness check below would
+		// then report as a hardware miscompare that never happened.
+		if (collective == burnin::Collective::AllToAll) {
+			for (int i = 0; i < devices; ++i) {
+				std::vector<float> host(plan.BufElements, 0.0f);
+				for (int j = 0; j < devices; ++j) {
+					const float v = burnin::SeedForAllToAll(i, j);
+					const std::size_t base = static_cast<std::size_t>(j) * plan.ChunkCount;
+					for (std::size_t k = 0; k < plan.ChunkCount && base + k < host.size(); ++k) host[base + k] = v;
+				}
+				HIP_CHECK(hipSetDevice(devList[i]));
+				HIP_CHECK(hipMemcpy(sendBufs[i], host.data(), host.size() * sizeof(float), hipMemcpyHostToDevice));
+			}
+		}
 
 		int rc = launchGroup(collective, devices, devList, comms, streams, sendBufs, recvBufs, plan);
 		if (rc != kExitPass) return rc;
@@ -454,6 +471,9 @@ int runLocalMultiGpu(int devices, int durationSeconds, burnin::Collective collec
 		}
 
 		for (int i = 0; i < devices; ++i) {
+			// See nccl_pair.cu's identical comment: current device is stated
+			// explicitly rather than relied upon.
+			HIP_CHECK(hipSetDevice(devList[i]));
 			std::vector<float> back(plan.RecvCount);
 			HIP_CHECK(hipMemcpy(back.data(), recvBufs[i], plan.RecvCount * sizeof(float), hipMemcpyDeviceToHost));
 			switch (collective) {
@@ -493,8 +513,8 @@ int runLocalMultiGpu(int devices, int durationSeconds, burnin::Collective collec
 	}
 
 	for (int i = 0; i < devices; ++i) {
-		ncclCommDestroy(comms[i]);
 		(void)hipSetDevice(devList[i]);
+		ncclCommDestroy(comms[i]);
 		(void)hipStreamDestroy(streams[i]);
 		(void)hipFree(sendBufs[i]);
 		(void)hipFree(recvBufs[i]);

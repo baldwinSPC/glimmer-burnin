@@ -14,6 +14,7 @@
 #include "collective_bw.h"
 
 #include <cstdio>
+#include <vector>
 
 using namespace burnin;
 
@@ -177,6 +178,53 @@ void testDecideNodeScope() {
 	}
 }
 
+// simulateAllToAll and testSeedPlanMustMatchUsePlan mirror
+// runners/nccl/collective/collective_test.cc's own — see that file for the
+// full rationale. The bug they pin as a negative control was fixed in BOTH
+// vendors' runLocalMultiGpu at once (rccl_pair.cc's AllToAll seeding is now
+// deferred into the per-size sweep loop, same as nccl_pair.cu's), so this
+// test exists here too rather than being asserted on only one side of a
+// duplicated implementation.
+std::size_t simulateAllToAll(int devices, const BufferPlan &seedPlan, const BufferPlan &usePlan) {
+	std::vector<std::vector<float>> sendBufs(devices, std::vector<float>(seedPlan.BufElements, 0.0f));
+	for (int i = 0; i < devices; ++i) {
+		for (int j = 0; j < devices; ++j) {
+			const float v = SeedForAllToAll(i, j);
+			const std::size_t base = static_cast<std::size_t>(j) * seedPlan.ChunkCount;
+			for (std::size_t k = 0; k < seedPlan.ChunkCount && base + k < sendBufs[i].size(); ++k) {
+				sendBufs[i][base + k] = v;
+			}
+		}
+	}
+	std::size_t wrong = 0;
+	for (int receiver = 0; receiver < devices; ++receiver) {
+		for (int sender = 0; sender < devices; ++sender) {
+			const float expect = ExpectedAllToAllChunk(sender, receiver);
+			const std::size_t base = static_cast<std::size_t>(receiver) * usePlan.ChunkCount;
+			for (std::size_t k = 0; k < usePlan.ChunkCount && base + k < sendBufs[sender].size(); ++k) {
+				if (sendBufs[sender][base + k] != expect) ++wrong;
+			}
+		}
+	}
+	return wrong;
+}
+
+void testSeedPlanMustMatchUsePlan() {
+	const int devices = 4;
+	const BufferPlan maxPlan = PlanBuffers(Collective::AllToAll, 32 * 1024 * 1024, devices);
+	const BufferPlan smallPlan = PlanBuffers(Collective::AllToAll, 256 * 1024 / 4, devices);
+	check(smallPlan.ChunkCount < maxPlan.ChunkCount,
+	      "precondition: a realistic small sweep size has a strictly smaller chunk than the max");
+
+	const std::size_t buggyWrong = simulateAllToAll(devices, /*seedPlan=*/maxPlan, /*usePlan=*/smallPlan);
+	check(buggyWrong > 0, "seeding at maxPlan and reading at a smaller plan DOES miscompare — the bug this test pins");
+
+	check(simulateAllToAll(devices, /*seedPlan=*/smallPlan, /*usePlan=*/smallPlan) == 0,
+	      "seeding and reading with the SAME plan produces zero miscompares");
+	check(simulateAllToAll(devices, /*seedPlan=*/maxPlan, /*usePlan=*/maxPlan) == 0,
+	      "the same holds at the largest size, where the bug was invisible");
+}
+
 }  // namespace
 
 int main() {
@@ -188,6 +236,7 @@ int main() {
 	testPlanBuffers();
 	testSeedAndExpect();
 	testDecideNodeScope();
+	testSeedPlanMustMatchUsePlan();
 	if (failures > 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", failures);
 		return 1;

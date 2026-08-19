@@ -197,6 +197,18 @@ accident. `AllGather`/`ReduceScatter`/`AllToAll` scale by `(n-1)/n` rather than
 | `ranks` | `ranks` | how many devices actually joined — the same count that decided whether to run at all |
 | `nccl_transport` | `ncclTransport` | best-effort: `nvlink`\|`p2p`\|`shm`\|`net`, read from `NCCL_DEBUG=INFO`'s own log text. **Absent, never wrong**, if NCCL's wording ever moves — this is the one place this runner reads NCCL's diagnostic output at all, and it can never become a hardware verdict |
 
+**`BURNIN_DURATION_SECONDS` does not bound this sweep — a fixed 5-size list
+runs regardless of the requested duration**, the same way it always has for
+this file's Pair/Group paths (there, `BURNIN_DURATION_SECONDS` bounds only the
+rendezvous wait, never the sweep). `runners/nccl-rocm`'s Node-scope path
+differs: its file's cross-node sweep has always been duration-bounded and
+geometric, so its Node-scope path inherited that shape instead. Neither vendor
+invented this difference for Node scope — each followed its own file's
+pre-existing convention — but it means a profile setting `durationSeconds` on
+`nccl` gets a fixed sweep on NVIDIA and a wall-clock-bounded one on AMD. See
+`runners/nccl-rocm/README.md`'s Node-scope section for the AMD side of this
+note.
+
 **`RLIMIT_MEMLOCK` is checked but not enforced at Node scope.** An intra-node
 collective over NVLink, PCIe P2P or shared memory registers no pinned buffers
 the way NCCL's `net` transport does, so a small limit does not stop it here —
@@ -370,9 +382,9 @@ bound", and the operator's gate is only as good as what it gates on.
 **At Node scope, none of the above applies.** There is one pod, no rendezvous,
 no `hostNetwork`, no `/dev/infiniband` mount and no readiness probe to wait
 for a peer that does not exist. `spec.resources.limits` requests the SKU's
-whole board (`nvidia.com/gpu: 8`, not `1`) — see
-[docs/dev/multi-device.md](../../docs/dev/multi-device.md) for why the pod asks
-for the count rather than `all`.
+whole board (`nvidia.com/gpu: 8`, not `1`) — the pod asks for the count
+rather than `all` because a Kubernetes resource request must be a specific
+quantity the scheduler can bin-pack against; there is no "all" value.
 
 ## Tuning
 

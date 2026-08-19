@@ -345,6 +345,15 @@ func runNodeScope(gpus int) int {
 	echo(out)
 	if runErr != nil && !strings.Contains(out, "RESULT ") {
 		if looksLikeMemlockExhaustion(out) {
+			if mlErr != nil {
+				// soft was never actually read (see the memlock() call above), so
+				// reporting it here would print a fabricated "RLIMIT_MEMLOCK is 0 B"
+				// — a limit this runner never measured, stated as fact.
+				return fin(exitError, "the intra-node harness could not register its NCCL transport buffers — this "+
+					"happens only if NCCL fell back to net transport within the node. RLIMIT_MEMLOCK could not be "+
+					"read (%v), so its value is unknown rather than exhausted; check the container runtime's memlock "+
+					"limit directly", mlErr)
+			}
 			return fin(exitError, "the intra-node harness could not register its NCCL transport buffers — this "+
 				"happens only if NCCL fell back to net transport within the node. %s", memlockAdvice(soft))
 		}
