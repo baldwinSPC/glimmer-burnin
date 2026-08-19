@@ -766,12 +766,10 @@ func refuseGatedBaseline(tests []plannedTest, baseline bool) error {
 		len(gated), strings.Join(shown, "; "))
 }
 
-// refuseUnreachableAxes and sortedAxisKeys are pkg/plan's, so cmd/burnin
-// refuses the same axis this operator refuses rather than accepting a plan the
-// cluster would reject. The full reasoning is in that package; the short
-// version is that an axis which cannot become an environment variable would run
-// the cell's DEFAULT configuration while the run reported it under a distinct
-// label (#296) — a confident wrong answer dressed as evidence.
+// refuseUnreachableAxes is pkg/plan's, so cmd/burnin refuses the same axis this
+// operator refuses rather than accepting a plan the cluster would reject. The
+// full reasoning is in that package; the short version is that an axis which
+// cannot become an environment variable would run the cell's DEFAULT
+// configuration while the run reported it under a distinct label (#296) — a
+// confident wrong answer dressed as evidence.
 func refuseUnreachableAxes(tests []plannedTest) error { return burninplan.RefuseUnreachableAxes(tests) }
-
-func sortedAxisKeys(axes map[string]string) []string { return burninplan.SortedAxisKeys(axes) }
