@@ -668,10 +668,9 @@ spec:
                       format: date-time
                       type: string
                     kind:
-                      description: |-
-                        TestKind is a well-known category. The kind selects the default runner image
-                        and result parser; Runner may override the image. Unknown kinds are allowed
-                        (custom runners) but get no built-in parsing.
+                      description: |
+                        Kind is the executed test's kind. It is empty on a SYNTHETIC result — one
+                        that is about the run rather than about any hardware (see IsSynthetic).
                       type: string
                     lastCheckpointAt:
                       description: |-
@@ -765,17 +764,9 @@ spec:
                       minimum: 0
                       type: integer
                     scope:
-                      description: |-
-                        TestScope is the topology a test exercises.
-
-                        Acceptance of an interconnect — NCCL over RoCE/IB, ib_write_bw, GPUDirect —
-                        is only meaningful across at least two nodes, so the operator schedules and
-                        correlates multi-node tests, not just per-node ones.
-
-                        Node, Pair and Group all execute. A scope this operator version does not
-                        recognise is recorded as a terminal Error rather than skipped: a required
-                        acceptance test the operator cannot run must never let hardware pass by
-                        omission.
+                      description: |
+                        Scope is the topology the test ran at. It is absent on a synthetic result,
+                        which is about the run and not about a node, a link or a collective.
                       enum:
                       - Node
                       - Pair
@@ -931,7 +922,6 @@ spec:
                   - kind
                   - name
                   - phase
-                  - scope
                   type: object
                 type: array
               sinkStatus:
