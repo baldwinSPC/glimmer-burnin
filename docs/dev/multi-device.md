@@ -290,16 +290,18 @@ that is in none of the three fails the build.
 
 ## Delivery order
 
+Tracked in #398; each step below is its own issue.
+
 1. This note, the contract names, `BURNIN_RESOURCE_LIMITS` and the overdue
    message, the shared header and its tests, the invariant text and the
    total table (every CUDA/HIP runner PENDING), and `gpu_count` →
    `device_count` in memory-bw, host-health and dcgm-diag (the wire break
    lands with the name that supersedes it). Nothing changes what any
    published image MEASURES.
-2. The soak family (`soak_core.cuh`, `soak_core_rocm.h`): concurrent default.
+2. The soak family (`soak_core.cuh`, `soak_core_rocm.h`): concurrent default (#399).
 3. clockprobe, compute-smoke, gemm-sweep and their `-rocm` siblings:
-   sequential default.
-4. Samples request the board. The CLI already passes `--gpus all` /
+   sequential default (#400).
+4. Samples request the board (#401). The CLI already passes `--gpus all` /
    `--device nvidia.com/gpu=all` (`pkg/localrun/runtime.go`), so bare metal
    measured device 0 of N silently until step 2 and measures every device
    after it; `cmd/burnin`'s usage text and the README's known-limitations
@@ -310,7 +312,7 @@ immutable, so a fleet re-pins deliberately and the release notes carry it —
 a node that passed under the old tag was certified on one device. Steps 2–4
 each need a real multi-GPU node to verify and the project has none: the fold
 is unit-tested CUDA-free, the single-device path is verified on GB10, and one
-HGX/MI300X verification issue names what to capture.
+HGX/MI300X verification issue names what to capture (#402).
 
 ## What this does not decide
 

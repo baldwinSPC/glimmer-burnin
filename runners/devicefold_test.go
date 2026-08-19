@@ -68,17 +68,17 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 
 	// PENDING: every CUDA/HIP kernel that today takes device 0. Each names the
 	// delivery step in docs/dev/multi-device.md that converts it; the issue
-	// number is added when it is filed.
+	// number is the issue that converts it.
 	pending := map[string]string{
-		"gpu-burn":           "delivery step 2 (soak family, concurrent default)",
-		"thermal-soak":       "delivery step 2 (soak family, concurrent default)",
-		"gpu-burn-rocm":      "delivery step 2 (soak family, concurrent default)",
-		"thermal-soak-rocm":  "delivery step 2 (soak family, concurrent default)",
-		"clockprobe":         "delivery step 3 (measurement kinds, sequential default)",
-		"clockprobe-rocm":    "delivery step 3 (measurement kinds, sequential default)",
-		"compute-smoke":      "delivery step 3 (a burst; sequential)",
-		"compute-smoke-rocm": "delivery step 3 (a burst; sequential)",
-		"gemm-sweep":         "delivery step 3 (measurement kinds, sequential default)",
+		"gpu-burn":           "#399 — delivery step 2 (soak family, concurrent default)",
+		"thermal-soak":       "#399 — delivery step 2 (soak family, concurrent default)",
+		"gpu-burn-rocm":      "#399 — delivery step 2 (soak family, concurrent default)",
+		"thermal-soak-rocm":  "#399 — delivery step 2 (soak family, concurrent default)",
+		"clockprobe":         "#400 — delivery step 3 (measurement kinds, sequential default)",
+		"clockprobe-rocm":    "#400 — delivery step 3 (measurement kinds, sequential default)",
+		"compute-smoke":      "#400 — delivery step 3 (a burst; sequential)",
+		"compute-smoke-rocm": "#400 — delivery step 3 (a burst; sequential)",
+		"gemm-sweep":         "#400 — delivery step 3 (measurement kinds, sequential default)",
 	}
 
 	for _, d := range runnerDirs(t) {
