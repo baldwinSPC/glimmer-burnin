@@ -55,6 +55,15 @@ var kubernetesFree = []string{
 	// so the shared verdict brain no longer imports the CRD to get its own
 	// words. This is the entry that had to move for the ledger to stay exact.
 	"pkg/verdict",
+	// Kubernetes-free BY CONSTRUCTION, and it had to be: the whole point of
+	// hoisting the group fold out of internal/controller was that cmd/burnin
+	// could reach it, and the bare-metal path is the one that can afford
+	// controller-runtime least. The fold is expressed over pkg/runner's Result
+	// and pkg/contract's Combination, neither of which needs a cluster — so
+	// nothing here should ever grow a CRD type. If it does, the fold has
+	// started depending on something only the operator has, and the two
+	// dispatchers are about to disagree about a collective's verdict.
+	"pkg/group",
 }
 
 // kubernetesCoupled are the packages that DO cost a consumer Kubernetes, each

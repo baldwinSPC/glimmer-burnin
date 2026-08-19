@@ -912,3 +912,91 @@ func TestConformance_ACheckpointWithNoMetricsIsNotPublished(t *testing.T) {
 		t.Errorf("checkpoints = %+v, want exactly the one that had something to say", seen)
 	}
 }
+
+// ─── Group scope (mirrors the rendezvous contract and NodesFor) ──────────────
+//
+// The row: A GROUP RANK RECEIVES BURNIN_RANK/BURNIN_NRANKS/BURNIN_ROOT_HOST AND
+// NEVER BURNIN_ROLE, and names only the node it can honestly speak for.
+//
+// BURNIN_ROLE's absence is the load-bearing half. Every fabric runner branches
+// on it and reads its absence as Node scope; a Group pod handed one would have
+// rank 4 behaving as a client. The operator has never set it at Group scope,
+// and this dispatcher must not either.
+func TestConformance_AGroupRankGetsTheRendezvousAndNeverARole(t *testing.T) {
+	spec := testSpec()
+	spec.Scope = api.ScopeGroup
+	rank := int32(2)
+	p := Plan{
+		Node: "spark-c",
+		Rendezvous: &Rendezvous{
+			Rank: &rank, NRanks: 4,
+			RootHost: "10.0.0.11", RootNode: "spark-a",
+		},
+		Tests: []PlannedTest{{Name: "nccl", Spec: spec, Required: true}},
+	}
+
+	got, err := Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	for k, want := range map[string]string{
+		"BURNIN_RANK":      "2",
+		"BURNIN_NRANKS":    "4",
+		"BURNIN_ROOT_HOST": "10.0.0.11",
+		"BURNIN_ROOT_NODE": "spark-a",
+	} {
+		if got.Env[k] != want {
+			t.Errorf("%s = %q, want %q", k, got.Env[k], want)
+		}
+	}
+	if v, present := got.Env["BURNIN_ROLE"]; present {
+		t.Errorf("BURNIN_ROLE = %q and is present. Group scope has no roles: every fabric runner "+
+			"branches on this variable, and rank 2 handed one would behave as a client", v)
+	}
+	if !got.HostNetwork {
+		t.Error("a Group rank needs hostNetwork; a NAT'd rendezvous is a connection error that reads " +
+			"as a bad link")
+	}
+}
+
+// A rank names only ITSELF. The rendezvous contract carries BURNIN_ROOT_NODE and
+// deliberately no rank list, so a rank that invented the roster would be
+// inventing hardware it never heard from. The merged result names all N.
+func TestConformance_AGroupRankNamesOnlyTheNodeItCanSpeakFor(t *testing.T) {
+	spec := testSpec()
+	spec.Scope = api.ScopeGroup
+	rank := int32(2)
+	p := Plan{
+		Node:       "spark-c",
+		Rendezvous: &Rendezvous{Rank: &rank, NRanks: 4, RootHost: "10.0.0.11", RootNode: "spark-a"},
+		Tests:      []PlannedTest{{Name: "nccl", Spec: spec, Required: true}},
+	}
+
+	got := NodesFor(p, p.Tests[0])
+	if len(got) != 1 || got[0] != "spark-c" {
+		t.Errorf("NodesFor = %v, want just this rank's own node. Padding the list with the root's "+
+			"name would produce a record claiming to be about two machines when it is about one", got)
+	}
+}
+
+// A Node-scope test in a plan carrying a Group rendezvous must NOT receive the
+// rank variables — the same gate BURNIN_ROLE already has, for the same reason.
+func TestConformance_ANodeScopeTestNeverReceivesTheRankVariables(t *testing.T) {
+	rank := int32(1)
+	p := Plan{
+		Node:       "spark-b",
+		Rendezvous: &Rendezvous{Rank: &rank, NRanks: 2, RootHost: "10.0.0.11"},
+		Tests:      []PlannedTest{{Name: "t", Spec: testSpec(), Required: true}},
+	}
+
+	got, err := Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	for _, k := range []string{"BURNIN_RANK", "BURNIN_NRANKS", "BURNIN_ROOT_HOST"} {
+		if v, present := got.Env[k]; present {
+			t.Errorf("a Node-scope test received %s=%q; it would wait for a collective that does not "+
+				"include it", k, v)
+		}
+	}
+}

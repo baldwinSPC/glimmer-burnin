@@ -34,6 +34,7 @@ USAGE
 COMMANDS
   plan       resolve a suite and print what would run
   run        execute a profile on this machine
+  merge      fold every rank's record into one collective verdict
   report     render a run's results as a document
   version    print the version
 
@@ -54,6 +55,8 @@ func main() {
 		// A dry run under its own name, because "show me what this would do" is
 		// a question people ask before they trust a tool with their hardware.
 		err = runRun(append([]string{"--dry-run"}, os.Args[2:]...))
+	case "merge":
+		err = runMerge(os.Args[2:])
 	case "report":
 		err = runReport(os.Args[2:])
 	case "version", "--version", "-v":

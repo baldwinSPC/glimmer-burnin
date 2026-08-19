@@ -268,14 +268,12 @@ func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendez
 					"--role client --peer <ip> on the other machine to actually measure the link", name))
 		}
 	case api.ScopeGroup:
-		// Group needs N hosts started together against one root, which is real
-		// orchestration and is not wired up. Warned about specifically rather
-		// than lumped in with Pair: the fix for Pair is two flags, and telling
-		// someone the same thing here would send them somewhere that does not
-		// exist.
-		out = append(out, fmt.Sprintf(
-			"%s is Group-scope: multi-host Group orchestration is not wired up in this command yet, "+
-				"so it will skip; run it in a cluster", name))
+		if rz == nil || rz.Rank == nil {
+			out = append(out, fmt.Sprintf(
+				"%s is Group-scope and no --rank was given: it will run with BURNIN_RANK unset, which a "+
+					"fabric runner treats as not-applicable and skips — pass --rank i --nranks n on each "+
+					"machine (--root <ip> on every rank but 0), then `burnin merge` the records", name))
+		}
 	}
 
 	if spec.Runner != nil && spec.Runner.ReadinessProbe != nil && spec.Scope != api.ScopePair {

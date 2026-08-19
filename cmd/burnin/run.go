@@ -95,6 +95,27 @@ TWO MACHINES (Pair-scope tests)
   the link, naming both nodes; the server writes sidecar/server-record.json,
   which is a record of that end and not a second verdict.
 
+N MACHINES (Group-scope tests)
+
+  A collective needs N machines. There is no --role: Group scope has no roles,
+  and BURNIN_ROLE is deliberately never set, so a runner cannot mistake rank 4
+  for a client.
+
+    spark-a$ burnin run -f suite.yaml --rank 0 --nranks 3 --node spark-a --results-dir r/
+    spark-b$ burnin run -f suite.yaml --rank 1 --nranks 3 --root 10.0.0.11 \
+                        --node spark-b --results-dir r/
+
+  --rank i          this machine's 0-based rank
+  --nranks n        how many ranks the collective has
+  --root <ip|host>  rank 0's address; required on every rank but 0
+
+  START RANK 0 FIRST, wait for its listener, then start the rest. There is no
+  scheduler here to gate on readiness, so the ordering is yours.
+
+  NO RANK WRITES THE VERDICT. Each writes ranks/rank-NN.json; burnin merge
+  folds them, because "did every rank take part" is a fact no rank can see.
+  A partial collective is refused, naming the ranks that never reported.
+
 EXIT CODES
   0  every required test passed
   1  a required test FAILED — measured, and fell short
@@ -111,6 +132,7 @@ type runFlags struct {
 	retries    int
 	dryRun     bool
 	pair       pairFlags
+	group      groupFlags
 	sink       sinkFlags
 }
 
@@ -136,6 +158,9 @@ func runRun(args []string) error {
 	fs.StringVar(&f.pair.role, "role", "", "server|client, for a link test across two machines")
 	fs.StringVar(&f.pair.peer, "peer", "", "the server's address (client only)")
 	fs.StringVar(&f.pair.peerNode, "peer-node", "", "the peer's name, for messages only")
+	fs.IntVar(&f.group.rank, "rank", 0, "this machine's 0-based rank, for a Group-scope collective")
+	fs.IntVar(&f.group.nranks, "nranks", 0, "how many ranks the collective has")
+	fs.StringVar(&f.group.root, "root", "", "rank 0's address, which every other rank dials")
 	fs.StringVar(&f.sink.url, "sink-url", "", "POST the envelope here when the run finishes")
 	fs.StringVar(&f.sink.tokenFile, "sink-token-file", "", "file holding the bearer token")
 	fs.BoolVar(&f.sink.insecure, "sink-insecure-skip-tls-verify", false, "development only")
@@ -158,7 +183,16 @@ func runRun(args []string) error {
 		node = h
 	}
 
-	rz, err := f.pair.rendezvous()
+	// --rank is only "given" if it appears; rank 0 is a legal value and its
+	// zero value is indistinguishable from absence, which would make every
+	// machine that forgot the flag believe it was the root.
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "rank" {
+			f.group.rankSet = true
+		}
+	})
+
+	rz, err := f.rendezvous(node)
 	if err != nil {
 		return exitWith(exitError, err)
 	}
@@ -185,8 +219,13 @@ func runRun(args []string) error {
 	// profile of Node-scope tests instead would answer a question they did not
 	// ask while looking exactly like it answered theirs.
 	if rz != nil && !pairScoped(resolved) {
+		flag := "--role"
+		if f.group.isGroup() {
+			flag = "--rank"
+		}
 		return exitWith(exitError, fmt.Errorf(
-			"--role was given but no test in this profile is Pair- or Group-scope; nothing here measures a link"))
+			"%s was given but no test in this profile is Pair- or Group-scope; nothing here measures a "+
+				"link or a collective", flag))
 	}
 	for _, w := range warnings {
 		warn("%s", w)
@@ -233,7 +272,7 @@ func runRun(args []string) error {
 	}
 
 	if f.resultsDir != "" {
-		if err := writeResults(f.resultsDir, report, rz); err != nil {
+		if err := writeResults(f.resultsDir, report, rz, resolved); err != nil {
 			// The run happened and its verdict stands; failing to file it is
 			// worth saying loudly and is not a reason to discard the verdict.
 			warn("results were not written: %v", err)
@@ -519,7 +558,17 @@ func printSummary(rep localrun.Report) {
 //
 // The same shape `burnin report --results-dir` reads, so the two halves of the
 // CLI fit together without a format anyone has to remember.
-func writeResults(dir string, rep localrun.Report, rz *localrun.Rendezvous) error {
+// requiredNames is which tests decide the run's exit code, for a rank record
+// that will be merged on another machine where no plan exists.
+func requiredNames(p localrun.Plan) map[string]bool {
+	out := map[string]bool{}
+	for _, t := range p.Tests {
+		out[t.Name] = t.Required
+	}
+	return out
+}
+
+func writeResults(dir string, rep localrun.Report, rz *localrun.Rendezvous, p localrun.Plan) error {
 	// raw/ always; the verdict directory only where a verdict is produced. An
 	// empty envelopes/ on a server end reads as a run that lost its results.
 	if err := os.MkdirAll(filepath.Join(dir, "raw"), 0o755); err != nil {
@@ -534,6 +583,31 @@ func writeResults(dir string, rep localrun.Report, rz *localrun.Rendezvous) erro
 	}
 	if err := writeJSON(filepath.Join(dir, "run.json"), runFile); err != nil {
 		return err
+	}
+
+	// EVERY RANK of a collective writes a record, and none writes an envelope.
+	//
+	// Not because a rank has nothing to say, but because no rank can say the
+	// thing that matters: "did every rank take part" is invisible from inside
+	// one of them. The verdict is rendered by `burnin merge`, which is the only
+	// thing that can count to N — see pkg/group.Verdict, which refuses a
+	// partial turnout for Pass and for Skip alike.
+	if rz != nil && rz.Rank != nil {
+		rec := rankRecord{
+			Rank:        int(*rz.Rank),
+			NRanks:      int(rz.NRanks),
+			Node:        rep.Node,
+			Phase:       string(rep.Phase),
+			StartedAt:   rep.StartedAt.UTC(),
+			FinishedAt:  rep.FinishedAt.UTC(),
+			Results:     rep.Results,
+			Required:    requiredNames(p),
+			Fingerprint: fingerprint(rep.Node),
+			Note: "One rank of a collective. NOT a verdict: a group verdict is about the " +
+				"COLLECTIVE, and no single rank knows whether every other rank took part. " +
+				"Run `burnin merge` over the directory holding every rank's record.",
+		}
+		return writeJSON(filepath.Join(dir, "ranks", rankRecordName(rec.Rank)), rec)
 	}
 
 	// The SERVER end of a link writes a sidecar, not an envelope.

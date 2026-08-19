@@ -162,6 +162,93 @@ than reporting a fabric fault. If the test declares a `tcpSocket`
 
 ---
 
+## N machines: Group scope
+
+A collective needs N machines, and none of them has to be in a cluster.
+
+```sh
+spark-a$ burnin run -f suite.yaml --rank 0 --nranks 3 --node spark-a --results-dir r/
+spark-b$ burnin run -f suite.yaml --rank 1 --nranks 3 --root 10.0.0.11 --node spark-b --results-dir r/
+spark-c$ burnin run -f suite.yaml --rank 2 --nranks 3 --root 10.0.0.11 --node spark-c --results-dir r/
+
+# then, with every rank's ranks/rank-NN.json copied into one directory:
+$ burnin merge --results-dir merged/ --nranks 3
+```
+
+**There is no `--role`, and that is not an omission.** Group scope has no roles.
+The contract is `BURNIN_RANK`, `BURNIN_NRANKS`, `BURNIN_ROOT_HOST` and
+`BURNIN_ROOT_NODE`, and `BURNIN_ROLE` is *deliberately absent* — every fabric
+runner branches on it, and a rank handed one would behave as a client. Passing
+`--rank` and `--role` together is refused.
+
+**Start ordering is yours: rank 0 first.** In a cluster the operator starts rank
+0 and creates no other rank until it is Ready. Here there is no controller
+watching pods, so you are the operator: start rank 0, wait for its listener,
+then start the rest. That is documented rather than faked — a gate this command
+pretended to enforce would be worse than one it plainly does not have. The
+runners' connect-with-retry is the real gate, exactly as in a cluster.
+
+### No rank writes the verdict
+
+Every rank writes `ranks/rank-NN.json`. **None writes an envelope.**
+
+This is the one place Group differs from Pair in kind rather than degree. At
+Pair scope the client holds both halves of the measurement, so it can render the
+link's verdict alone. A collective's verdict is not held by any rank: rank 0 has
+the bandwidth figure, but *"did every rank take part"* is a fact invisible from
+inside any one of them — and it is the fact that decides whether there is a
+verdict at all.
+
+So `burnin merge` renders it, because it is the only thing that can count to N.
+
+### A partial collective has no verdict
+
+If fewer records are found than `--nranks`, the merge **refuses**, naming the
+ranks that never reported:
+
+```
+only 2 of 3 ranks reported — rank 2 never did. A collective is only MEASURED if
+every rank took part, so there is no verdict here: a fold over the ranks that
+happened to report would certify machines nobody looked at.
+```
+
+Exit code 3 — machinery, not a hardware verdict.
+
+This holds for `Skip` as much as for `Pass`, and Skip is the more dangerous of
+the two to get wrong: a Skip does not fail the run, it records "acceptance does
+not apply to this hardware" and the run settles `Passed` around it. Honouring
+rank 0's declaration for a group whose other members never ran would certify
+every one of them on evidence from one node.
+
+`Error` and `Fail` are honoured however many ranks reported — a rank that
+positively failed established something, and a silent peer does not erase it.
+
+### How metrics are elected
+
+By what the metric **says it is**, through `pkg/contract`'s `Combination` — the
+same election the operator makes, in the same code (`pkg/group`).
+
+| Combination | across ranks |
+|---|---|
+| `Collective` | rank 0's value — it is the reporting rank for a property of the group |
+| `Max` / `Min` / `Sum` | computed across every rank |
+| unclassified | kept only if the ranks **agree**; a disagreement is dropped and declared unmeasurable, so a threshold fails closed |
+
+`elapsedS` is the worked example of why `Aggregation` cannot stand in for
+`Combination`: it is `Sum` across a soak's windows and `Max` across ranks —
+eight ranks running 300 s took 300 s, not 2400 s.
+
+A rank that declared a metric **unmeasurable** blocks the election entirely. If
+ranks 0 and 1 report `eccErrors=0` and rank 2 is a part with no ECC to report,
+electing `0` would certify the node that said it could not tell.
+
+Disagreements are **recorded, not resolved**: the merged message names the keys
+the ranks answered differently. It changes no verdict, which is the point — a
+stored result saying "ranks disagreed about `gpuTempC`" is one an engineer can
+act on, where a silent `70` next to eight node names is not.
+
+---
+
 ## Exit codes
 
 The runner contract's shape, preserved at the process boundary, because a CI job

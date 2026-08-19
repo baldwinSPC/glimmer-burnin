@@ -52,15 +52,31 @@ type RunIdentity struct {
 	fingerprint map[string]string
 }
 
-// NewRunIdentity mints one, and probes the hardware once.
+// NewRunIdentity mints one, and probes THIS machine's hardware once.
 func NewRunIdentity(node string) (*RunIdentity, error) {
+	return NewRunIdentityFor(node, fingerprint(node))
+}
+
+// NewRunIdentityFor mints one with a fingerprint the caller already has.
+//
+// For `burnin merge`, which folds records written on OTHER machines. Probing
+// the host that happens to be running the merge — usually a laptop — would put
+// its kernel and PCI devices in the envelope as the hardware the collective's
+// verdict applies to, which is a statement about machines that took no part in
+// the test.
+func NewRunIdentityFor(node string, fp map[string]string) (*RunIdentity, error) {
 	uid, err := mintUID()
 	if err != nil {
 		return nil, err
 	}
+	if len(fp) == 0 {
+		// Absent rather than empty: a fingerprint nobody established must not
+		// look like one that was taken and found nothing.
+		fp = nil
+	}
 	return &RunIdentity{
 		run:         contract.RunRef{Namespace: "local", Name: node, UID: uid},
-		fingerprint: fingerprint(node),
+		fingerprint: fp,
 	}, nil
 }
 
