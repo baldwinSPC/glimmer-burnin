@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/internal/sink"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
@@ -61,6 +63,15 @@ VARIANTS
   A profile entry's variants: block expands here exactly as it does in a cluster —
   one execution per cell, each with the cell's own name, thresholds and
   BURNIN_VARIANT_<AXIS> variables. --dry-run lists the cells and their axes.
+
+PROGRESS
+
+  A test that sets checkpointIntervalSeconds publishes the metrics it has
+  emitted so far, every interval, to the terminal and to --sink-url. A soak
+  killed at minute 200 otherwise reports nothing at all.
+
+  A checkpoint is EVIDENCE, never a verdict: thresholds are evaluated once, at
+  the end, against the completed execution.
 
 TWO MACHINES (Pair-scope tests)
 
@@ -204,7 +215,19 @@ func runRun(args []string) error {
 		announceServerReady(ctx, os.Stderr, resolved)
 	}
 
-	report, runErr := localrun.Run(ctx, resolved, rt, Hooks(os.Stderr))
+	// ONE identity for the whole run, minted before anything executes. Every
+	// checkpoint and the final verdict carry it, so a consumer can join a
+	// soak's progress to its outcome — which is the entire point of publishing
+	// progress at all.
+	id, err := NewRunIdentity(node)
+	if err != nil {
+		return exitWith(exitError, err)
+	}
+
+	hooks := Hooks(os.Stderr)
+	hooks.OnCheckpoint = checkpointHook(ctx, os.Stderr, id, resolved, sender, rz)
+
+	report, runErr := localrun.Run(ctx, resolved, rt, hooks)
 	if runErr != nil && ctx.Err() == nil {
 		return exitWith(exitError, runErr)
 	}
@@ -222,7 +245,7 @@ func runRun(args []string) error {
 			// A server end has no verdict to deliver, and posting one would put
 			// a second document about one link into a consumer's history.
 			fmt.Fprintf(os.Stderr, "burnin: not delivering from the server end — the client sends the link's envelope\n")
-		} else if env, err := EnvelopeFor(report); err != nil {
+		} else if env, err := id.Final(report); err != nil {
 			warn("no envelope to deliver: %v", err)
 		} else {
 			deliver(ctx, os.Stderr, sender, env)
@@ -309,6 +332,81 @@ func Hooks(w *os.File) localrun.Hooks {
 			fmt.Fprintf(w, "%-8s %s\n", r.Phase, firstLineOf(r.Message))
 		},
 	}
+}
+
+// checkpointHook publishes a test's progress while it is still running.
+//
+// Two things happen, and only one of them may fail loudly. The progress line
+// goes to the terminal always, because it is the thing a person watching a
+// twelve-hour soak actually wants. The DELIVERY is best-effort: a checkpoint is
+// evidence about a run that has not finished, and a sink that rejects one must
+// never stop the run or change its verdict. So a failure is warned about and
+// the soak continues — the opposite posture to the final envelope, which is the
+// verdict and is worth saying loudly about.
+//
+// Nothing is delivered from a Pair server end, for the same reason its final
+// envelope is not: the client decides the link, and a second document about one
+// link in a consumer's history is worse than none.
+func checkpointHook(
+	ctx context.Context,
+	w *os.File,
+	id *RunIdentity,
+	p localrun.Plan,
+	sender *sink.Sender,
+	rz *localrun.Rendezvous,
+) func(localrun.Checkpoint) {
+	return func(c localrun.Checkpoint) {
+		fmt.Fprintf(w, "\n  %-28s checkpoint %d: %s\n", c.Test, c.Sequence, summariseMetrics(c.Metrics))
+
+		if sender == nil || !deciding(rz) {
+			return
+		}
+		t, ok := testNamed(p, c.Test)
+		if !ok {
+			return
+		}
+		env, err := id.Checkpoint(c, string(t.Spec.Kind), t.Spec.Scope, localrun.NodesFor(p, t))
+		if err != nil {
+			warn("checkpoint %d not delivered: %v", c.Sequence, err)
+			return
+		}
+		if err := sender.Send(ctx, &env); err != nil {
+			warn("checkpoint %d not delivered: %v", c.Sequence, err)
+		}
+	}
+}
+
+func testNamed(p localrun.Plan, name string) (localrun.PlannedTest, bool) {
+	for _, t := range p.Tests {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return localrun.PlannedTest{}, false
+}
+
+// summariseMetrics renders a checkpoint for a human watching a long soak.
+//
+// Sorted, because Go randomises map iteration and a progress line whose fields
+// move between samples is one nobody can read down a column.
+func summariseMetrics(m map[string]string) string {
+	if len(m) == 0 {
+		return "(no metrics yet)"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+m[k])
+	}
+	line := strings.Join(parts, " ")
+	if len(line) > 120 {
+		line = line[:117] + "..."
+	}
+	return line
 }
 
 func firstLineOf(s string) string {

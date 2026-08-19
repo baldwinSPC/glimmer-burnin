@@ -50,12 +50,11 @@ var cliDoesNotDeliver = map[string][]string{
 		// namespace "local", and inventing a cluster ref would claim an
 		// apiserver that never existed.
 		"Cluster",
-		// Baseline mode, cancellation and checkpoints are run-lifecycle
-		// features the local engine does not have: a local run is one shot,
-		// driven by a person, cancelled by ^C.
+		// Baseline mode and cancellation are run-lifecycle features the local
+		// engine does not have: a local run is one shot, driven by a person,
+		// cancelled by ^C.
 		"Baseline",
 		"CancelReason",
-		"CheckpointSequence",
 	},
 	"TestResult": {
 		// Segmented soaks are pod-lifecycle machinery, and they stay here
@@ -110,13 +109,29 @@ func TestTheTwoAssemblersAgreeAboutEveryContractField(t *testing.T) {
 		t.Errorf("the operator's assembler cannot populate TestResult fields %v (see above)", missing)
 	}
 
-	// ── The CLI's side: one delivery, judged against the ledger exactly. ──
-	cliEnv, err := EnvelopeFor(maximalReport())
+	// ── The CLI's side: the union of ITS legal deliveries. ──
+	//
+	// Two, for the same reason the operator's side needs three: one envelope
+	// cannot carry everything. CheckpointSequence is present only on a
+	// checkpoint, so judging a final envelope alone would have said the CLI
+	// cannot deliver a field it now delivers on every long soak.
+	id, err := NewRunIdentity("spark-a")
 	if err != nil {
-		t.Fatalf("EnvelopeFor: %v", err)
+		t.Fatalf("NewRunIdentity: %v", err)
 	}
-	cliEnvelope := populated(cliEnv)
-	cliResult := populated(cliEnv.Results[0])
+	final, err := id.Final(maximalReport())
+	if err != nil {
+		t.Fatalf("Final: %v", err)
+	}
+	cp, err := id.Checkpoint(maximalCheckpoint(), "ib-write-bw", api.ScopePair, []string{"spark-a", "spark-b"})
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	cliEnvelope := map[string]bool{}
+	union(cliEnvelope, populated(final))
+	union(cliEnvelope, populated(cp))
+	cliResult := populated(final.Results[0])
 
 	checkLedger(t, "Envelope", contract.Envelope{}, cliEnvelope, cliDoesNotDeliver["Envelope"])
 	checkLedger(t, "TestResult", contract.TestResult{}, cliResult, cliDoesNotDeliver["TestResult"])
@@ -237,15 +252,27 @@ func maximalReport() localrun.Report {
 	}
 }
 
+// maximalCheckpoint is a checkpoint carrying everything one can.
+func maximalCheckpoint() localrun.Checkpoint {
+	return localrun.Checkpoint{
+		Test:     "ib-write-bw",
+		Sequence: 3,
+		Attempt:  1,
+		Metrics:  map[string]string{"bandwidthGbps": "97.2"},
+		At:       time.Now(),
+	}
+}
+
 // The guard would be satisfied by a ledger that lists everything, so pin its
 // size: the ledger may only shrink. Growing it is a decision about the
 // CONTRACT — a new field the CLI will never deliver — and should hurt a
 // little: update this count in the same commit, with the reason in the ledger.
 func TestTheLedgerOnlyShrinks(t *testing.T) {
 	// 7 at the start; 6 once variant expansion moved to pkg/plan and both
-	// dispatchers began calling it. Lower this in the same commit as each entry
-	// that goes.
-	if n := len(cliDoesNotDeliver["Envelope"]) + len(cliDoesNotDeliver["TestResult"]); n > 6 {
+	// dispatchers began calling it; 5 once the CLI streamed its runners' stdout
+	// and could publish checkpoints. Lower this in the same commit as each
+	// entry that goes.
+	if n := len(cliDoesNotDeliver["Envelope"]) + len(cliDoesNotDeliver["TestResult"]); n > 5 {
 		t.Errorf("the cliDoesNotDeliver ledger grew to %d entries; it started at 7 and is meant to "+
 			"shrink as the CLI gains features. If a new contract field genuinely cannot be delivered "+
 			"locally, raise this bound in the same commit as the ledger entry and its reason", n)

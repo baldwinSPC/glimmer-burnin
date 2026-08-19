@@ -735,3 +735,180 @@ func TestConformance_ReservedVariablesAreRefusedThroughValueFromToo(t *testing.T
 			got.Env["BURNIN_ROLE"], RoleServer)
 	}
 }
+
+// ─── Checkpoints (mirrors the reconciler's checkpoint) ───────────────────────
+//
+// The row: A CHECKPOINT IS EVIDENCE, NEVER A VERDICT.
+//
+// A long soak that is cancelled, killed at its deadline, or lost to a reboot at
+// minute 200 otherwise reports NOTHING AT ALL, because a runner's metrics only
+// reach the report when the container exits. The operator has published these
+// since checkpointIntervalSeconds existed; this engine buffered stdout until
+// exit and so could not.
+//
+// What must NOT follow is a checkpoint reaching the verdict. Thresholds are
+// evaluated once, at the end, against the completed execution — a mid-run
+// sample that dips below a floor is not a failure, because the run is not over,
+// and a dispatcher that judged one would condemn hardware for a moment the test
+// was written to expect.
+
+// streamingFake is a fakeRuntime that emits its stdout in pieces, so the
+// engine's checkpoint path is exercised without a container runtime.
+type streamingFake struct {
+	fakeRuntime
+	chunks []string
+}
+
+func (f *streamingFake) RunStreaming(ctx context.Context, spec RunSpec, onOutput func(string)) (Execution, error) {
+	f.specs = append(f.specs, spec)
+	var sofar strings.Builder
+	for _, c := range f.chunks {
+		sofar.WriteString(c)
+		if onOutput != nil {
+			onOutput(sofar.String())
+		}
+	}
+	if f.calls >= len(f.steps) {
+		return Execution{}, fmt.Errorf("streaming fake: unexpected call %d", f.calls+1)
+	}
+	e := f.steps[f.calls]
+	f.calls++
+	return e, nil
+}
+
+func checkpointed(spec api.BurnInTestSpec, seconds int32) api.BurnInTestSpec {
+	spec.CheckpointIntervalSeconds = &seconds
+	return spec
+}
+
+func TestConformance_ACheckpointIsEvidenceAndNeverReachesTheVerdict(t *testing.T) {
+	// A floor the MID-RUN sample violates and the FINAL metrics satisfy. If a
+	// checkpoint could reach the verdict, this would settle Failed.
+	th := api.Threshold{Metric: "bandwidthGbps", Comparison: api.GTE, Value: "90"}
+	spec := checkpointed(testSpec(th), 1)
+
+	rt := &streamingFake{
+		fakeRuntime: fakeRuntime{steps: []Execution{exits(0, "bandwidthGbps=97.2\n")}},
+		chunks:      []string{"bandwidthGbps=12.0\n", "bandwidthGbps=97.2\n"},
+	}
+	var seen []Checkpoint
+	p := onePlan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0)
+
+	clock := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	rep, err := runWithClock(context.Background(), p, rt, Hooks{
+		OnCheckpoint: func(c Checkpoint) { seen = append(seen, c) },
+	}, func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := rep.Results[0]
+	if got.Phase != api.RunPassed {
+		t.Fatalf("phase = %v (%s), want Passed — the FINAL metrics satisfy the floor, and a mid-run "+
+			"sample that dips below it is not a failure because the run is not over", got.Phase, got.Message)
+	}
+	if len(got.Violations) != 0 {
+		t.Errorf("violations = %+v, want none", got.Violations)
+	}
+	if got.Metrics["bandwidthGbps"] != "97.2" {
+		t.Errorf("the result's metrics = %v, want the final execution's, not a checkpoint's", got.Metrics)
+	}
+
+	// And the evidence was published along the way.
+	if len(seen) == 0 {
+		t.Fatal("no checkpoint was published; a soak killed mid-run would report nothing at all")
+	}
+	if seen[0].Metrics["bandwidthGbps"] != "12.0" {
+		t.Errorf("first checkpoint = %v, want the metrics as they stood at that moment", seen[0].Metrics)
+	}
+	if seen[0].Test != "t" {
+		t.Errorf("checkpoint names test %q, want t", seen[0].Test)
+	}
+}
+
+// No interval means no checkpoints, so a profile written before the field
+// existed behaves exactly as it did.
+func TestConformance_NoCheckpointIntervalPublishesNothing(t *testing.T) {
+	rt := &streamingFake{
+		fakeRuntime: fakeRuntime{steps: []Execution{exits(0, "bandwidthGbps=97.2\n")}},
+		chunks:      []string{"bandwidthGbps=12.0\n", "bandwidthGbps=97.2\n"},
+	}
+	var seen []Checkpoint
+	p := onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0)
+	clock := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	rep, err := runWithClock(context.Background(), p, rt, Hooks{
+		OnCheckpoint: func(c Checkpoint) { seen = append(seen, c) },
+	}, func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Results[0].Phase != api.RunPassed {
+		t.Errorf("phase = %v, want Passed", rep.Results[0].Phase)
+	}
+	if len(seen) != 0 {
+		t.Errorf("got %d checkpoints for a test that asked for none: %+v", len(seen), seen)
+	}
+}
+
+// A runtime that cannot stream degrades the EVIDENCE and never the verdict: the
+// test runs exactly as before and simply publishes nothing.
+func TestConformance_ANonStreamingRuntimeStillProducesTheSameVerdict(t *testing.T) {
+	spec := checkpointed(testSpec(), 1)
+	rt := &fakeRuntime{steps: []Execution{exits(0, "bandwidthGbps=97.2\n")}}
+
+	published := 0
+	p := onePlan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0)
+	clock := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	rep, err := runWithClock(context.Background(), p, rt, Hooks{
+		OnCheckpoint: func(Checkpoint) { published++ },
+	}, func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Results[0].Phase != api.RunPassed {
+		t.Errorf("phase = %v, want Passed", rep.Results[0].Phase)
+	}
+	if published != 0 {
+		t.Errorf("a runtime that cannot stream published %d checkpoints", published)
+	}
+}
+
+// A checkpoint with no metrics yet is NOT published — an envelope carrying an
+// empty metric set is not evidence, and it would reset the receiver's view of a
+// soak that had already reported real numbers.
+func TestConformance_ACheckpointWithNoMetricsIsNotPublished(t *testing.T) {
+	spec := checkpointed(testSpec(), 1)
+	rt := &streamingFake{
+		fakeRuntime: fakeRuntime{steps: []Execution{exits(0, "starting\nbandwidthGbps=97.2\n")}},
+		chunks:      []string{"starting up, no metrics yet\n", "bandwidthGbps=97.2\n"},
+	}
+	var seen []Checkpoint
+	p := onePlan(PlannedTest{Name: "t", Spec: spec, Required: true}, 0)
+	clock := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	if _, err := runWithClock(context.Background(), p, rt, Hooks{
+		OnCheckpoint: func(c Checkpoint) { seen = append(seen, c) },
+	}, func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, c := range seen {
+		if len(c.Metrics) == 0 {
+			t.Error("a checkpoint was published with no metrics")
+		}
+	}
+	if len(seen) != 1 || seen[0].Metrics["bandwidthGbps"] != "97.2" {
+		t.Errorf("checkpoints = %+v, want exactly the one that had something to say", seen)
+	}
+}

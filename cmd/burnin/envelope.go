@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"time"
 
+	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/hostinfo"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
@@ -23,23 +25,90 @@ import (
 // says plainly that no apiserver ever knew about this run rather than inventing
 // a namespace that sounds like it might have.
 func EnvelopeFor(rep localrun.Report) (contract.Envelope, error) {
-	uid, err := mintUID()
+	id, err := NewRunIdentity(rep.Node)
 	if err != nil {
 		return contract.Envelope{}, err
 	}
+	return id.Final(rep)
+}
 
-	run := contract.RunRef{
-		Namespace: "local",
-		Name:      rep.Node,
-		UID:       uid,
+// RunIdentity is one local run's synthetic identity, minted ONCE.
+//
+// It exists because a run now delivers more than one envelope: every checkpoint
+// is a delivery, and the final verdict is another. They must agree about WHICH
+// RUN they describe, or a consumer receives a soak's progress under one UID and
+// its verdict under a different one and has no way to join them — which is
+// worse than no checkpoints at all, because it looks like two runs happened.
+//
+// The operator has this for free: a BurnInRun is an apiserver object with a UID.
+// Here it is minted, and minting it per envelope was fine only while there was
+// exactly one.
+type RunIdentity struct {
+	run contract.RunRef
+	// fingerprint is captured ONCE, at the start, like the operator's. Hardware
+	// does not change mid-run, and re-probing per delivery would make a
+	// checkpoint's fingerprint disagree with the verdict's if a driver were
+	// reloaded underneath.
+	fingerprint map[string]string
+}
+
+// NewRunIdentity mints one, and probes the hardware once.
+func NewRunIdentity(node string) (*RunIdentity, error) {
+	uid, err := mintUID()
+	if err != nil {
+		return nil, err
 	}
+	return &RunIdentity{
+		run:         contract.RunRef{Namespace: "local", Name: node, UID: uid},
+		fingerprint: fingerprint(node),
+	}, nil
+}
 
+// Checkpoint is the envelope for one in-progress sample.
+//
+// A CHECKPOINT IS EVIDENCE, NEVER A VERDICT, and the envelope says so in the
+// only ways the contract has: Reason is Checkpoint, and Phase is Running. The
+// TestResult it carries is also Running and has no Violations — nothing has
+// been judged, because the execution is not over.
+func (i *RunIdentity) Checkpoint(c localrun.Checkpoint, kind string, scope api.TestScope, nodes []string) (contract.Envelope, error) {
+	at := c.At.UTC()
+	env := contract.Envelope{
+		Version: contract.Version,
+		// The sequence is what makes this stable across a retry — see
+		// localrun.checkpointSequence. A key that moved per attempt would mint
+		// a new identity each time and defeat the receiver's dedupe.
+		DeliveryID:         contract.NewDeliveryID(i.run.UID, contract.ReasonCheckpoint, strconv.Itoa(c.Sequence)),
+		Reason:             contract.ReasonCheckpoint,
+		SentAt:             time.Now().UTC(),
+		Run:                i.run,
+		Phase:              string(api.RunRunning),
+		CheckpointSequence: c.Sequence,
+		Fingerprint:        i.fingerprint,
+		Results: []contract.TestResult{{
+			Name:      c.Test,
+			Kind:      kind,
+			Scope:     string(scope),
+			Phase:     string(api.RunRunning),
+			Nodes:     nodes,
+			Metrics:   c.Metrics,
+			StartedAt: &at,
+		}},
+	}
+	if err := env.Validate(); err != nil {
+		return contract.Envelope{}, fmt.Errorf("built a checkpoint envelope the contract rejects: %w", err)
+	}
+	return env, nil
+}
+
+// Final is the envelope for the run's verdict.
+func (i *RunIdentity) Final(rep localrun.Report) (contract.Envelope, error) {
+	uid := i.run.UID
 	env := contract.Envelope{
 		Version:    contract.Version,
 		DeliveryID: contract.NewDeliveryID(uid, contract.ReasonPhaseChanged, string(rep.Phase)),
 		Reason:     contract.ReasonPhaseChanged,
 		SentAt:     time.Now().UTC(),
-		Run:        run,
+		Run:        i.run,
 		Phase:      string(rep.Phase),
 		Summary: contract.Summary{
 			Passed:  rep.Summary.Passed,
@@ -47,7 +116,7 @@ func EnvelopeFor(rep localrun.Report) (contract.Envelope, error) {
 			Errored: rep.Summary.Errored,
 			Skipped: rep.Summary.Skipped,
 		},
-		Fingerprint: fingerprint(rep.Node),
+		Fingerprint: i.fingerprint,
 	}
 
 	for _, r := range rep.Results {

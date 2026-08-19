@@ -203,6 +203,7 @@ The GPU axis is per runner and is documented in each runner's README:
 | [`docs/sinks.md`](docs/sinks.md) | the delivery envelope, idempotency, the three sinks |
 | [`docs/reports.md`](docs/reports.md) | JUnit, HTML, markdown and the NVVS-compatible document |
 | [`docs/soaks.md`](docs/soaks.md) | running a soak, and the capacity it costs |
+| [`docs/bare-metal.md`](docs/bare-metal.md) | `burnin run` on a host that is not a cluster member, and exactly what differs |
 | [`docs/vendors/`](docs/vendors/README.md) | running a mixed fleet: what works on which vendor, and what to bring yourself |
 | [`docs/verifying-images.md`](docs/verifying-images.md) | verifying the cosign signature on what you pulled |
 | [`docs/dev/invariants.md`](docs/dev/invariants.md) | **the design rationale** — the rules and the failures each prevents |
