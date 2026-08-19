@@ -98,12 +98,96 @@ void testSweep() {
 	      "the alg figure comes from the peak's own row, not from a separate maximum");
 }
 
+void testParseCollective() {
+	Collective c;
+	check(ParseCollective("", &c) && c == Collective::AllReduce, "empty string is the default, AllReduce");
+	check(ParseCollective("allreduce", &c) && c == Collective::AllReduce, "\"allreduce\" parses");
+	check(ParseCollective("allgather", &c) && c == Collective::AllGather, "\"allgather\" parses");
+	check(ParseCollective("reducescatter", &c) && c == Collective::ReduceScatter, "\"reducescatter\" parses");
+	check(ParseCollective("alltoall", &c) && c == Collective::AllToAll, "\"alltoall\" parses");
+	check(!ParseCollective("AllReduce", &c), "case-sensitive: refused, not silently accepted");
+	check(!ParseCollective("broadcast", &c), "an unimplemented collective is refused");
+	for (Collective want : {Collective::AllReduce, Collective::AllGather, Collective::ReduceScatter, Collective::AllToAll}) {
+		Collective got;
+		check(ParseCollective(CollectiveName(want), &got) && got == want, "CollectiveName round-trips through ParseCollective");
+	}
+}
+
+// THE CROSS-VENDOR INVARIANT: these magic numbers must be the SAME ones
+// runners/nccl/collective/collective.h's BusBandwidthScale is tested against
+// — a Spark pair and a Halo pair report busBandwidthGBs onto the same fleet
+// axis, so the two vendors' scaling formulas must never quietly diverge.
+void testBusBandwidthScale() {
+	for (int n : {2, 3, 4, 8, 16}) {
+		check(BusBandwidthScale(Collective::AllReduce, n) == busBandwidthFactor(n),
+		      "AllReduce's scale is exactly busBandwidthFactor's own answer, not a second formula");
+	}
+	check(BusBandwidthScale(Collective::AllGather, 2) == 0.5, "AllGather at n=2 is (n-1)/n = 0.5");
+	check(BusBandwidthScale(Collective::ReduceScatter, 4) == 0.75, "ReduceScatter at n=4 is 0.75");
+	check(BusBandwidthScale(Collective::AllToAll, 8) == 0.875, "AllToAll at n=8 is 7/8");
+	for (Collective c : {Collective::AllReduce, Collective::AllGather, Collective::ReduceScatter, Collective::AllToAll}) {
+		check(BusBandwidthScale(c, 1) == 0.0, "every collective's scale is 0 at n=1 — nothing crosses the interconnect");
+	}
+}
+
+void testPlanBuffers() {
+	{
+		BufferPlan p = PlanBuffers(Collective::AllReduce, 1024, 4);
+		check(p.SendCount == 1024 && p.RecvCount == 1024 && p.BufElements == 1024, "AllReduce plan is the swept count everywhere");
+	}
+	{
+		BufferPlan p = PlanBuffers(Collective::AllGather, 1024, 4);
+		check(p.SendCount == 256 && p.RecvCount == 1024 && p.RecvCount == p.SendCount * 4,
+		      "AllGather: send is total/nranks, recv is exactly send*nranks");
+	}
+	{
+		BufferPlan p = PlanBuffers(Collective::ReduceScatter, 1024, 4);
+		check(p.RecvCount == 256 && p.SendCount == p.RecvCount * 4, "ReduceScatter is AllGather's inverse");
+	}
+	{
+		BufferPlan p = PlanBuffers(Collective::AllToAll, 1024, 4);
+		check(p.ChunkCount == 256 && p.SendCount == 1024 && p.RecvCount == 1024, "AllToAll reconstructs both buffers from the chunk");
+	}
+	{
+		BufferPlan p = PlanBuffers(Collective::AllGather, 3, 8);
+		check(p.SendCount >= 1, "a tiny message still gets at least one element per rank, never zero");
+	}
+}
+
+void testSeedAndExpect() {
+	for (int rank = 0; rank < 8; ++rank) {
+		check(SeedForAllGather(rank) == ExpectedAllGatherSegment(rank), "AllGather: seeded value equals the expected gathered segment");
+	}
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			check(SeedForAllToAll(i, j) == ExpectedAllToAllChunk(i, j), "AllToAll: sender i's seed for peer j equals receiver j's expectation from i");
+		}
+	}
+	check(SeedForAllToAll(1, 2) != SeedForAllToAll(2, 1), "a chunk and its transpose are distinguishable");
+}
+
+void testDecideNodeScope() {
+	for (int devs : {0, 1}) {
+		NodeScopeDecision d = DecideNodeScope(devs);
+		check(d.Skip && !d.Reason.empty(), "fewer than two devices: skip, with a reason");
+	}
+	for (int devs : {2, 3, 8}) {
+		NodeScopeDecision d = DecideNodeScope(devs);
+		check(!d.Skip, "two or more devices: does not skip");
+	}
+}
+
 }  // namespace
 
 int main() {
 	testBusBandwidthFactor();
 	testAlgBandwidth();
 	testSweep();
+	testParseCollective();
+	testBusBandwidthScale();
+	testPlanBuffers();
+	testSeedAndExpect();
+	testDecideNodeScope();
 	if (failures > 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", failures);
 		return 1;

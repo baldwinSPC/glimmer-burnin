@@ -132,19 +132,20 @@ func run() int {
 	}
 
 	// ── Node scope ────────────────────────────────────────────────────────────
-	// An all-reduce needs at least two ranks. At Node scope both ranks would
-	// have to be GPUs in the same box, where the test is a free NVLink check and
-	// well worth running. On a ONE-GPU part — DGX Spark among them — there is no
-	// second rank, so the test is inapplicable rather than failed.
+	// role == "" is what a Node-scope run looks like from here — Group is
+	// already ruled out above, and the operator injects no BURNIN_ROLE at Node
+	// scope. But that ABSENCE is not what grants this pod permission to run a
+	// collective: what does is the POSITIVE fact checked inside
+	// nodeScopeDecision, gpus >= minGPUsForNodeScope. Reading an absent
+	// variable as capability rather than checking a hardware fact is the exact
+	// failure the groupCapableKinds guard exists to catch on the Group side
+	// (#118) — this is its Node-scope mirror, and the reason the check lives in
+	// its own named function rather than inline here.
 	if role == "" {
-		if gpus < minGPUsForNodeScope {
-			return fin(exitSkip, "this node has %d accelerator(s) and an all-reduce needs at least %d ranks; "+
-				"BURNIN_ROLE is unset, so this is a Node-scope run and there is no second node to be the other rank. "+
-				"Run this TestKind at scope: Pair to measure the collective across the fabric",
-				gpus, minGPUsForNodeScope)
+		if skip, reason := nodeScopeDecision(gpus); skip {
+			return fin(exitSkip, "%s", reason)
 		}
-		return fin(exitSkip, "this node has %d accelerators, but intra-node (Node scope) collectives are not "+
-			"implemented by this runner yet — it is a Pair-scope fabric test. Run at scope: Pair", gpus)
+		return runNodeScope(gpus)
 	}
 	// THE MEMLOCK GATE, checked before the rendezvous on purpose: a node that
 	// cannot register NCCL's buffers must not hold its peer's node hostage while
@@ -234,6 +235,135 @@ func countGPUs() int {
 	}
 	devs, _ := filepath.Glob("/dev/nvidia[0-9]*")
 	return len(devs)
+}
+
+// ── Node scope: intra-node, ncclCommInitAll ──────────────────────────────────
+//
+// Everything below is the second path nccl_pair.cu grew (see its file header):
+// one process, every device the pod was allocated, joined into N
+// communicators in-process rather than N processes finding each other over
+// TCP. It exists because DGX BasePOD validation runs the 8-GPU intra-node
+// all-reduce BEFORE any multi-node test, and AMD's CVF gates intra-node
+// all-reduce bandwidth the same way — neither is a Pair or Group measurement.
+//
+// nodeScopeDecision is pulled out as a PURE function, taking only the device
+// count, so it is unit-tested with no GPU in nodescope_test.go — this project
+// has no multi-GPU node, so this function and collective.h's C++ arithmetic
+// are the only places the >=2-device path is exercised before real hardware
+// (see issue #406).
+func nodeScopeDecision(gpus int) (skip bool, reason string) {
+	if gpus < minGPUsForNodeScope {
+		return true, fmt.Sprintf(
+			"this node has %d accelerator(s) and an all-reduce needs at least %d ranks; "+
+				"BURNIN_ROLE is unset, so this is a Node-scope run and there is no second node to be the other rank. "+
+				"Run this TestKind at scope: Pair to measure the collective across the fabric",
+			gpus, minGPUsForNodeScope)
+	}
+	return false, ""
+}
+
+// ncclCollectives is every value BURNIN_VARIANT_COLLECTIVE accepts, in the
+// exact spelling collective.h's ParseCollective (nccl_pair.cu) also accepts —
+// the two validate independently and must agree on the vocabulary, not on the
+// decision, exactly as parseArgs re-validates everything main.go already
+// checked rather than trusting its own caller.
+var ncclCollectives = map[string]bool{
+	"allreduce": true, "allgather": true, "reducescatter": true, "alltoall": true,
+}
+
+const defaultCollective = "allreduce"
+
+// resolveCollective reads the variant axis and validates it. An unrecognised
+// value is refused rather than silently measured as allreduce: a result
+// gated by thresholds written for one collective is worse than no result if
+// it was actually measuring a different one, and nothing would say so.
+func resolveCollective() (string, error) {
+	raw := strings.TrimSpace(os.Getenv("BURNIN_VARIANT_COLLECTIVE"))
+	if raw == "" {
+		return defaultCollective, nil
+	}
+	if !ncclCollectives[raw] {
+		return "", fmt.Errorf("BURNIN_VARIANT_COLLECTIVE=%q is not one of allreduce, allgather, reducescatter, "+
+			"alltoall — refusing rather than measuring a different collective than the profile asked for", raw)
+	}
+	return raw, nil
+}
+
+// nodeScopeArgs builds the harness invocation for the intra-node path — pulled
+// out for the same reason harnessArgs is, so the shape of the command line is
+// checked without invoking a process (TestNodeScopeArgs).
+func nodeScopeArgs(collective string, warmup, iters int, sizes string) []string {
+	a := []string{"/usr/local/bin/nccl_pair", "--local-multi-gpu", "--collective", collective,
+		"--warmup", strconv.Itoa(warmup),
+		"--iters", strconv.Itoa(iters),
+	}
+	if sizes != "" {
+		a = append(a, "--sizes", sizes)
+	}
+	return a
+}
+
+// runNodeScope drives the intra-node collective. There is no rendezvous here
+// at all — no peer to wait for, no bootstrap port to publish a handle on —
+// because there is only one process and it never talks to another pod.
+func runNodeScope(gpus int) int {
+	collective, err := resolveCollective()
+	if err != nil {
+		return fin(exitError, "%s", err.Error())
+	}
+
+	// BEST-EFFORT ONLY, and never fatal here — the one place this runner's
+	// memlock handling differs from the cross-node path. An intra-node
+	// collective over NVLink, PCIe P2P or shared memory registers no pinned
+	// buffers the way NCCL's net transport does, so a small RLIMIT_MEMLOCK does
+	// not stop it. It matters ONLY if NCCL falls back to net transport within
+	// one box — an unusual configuration this runner does not assume — and if
+	// that happens the harness's own failure is still recognised below by the
+	// same looksLikeMemlockExhaustion check runClient and runGroupRank use.
+	soft, raised, mlErr := memlock()
+	if mlErr != nil {
+		logf("could not read RLIMIT_MEMLOCK (%v); continuing — an intra-node collective does not need it "+
+			"unless NCCL falls back to net transport", mlErr)
+	} else if raised {
+		logf("raised the RLIMIT_MEMLOCK soft limit to the hard limit (%s)", humanLimit(soft))
+	}
+
+	args := nodeScopeArgs(collective, envInt("BURNIN_NCCL_WARMUP_ITERS", defaultWarmupIters),
+		envInt("BURNIN_NCCL_ITERS", defaultTimedIters), strings.TrimSpace(os.Getenv("BURNIN_NCCL_SIZES")))
+
+	// NCCL_DEBUG=INFO is requested for THIS run only, never for the cross-node
+	// path: ncclTransport (below) exists specifically to answer the question an
+	// intra-node run raises — did the collective actually use NVLink, or fall
+	// back to something slower — and enabling it broadly would change every
+	// other path's log volume for no reason. See classifyTransport for why
+	// this is safe despite NCCL's own log format being no contract at all.
+	env := []string{"NCCL_DEBUG=INFO", "NCCL_DEBUG_SUBSYS=INIT,GRAPH"}
+
+	logf("NCCL %s; Node scope, collective=%s, gpus=%d", ncclVersion, collective, gpus)
+
+	out, runErr := runHarness(args, env, 20*time.Minute)
+	echo(out)
+	if runErr != nil && !strings.Contains(out, "RESULT ") {
+		if looksLikeMemlockExhaustion(out) {
+			return fin(exitError, "the intra-node harness could not register its NCCL transport buffers — this "+
+				"happens only if NCCL fell back to net transport within the node. %s", memlockAdvice(soft))
+		}
+		return fin(exitError, "the intra-node harness failed: %v", runErr)
+	}
+	s, err := parseSweep(out)
+	if err != nil {
+		return fin(exitError, "reading the harness output: %v", err)
+	}
+
+	// ranks is how many devices actually joined THIS collective — main.go
+	// already knows it without asking the harness, because it is the same
+	// count that decided whether to run at all.
+	metric("ranks", strconv.Itoa(gpus))
+	if transport, ok := classifyTransport(out); ok {
+		metric("nccl_transport", transport)
+	}
+
+	return reportCollective(s, gpus, fmt.Sprintf("%d devices on this node", gpus), collective)
 }
 
 // ── server (rank 0) ──────────────────────────────────────────────────────────
@@ -353,23 +483,28 @@ func runClient(ports []rdmaPort, peerHost string, cfg plan) int {
 	}
 	_ = ch.send(message{Kind: kindDone, Phase: phaseCollective})
 
-	return reportCollective(s, 2, peerIP.String())
+	return reportCollective(s, 2, peerIP.String(), defaultCollective)
 }
 
 // reportCollective turns a parsed sweep into metrics and a verdict.
 //
-// It is SHARED between Pair scope and Group scope, and that is the point: the
-// two paths differ in how the ranks find each other and in nothing else about
-// what a collective means. Two copies would be two chances for the metric set,
-// the miscompare rule or the scaling-factor cross-check to drift, and a fleet's
-// stored bandwidth would then depend on which scope produced it — which is
-// exactly the "one brain, two dispatchers" failure this project keeps guarding
-// against.
+// It is SHARED across every scope that can report a collective — Pair, Group
+// and now Node — and that is the point: the paths differ in how the ranks
+// find each other and in nothing else about what a collective means. Separate
+// copies would be separate chances for the metric set, the miscompare rule or
+// the scaling-factor cross-check to drift, and a fleet's stored bandwidth
+// would then depend on which scope or which collective produced it — exactly
+// the "one brain, two dispatchers" failure this project keeps guarding
+// against, now with a third dispatcher and four collectives instead of one.
 //
-// nranks is a parameter rather than a constant because it is the ONLY thing the
-// arithmetic depends on: bus bandwidth is algorithm bandwidth scaled by
-// 2*(n-1)/n, which is exactly 1 at two ranks and is not at three.
-func reportCollective(s sweep, nranks int, peers string) int {
+// nranks is a parameter rather than a constant because it is the ONLY thing
+// AllReduce's arithmetic depends on: bus bandwidth is algorithm bandwidth
+// scaled by 2*(n-1)/n, which is exactly 1 at two ranks and is not at three.
+// collective is a second parameter for the same reason: the scale factor
+// AllGather, ReduceScatter and AllToAll need is (n-1)/n, not 2*(n-1)/n — see
+// busBandwidthFactorForCollective. Every scope but Node passes
+// defaultCollective ("allreduce"), which is the only collective they measure.
+func reportCollective(s sweep, nranks int, peers string, collective string) int {
 	peak, okPeak := s.Peak()
 	small, okSmall := s.Smallest()
 	if !okPeak {
@@ -384,13 +519,14 @@ func reportCollective(s sweep, nranks int, peers string) int {
 	// Re-derive the harness's own arithmetic from the other side. If these ever
 	// disagree, one of the two files changed its formula or its units and the
 	// fleet's stored bandwidth silently rescaled; better to say so in the log
-	// than to let the number drift. It is worth MORE at Group scope than at Pair:
-	// the factor is exactly 1 at two ranks, so a broken factor is invisible there
-	// and shows up the moment a third rank joins.
-	if want := peak.AlgGBs * busBandwidthFactor(nranks); math.Abs(want-peak.BusGBs) > 0.01*math.Max(1, want) {
+	// than to let the number drift. It is worth MORE at Group and Node scope
+	// than at Pair: the AllReduce factor is exactly 1 at two ranks, so a broken
+	// factor is invisible there and shows up the moment a third rank joins.
+	factor := busBandwidthFactorForCollective(collective, nranks)
+	if want := peak.AlgGBs * factor; math.Abs(want-peak.BusGBs) > 0.01*math.Max(1, want) {
 		logf("WARNING: the harness reported busBandwidth %.4f GB/s where alg %.4f x %.2f = %.4f — "+
-			"nccl_pair.cu and results.go disagree about the all-reduce scaling factor",
-			peak.BusGBs, peak.AlgGBs, busBandwidthFactor(nranks), want)
+			"nccl_pair.cu and results.go disagree about the %s scaling factor",
+			peak.BusGBs, peak.AlgGBs, factor, want, collective)
 	}
 
 	// ── metrics, before the decision ──────────────────────────────────────────
@@ -408,15 +544,15 @@ func reportCollective(s sweep, nranks int, peers string) int {
 	// a measurement, and this hardware plainly can.
 
 	if s.WrongReported && s.Wrong > 0 {
-		return fin(exitFail, "the all-reduce returned %d incorrect element(s) across the sweep — "+
-			"the collective completed but the data is wrong", s.Wrong)
+		return fin(exitFail, "the %s returned %d incorrect element(s) across the sweep — "+
+			"the collective completed but the data is wrong", collective, s.Wrong)
 	}
 	if peak.BusGBs <= 0 {
 		return fin(exitFail, "the collective completed carrying no traffic (busBandwidthGBs=%.2f)", peak.BusGBs)
 	}
-	return fin(exitPass, "peak bus bandwidth %.2f GB/s at %s over %d ranks with %s; "+
+	return fin(exitPass, "peak bus bandwidth %.2f GB/s at %s over %d ranks (%s) with %s; "+
 		"acceptance is the profile's thresholds to decide",
-		peak.BusGBs, humanBytes(peak.Bytes), nranks, peers)
+		peak.BusGBs, humanBytes(peak.Bytes), nranks, collective, peers)
 }
 
 // ── harness invocation ───────────────────────────────────────────────────────
@@ -811,7 +947,7 @@ func runGroupRank(rank, nranks int, rootHost string, duration int) int {
 		return fin(exitPass, "rank %d of %d completed the collective with no miscompares; rank %d "+
 			"reports the bandwidth", rank, nranks, groupRootRankIndex)
 	}
-	return reportCollective(parsed, nranks, fmt.Sprintf("%d peer(s)", nranks-1))
+	return reportCollective(parsed, nranks, fmt.Sprintf("%d peer(s)", nranks-1), defaultCollective)
 }
 
 // groupRootRankIndex is rank 0: the rank that serves the bootstrap handle. It

@@ -45,6 +45,25 @@
 // busBandwidthGBs, because the operator's parser is last-occurrence-wins and a
 // program that printed "busbw=" once per size would silently report only the
 // last size measured. See README.md.
+//
+// ── THE SECOND PATH: --local-multi-gpu ────────────────────────────────────────
+//
+// Everything above is the ORIGINAL path: one process is one rank, and N of
+// them (N=2 at Pair scope, N>=2 at Group scope) find each other over TCP and
+// join ONE communicator across NODES. --local-multi-gpu is a second, disjoint
+// path added for Node scope: one process, EVERY device the pod was allocated,
+// joined into N communicators via ncclCommInitAll — NCCL's own API for a
+// single process driving multiple devices, no bootstrap handle exchange
+// needed because there is no second process to exchange it with. See
+// collective.h for the collective-specific arithmetic and buffer sizing this
+// path needs that the single-collective, single-buffer-pair path above never
+// did.
+//
+// It exists because DGX BasePOD validation runs the 8-GPU intra-node
+// all-reduce BEFORE any multi-node test, and AMD's CVF gates intra-node
+// all-reduce bandwidth the same way — neither is expressible as two pods
+// exchanging a handle over a fabric that does not exist between two GPUs in
+// one box.
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -53,6 +72,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -62,6 +82,8 @@
 
 #include <cuda_runtime.h>
 #include <nccl.h>
+
+#include "collective/collective.h"
 
 namespace {
 
@@ -268,6 +290,11 @@ struct Options {
 	int warmup = 5;
 	int iters = 20;
 	std::vector<size_t> sizes;
+	// localMultiGpu selects the SECOND path — see the file header. Every field
+	// above is meaningless under it: there is no rank, no peer, no bootstrap
+	// port, because there is only one process and it never talks to another.
+	bool localMultiGpu = false;
+	burnin::Collective collective = burnin::Collective::AllReduce;
 };
 
 bool parseArgs(int argc, char **argv, Options *o) {
@@ -285,7 +312,17 @@ bool parseArgs(int argc, char **argv, Options *o) {
 		else if (a == "--warmup" && next(&v)) o->warmup = static_cast<int>(v);
 		else if (a == "--iters" && next(&v)) o->iters = static_cast<int>(v);
 		else if (a == "--peer" && i + 1 < argc) o->peer = argv[++i];
-		else if (a == "--sizes" && i + 1 < argc) {
+		else if (a == "--local-multi-gpu") o->localMultiGpu = true;
+		else if (a == "--collective" && i + 1 < argc) {
+			const std::string raw = argv[++i];
+			if (!burnin::ParseCollective(raw, &o->collective)) {
+				std::fprintf(stderr,
+				             "nccl_pair: --collective %s is not one of allreduce, allgather, "
+				             "reducescatter, alltoall\n",
+				             raw.c_str());
+				return false;
+			}
+		} else if (a == "--sizes" && i + 1 < argc) {
 			std::string s = argv[++i];
 			size_t start = 0;
 			while (start <= s.size()) {
@@ -301,6 +338,12 @@ bool parseArgs(int argc, char **argv, Options *o) {
 		}
 	}
 	if (o->sizes.empty()) o->sizes = {8, 1u << 20, 1u << 23, 1u << 26, 1u << 28};
+	if (o->localMultiGpu) {
+		// rank/nranks/peer are unused under this path; the device count that
+		// takes their place is read from the runtime, not the command line,
+		// because it is a hardware fact rather than something a wrapper decides.
+		return true;
+	}
 	// Any rank in [0, nranks), and at least two of them: an all-reduce over one
 	// rank measures nothing. The upper bound is what stops a wrapper bug from
 	// launching a rank the communicator has no room for, which NCCL would report
@@ -411,6 +454,225 @@ int runBenchmark(const Options &o) {
 	return kOK;
 }
 
+// launchGroup issues one collective across every device, batched as a SINGLE
+// NCCL group so the N per-device calls execute as one synchronized operation
+// rather than N independent ones. AllToAll has no native NCCL primitive — it
+// is composed from nranks*nranks point-to-point ncclSend/ncclRecv pairs inside
+// the same group, the pattern NCCL's own user guide gives for implementing an
+// all-to-all; every other collective is one native call per device.
+//
+// A device must be cudaSetDevice'd as current immediately before the NCCL call
+// that targets it, group or not — NCCL routes each call by the CURRENT device,
+// not by which comms[i] was passed.
+int launchGroup(burnin::Collective collective, int devices, const std::vector<int> &devList,
+                 std::vector<ncclComm_t> &comms, std::vector<cudaStream_t> &streams,
+                 std::vector<float *> &sendBufs, std::vector<float *> &recvBufs,
+                 const burnin::BufferPlan &plan) {
+	NCCL_CHECK(ncclGroupStart());
+	if (collective == burnin::Collective::AllToAll) {
+		for (int i = 0; i < devices; ++i) {
+			CUDA_CHECK(cudaSetDevice(devList[i]));
+			for (int j = 0; j < devices; ++j) {
+				NCCL_CHECK(ncclSend(sendBufs[i] + static_cast<size_t>(j) * plan.ChunkCount, plan.ChunkCount,
+				                     ncclFloat, j, comms[i], streams[i]));
+				NCCL_CHECK(ncclRecv(recvBufs[i] + static_cast<size_t>(j) * plan.ChunkCount, plan.ChunkCount,
+				                     ncclFloat, j, comms[i], streams[i]));
+			}
+		}
+	} else {
+		for (int i = 0; i < devices; ++i) {
+			CUDA_CHECK(cudaSetDevice(devList[i]));
+			switch (collective) {
+			case burnin::Collective::AllReduce:
+				NCCL_CHECK(
+				    ncclAllReduce(sendBufs[i], recvBufs[i], plan.SendCount, ncclFloat, ncclSum, comms[i], streams[i]));
+				break;
+			case burnin::Collective::AllGather:
+				NCCL_CHECK(ncclAllGather(sendBufs[i], recvBufs[i], plan.SendCount, ncclFloat, comms[i], streams[i]));
+				break;
+			case burnin::Collective::ReduceScatter:
+				NCCL_CHECK(ncclReduceScatter(sendBufs[i], recvBufs[i], plan.RecvCount, ncclFloat, ncclSum, comms[i],
+				                              streams[i]));
+				break;
+			case burnin::Collective::AllToAll:
+				break;  // handled above; unreachable here
+			}
+		}
+	}
+	NCCL_CHECK(ncclGroupEnd());
+	return kOK;
+}
+
+// runLocalMultiGpu is the SECOND path — see the file header. One process,
+// every visible device, one collective chosen by --collective, joined via
+// ncclCommInitAll rather than the bootstrap handshake runBenchmark uses.
+//
+// It ignores o.rank, o.nranks, o.peer and o.port entirely: there is one
+// process and it never talks to another, so none of those has a meaning here.
+int runLocalMultiGpu(const Options &o) {
+	int devices = 0;
+	CUDA_CHECK(cudaGetDeviceCount(&devices));
+	// The wrapper (main.go) already refuses fewer than two devices before ever
+	// invoking this binary — a POSITIVE check on the device count, never on
+	// BURNIN_ROLE/BURNIN_RANK being absent (see main.go's runNodeScope). Reaching
+	// here with devices<2 means the two disagree about the hardware, so refuse
+	// loudly rather than silently measure a "collective" with no second rank.
+	if (devices < 2) {
+		std::fprintf(stderr, "nccl_pair: --local-multi-gpu needs at least 2 visible devices, found %d\n", devices);
+		return kError;
+	}
+
+	std::vector<int> devList(devices);
+	for (int i = 0; i < devices; ++i) devList[i] = i;
+
+	for (int i = 0; i < devices; ++i) {
+		cudaDeviceProp prop{};
+		CUDA_CHECK(cudaGetDeviceProperties(&prop, i));
+		std::fprintf(stderr, "nccl_pair: device %d of %d: %s (sm_%d%d)\n", i, devices, prop.name, prop.major,
+		             prop.minor);
+	}
+	int nvVer = 0;
+	ncclGetVersion(&nvVer);
+	std::fprintf(stderr, "nccl_pair: NCCL runtime version %d.%d.%d; collective=%s\n", nvVer / 10000,
+	             (nvVer / 100) % 100, nvVer % 100, burnin::CollectiveName(o.collective));
+
+	std::vector<ncclComm_t> comms(devices);
+	NCCL_CHECK(ncclCommInitAll(comms.data(), devices, devList.data()));
+
+	// The largest buffer is allocated ONCE per device and reused for every
+	// size, exactly as runBenchmark does — the measurement is of the
+	// collective, not of an allocator.
+	size_t maxTotal = 0;
+	for (size_t s : o.sizes) maxTotal = s > maxTotal ? s : maxTotal;
+	size_t maxCount = maxTotal / sizeof(float);
+	if (maxCount == 0) maxCount = 1;
+	const burnin::BufferPlan maxPlan = burnin::PlanBuffers(o.collective, maxCount, devices);
+
+	std::vector<cudaStream_t> streams(devices);
+	std::vector<float *> sendBufs(devices), recvBufs(devices);
+
+	for (int i = 0; i < devices; ++i) {
+		CUDA_CHECK(cudaSetDevice(devList[i]));
+		CUDA_CHECK(cudaStreamCreate(&streams[i]));
+		CUDA_CHECK(cudaMalloc(&sendBufs[i], maxPlan.BufElements * sizeof(float)));
+		CUDA_CHECK(cudaMalloc(&recvBufs[i], maxPlan.BufElements * sizeof(float)));
+
+		// Seeded ONCE, at the largest allocation, and never again: AllReduce and
+		// ReduceScatter sum a constant (1.0) so the input never needs to change,
+		// and AllGather/AllToAll seed an identity keyed on THIS device's index —
+		// fixed regardless of message size or which iteration this is. See
+		// collective.h for what each pattern proves.
+		std::vector<float> host(maxPlan.BufElements);
+		switch (o.collective) {
+		case burnin::Collective::AllReduce:
+		case burnin::Collective::ReduceScatter:
+			std::fill(host.begin(), host.end(), 1.0f);
+			break;
+		case burnin::Collective::AllGather:
+			std::fill(host.begin(), host.end(), burnin::SeedForAllGather(i));
+			break;
+		case burnin::Collective::AllToAll:
+			for (int j = 0; j < devices; ++j) {
+				const float v = burnin::SeedForAllToAll(i, j);
+				const size_t base = static_cast<size_t>(j) * maxPlan.ChunkCount;
+				for (size_t k = 0; k < maxPlan.ChunkCount && base + k < host.size(); ++k) host[base + k] = v;
+			}
+			break;
+		}
+		CUDA_CHECK(cudaMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), cudaMemcpyHostToDevice));
+	}
+
+	long long wrong = 0;
+
+	for (size_t bytes : o.sizes) {
+		size_t totalCount = bytes / sizeof(float);
+		if (totalCount == 0) totalCount = 1;
+		const burnin::BufferPlan plan = burnin::PlanBuffers(o.collective, totalCount, devices);
+
+		for (int w = 0; w < o.warmup; ++w) {
+			int rc = launchGroup(o.collective, devices, devList, comms, streams, sendBufs, recvBufs, plan);
+			if (rc != kOK) return rc;
+		}
+		for (int i = 0; i < devices; ++i) {
+			CUDA_CHECK(cudaSetDevice(devList[i]));
+			CUDA_CHECK(cudaStreamSynchronize(streams[i]));
+		}
+
+		auto t0 = std::chrono::steady_clock::now();
+		for (int it = 0; it < o.iters; ++it) {
+			int rc = launchGroup(o.collective, devices, devList, comms, streams, sendBufs, recvBufs, plan);
+			if (rc != kOK) return rc;
+		}
+		for (int i = 0; i < devices; ++i) {
+			CUDA_CHECK(cudaSetDevice(devList[i]));
+			CUDA_CHECK(cudaStreamSynchronize(streams[i]));
+		}
+		auto t1 = std::chrono::steady_clock::now();
+
+		// The swept size IS the total collective payload — the same "count" the
+		// original path has always used, so a fleet reading busBandwidthGBs
+		// against a swept size reads it against the same numbers whichever path
+		// produced it. algbw is bytes moved per device per second, matching
+		// nccl-tests' own convention of reporting per-rank throughput.
+		double seconds = std::chrono::duration<double>(t1 - t0).count() / static_cast<double>(o.iters);
+		double actualBytes = static_cast<double>(totalCount * sizeof(float));
+		double algbw = actualBytes / seconds / 1e9;
+		double busbw = burnin::BusBandwidth(o.collective, algbw, devices);
+
+		// Correctness, checked at every size — the same reasoning runBenchmark
+		// already gives: a fault that only appears above a protocol switchover
+		// threshold would be invisible to a single-size check.
+		for (int i = 0; i < devices; ++i) {
+			std::vector<float> back(plan.RecvCount);
+			CUDA_CHECK(cudaMemcpy(back.data(), recvBufs[i], plan.RecvCount * sizeof(float), cudaMemcpyDeviceToHost));
+			switch (o.collective) {
+			case burnin::Collective::AllReduce:
+			case burnin::Collective::ReduceScatter: {
+				const float expect = static_cast<float>(devices);
+				for (float v : back) {
+					if (v != expect) ++wrong;
+				}
+				break;
+			}
+			case burnin::Collective::AllGather:
+				for (int seg = 0; seg < devices; ++seg) {
+					const float expect = burnin::ExpectedAllGatherSegment(seg);
+					const size_t base = static_cast<size_t>(seg) * plan.SendCount;
+					for (size_t k = 0; k < plan.SendCount && base + k < back.size(); ++k) {
+						if (back[base + k] != expect) ++wrong;
+					}
+				}
+				break;
+			case burnin::Collective::AllToAll:
+				for (int sender = 0; sender < devices; ++sender) {
+					const float expect = burnin::ExpectedAllToAllChunk(sender, i);
+					const size_t base = static_cast<size_t>(sender) * plan.ChunkCount;
+					for (size_t k = 0; k < plan.ChunkCount && base + k < back.size(); ++k) {
+						if (back[base + k] != expect) ++wrong;
+					}
+				}
+				break;
+			}
+		}
+
+		std::printf("RESULT size_bytes=%zu time_us=%.3f algbw_gbs=%.4f busbw_gbs=%.4f\n", totalCount * sizeof(float),
+		            seconds * 1e6, algbw, busbw);
+		std::fflush(stdout);
+	}
+
+	std::printf("RESULT_WRONG %lld\n", wrong);
+	std::fflush(stdout);
+
+	for (int i = 0; i < devices; ++i) {
+		ncclCommDestroy(comms[i]);
+		CUDA_CHECK(cudaSetDevice(devList[i]));
+		CUDA_CHECK(cudaStreamDestroy(streams[i]));
+		CUDA_CHECK(cudaFree(sendBufs[i]));
+		CUDA_CHECK(cudaFree(recvBufs[i]));
+	}
+	return kOK;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -418,9 +680,12 @@ int main(int argc, char **argv) {
 	if (!parseArgs(argc, argv, &o)) {
 		std::fprintf(stderr,
 		             "usage: nccl_pair --rank <0..nranks-1> --nranks <N, at least 2> [--peer <ipv4>] [--port N]\n"
+		             "                 [--warmup N] [--iters N] [--sizes b1,b2,...]\n"
+		             "   or: nccl_pair --local-multi-gpu [--collective allreduce|allgather|reducescatter|alltoall]\n"
 		             "                 [--warmup N] [--iters N] [--sizes b1,b2,...]\n");
 		return kError;
 	}
+	if (o.localMultiGpu) return runLocalMultiGpu(o);
 	if (o.rank != 0 && o.peer.empty()) {
 		std::fprintf(stderr, "nccl_pair: rank %d needs --peer (the address rank 0 answers on)\n", o.rank);
 		return kError;

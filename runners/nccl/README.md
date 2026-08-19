@@ -1,16 +1,22 @@
-# `nccl` runner — a two-rank all-reduce across a link
+# `nccl` runner — a collective, over a link or within one box
 
-Runner image for the `nccl` [`TestKind`](../../api/v1alpha1/burnintest_types.go):
-an NCCL `AllReduce` between **two nodes**, one rank each, over the fabric.
+Runner image for the `nccl` [`TestKind`](../../api/v1alpha1/burnintest_types.go).
+At **Pair** and **Group** scope it is an NCCL `AllReduce` between nodes, one rank
+each, over the fabric. At **Node** scope — a box with two or more GPUs — it is
+one process, every device the pod was allocated, joined via `ncclCommInitAll`
+into a collective that never leaves the node: no bootstrap handle to exchange,
+because there is no second pod.
 
 [`ib-write-bw`](../ib-write-bw) measures the wire. This measures what a
-**collective** achieves over that wire — NCCL's transport selection, its protocol
-and algorithm choices, and the copies it needs on a node without GPUDirect RDMA.
-A link can be perfect and the collective still slow because NCCL fell back to a
-socket transport; that is exactly the failure this test exists to catch.
+**collective** achieves over it (or over NVLink/PCIe P2P/shared memory, at Node
+scope) — NCCL's transport selection, its protocol and algorithm choices, and the
+copies it needs on a node without GPUDirect RDMA. A link can be perfect and the
+collective still slow because NCCL fell back to a socket transport; that is
+exactly the failure this test exists to catch, at every scope.
 
-**Pair and Group scope.** See *Node scope* below for what happens on a one-GPU
-part.
+**Why Node scope exists.** DGX BasePOD validation runs the 8-GPU intra-node
+all-reduce *before* any multi-node test, and it has no Pair or Group form — there
+is no fabric between two GPUs in one box for a Pair test to measure.
 
 ## Group scope (N ranks)
 
@@ -155,16 +161,55 @@ thresholds:
 `miscompares == 0` is the threshold worth having unconditionally: it is the one
 that catches a link returning wrong data rather than slow data.
 
-## Node scope exits 2 on a one-GPU part
+## Node scope: intra-node, `ncclCommInitAll`
 
-An all-reduce needs at least two ranks. At Node scope both would have to be GPUs
-in the same box — where this would be a free NVLink test and well worth running.
-**Each DGX Spark has one GPU**, so there is no second rank and the test is
-inapplicable, not failed: exit 2, with the GPU count in the message.
+`BURNIN_ROLE` unset with no `BURNIN_RANK`/`BURNIN_NRANKS` either means Node
+scope. What decides whether this pod may run a collective is a **positive** fact
+about the hardware — how many devices the driver reports — never the mere
+absence of those variables: reading an absence as permission is the exact
+failure the Group-scope `groupCapableKinds` guard exists to catch (#118), and
+this is its Node-scope mirror.
 
-Intra-node (multi-GPU, single-node) collectives are **not implemented** by this
-runner even where the GPUs exist; it is a Pair-scope fabric test. A node with two
-or more accelerators also exits 2, saying so.
+- **Fewer than two GPUs — `DGX Spark` among them, which has one — exits 2.** An
+  all-reduce needs at least two ranks; there is no second one in the box, so the
+  test is inapplicable, not failed. The GPU count is in the message.
+- **Two or more GPUs runs the collective.** `nccl_pair`'s `--local-multi-gpu`
+  mode enumerates every visible device, joins them with `ncclCommInitAll`, and
+  runs the collective named by the `collective` variant axis
+  (`BURNIN_VARIANT_COLLECTIVE`) — `allreduce` by default, or `allgather`,
+  `reducescatter`, `alltoall`. An unrecognised value is refused as a config
+  error rather than silently measured as `allreduce`.
+
+**`busBandwidthGBs`/`algBandwidthGBs` keep their names at Node scope**, for
+every collective, deliberately — see the field's own doc comment in
+`pkg/contract/metrics.go` for the full reasoning: the *same* `busBandwidth`
+formula computes the figure regardless of scope or collective, `Scope` on the
+stored result already tells a Node reading from a Pair one apart, and a
+threshold is written per `BurnInTest`, never globally by metric name — so
+nothing ever compares a Node-scope number against a Pair-scope gate by
+accident. `AllGather`/`ReduceScatter`/`AllToAll` scale by `(n-1)/n` rather than
+`AllReduce`'s `2(n-1)/n` — see `collective/collective.h`.
+
+**Two additional metrics, both Evidence, never gates:**
+
+| Runner key | Canonical metric | Meaning |
+|---|---|---|
+| `ranks` | `ranks` | how many devices actually joined — the same count that decided whether to run at all |
+| `nccl_transport` | `ncclTransport` | best-effort: `nvlink`\|`p2p`\|`shm`\|`net`, read from `NCCL_DEBUG=INFO`'s own log text. **Absent, never wrong**, if NCCL's wording ever moves — this is the one place this runner reads NCCL's diagnostic output at all, and it can never become a hardware verdict |
+
+**`RLIMIT_MEMLOCK` is checked but not enforced at Node scope.** An intra-node
+collective over NVLink, PCIe P2P or shared memory registers no pinned buffers
+the way NCCL's `net` transport does, so a small limit does not stop it here —
+unlike Pair and Group, where it is fatal before the rendezvous even starts. It
+only matters if NCCL falls back to `net` transport *within* the box, and if that
+happens the harness's own failure is still recognised and gets the same advice.
+
+> **NOT VERIFIED ON HARDWARE.** This project has no multi-GPU node. The
+> `>=2`-device decision and every collective's arithmetic are unit-tested in a
+> CUDA-free header (`collective/collective_test.cc`); the `<2`-device skip is
+> verified on a real DGX Spark. `AllGather`, `ReduceScatter` and `AllToAll` in
+> particular have never run on real silicon. See issue #406 for exactly what a
+> real run must capture before any of this is published.
 
 ## Why this is not `nccl-tests`
 
@@ -322,6 +367,13 @@ client only once `/proc/net/tcp` shows the bootstrap socket is actually
 **LISTENING**. "The process started" is not the same claim as "the port is
 bound", and the operator's gate is only as good as what it gates on.
 
+**At Node scope, none of the above applies.** There is one pod, no rendezvous,
+no `hostNetwork`, no `/dev/infiniband` mount and no readiness probe to wait
+for a peer that does not exist. `spec.resources.limits` requests the SKU's
+whole board (`nvidia.com/gpu: 8`, not `1`) — see
+[docs/dev/multi-device.md](../../docs/dev/multi-device.md) for why the pod asks
+for the count rather than `all`.
+
 ## Tuning
 
 | Variable | Default | Meaning |
@@ -459,3 +511,8 @@ Two DGX Sparks (NVIDIA GB10, aarch64, driver 580.82.09), ConnectX-7 at PCIe Gen5
 x4, RoCE v2, MTU 4096. Rank 0 on `spark-85a9`, rank 1 on `spark-043a`. The
 measured figures are in the run recorded with this runner's introduction; use
 them, not a spec sheet, to set the gate.
+
+**Node scope: only the `<2`-device skip**, on `spark-043a` (one GB10). The
+`>=2`-device path — every collective, `ncclCommInitAll`, the buffer sizing and
+correctness checks — has never run on real silicon; this project has no
+multi-GPU node. See issue #406.
