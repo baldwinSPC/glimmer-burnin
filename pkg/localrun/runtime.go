@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // ContainerRuntime runs one container to completion.
@@ -26,6 +27,25 @@ type ContainerRuntime interface {
 	Run(ctx context.Context, spec RunSpec) (Execution, error)
 	// Name identifies the runtime for messages.
 	Name() string
+}
+
+// StreamingRuntime is a ContainerRuntime that can report stdout as it arrives
+// rather than only when the container exits.
+//
+// A SEPARATE, OPTIONAL interface rather than a method on ContainerRuntime,
+// because ContainerRuntime is exported and a third party may already implement
+// it; adding a method would break every such implementation for a feature it
+// may not need. The engine type-asserts, and a runtime that does not implement
+// this simply produces no checkpoints — which is a degradation of evidence,
+// never of the verdict.
+//
+// onOutput is called with EVERYTHING read so far, not the new fragment. The
+// runner contract is last-occurrence-wins over the whole stream, so a consumer
+// handed only the tail would parse a metric out of the middle of a line and
+// report whichever fragment happened to land in that read.
+type StreamingRuntime interface {
+	ContainerRuntime
+	RunStreaming(ctx context.Context, spec RunSpec, onOutput func(stdoutSoFar string)) (Execution, error)
 }
 
 // Execution is what a container produced.
@@ -118,6 +138,17 @@ func (r *CLIRuntime) Name() string { return r.Binary }
 
 // Run executes one container.
 func (r *CLIRuntime) Run(ctx context.Context, spec RunSpec) (Execution, error) {
+	return r.RunStreaming(ctx, spec, nil)
+}
+
+// RunStreaming executes one container, reporting stdout as it arrives.
+//
+// ONE implementation, with the streaming as the general case and Run passing a
+// nil callback, rather than two paths that could disagree about deadlines, exit
+// codes or stderr. A second copy of the "was this a deadline kill or a
+// verdict?" logic is exactly the kind of divergence this project spends its
+// tests catching.
+func (r *CLIRuntime) RunStreaming(ctx context.Context, spec RunSpec, onOutput func(string)) (Execution, error) {
 	// The deadline is enforced here rather than left to the runtime, so that a
 	// hung runner is killed on the same schedule regardless of which CLI is
 	// driving and whether it honours its own timeout flags.
@@ -130,8 +161,9 @@ func (r *CLIRuntime) Run(ctx context.Context, spec RunSpec) (Execution, error) {
 	args := r.args(spec)
 	cmd := exec.CommandContext(ctx, r.Binary, args...)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout := &liveBuffer{notify: onOutput}
+	var stderr bytes.Buffer
+	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 	// Never inherit the caller's stdin: a runner that reads from it would block
 	// forever in a pipeline, and none of them has any business doing so.
@@ -163,6 +195,48 @@ func (r *CLIRuntime) Run(ctx context.Context, spec RunSpec) (Execution, error) {
 	}
 
 	return out, nil
+}
+
+// liveBuffer accumulates a command's stdout and announces each write.
+//
+// os/exec writes to cmd.Stdout from a goroutine it owns, and the engine reads
+// the accumulated text from its own, so every access is under the mutex. Before
+// this existed the whole of stdout was invisible until the process exited,
+// which is why a multi-hour soak could be killed at hour six having published
+// nothing at all — the evidence was sitting in a buffer nobody could read.
+//
+// The notification carries the whole stream rather than the fragment just
+// written: a container's stdout arrives in whatever chunks the pipe delivers,
+// which split lines in the middle, and the runner contract is defined over
+// complete `key=value` lines.
+type liveBuffer struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	notify func(string)
+}
+
+func (b *liveBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	n, err := b.buf.Write(p)
+	var snapshot string
+	if b.notify != nil {
+		snapshot = b.buf.String()
+	}
+	b.mu.Unlock()
+
+	// Called OUTSIDE the lock. The callback parses and may deliver over a
+	// network, and holding the buffer's lock across that would block the
+	// container's own output — turning a slow sink into a stalled runner.
+	if b.notify != nil {
+		b.notify(snapshot)
+	}
+	return n, err
+}
+
+func (b *liveBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // isExitError extracts an exit code from a command failure.

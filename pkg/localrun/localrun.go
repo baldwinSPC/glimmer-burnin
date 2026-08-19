@@ -170,6 +170,47 @@ type Hooks struct {
 	OnAttempt func(test string, attempt int32, res runner.Result)
 	// OnTestComplete fires once per test, when it settles.
 	OnTestComplete func(TestResult)
+	// OnCheckpoint fires while a test is still running, every
+	// spec.checkpointIntervalSeconds, with the metrics the runner has emitted
+	// so far.
+	//
+	// A CHECKPOINT IS EVIDENCE, NEVER A VERDICT. Nothing in this package reads
+	// what it publishes; thresholds are evaluated once, at the end, against the
+	// completed execution. A mid-run sample that dips below a floor is not a
+	// failure, because the run is not over — and a consumer that treated one as
+	// a verdict would condemn hardware for a moment it was told to expect.
+	OnCheckpoint func(Checkpoint)
+}
+
+// Checkpoint is a test's progress, published while it is still running.
+//
+// It exists for the case a long soak is most likely to meet: a multi-hour
+// thermal soak that is cancelled, killed at its deadline, or lost to a reboot
+// at minute 200 otherwise reports NOTHING AT ALL, because a runner's metrics
+// only reach the report when the container exits. The operator has published
+// these since checkpointIntervalSeconds was added; this dispatcher buffered
+// stdout until exit and so could not, which is the drift the parity ledger
+// pins.
+type Checkpoint struct {
+	// Test is the execution's name — a variant cell's own name, where the entry
+	// was expanded.
+	Test string
+	// Sequence orders checkpoints within one run. Derived from elapsed time
+	// rather than counted, exactly as the operator derives it, so it is stable
+	// across a retry and a receiver's dedupe still works.
+	Sequence int
+	// Attempt is which execution of this test is being sampled.
+	Attempt int32
+	// Metrics is what the runner has emitted so far, parsed by the same
+	// pkg/runner both dispatchers use.
+	Metrics map[string]string
+	At      time.Time
+}
+
+func (h Hooks) checkpoint(c Checkpoint) {
+	if h.OnCheckpoint != nil {
+		h.OnCheckpoint(c)
+	}
 }
 
 func (h Hooks) testStart(name string) {
@@ -283,7 +324,7 @@ func runWithClock(ctx context.Context, p Plan, rt ContainerRuntime, h Hooks, now
 		}
 
 		h.testStart(t.Name)
-		res, err := runTest(ctx, p, t, rt, h, now)
+		res, err := runTest(ctx, p, t, rt, h, now, rep.StartedAt)
 		if err != nil {
 			return rep, err
 		}
@@ -309,7 +350,7 @@ func runWithClock(ctx context.Context, p Plan, rt ContainerRuntime, h Hooks, now
 //
 // This is the loop that mirrors completeAttempt. Every branch below names the
 // controller behaviour it reproduces.
-func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h Hooks, now Clock) (TestResult, error) {
+func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h Hooks, now Clock, runStarted time.Time) (TestResult, error) {
 	res := TestResult{
 		Name: t.Name,
 		Kind: string(t.Spec.Kind),
@@ -350,7 +391,7 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 		spec.Env["BURNIN_ATTEMPT"] = fmt.Sprint(attempt)
 
 		started := now()
-		exec, err := rt.Run(ctx, spec)
+		exec, err := runOnce(ctx, rt, spec, t, attempt, started, runStarted, p, h, now)
 		if err != nil {
 			// The runtime itself failed. Recorded as an Error attempt so the
 			// retry budget applies, rather than aborting the whole run: a
@@ -428,6 +469,114 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 			return settle(api.RunError), nil
 		}
 	}
+}
+
+// runOnce executes one attempt, publishing checkpoints along the way when the
+// test asked for them and the runtime can stream.
+//
+// The timing decision lives HERE and not in the runtime, because the interval
+// is a property of the test — which is in the plan, which the engine owns. A
+// runtime that decided when to sample would need to be told the plan, and every
+// implementation of the interface would have to reproduce the rule.
+//
+// A checkpoint publishes nothing back into the attempt: the returned Execution
+// is exactly what the runtime produced. That is the "evidence, never a verdict"
+// rule expressed as a signature — there is no path from here into the phase.
+func runOnce(
+	ctx context.Context,
+	rt ContainerRuntime,
+	spec RunSpec,
+	t PlannedTest,
+	attempt int32,
+	started time.Time,
+	runStarted time.Time,
+	p Plan,
+	h Hooks,
+	now Clock,
+) (Execution, error) {
+	interval := checkpointInterval(t.Spec)
+	stream, canStream := rt.(StreamingRuntime)
+	if interval <= 0 || !canStream || h.OnCheckpoint == nil {
+		// Nothing to publish, nobody to publish to, or a runtime that cannot
+		// stream. The last case degrades the EVIDENCE and never the verdict,
+		// which is why it is silent rather than an error.
+		return rt.Run(ctx, spec)
+	}
+
+	// last is read and written only from the runtime's write goroutine, which
+	// calls onOutput serially — liveBuffer notifies outside its lock but never
+	// concurrently with itself.
+	last := started
+	return stream.RunStreaming(ctx, spec, func(stdoutSoFar string) {
+		at := now()
+		if at.Sub(last) < interval {
+			return
+		}
+
+		// The exit code is deliberately not consulted: the container has not
+		// exited, and only the parsed metrics are wanted. Passing 0 selects no
+		// behaviour — the phase logic is not on this path at all, which is the
+		// same choice the operator's own checkpoint makes.
+		parsed := runner.Parse(string(t.Spec.Kind), stdoutSoFar, 0)
+		if len(parsed.Metrics) == 0 {
+			// Nothing to publish yet. `last` is NOT advanced, so the next write
+			// tries again rather than waiting out another whole interval for a
+			// runner that is simply slow to emit its first line.
+			return
+		}
+		last = at
+
+		h.checkpoint(Checkpoint{
+			Test:     t.Name,
+			Sequence: checkpointSequence(p, runStarted, at),
+			Attempt:  attempt,
+			Metrics:  parsed.Metrics,
+			At:       at,
+		})
+	})
+}
+
+// checkpointInterval is how often one test publishes its in-progress metrics.
+// Zero or nil disables it, matching the operator's own reading of the field.
+func checkpointInterval(spec api.BurnInTestSpec) time.Duration {
+	if spec.CheckpointIntervalSeconds == nil || *spec.CheckpointIntervalSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(*spec.CheckpointIntervalSeconds) * time.Second
+}
+
+// checkpointSequence numbers a run's checkpoints.
+//
+// DERIVED from elapsed time rather than counted, which is the operator's own
+// choice and for its reason: the sequence feeds the envelope's DeliveryID, and
+// a key that moved on every attempt would mint a new identity per retry and
+// defeat the receiver's dedupe — turning a flaky endpoint into a flood of
+// near-identical records.
+//
+// The interval used is the RUN's — the shortest positive one any test asked
+// for — so two tests with different cadences still produce one monotonic
+// sequence for the run, which is what a consumer orders by.
+func checkpointSequence(p Plan, started, at time.Time) int {
+	interval := runCheckpointInterval(p)
+	if interval <= 0 {
+		return 0
+	}
+	elapsed := at.Sub(started)
+	if elapsed <= 0 {
+		return 0
+	}
+	return int(elapsed / interval)
+}
+
+// runCheckpointInterval is the shortest positive interval any test declares.
+func runCheckpointInterval(p Plan) time.Duration {
+	var shortest time.Duration
+	for i := range p.Tests {
+		if d := checkpointInterval(p.Tests[i].Spec); d > 0 && (shortest == 0 || d < shortest) {
+			shortest = d
+		}
+	}
+	return shortest
 }
 
 // evidence is what an attempt established beyond its phase.
