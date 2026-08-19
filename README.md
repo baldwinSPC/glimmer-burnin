@@ -7,8 +7,8 @@ verdict you can gate provisioning on.
 
 > **Standalone by design.** This operator does **not** import any control plane. It
 > exports verdicts through a generic `BurnInSink` (webhook / ConfigMap / Prometheus),
-> so it integrates with [Glimmer](https://github.com/baldwinSPC/glimmer) — or your own
-> system — with zero code dependency. CI enforces the no-import rule.
+> so it integrates with a control plane of your choice — or your own system — with
+> zero code dependency. CI enforces the no-import rule.
 
 ## Scope: what runs today
 
@@ -161,8 +161,8 @@ NVIDIA redistributable.
 
 A new accelerator or NIC ships a **runner image**, not a controller change — the
 `runner` field on a test overrides the built-in image/command. The controller stays
-vendor-neutral; vendor specifics live in images (mirrors how Glimmer keeps vendor
-logic behind a single seam).
+vendor-neutral; vendor specifics live in images, kept behind a single seam rather
+than scattered through the reconciler.
 
 ### Host architecture is not GPU architecture
 

@@ -461,14 +461,14 @@ the same node passes from a soak to a passive read without being released in
 between. Expiry would clear it eventually, but eventually is a whole pod window
 of suppressed thermal response bought by a test that never asked for it.
 
-It exists because two safety systems were fighting each other. The Glimmer agent
-runs a thermal watchdog that drains a node when the part passes its trip point,
-and a thermal soak drives the part past that point **by design** — so every soak
-on a fleet running both was drained by the watchdog, its runner pods killed with
-SIGKILL, and the hardware recorded as `Error — hardware unjudged`. The watchdog
-was not wrong; it had no way to tell a soak from a cooling failure. This
-annotation is that way. The operator declares the heat; the reader gates its
-drain on the declaration.
+It exists because two safety systems were fighting each other. A separate fleet
+agent runs a thermal watchdog that drains a node when the part passes its trip
+point, and a thermal soak drives the part past that point **by design** — so
+every soak on a fleet running both was drained by the watchdog, its runner pods
+killed with SIGKILL, and the hardware recorded as `Error — hardware unjudged`.
+The watchdog was not wrong; it had no way to tell a soak from a cooling
+failure. This annotation is that way. The operator declares the heat; the
+reader gates its drain on the declaration.
 
 **The value carries an absolute expiry, and that is what makes it safe.** The
 reader is on the node and knows nothing about whether the run is still alive. A
@@ -771,7 +771,7 @@ spec:
     - testRef: gemm
     - testRef: soak
       required: false
-  sinks: [glimmer]
+  sinks: [prod]
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInRun
@@ -804,7 +804,7 @@ own fleet rather than from a spec sheet — see [thresholds](thresholds.md).)*
    schedulable — **this is the record the release will restore, and it is never
    recomputed**. `status.fingerprint` captures each node's kernel, OS image,
    architecture and accelerator labels. `ThresholdsSound=True`. A `Running`
-   envelope goes to the `glimmer` sink.
+   envelope goes to the `prod` sink.
 5. **Wave 1.** `gemm` is the first test with work. `spark-a` is free, the cap is
    1, so: stamp `spark-a` with the cordon owner, cordon it, create the pod
    (`acceptance-2026-08-t0-a1-<hash>` — deterministic, so a crashed controller

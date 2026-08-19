@@ -16,8 +16,8 @@ PR may wait.
   whole fleet at once — publishing is deliberately manual.
 - Owns the [security process](SECURITY.md).
 - Owns the two rules that are not negotiable in review: the **standalone
-  invariant** (this repository must never import the Glimmer control plane) and
-  the **licence policy** (permissive only; see `hack/licenses-allowed.txt`).
+  invariant** (this repository must never import its control-plane consumer)
+  and the **licence policy** (permissive only; see `hack/licenses-allowed.txt`).
   Both are enforced by CI, and both would make the project unpublishable if
   they were relaxed.
 

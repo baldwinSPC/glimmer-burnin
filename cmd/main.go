@@ -1,6 +1,6 @@
 // Command manager runs the Glimmer Burn-In Operator: it reconciles BurnInRun
 // objects into test pods across the targeted nodes and exports verdicts to the
-// configured sinks. Standalone — no Glimmer control-plane dependency.
+// configured sinks. Standalone — no control-plane dependency.
 package main
 
 import (

@@ -26,7 +26,8 @@ If this fixes an issue, say "Closes #NNN".
 - [ ] **New `TestKind`?** It has a parser entry where the runner's keys are not
       merely a different spelling of the canonical names, a unit test for that
       parser, and it is in `v1alpha1.BuiltInKinds`.
-- [ ] Nothing here imports `github.com/baldwinSPC/glimmer/…`.
+- [ ] Nothing here imports the control plane's module path (see the standalone
+      invariant in CONTRIBUTING.md).
 
 ### New dependency licence
 

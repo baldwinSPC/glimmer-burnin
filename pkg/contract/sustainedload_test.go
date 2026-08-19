@@ -12,7 +12,7 @@ import (
 // writes a heat declaration on every node it is loading, and a node-local
 // thermal watchdog reads it as permission to skip the drain it would otherwise
 // run — so a kind wrongly listed here gives away a safety action on a node
-// nothing is heating, and a kind wrongly left out is glimmer#280 again for that
+// nothing is heating, and a kind wrongly left out is #280 again for that
 // kind: the drain evicts it and the hardware comes back unjudged.
 //
 // Every row states its reason from the RUNNER, because the property is the

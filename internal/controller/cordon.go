@@ -73,8 +73,9 @@ func parseCordonOwner(value string) (cordonOwner, bool) {
 
 // ─── The heat declaration ─────────────────────────────────────────────────────
 //
-// A burn-in drives a part past the temperature at which the Glimmer agent's
-// thermal watchdog drains the node — by design, because that is what a soak is.
+// A burn-in drives a part past the temperature at which a separate fleet
+// agent's thermal watchdog drains the node — by design, because that is what a
+// soak is.
 // The watchdog cannot tell that from a cooling failure on its own, so the
 // operator says so on the node: AnnotationHeatExpected is present for as long as
 // this run is loading it, and carries the instant after which the statement

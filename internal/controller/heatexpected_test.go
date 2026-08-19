@@ -15,8 +15,8 @@ import (
 
 // The heat declaration. Issue #280.
 //
-// The Glimmer agent's thermal watchdog drains a node that passes its trip point,
-// and a thermal soak drives the part past that point ON PURPOSE. Every soak on
+// A separate fleet agent's thermal watchdog drains a node that passes its trip
+// point, and a thermal soak drives the part past that point ON PURPOSE. Every soak on
 // this fleet was therefore drained by the safety system, its runner pods killed
 // with SIGKILL, and the hardware recorded as "Error — hardware unjudged". The
 // watchdog was not wrong; it had no way to tell a soak from a cooling failure.
@@ -523,7 +523,7 @@ func TestHeat_ARestampNeverShortensADeclarationAlreadyInForce(t *testing.T) {
 func TestHeat_TheAnnotationKeyIsPinned(t *testing.T) {
 	const want = "burnin.glimmer.ai/heat-expected"
 	if burninv1alpha1.AnnotationHeatExpected != want {
-		t.Errorf("AnnotationHeatExpected = %q, want %q — the Glimmer agent reads this key byte for "+
+		t.Errorf("AnnotationHeatExpected = %q, want %q — a separate fleet agent reads this key byte for "+
 			"byte, and a mismatch silently restores the drain this change exists to stop",
 			burninv1alpha1.AnnotationHeatExpected, want)
 	}

@@ -12,8 +12,8 @@ the PR.
 
 ## The standalone invariant (enforced in CI)
 
-The operator must never import the Glimmer control plane. CI fails any PR that
-adds an import of `github.com/baldwinSPC/glimmer/…`. Integration happens through
+The operator must never import its control-plane consumer. CI fails any PR that
+adds an import of a control plane's module path. Integration happens through
 the `BurnInSink` export contract, not code. Keep it that way — it's what lets
 this repo be published and adopted on its own.
 
@@ -37,7 +37,7 @@ make docker-build IMG=...   # multi-arch (arm64 + amd64)
 ## PRs
 
 Small, focused PRs. Include tests. CI must be green (build, vet, test, the
-no-glimmer-import guard, and CRD-drift check).
+standalone-import guard, and CRD-drift check).
 
 ---
 
@@ -92,6 +92,7 @@ decides whether a verdict can condemn a node.
 
 ## Design proposals
 
-Significant design changes go in a GEP, in the `glimmer` repository under
-`docs/geps/`, not a design document here. This project's own design is GEP-0178.
-Implementation issues are filed **here**, where the code lands.
+Significant design changes go in a GEP, in this project's private
+design-tracking repository under `docs/geps/`, not a design document here. This
+project's own design is GEP-0178. Implementation issues are filed **here**,
+where the code lands.

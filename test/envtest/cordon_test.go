@@ -299,8 +299,8 @@ func TestDeletingARunReleasesEveryCordonItHeld(t *testing.T) {
 // TestAHeldNodeDeclaresTheHeatAndStopsWhenReleased is issue #280 against a real
 // apiserver.
 //
-// The Glimmer agent's thermal watchdog drains a node whose part passes its trip
-// point, and a soak drives the part past that point on purpose — so every soak
+// A separate fleet agent's thermal watchdog drains a node whose part passes its
+// trip point, and a soak drives the part past that point on purpose — so every soak
 // on this fleet was drained by the safety system and its runner pods killed with
 // SIGKILL, which read back as `Error — hardware unjudged`. The operator's half
 // of the fix is to say on the node that the heat is deliberate.

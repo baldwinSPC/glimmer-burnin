@@ -14,7 +14,7 @@ package contract
 // runner and verdict.
 //
 // The cost fell hardest exactly where the project can least afford it. GEP-0178
-// specifies that Glimmer's pre-Kubernetes path adopts this brain precisely so a
+// specifies that a separate, pre-Kubernetes path adopts this brain precisely so a
 // bare-metal run and an in-cluster run cannot disagree about the same hardware
 // — and that path would have linked controller-runtime it has no cluster to
 // use. One brain, two dispatchers, and only one of them is a Kubernetes client.
@@ -23,9 +23,9 @@ package contract
 // format is unchanged, controller-gen reads the kubebuilder markers here
 // (crd generation already scans the whole module), and no caller had to change
 // to keep compiling. The window for doing it this cheaply was open because no
-// external consumer had adopted pkg/verdict yet: Glimmer imports only
-// pkg/contract today, so there were zero callers to break. It would not have
-// stayed open.
+// external consumer had adopted pkg/verdict yet: the only external consumer
+// imports only pkg/contract today, so there were zero callers to break. It
+// would not have stayed open.
 //
 // hack/invariants/kubernetesfree_test.go is the ledger that now enforces the
 // result rather than asserting it in prose.

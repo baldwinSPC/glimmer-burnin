@@ -71,7 +71,7 @@ var kubernetesCoupled = map[string]string{
 	// the right time to design that seam is when Path A is built and can say
 	// what it actually needs — not speculatively.
 	"pkg/localrun": "PlannedTest holds api.BurnInTestSpec whole, plus RunPhase, Violation, " +
-		"TestScope and AttemptTrigger. This is the package GEP-0178 has Glimmer's Path A " +
+		"TestScope and AttemptTrigger. This is the package GEP-0178 has Path A " +
 		"adopt, so the coupling lands on the path that can use Kubernetes least",
 	"pkg/runnerimages": "resolution is expressed over api.RunnerSpec and api.VendorImage",
 	// Coupled by the same EXECUTION vocabulary as pkg/localrun, and not by a
