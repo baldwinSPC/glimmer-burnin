@@ -65,6 +65,17 @@ type Plan struct {
 	// dispatchers cannot resolve different images for the same test on the same
 	// hardware.
 	Vendor string
+	// HostIP is this machine's primary address, as pkg/hostinfo establishes it
+	// from the routing table. Empty where none could be found.
+	//
+	// It is here for the same reason Vendor is: a BurnInTest may ask for it,
+	// and the two dispatchers must answer from equally authoritative sources.
+	// In a cluster `valueFrom.fieldRef: status.hostIP` is filled by the kubelet;
+	// here it is filled from this field, which the caller probes. Resolved by
+	// the CALLER rather than by Translate so that translation stays a pure
+	// function of the plan — the same reason Node and Vendor are not probed
+	// here either.
+	HostIP string
 	// Tests run in order. A profile is an ordered list, and the order is part of
 	// what it means: a smoke test that gates a soak has to run first.
 	Tests []PlannedTest
