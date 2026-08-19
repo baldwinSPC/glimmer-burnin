@@ -594,14 +594,15 @@ func writeResults(dir string, rep localrun.Report, rz *localrun.Rendezvous, p lo
 	// partial turnout for Pass and for Skip alike.
 	if rz != nil && rz.Rank != nil {
 		rec := rankRecord{
-			Rank:       int(*rz.Rank),
-			NRanks:     int(rz.NRanks),
-			Node:       rep.Node,
-			Phase:      string(rep.Phase),
-			StartedAt:  rep.StartedAt.UTC(),
-			FinishedAt: rep.FinishedAt.UTC(),
-			Results:    rep.Results,
-			Required:   requiredNames(p),
+			Rank:        int(*rz.Rank),
+			NRanks:      int(rz.NRanks),
+			Node:        rep.Node,
+			Phase:       string(rep.Phase),
+			StartedAt:   rep.StartedAt.UTC(),
+			FinishedAt:  rep.FinishedAt.UTC(),
+			Results:     rep.Results,
+			Required:    requiredNames(p),
+			Fingerprint: fingerprint(rep.Node),
 			Note: "One rank of a collective. NOT a verdict: a group verdict is about the " +
 				"COLLECTIVE, and no single rank knows whether every other rank took part. " +
 				"Run `burnin merge` over the directory holding every rank's record.",

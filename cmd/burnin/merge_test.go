@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestMergeRefusesAPartialCollective(t *testing.T) {
 		rankRec(1, 4, "spark-b", passed("nccl", nil)),
 	}
 
-	_, err := mergeRanks(records, 4)
+	_, _, err := mergeRanks(records, 4)
 	if err == nil {
 		t.Fatal("two of four ranks produced a verdict; a partial collective has none")
 	}
@@ -57,7 +58,7 @@ func TestMergeProducesOneResultNamingEveryNode(t *testing.T) {
 		rankRec(2, 3, "spark-c", passed("nccl", map[string]string{"busBandwidthGBs": "41.0"})),
 	}
 
-	rep, err := mergeRanks(records, 3)
+	rep, _, err := mergeRanks(records, 3)
 	if err != nil {
 		t.Fatalf("mergeRanks: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestMergeARankMissingThisTestIsNotAPass(t *testing.T) {
 		rankRec(1, 2, "spark-b"), // ran, but produced no result for "nccl"
 	}
 
-	rep, err := mergeRanks(records, 2)
+	rep, _, err := mergeRanks(records, 2)
 	if err != nil {
 		t.Fatalf("mergeRanks: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestMergeAFailingRankFailsTheCollective(t *testing.T) {
 		rankRec(1, 2, "spark-b", failing),
 	}
 
-	rep, err := mergeRanks(records, 2)
+	rep, _, err := mergeRanks(records, 2)
 	if err != nil {
 		t.Fatalf("mergeRanks: %v", err)
 	}
@@ -208,7 +209,7 @@ func TestMergeAPassingCollectiveExitsZero(t *testing.T) {
 		records[i].Required = map[string]bool{"nccl": true}
 	}
 
-	rep, err := mergeRanks(records, 2)
+	rep, _, err := mergeRanks(records, 2)
 	if err != nil {
 		t.Fatalf("mergeRanks: %v", err)
 	}
@@ -234,7 +235,7 @@ func TestMergeAnOptionalCollectiveDoesNotDecideTheRun(t *testing.T) {
 		records[i].Required = map[string]bool{"nccl": false}
 	}
 
-	rep, err := mergeRanks(records, 2)
+	rep, _, err := mergeRanks(records, 2)
 	if err != nil {
 		t.Fatalf("mergeRanks: %v", err)
 	}
@@ -243,5 +244,61 @@ func TestMergeAnOptionalCollectiveDoesNotDecideTheRun(t *testing.T) {
 	}
 	if got := codeFor(rep, requiredPlan(records)); got == exitFail {
 		t.Error("an optional collective's failure reached the exit code as a hardware verdict")
+	}
+}
+
+// The merged envelope's fingerprint describes THE RANKS, never the machine that
+// ran the merge.
+//
+// A fingerprint is "the hardware this verdict applies to". The merge usually
+// runs on a laptop; probing it would put that laptop's kernel and PCI devices
+// in the envelope as the hardware a collective of accelerator nodes was
+// measured on — a confident claim about machines that took no part in the test.
+func TestMergeTakesTheFingerprintFromTheRanksNotTheMergingHost(t *testing.T) {
+	records := []rankRecord{
+		rankRec(0, 2, "spark-a", passed("nccl", nil)),
+		rankRec(1, 2, "spark-b", passed("nccl", nil)),
+	}
+	records[0].Fingerprint = map[string]string{"spark-a": "kernel=6.11 accelerator=nvidia:2941"}
+	records[1].Fingerprint = map[string]string{"spark-b": "kernel=6.11 accelerator=nvidia:2941"}
+
+	_, fp, err := mergeRanks(records, 2)
+	if err != nil {
+		t.Fatalf("mergeRanks: %v", err)
+	}
+	if len(fp) != 2 || fp["spark-a"] == "" || fp["spark-b"] == "" {
+		t.Fatalf("fingerprint = %v, want one entry per rank's node", fp)
+	}
+
+	id, err := NewRunIdentityFor("spark-a,spark-b", fp)
+	if err != nil {
+		t.Fatalf("NewRunIdentityFor: %v", err)
+	}
+	env, err := id.Final(localrun.Report{Node: "spark-a,spark-b", Phase: api.RunPassed})
+	if err != nil {
+		t.Fatalf("Final: %v", err)
+	}
+	if len(env.Fingerprint) != 2 {
+		t.Errorf("the envelope's fingerprint = %v, want both ranks'", env.Fingerprint)
+	}
+	if h, _ := os.Hostname(); env.Fingerprint[h] != "" {
+		t.Errorf("the merging host (%s) leaked into the fingerprint: %v", h, env.Fingerprint)
+	}
+}
+
+// Records with no fingerprint produce an ABSENT one, not an empty object: a
+// fingerprint nobody established must not look like one that was taken and
+// found nothing.
+func TestMergeWithNoRecordedFingerprintCarriesNone(t *testing.T) {
+	id, err := NewRunIdentityFor("spark-a", nil)
+	if err != nil {
+		t.Fatalf("NewRunIdentityFor: %v", err)
+	}
+	env, err := id.Final(localrun.Report{Node: "spark-a", Phase: api.RunPassed})
+	if err != nil {
+		t.Fatalf("Final: %v", err)
+	}
+	if env.Fingerprint != nil {
+		t.Errorf("Fingerprint = %v, want nil", env.Fingerprint)
 	}
 }

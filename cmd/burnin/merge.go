@@ -73,6 +73,15 @@ type rankRecord struct {
 	StartedAt  time.Time             `json:"startedAt"`
 	FinishedAt time.Time             `json:"finishedAt"`
 	Results    []localrun.TestResult `json:"results"`
+	// Fingerprint is THIS RANK'S hardware, keyed by its node name — the same
+	// shape the envelope carries.
+	//
+	// Recorded per rank because the merge runs somewhere else. The machine
+	// folding the records is often a laptop, and probing IT would attribute a
+	// laptop's kernel and PCI devices to a collective of eight accelerator
+	// nodes: a fingerprint is "the hardware this verdict applies to", and that
+	// would make it a statement about hardware that took no part in the test.
+	Fingerprint map[string]string `json:"fingerprint,omitempty"`
 	// Required names the tests that decide the run's exit code.
 	//
 	// Recorded rather than assumed, because a merge has no plan to read it
@@ -129,12 +138,15 @@ func runMerge(args []string) error {
 		return exitWith(exitError, err)
 	}
 
-	report, err := mergeRanks(records, nranks)
+	report, fingerprint, err := mergeRanks(records, nranks)
 	if err != nil {
 		return exitWith(exitError, err)
 	}
 
-	id, err := NewRunIdentity(report.Node)
+	// The fingerprint comes from the RECORDS, never from this machine. A merge
+	// usually runs on a laptop, and probing it would attribute that laptop's
+	// kernel and PCI devices to a collective of accelerator nodes.
+	id, err := NewRunIdentityFor(report.Node, fingerprint)
 	if err != nil {
 		return exitWith(exitError, err)
 	}
@@ -270,14 +282,14 @@ func loadRankRecords(dirs []string) ([]rankRecord, error) {
 }
 
 // mergeRanks folds N records into the one report a collective is judged on.
-func mergeRanks(records []rankRecord, nranks int) (localrun.Report, error) {
+func mergeRanks(records []rankRecord, nranks int) (localrun.Report, map[string]string, error) {
 	// THE REFUSAL. Checked before anything is folded, because a fold over a
 	// partial turnout produces a plausible-looking verdict and the whole point
 	// is that there is not one.
 	present := map[int]bool{}
 	for _, r := range records {
 		if r.Rank < 0 || r.Rank >= nranks {
-			return localrun.Report{}, fmt.Errorf(
+			return localrun.Report{}, nil, fmt.Errorf(
 				"a record claims rank %d, which is not a rank of %d", r.Rank, nranks)
 		}
 		present[r.Rank] = true
@@ -289,7 +301,7 @@ func mergeRanks(records []rankRecord, nranks int) (localrun.Report, error) {
 		}
 	}
 	if len(missing) > 0 {
-		return localrun.Report{}, fmt.Errorf(
+		return localrun.Report{}, nil, fmt.Errorf(
 			"only %d of %d ranks reported — %s never did. A collective is only MEASURED if every rank "+
 				"took part, so there is no verdict here: a fold over the ranks that happened to report "+
 				"would certify machines nobody looked at. Collect the missing record(s), or re-run",
@@ -297,8 +309,14 @@ func mergeRanks(records []rankRecord, nranks int) (localrun.Report, error) {
 	}
 
 	nodes := make([]string, 0, len(records))
+	fingerprint := map[string]string{}
 	for _, r := range records {
 		nodes = append(nodes, r.Node)
+		// Keyed by node, so the union describes every machine that took part —
+		// exactly what the operator delivers for a Group run.
+		for node, desc := range r.Fingerprint {
+			fingerprint[node] = desc
+		}
 	}
 
 	// Tests are folded BY NAME, in rank 0's order. A rank that ran a different
@@ -312,7 +330,7 @@ func mergeRanks(records []rankRecord, nranks int) (localrun.Report, error) {
 	for _, seed := range records[0].Results {
 		merged, err := mergeOneTest(seed, records, nodes)
 		if err != nil {
-			return localrun.Report{}, err
+			return localrun.Report{}, nil, err
 		}
 		rep.Results = append(rep.Results, merged)
 		switch merged.Phase {
@@ -327,7 +345,7 @@ func mergeRanks(records []rankRecord, nranks int) (localrun.Report, error) {
 		}
 	}
 	rep.Phase = mergedPhase(rep.Results)
-	return rep, nil
+	return rep, fingerprint, nil
 }
 
 // mergeOneTest folds one test across every rank.
