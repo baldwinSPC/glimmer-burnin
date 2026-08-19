@@ -293,7 +293,7 @@ func TestTheTwoHalvesOfTheCLIFitTogether(t *testing.T) {
 	// reads. If that ever stops being true the CLI has two halves and no
 	// feature, so it is asserted rather than assumed.
 	dir := t.TempDir()
-	if err := writeResults(dir, sampleReport(), nil); err != nil {
+	if err := writeResults(dir, sampleReport(), nil, localrun.Plan{Tests: []localrun.PlannedTest{{Name: "compute-smoke", Required: true}}}); err != nil {
 		t.Fatalf("writeResults: %v", err)
 	}
 
@@ -314,7 +314,7 @@ func TestTheTwoHalvesOfTheCLIFitTogether(t *testing.T) {
 
 func TestResultsDirectoryLayoutIsStable(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeResults(dir, sampleReport(), nil); err != nil {
+	if err := writeResults(dir, sampleReport(), nil, localrun.Plan{Tests: []localrun.PlannedTest{{Name: "compute-smoke", Required: true}}}); err != nil {
 		t.Fatalf("writeResults: %v", err)
 	}
 	for _, want := range []string{"run.json", "envelopes", "raw"} {

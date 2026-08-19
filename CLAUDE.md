@@ -231,6 +231,10 @@ pkg/runner/          runner exit-code + key=value stdout parsing
                      NO Kubernetes dependency. Measured: 0 k8s modules.
 pkg/verdict/         threshold evaluation, no I/O
                      NO Kubernetes dependency. Measured: 0 k8s modules.
+pkg/group/           folds N ranks' reports into the ONE result a collective is
+                     judged on: the verdict precedence and the per-metric
+                     Combination election
+                     NO Kubernetes dependency. Measured: 0 k8s modules.
 ```
 
 Shared by both dispatchers, but Kubernetes-coupled (see the ledger below):

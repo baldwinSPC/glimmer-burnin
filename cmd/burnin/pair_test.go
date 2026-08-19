@@ -166,7 +166,7 @@ func TestTheServerWritesARecordAndNotASecondVerdict(t *testing.T) {
 	// engineer comparing them would be comparing a measurement with its echo.
 	dir := t.TempDir()
 	rz := &localrun.Rendezvous{Role: localrun.RoleServer, PeerNode: "spark-b"}
-	if err := writeResults(dir, sampleReport(), rz); err != nil {
+	if err := writeResults(dir, sampleReport(), rz, localrun.Plan{Tests: []localrun.PlannedTest{{Name: "compute-smoke", Required: true}}}); err != nil {
 		t.Fatalf("writeResults: %v", err)
 	}
 

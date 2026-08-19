@@ -142,6 +142,24 @@ func (r *Rendezvous) pairNodes(local string) []string {
 	return []string{local, r.PeerNode}
 }
 
+// groupNodes returns the nodes ONE RANK can honestly name.
+//
+// Just itself — and that is the whole reason `burnin merge` exists.
+//
+// A Group result names EVERY rank's node, because the verdict is about the
+// collective. But no single rank knows the others' node names: the rendezvous
+// contract carries BURNIN_ROOT_NODE and DELIBERATELY NOT A RANK LIST, so a rank
+// that invented the roster would be inventing hardware it never heard from.
+// The operator knows the roster because it planned the run; here the roster is
+// only assembled when the per-rank records are merged.
+//
+// So a rank's own record names one node, truthfully, and the merged result
+// names all N. A rank that padded its list with the root's name would produce
+// a record claiming to be about two machines when it is about one.
+func (r *Rendezvous) groupNodes(local string) []string {
+	return []string{local}
+}
+
 // PlannedTest is one test, with its spec pinned.
 //
 // An ALIAS for plan.Test, which is the same type the operator materialises its
@@ -789,8 +807,14 @@ func finalPhase(results []TestResult) api.RunPhase {
 // point-to-point measurement to one machine sends an engineer to replace the
 // wrong part.
 func NodesFor(p Plan, t PlannedTest) []string {
-	if t.Spec.Scope == api.ScopePair && p.Rendezvous != nil {
+	if p.Rendezvous == nil {
+		return []string{p.Node}
+	}
+	switch t.Spec.Scope {
+	case api.ScopePair:
 		return p.Rendezvous.pairNodes(p.Node)
+	case api.ScopeGroup:
+		return p.Rendezvous.groupNodes(p.Node)
 	}
 	return []string{p.Node}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -15,6 +14,7 @@ import (
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+	burningroup "github.com/baldwinSPC/glimmer-burnin/pkg/group"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 )
 
@@ -543,118 +543,28 @@ func groupRendezvous(rank int, nodes []string, service string) *rendezvous {
 // combineGroup folds every rank's report into the single result the collective
 // is judged on. See the package comment for the precedence rule.
 func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.BurnInTestSpec) runner.Result {
-	out := runner.Result{Metrics: map[string]string{}, Unmeasurable: map[string]bool{}}
+	// The FOLD is pkg/group's, so cmd/burnin elects the same verdict and the
+	// same metric values from the same eight rank reports. What stays here is
+	// the MESSAGE — this side has a pod name to quote and the bare-metal side
+	// has a file path, and neither is a decision.
+	c := burningroup.Combine(rankReports(members))
 
-	// Highest rank first, so a LOWER rank overwrites it and rank 0 wins outright.
-	//
-	// RANK 0 WINNING IS RIGHT FOR A COLLECTIVE MEASURAND AND WRONG FOR A PER-NODE
-	// ONE, and nothing in the metric itself distinguishes them (#121). busBandwidthGBs
-	// is a property of the group and rank 0 is its reporting rank; gpuTempC is a
-	// property of whichever node emitted it, and taking rank 0's would certify
-	// every other node on one node's evidence.
-	//
-	// Choosing a winner differently needs something this operator does not have:
-	// a metric's POLARITY (is higher worse?) is not in pkg/contract, and refusing
-	// to merge on any disagreement would fail closed on every healthy collective
-	// whose ranks each report their own slightly different figure. Both need a
-	// measurement of what a real N-rank runner emits, and none exists yet.
-	//
-	// So the merge is unchanged and the disagreement is RECORDED. That is worth
-	// doing on its own: a stored result which says "ranks disagreed about
-	// gpuTempC" is one an engineer can act on, where a silent 70 next to eight
-	// node names is one they cannot. It changes no verdict, which is the point —
-	// the verdict rule is the part that needs the measurement.
-	// Every rank's answer is kept as it is read, PAIRED WITH THE RANK THAT GAVE
-	// IT. Attributing the discarded value to whichever rank happened to overwrite
-	// it — the obvious shortcut, and my first attempt — produces a note that
-	// names the wrong node, which on a per-node metric is the entire cost of the
-	// bug it exists to report.
-	reported := map[string][]rankValue{}
-	var invalid []string
-	for i := len(members) - 1; i >= 0; i-- {
-		m := members[i]
-		if m.result == nil {
-			continue
-		}
-		for k, v := range m.result.Metrics {
-			reported[k] = append(reported[k], rankValue{rank: m.rank, value: v})
-			out.Metrics[k] = v
-		}
-		invalid = append(invalid, m.result.InvalidNames...)
-	}
-	// A declaration of unmeasurability never overwrites a real measurement, which
-	// is the Pair rule and is right there: two ends of ONE link measuring one
-	// quantity, so if either produced a number the quantity was measurable.
-	//
-	// AT GROUP SCOPE THAT REASONING DOES NOT CARRY, and swallowing the
-	// declaration is a certification. Ranks 0 and 1 emit `eccErrors=0` and rank 2
-	// is a GB10 whose runner correctly emits `eccErrors=n/a` — the worked example
-	// in CLAUDE.md — and the group stored eccErrors=0 with an empty Unmeasurable
-	// set. An `eccErrors Equal 0` gate then passed and all three nodes were
-	// certified, including the one whose gate never ran. The SAME node under Node
-	// scope fails closed on that threshold.
-	//
-	// The merge is still the Pair one, because changing it means deciding what a
-	// group's verdict should be when its ranks disagree about measurability — the
-	// same open question as the value disagreement below, and it wants the same
-	// measurement (#121). What changes is that the declaration is no longer
-	// SILENT: a rank saying "my hardware cannot produce this" while others report
-	// a number is recorded as the disagreement it is.
-	for _, m := range members {
-		if m.result == nil {
-			continue
-		}
-		for k := range m.result.Unmeasurable {
-			if _, measured := out.Metrics[k]; !measured {
-				out.Unmeasurable[k] = true
-				continue
-			}
-			reported[k] = append(reported[k], rankValue{rank: m.rank, value: runner.Unmeasurable})
-		}
+	out := runner.Result{
+		Metrics:      c.Metrics,
+		Unmeasurable: c.Unmeasurable,
+		InvalidNames: c.InvalidNames,
+		Verdict:      c.Verdict,
+		ExitCode:     c.ExitCode,
 	}
 
-	// Now that every rank has been read, elect each key's value by what the
-	// metric SAYS it is rather than by which rank happened to write last.
-	//
-	// pkg/contract.Combination is the missing half of the classification #121
-	// named. Aggregation cannot stand in for it: elapsedS is Sum across windows
-	// and Max across ranks — eight ranks running 300s took 300s, not 2400s — and
-	// eccErrors is Last across windows, which across ranks means "whatever rank 0
-	// said", the defect itself.
-	//
-	// An UNCLASSIFIED key keeps rank 0's value only while the ranks agree, which
-	// is the case where there is nothing to decide. The moment they disagree it
-	// is dropped and declared unmeasurable, so a threshold fails closed rather
-	// than certifying every node on one node's evidence.
-	for k, vals := range reported {
-		merged, ok := combineRanks(k, vals)
-		if !ok {
-			delete(out.Metrics, k)
-			out.Unmeasurable[k] = true
-			continue
-		}
-		out.Metrics[k] = merged
-	}
-
-	// DEDUPED, because attemptOutcome joins the WHOLE list into the message and
-	// that append happens after everything this function bounds. pkg/runner adds
-	// an entry per OFFENDING LINE and progressive reporting is expected there, so
-	// a runner emitting one bad key per sample gives ranks x samples entries —
-	// 64 ranks x 40 samples is 2560 copies of the same name in one status. The
-	// SET is the finding; the count of times it was printed is not.
-	out.InvalidNames = dedupeStrings(invalid)
-
-	verdict, exit := groupVerdict(members)
-	out.Verdict = verdict
-	out.ExitCode = exit
 	// THE ORDER HERE IS THE POINT. groupMessage is the unbounded half — it embeds
 	// each rank's own last stdout line, which nothing caps — so IT is clamped,
 	// and the operator-constructed note is appended AFTER and never truncated.
 	//
-	// The reverse order is what the previous revision did, and it defeated the
-	// fix it shipped alongside: the note was appended to the tail and the clamp
-	// cut the tail, so on exactly the long messages the clamp exists for, the
-	// note went and the runner spew stayed. Since the merge deliberately leaves
+	// The reverse order is what an earlier revision did, and it defeated the fix
+	// it shipped alongside: the note was appended to the tail and the clamp cut
+	// the tail, so on exactly the long messages the clamp exists for, the note
+	// went and the runner spew stayed. Since the merge deliberately leaves
 	// out.Unmeasurable empty when another rank measured the key, that note is the
 	// ONLY record that a rank declared the metric unmeasurable — so truncating it
 	// restored the certification it was written to prevent, silently, in the case
@@ -663,7 +573,7 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 	// Deliberate clauses outlive verbose ones. Everything appended below this
 	// line is something this operator chose to say.
 	out.Message = clampRankSummaries(groupMessage(members))
-	if note := disagreementNote(reported, out.Metrics); note != "" {
+	if note := disagreementNote(readingsToRankValues(c.Readings), out.Metrics); note != "" {
 		out.Message = strings.TrimSpace(out.Message + " [" + note + "]")
 	}
 
@@ -679,65 +589,26 @@ func combineGroup(members []groupMember, logErr error, spec *burninv1alpha1.Burn
 	return out
 }
 
-// groupVerdict applies the precedence rule across every rank and returns the
-// exit code of the rank that decided it.
-func groupVerdict(members []groupMember) (runner.Verdict, int) {
-	reported := 0
+// rankReports adapts this package's members to the shared fold's input.
+func rankReports(members []groupMember) []burningroup.Rank {
+	out := make([]burningroup.Rank, 0, len(members))
 	for _, m := range members {
-		if m.result != nil {
-			reported++
-		}
+		out = append(out, burningroup.Rank{Rank: m.rank, Node: m.node, Result: m.result})
 	}
-	if reported == 0 {
-		// Nobody reported. Reachable only through a build failure, which supplies
-		// its own result; kept exhaustive rather than assumed.
-		return runner.VerdictError, -1
-	}
+	return out
+}
 
-	// Error and Fail are taken from the LOWEST rank holding them, so the exit
-	// code and the verdict describe the same pod. Both are honoured however many
-	// ranks reported: a rank that positively erred or positively failed has
-	// established something, and a silent peer does not erase it.
-	for _, want := range []runner.Verdict{runner.VerdictError, runner.VerdictFail} {
-		for _, m := range members {
-			if m.result != nil && m.result.Verdict == want {
-				return want, m.result.ExitCode
-			}
+// readingsToRankValues adapts the shared fold's readings to what
+// disagreementNote already takes. The note is presentation and stays here; WHO
+// SAID WHAT is a fact about the run and comes from the fold.
+func readingsToRankValues(in map[string][]burningroup.Reading) map[string][]rankValue {
+	out := make(map[string][]rankValue, len(in))
+	for k, vals := range in {
+		for _, v := range vals {
+			out[k] = append(out[k], rankValue{rank: v.Rank, value: v.Value})
 		}
 	}
-
-	// EVERY REMAINING VERDICT REQUIRES A FULL TURNOUT, and Skip needs it for
-	// exactly the same reason Pass does.
-	//
-	// A collective is only measured if every rank took part, so a rank that never
-	// reported is a rank whose participation nobody can vouch for. That is
-	// obvious for Pass. It is just as true for Skip, and Skip is the more
-	// dangerous of the two to get wrong, because a Skip does not fail the RUN —
-	// it records "acceptance does not apply to this hardware" and the run settles
-	// Passed around it.
-	//
-	// The reachable case is not hypothetical. If the root's runner declares the
-	// test inapplicable before the workers are created — which is what
-	// gateWorkersOnRoot does the moment the root terminates early — then N-1
-	// nodes never had a pod at all, and honouring rank 0's declaration for the
-	// group would certify every one of them on evidence from one. A runner may
-	// only declare what it positively established, and rank 0 established
-	// something about rank 0.
-	//
-	// Pair scope does NOT have this guard and must not grow one by symmetry: at
-	// n=2 the server terminating before the client is already an Error when it
-	// exits 0 (no traffic crossed the link), and its Skip is a statement about
-	// the only other participant in a link it is one half of. The asymmetry is
-	// the point — a group has members whose hardware nobody consulted.
-	if reported != len(members) {
-		return runner.VerdictError, members[groupRootRank].result.ExitCode
-	}
-	for _, m := range members {
-		if m.result.Verdict == runner.VerdictSkip {
-			return runner.VerdictSkip, m.result.ExitCode
-		}
-	}
-	return runner.VerdictPass, members[groupRootRank].result.ExitCode
+	return out
 }
 
 // groupMessage states the verdict's subject before it states the evidence.
@@ -1006,81 +877,6 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
-// combineRanks elects the value that describes the group for one metric key,
-// from every rank that reported it.
-//
-// The second return is false when no single value can honestly stand for the
-// group, and the caller then drops the key and marks it unmeasurable.
-//
-// The lowest rank wins for a Collective metric because that is what collective
-// means: every rank measured the same quantity and rank 0 is its conventional
-// reporting rank. For Sum/Max/Min the direction comes from the registry, not
-// from this function guessing a polarity it cannot know — which was the reason
-// #121 could not be fixed by "take the worst value".
-func combineRanks(key string, vals []rankValue) (string, bool) {
-	if len(vals) == 0 {
-		return "", false
-	}
-	// A rank that declared the metric unmeasurable has not measured it, and a
-	// number elected past that declaration would certify the node that said it
-	// could not tell.
-	for _, rv := range vals {
-		if rv.value == runner.Unmeasurable {
-			return "", false
-		}
-	}
-
-	lowest := vals[0]
-	unanimous := true
-	for _, rv := range vals[1:] {
-		if rv.rank < lowest.rank {
-			lowest = rv
-		}
-		if rv.value != vals[0].value {
-			unanimous = false
-		}
-	}
-
-	switch contract.CombinationFor(key) {
-	case contract.CombineCollective:
-		return lowest.value, true
-	case contract.CombineSum, contract.CombineMax, contract.CombineMin:
-		return combineNumeric(contract.CombinationFor(key), vals)
-	default:
-		// Unclassified. Unanimity is not a decision about the metric, it is the
-		// absence of anything to decide.
-		if unanimous {
-			return lowest.value, true
-		}
-		return "", false
-	}
-}
-
-// combineNumeric applies a numeric Combination. A value that is not a number
-// cannot be summed or compared, and inventing an ordering for it would be the
-// same silent guess the classification exists to prevent.
-func combineNumeric(c contract.Combination, vals []rankValue) (string, bool) {
-	acc, err := strconv.ParseFloat(vals[0].value, 64)
-	if err != nil {
-		return "", false
-	}
-	for _, rv := range vals[1:] {
-		f, err := strconv.ParseFloat(rv.value, 64)
-		if err != nil {
-			return "", false
-		}
-		switch c {
-		case contract.CombineSum:
-			acc += f
-		case contract.CombineMax:
-			if f > acc {
-				acc = f
-			}
-		case contract.CombineMin:
-			if f < acc {
-				acc = f
-			}
-		}
-	}
-	return strconv.FormatFloat(acc, 'f', -1, 64), true
-}
+// combineRanks and combineNumeric moved to pkg/group, where cmd/burnin can
+// reach them: two dispatchers electing DIFFERENT values from the same rank
+// reports, under one metric name, is a fleet dashboard nobody can read.
