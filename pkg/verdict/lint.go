@@ -183,10 +183,10 @@ func ValidateThresholdsForKind(kind contract.TestKind, thresholds []contract.Thr
 		// the failure reads as a hardware verdict. Advice, not a refusal: on an
 		// eight-GPU node the same gate is exactly right. See
 		// docs/dev/multi-device.md.
-		if contract.IsSpreadMetric(th.Metric) && th.Applicability != contract.RequiredIfMeasurable {
+		if contract.IsSpreadMetric(th.Metric) && applicabilityOf(th) != contract.RequiredIfMeasurable {
 			add(SeverityUnsound,
 				"%q is a cross-device spread and is n/a on every single-device node (and under MIG, and on a heterogeneous board); its applicability is %s, which fails closed on n/a, so this gate fails every healthy single-device node forever and the failure reads as a hardware verdict. Set applicability: %s, under which an n/a is reported as not evaluated",
-				th.Metric, applicabilityOrDefault(th.Applicability), contract.RequiredIfMeasurable)
+				th.Metric, applicabilityOf(th), contract.RequiredIfMeasurable)
 		}
 
 		// The registry's own opinion about what may decide acceptance. An
@@ -203,13 +203,4 @@ func ValidateThresholdsForKind(kind contract.TestKind, thresholds []contract.Thr
 	}
 
 	return problems
-}
-
-// applicabilityOrDefault spells out the default so a finding about an unset
-// applicability names what the unset value MEANS rather than printing "".
-func applicabilityOrDefault(a contract.Applicability) contract.Applicability {
-	if a == "" {
-		return contract.Required
-	}
-	return a
 }

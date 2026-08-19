@@ -60,9 +60,10 @@ a multi-GPU node the spread between the two is what distinguishes "this whole
 node is slow" from "one device on this node is slow".
 
 Also emitted, as context rather than as gates: `nvbandwidth_ref`, `gpu_name`,
-`device_count` (registered as `deviceCount`, how many devices the runner
-measured; it was `gpu_count` before v0.7 — see docs/dev/multi-device.md),
-`cuda_driver_version`, `transfer_size_bytes`, `test_samples`, `elapsed_s`.
+`devices_visible` (registered as `devicesVisible`: how many devices the runtime
+showed the pod — nvbandwidth iterates them all, but this runner does not yet
+read its allocation budget, so it does not claim `deviceCount`; it was
+`gpu_count` before v0.7 — see docs/dev/multi-device.md), `cuda_driver_version`, `transfer_size_bytes`, `test_samples`, `elapsed_s`.
 
 > The two spellings on stdout are deliberate. The three acceptance keys use the
 > snake spelling the operator's alias table in
@@ -300,7 +301,7 @@ Built and run on a GB10 DGX Spark (aarch64, driver 580.82.09, CUDA 13.0) on
 ```
 nvbandwidth_ref=v0.10.0
 gpu_name=NVIDIA GB10
-gpu_count=1
+gpu_count=1   # captured before v0.7; the runner now prints devices_visible
 cuda_driver_version=13000
 transfer_size_bytes=536870912
 test_samples=3

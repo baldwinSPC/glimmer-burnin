@@ -45,16 +45,17 @@ const deviceFoldHeader = "gpu-burn/device_fold.h"
 // (they are the noAccelerator set in TestDriverInjectionIsDeclaredWhereItIsNeeded)
 // and are listed here too so the table is total over runnerDirs.
 func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
-	// The helper name whose presence in a runner's source is the claim.
-	const helper = "burnin::devices::planIteration"
+	// The claim is the INCLUDE, not a call spelling: a runner that converts with
+	// `using namespace burnin::devices;` calls planIteration unqualified, and a
+	// substring on the qualified name would read it as still pending. The
+	// header is only ever included by a runner that iterates through it.
+	const helper = `#include "device_fold.h"`
 
 	converted := map[string]bool{}
 
 	exempt := map[string]string{
-		"memory-bw":         "nvbandwidth iterates every visible device itself; kCases gates the worst cell and publishes the best (the verdict-semantics precedent)",
-		"memory-bw-rocm":    "the ROCm sibling of memory-bw; the wrapped tool iterates",
-		"dcgm-diag":         "dcgmi enumerates and diagnoses every device the driver exposes; the runner wraps its verdict",
-		"host-health":       "reads NVML per GPU already, and its counters are per node by construction",
+		"dcgm-diag":         "a node-wide, read-only diagnostic: dcgmi enumerates and diagnoses every device the driver exposes, loads nothing, and reports devices_visible rather than claiming deviceCount",
+		"host-health":       "a node-wide, read-only probe: NVML per GPU already, loads nothing, reports devices_visible rather than claiming deviceCount",
 		"fingerprint-probe": "READS ABOUT accelerators over sysfs and never opens one",
 		"nccl":              "one rank per pod is the measurement at Pair and Group scope; Node scope over all visible devices is its own design (P0.2)",
 		"nccl-rocm":         "the ROCm sibling of nccl; same reason",
@@ -70,6 +71,14 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 	// delivery step in docs/dev/multi-device.md that converts it; the issue
 	// number is the issue that converts it.
 	pending := map[string]string{
+		// memory-bw's nvbandwidth iterates every VISIBLE device, so its
+		// conversion is the allocation budget check (budget ≠ visible is exit
+		// 3), not per-device iteration; until then it reports devices_visible
+		// and does not claim deviceCount. memory-bw-rocm is a hand-written HIP
+		// loop on device 0 — no wrapped tool iterates for it — and needs the
+		// full conversion.
+		"memory-bw":          "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
+		"memory-bw-rocm":     "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
 		"gpu-burn":           "#399 — delivery step 2 (soak family, concurrent default)",
 		"thermal-soak":       "#399 — delivery step 2 (soak family, concurrent default)",
 		"gpu-burn-rocm":      "#399 — delivery step 2 (soak family, concurrent default)",
@@ -130,7 +139,7 @@ func sourceMentions(t *testing.T, dir, needle string) bool {
 			continue
 		}
 		if strings.HasSuffix(name, "_test.cc") || strings.HasSuffix(name, "_test.go") || name == "device_fold.h" {
-			continue // the header defines the helper; only a caller counts
+			continue // the header and its test are not a runner including it
 		}
 		raw, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -165,7 +174,7 @@ func TestDeviceFoldAllowSetsAgreeWithTheCLI(t *testing.T) {
 	if len(matches) == 0 {
 		t.Fatalf("found no vendor allow-set in %s; the pattern this guard reads has moved", deviceFoldHeader)
 	}
-	var headerExact []string
+	var headerExact, headerPrefixes []string
 	quoted := regexp.MustCompile(`"([^"]+)"`)
 	for _, m := range matches {
 		domain := m[1]
@@ -179,33 +188,52 @@ func TestDeviceFoldAllowSetsAgreeWithTheCLI(t *testing.T) {
 			if !strings.HasPrefix(q[1], domain) {
 				t.Errorf("%s: prefix %q is not under its own vendor domain %q", deviceFoldHeader, q[1], domain)
 			}
+			headerPrefixes = append(headerPrefixes, q[1])
 		}
 	}
 	sort.Strings(headerExact)
-	cli := localrun.VendorResourceNames()
-	if strings.Join(headerExact, ",") != strings.Join(cli, ",") {
+	sort.Strings(headerPrefixes)
+	if cli := localrun.VendorResourceNames(); strings.Join(headerExact, ",") != strings.Join(cli, ",") {
 		t.Errorf("device_fold.h exact allow-set %v and pkg/localrun.VendorResourceNames %v differ; "+
 			"the two dispatchers would read one profile's accelerator request as two different things", headerExact, cli)
 	}
+	// Prefixes too: a MIG-sliced profile (nvidia.com/mig-1g.5gb: 7) that the
+	// runner counts as seven instances must not be a profile the CLI reads as
+	// "no accelerator" and runs with no device at all.
+	if cli := localrun.VendorResourcePrefixes(); strings.Join(headerPrefixes, ",") != strings.Join(cli, ",") {
+		t.Errorf("device_fold.h prefix allow-set %v and pkg/localrun.VendorResourcePrefixes %v differ; "+
+			"a MIG profile would mean instances to the runner and nothing to the CLI", headerPrefixes, cli)
+	}
 }
 
-// TestDeviceFoldTablesAgreeWithTheRegistry reads every CONVERTED runner's fold
-// table and asserts each Min/Max/Sum entry agrees with the registry's
-// Aggregation for the key's canonical name — so a runner cannot decide,
-// privately, that a floor is a ceiling. Once entries are the wall-clock and
-// identity keys and are not checked against a direction.
+// TestDeviceFoldTablesAgreeWithTheRegistry reads every runner's fold table and
+// asserts each Min/Max/Sum entry agrees with the registry's Aggregation for
+// the key's canonical name — so a runner cannot decide, privately, that a floor
+// is a ceiling.
+//
+// Two dimensions, deliberately: Aggregation is ACROSS WINDOWS, the table is
+// ACROSS DEVICES, and they agree exactly where Aggregation names a direction
+// (Min, Max, Sum). A registered Last metric is the class where Aggregation
+// says nothing about direction — a lifetime counter such as eccErrors is Last
+// across windows and SUMS across devices; a label is Last and is emitted Once
+// — so a Last metric is not checked against the table's direction, and an
+// unregistered key is not checked at all (nothing declared it). Once entries
+// are never checked.
 //
 // The table is `static const burnin::devices::FoldRule kDeviceFold[] = { {"raw_key", Fold::Min}, … };`
-// in the runner's own source. Today no runner is CONVERTED, so this asserts
-// only that the pattern is readable — the moment one converts, its table is
-// held to the registry.
+// in the runner's own source. A runner that includes the header must declare
+// one that this guard can read — a converted runner whose table yields no
+// entries would pass vacuously, and a floor could be declared a ceiling in
+// private.
 func TestDeviceFoldTablesAgreeWithTheRegistry(t *testing.T) {
-	entry := regexp.MustCompile(`\{"([a-z0-9_]+)",\s*(?:burnin::devices::)?Fold::(Min|Max|Sum|Once)\}`)
+	entry := regexp.MustCompile(`\{"([a-z0-9_]+)",\s*(?:burnin::)?(?:devices::)?Fold::(Min|Max|Sum|Once)\}`)
 	found := 0
 	for _, d := range runnerDirs(t) {
 		if _, err := os.Stat(filepath.Join(d, "device_fold.h")); err != nil {
 			continue
 		}
+		includes := sourceMentions(t, d, `#include "device_fold.h"`)
+		perDir := 0
 		entries, err := os.ReadDir(d)
 		if err != nil {
 			t.Fatal(err)
@@ -231,6 +259,7 @@ func TestDeviceFoldTablesAgreeWithTheRegistry(t *testing.T) {
 			kind, _ := kindForDir(d)
 			for _, m := range entry.FindAllStringSubmatch(body, -1) {
 				found++
+				perDir++
 				// Through the real parser for the runner's kind, so an alias
 				// table entry is honoured the way it is at harvest time.
 				parsed := runner.Parse(string(kind), m[1]+"=1\n", 0)
@@ -248,13 +277,22 @@ func TestDeviceFoldTablesAgreeWithTheRegistry(t *testing.T) {
 				if m[2] == "Once" {
 					continue
 				}
-				got := contract.AggregationFor(canonical)
+				reg, registered := contract.Lookup(canonical)
+				if !registered || reg.Aggregation == contract.AggLast {
+					continue // no direction to agree with; see the doc comment
+				}
+				got := reg.Aggregation
 				if got != want {
 					t.Errorf("%s/%s folds %q (%s) as %s across devices but the registry aggregates it %s across windows; "+
 						"the direction is the metric's, declared once beside its name — fix the table or the registry, not both",
 						d, name, m[1], canonical, m[2], got)
 				}
 			}
+		}
+		if includes && perDir == 0 {
+			t.Errorf("%s includes device_fold.h but declares no kDeviceFold table this guard can read "+
+				"(`{\"raw_key\", Fold::Min}` entries); a converted runner's fold direction must be checkable here, "+
+				"or a floor can be declared a ceiling in private", d)
 		}
 	}
 	t.Logf("checked %d fold-table entries", found)

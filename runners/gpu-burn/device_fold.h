@@ -30,6 +30,7 @@
 #define BURNIN_DEVICE_FOLD_H
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -139,10 +140,10 @@ struct VendorResources {
 };
 
 // The allow-sets, one per vendor image, in ONE place. A runner passes the one
-// for the vendor it is built for. Every exact name here must also be a key of
-// pkg/localrun's vendorResources table (the bare-metal CLI reads the same
-// profile), and runners/devicefold_test.go refuses drift between the two.
-// The prefixes are count-shaped resource families the CLI never sees.
+// for the vendor it is built for. Every exact name and every prefix here must
+// also be in pkg/localrun's vendorResources / vendorResourcePrefixes tables
+// (the bare-metal CLI reads the same profile), and runners/devicefold_test.go
+// refuses drift between the two.
 inline VendorResources nvidiaResources() { return {"nvidia.com/", {"nvidia.com/gpu"}, {"nvidia.com/mig-"}}; }
 inline VendorResources amdResources() { return {"amd.com/", {"amd.com/gpu"}, {}}; }
 
@@ -153,8 +154,9 @@ inline bool startsWith(const std::string &s, const std::string &p) {
 inline bool parseWhole(const std::string &s, long *out) {
   if (s.empty()) return false;
   char *end = nullptr;
+  errno = 0;
   const long v = std::strtol(s.c_str(), &end, 10);
-  if (end == nullptr || *end != '\0' || v < 0) return false;
+  if (errno == ERANGE || end == nullptr || *end != '\0' || v < 0) return false;
   *out = v;
   return true;
 }
@@ -162,9 +164,11 @@ inline bool parseWhole(const std::string &s, long *out) {
 
 inline Budget parseBudget(const char *csv, const VendorResources &vendor) {
   if (csv == nullptr) return {Budget::Absent, 0, ""};
-  // Set but empty is not a state the operator produces (it omits the variable
-  // when there are no limits), so treat it as absent rather than invent one.
-  if (*csv == '\0') return {Budget::Absent, 0, ""};
+  // Set but EMPTY is not a state the operator produces — it omits the variable
+  // when there are no limits — so it is somebody overriding the injected value
+  // to nothing, which would otherwise read as Absent and silently disable the
+  // allocation check. Malformed, so the escape hatch is a visible exit 3.
+  if (*csv == '\0') return {Budget::Malformed, 0, "(set but empty)"};
 
   long total = 0;
   bool matched = false;
@@ -251,8 +255,13 @@ inline Plan planIteration(int visible, const Budget &b) {
       break;
   }
   if (b.count == static_cast<long>(visible)) return {Plan::Iterate, visible, ""};
-  char buf[256];
-  if (b.count < visible) {
+  char buf[320];
+  if (b.count == 0) {
+    std::snprintf(buf, sizeof(buf),
+                  "this pod's limits request no accelerator this runner counts, yet the runtime shows %d device(s); "
+                  "that is the GPU leak — devices visible that were never allocated — and none of them is measured",
+                  visible);
+  } else if (b.count < visible) {
     std::snprintf(buf, sizeof(buf),
                   "the runtime shows %d device(s) but this pod was allocated %ld; a budget is a count, not an identity, so which devices are this pod's cannot be established (legacy-runtime host injecting NVIDIA_VISIBLE_DEVICES=all?) — no device is measured",
                   visible, b.count);
@@ -301,13 +310,19 @@ inline int combineExitCodes(const std::vector<int> &codes) {
   return 0;
 }
 
-// Spread is one homogeneity figure: (max − min) / max × 100 across devices,
-// or n/a — a POSITIVE claim: one device, a heterogeneous board, MIG, or a
-// key no device reported — with the reason kept so the runner can say which.
+// Spread is one homogeneity figure: (max − min) / max × 100 across devices;
+// or n/a — a POSITIVE claim that there is nothing to spread across: one
+// device, a heterogeneous board, MIG; or OMITTED — the base metric is missing
+// from at least one device, which means a probe failed, and "we could not
+// look" stays an omission (the base metric itself is absent from the fold and
+// fails closed downstream; its spread must not be declared anything). The
+// reason is kept so the runner can say which.
 struct Spread {
-  bool measurable;
-  double pct;
-  const char *whyNot;  // when !measurable
+  enum State { Measured, NotApplicable, Omitted };
+  State state;
+  double pct;          // Measured only
+  const char *whyNot;  // NotApplicable and Omitted
+  bool measurable() const { return state == Measured; }
 };
 
 struct Folded {
@@ -327,7 +342,14 @@ struct Folded {
 inline Folded fold(const std::vector<DeviceReport> &devs, const std::vector<FoldRule> &rules,
                    const char *primaryKey) {
   Folded out;
-  if (devs.empty()) return out;
+  if (devs.empty()) {
+    // Nothing was read, so nothing is declared: not homogeneous, not known.
+    out.homogeneityKnown = false;
+    return out;
+  }
+  // The runtime index of the first report, not position 0: a device that
+  // errored before reporting is not in devs, so devs.front().index need not be 0.
+  out.worstIndex = devs.front().index;
 
   for (const auto &r : rules) {
     bool seen = false;
@@ -393,21 +415,24 @@ inline Folded fold(const std::vector<DeviceReport> &devs, const std::vector<Fold
 // them measures one physical part several times and reads 0 on a degraded one.
 inline Spread spreadOf(const std::vector<DeviceReport> &devs, const char *key, bool absoluteFigure,
                        const Folded &f, bool underMig) {
-  if (underMig) return {false, 0, "MIG instances share one clock, power and thermal domain"};
-  if (absoluteFigure && !f.homogeneityKnown) return {false, 0, "device identities were not all read, so homogeneity is unknown"};
-  if (absoluteFigure && !f.homogeneous) return {false, 0, "heterogeneous board; an absolute spread across unlike parts is not a measurement"};
   double lo = 0, hi = 0;
-  int n = 0;
+  size_t n = 0;
   for (const auto &d : devs) {
     auto it = d.values.find(key);
     if (it == d.values.end()) continue;
     if (n == 0) { lo = hi = it->second; } else { lo = std::min(lo, it->second); hi = std::max(hi, it->second); }
     ++n;
   }
-  if (n == 0) return {false, 0, "no device reported the base metric"};
-  if (n == 1) return {false, 0, "one device; nothing to spread across"};
-  if (!(hi > 0) || !std::isfinite(hi) || !std::isfinite(lo)) return {false, 0, "readings admit no ratio"};
-  return {true, (hi - lo) / hi * 100.0, nullptr};
+  // A device that did not report the base metric had a probe fail. That is an
+  // omission, never a declaration — checked FIRST, because "one device
+  // reported" on an eight-device board is not "one device".
+  if (n < devs.size() || devs.empty()) return {Spread::Omitted, 0, "at least one device did not report the base metric; a probe failed, and that is an omission, not a claim"};
+  if (underMig) return {Spread::NotApplicable, 0, "MIG instances share one clock, power and thermal domain"};
+  if (absoluteFigure && !f.homogeneityKnown) return {Spread::Omitted, 0, "device identities were not all read, so homogeneity is unknown and an absolute spread cannot be declared either way"};
+  if (absoluteFigure && !f.homogeneous) return {Spread::NotApplicable, 0, "heterogeneous board; an absolute spread across unlike parts is not a measurement"};
+  if (n == 1) return {Spread::NotApplicable, 0, "one device; nothing to spread across"};
+  if (!(hi > 0) || !std::isfinite(hi) || !std::isfinite(lo)) return {Spread::Omitted, 0, "readings admit no ratio"};
+  return {Spread::Measured, (hi - lo) / hi * 100.0, nullptr};
 }
 
 // ── Output ─────────────────────────────────────────────────────────────────
@@ -437,13 +462,25 @@ inline void printFold(std::FILE *out, const std::vector<DeviceReport> &devs, int
   if (f.homogeneityKnown) std::fprintf(out, "device_homogeneous=%s\n", f.homogeneous ? "true" : "false");
   for (const auto &s : spreads) {
     const Spread sp = spreadOf(devs, s.ofKey, s.absoluteFigure, f, underMig);
-    if (sp.measurable) {
-      std::fprintf(out, "%s=%.2f\n", s.spreadKey, sp.pct);
-    } else {
-      // n/a is a positive claim and the reason rides beside it, on stderr,
-      // where it cannot be mistaken for a metric.
-      std::fprintf(out, "%s=n/a\n", s.spreadKey);
-      std::fprintf(stderr, "%s=n/a: %s\n", s.spreadKey, sp.whyNot);
+    switch (sp.state) {
+      case Spread::Measured:
+        std::fprintf(out, "%s=%.2f\n", s.spreadKey, sp.pct);
+        break;
+      case Spread::NotApplicable:
+        std::fprintf(out, "%s=n/a\n", s.spreadKey);
+        break;
+      case Spread::Omitted:
+        // Nothing on stdout: absence is the only honest report of a probe
+        // that failed, and a threshold on the key then fails closed.
+        break;
+    }
+    if (sp.whyNot != nullptr) {
+      // The reason, on stderr, and DELIBERATELY NOT in key=value shape: a
+      // container log is stdout and stderr merged, pkg/runner splits every
+      // line on the first '=' with last-occurrence-wins, so "<key>=n/a: why"
+      // arriving after "<key>=n/a" would REPLACE the declaration with prose
+      // and turn a positive n/a into a non-numeric value that fails closed.
+      std::fprintf(stderr, "# spread %s not reported: %s\n", s.spreadKey, sp.whyNot);
     }
   }
 }
@@ -495,10 +532,12 @@ inline std::string renderPerDeviceArtifact(const std::vector<DeviceReport> &devs
       if (!firstVal) s += ", ";
       firstVal = false;
       char num[64];
-      if (std::isfinite(kv.second)) {
-        std::snprintf(num, sizeof(num), "%.6g", kv.second);
-      } else {
+      if (!std::isfinite(kv.second)) {
         std::snprintf(num, sizeof(num), "null");  // JSON has no NaN; null says "no number"
+      } else if (kv.second == std::floor(kv.second) && std::fabs(kv.second) < 1e15) {
+        std::snprintf(num, sizeof(num), "%.0f", kv.second);  // a counter stays an integer
+      } else {
+        std::snprintf(num, sizeof(num), "%.17g", kv.second);  // round-trips a double exactly
       }
       s += "\"" + detail::jsonEscape(kv.first) + "\": " + num;
     }

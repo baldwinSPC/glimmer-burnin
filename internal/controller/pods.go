@@ -737,6 +737,44 @@ func firstPodFailure(pod *corev1.Pod) (reason, detail string) {
 	return "pod failed before the runner container terminated", pod.Status.Message
 }
 
+// pendingDetail is why a pod that never finished never got going, for the
+// overdue Error paths at every scope — the same rule as carrying the kubelet's
+// message for a container that never started (#52). A pod that was never
+// scheduled has no stdout, so the scheduler's PodScheduled=False message is the
+// only evidence there is: "0/3 nodes are available: 3 Insufficient
+// nvidia.com/gpu" names the fix — a BurnInTest asking for more accelerators
+// than the node holds — where the generic sentence names only the class. A
+// pod that WAS scheduled and is stuck pulling has the container's Waiting
+// reason and message instead ("ImagePullBackOff: failed to resolve …"). It is
+// DETAIL, appended after the reason and clamped, never a substitute for it;
+// empty when the pod carries neither, so the message reads as before.
+func pendingDetail(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse {
+			d := strings.TrimSpace(c.Message)
+			if d == "" {
+				d = c.Reason
+			}
+			if d != "" {
+				return " (scheduler: " + clampPodDetail(d) + ")"
+			}
+		}
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if w := cs.State.Waiting; w != nil && w.Reason != "" {
+			d := w.Reason
+			if m := strings.TrimSpace(w.Message); m != "" {
+				d += ": " + m
+			}
+			return " (kubelet: " + clampPodDetail(d) + ")"
+		}
+	}
+	return ""
+}
+
 // podLive reports whether a pod is still occupying its node.
 //
 // This is the unit MaxConcurrentNodes is enforced in, so it must answer the

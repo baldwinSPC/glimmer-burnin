@@ -95,7 +95,13 @@ PASS on a pod handed one card, which is the case that gate exists to fail. So:
   bare metal, where `--gpus all` genuinely IS the allocation — the runner
   iterates every visible device and says so; that fallback is safe there
   specifically, and it is why the CSV is only ever ABSENT or COMPLETE, never
-  partial.
+  partial. Set-but-EMPTY is not a state the operator produces, so the header
+  reads it as Malformed (exit 3), not Absent: it is somebody overriding the
+  injected value to nothing, and the escape hatch must be visible. The
+  variable is on the CLI's reserved list; in-cluster, `spec.runner.env` is
+  appended after the operator's own variables and would override it — a
+  pre-existing gap for every reserved name (`BURNIN_ROLE` included), tracked
+  separately (#404), not widened here.
 
 *Two iteration modes, one duration budget.* `durationSeconds` is the TEST's
 budget and does not grow with the board. Four reasons, none of them "the
@@ -198,13 +204,18 @@ suffix-bearing name must never hold a non-float, and a dimension in
    MIG it counts INSTANCES, not parts (56 on an 8-GPU node sliced `1g.5gb`),
    and a MIG fleet gates the instance count. It is distinct from
    `acceleratorCount` (fingerprint-probe: what the node's PCI bus HAS) and from
-   `devicesVisible` (Evidence: what the runtime showed the pod). It SUPERSEDES
-   the unregistered `gpuCount` that memory-bw, host-health and dcgm-diag emit
-   today as `gpu_count`. That is a wire break, made deliberately: `gpu_count`
-   is NOT aliased to it, because two keys must never alias to one name, so
-   the three emitters migrate to `device_count` in the SAME release as the
-   registration (delivery steps 1 and 4 together), or a rolling upgrade
-   produces the two-names-for-one-fact state being fixed. Beside it,
+   `devicesVisible` (Evidence: what the runtime showed the pod). **Only a
+   runner that folded devices claims `deviceCount`.** A runner that merely
+   SAW them — host-health and dcgm-diag are node-wide, read-only probes that
+   load nothing; memory-bw's nvbandwidth iterates every visible device but
+   the wrapper does not yet read its budget; memory-bw-rocm is a HIP loop on
+   device 0 — reports `devices_visible` for the count it saw and does NOT
+   claim the gate, so `deviceCount Equal 8` on such a kind fails closed
+   (metric absent) rather than passing on a pod handed one card. That is what
+   the unregistered `gpuCount` those four emit today as `gpu_count` becomes:
+   a wire break, made deliberately, `gpu_count` NOT aliased (two keys must
+   never alias to one name), landing in the same change as the registration.
+   Beside it,
    `deviceWindowS` (S, `Last`, Evidence) is the per-device window the runner
    actually used — under concurrent iteration it EQUALS `durationRequestedS`,
    so a concurrent soak's value is not read as evidence of slicing — and
@@ -257,8 +268,10 @@ suffix-bearing name must never hold a non-float, and a dimension in
   max-of-max and sum-of-sum compose; a lifetime counter summed across devices
   and taken `Last` across windows is the node's total at the last window. A
   spread is `Max` across windows under an `LTE` ceiling, which is monotone in
-  the gated direction, so **`AbortEarly` qualifies for it** — a new abortable
-  gate, tested as such.
+  the gated direction, so **`AbortEarly` qualifies for it** through the
+  existing `monotoneBreach` rule (`Max` under `LTE`), with no new case; the
+  step-2 conversion adds a soak test that a spread ceiling aborts a segmented
+  soak the way any `Max`/`LTE` gate does.
 - **With Group.** The per-device fold happens INSIDE the rank, before the rank
   reports; `Combination` then merges ranks and nothing in `group.go` learns
   devices exist. `deviceCount` is unclassified there, and an unclassified key
@@ -295,8 +308,9 @@ Tracked in #398; each step below is its own issue.
 1. This note, the contract names, `BURNIN_RESOURCE_LIMITS` and the overdue
    message, the shared header and its tests, the invariant text and the
    total table (every CUDA/HIP runner PENDING), and `gpu_count` →
-   `device_count` in memory-bw, host-health and dcgm-diag (the wire break
-   lands with the name that supersedes it). Nothing changes what any
+   `devices_visible` in memory-bw, memory-bw-rocm, host-health and dcgm-diag
+   (the wire break lands with the registration; none of the four claims
+   `deviceCount`, because none has folded devices). Nothing changes what any
    published image MEASURES.
 2. The soak family (`soak_core.cuh`, `soak_core_rocm.h`): concurrent default (#399).
 3. clockprobe, compute-smoke, gemm-sweep and their `-rocm` siblings:

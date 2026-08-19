@@ -343,6 +343,7 @@ with four remapped rows as having twelve after a three-segment soak.
 | `BURNIN_DURATION_SECONDS` | how long the test should run |
 | `BURNIN_ATTEMPT` | which attempt this is (1-based). A runner may use it for seeding or logging; nothing in the contract depends on it |
 | `BURNIN_VARIANT_<AXIS>` | one per variant axis, axis name upper-cased, value passed through uninterpreted |
+| `BURNIN_RESOURCE_LIMITS` | the pod's own `spec.resources.limits`, verbatim: `name=quantity,…` in sorted key order (`memory=2Gi,nvidia.com/gpu=8,rdma/hca=1`). Absent when the test declares no limits. A multi-device runner reads its own vendor's count-shaped names out of it to learn how many accelerators it was ALLOCATED, as distinct from how many it can see — the operator interprets nothing. See [docs/dev/multi-device.md](dev/multi-device.md) |
 
 The operator does not read the variant values back. Interpreting a precision or
 a message size is the runner's job — a reconciler branching on `precision: fp4`

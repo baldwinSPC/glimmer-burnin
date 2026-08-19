@@ -56,7 +56,16 @@ DeviceReport dev(int index, const char *bus, const char *name, const char *cc,
 void testBudget() {
   // Absent: not set at all. Bare metal, or a test with no limits.
   check(parseBudget(nullptr, nvidia()).state == Budget::Absent, "unset variable is Absent");
-  check(parseBudget("", nvidia()).state == Budget::Absent, "empty variable is Absent (the operator never emits it)");
+  // Set but EMPTY is somebody overriding the injected value to nothing; read
+  // as Absent it would silently disable the allocation check. Malformed.
+  check(parseBudget("", nvidia()).state == Budget::Malformed, "set-but-empty variable is Malformed, not Absent");
+  // A saturating quantity is refused rather than summed as LONG_MAX.
+  check(parseBudget("nvidia.com/gpu=99999999999999999999999", nvidia()).state == Budget::Malformed, "an out-of-range quantity is Malformed");
+  check(parseBudget("nvidia.com/gpu=", nvidia()).state == Budget::Malformed, "an empty quantity is Malformed");
+  check(parseBudget("nvidia.com/", nvidia()).state == Budget::Malformed, "the bare domain with no = is Malformed");
+  check(parseBudget("nvidia.com/mig=2", nvidia()).state == Budget::Unrecognised, "nvidia.com/mig without the dash is not the MIG prefix: Unrecognised");
+  Budget lead = parseBudget(",nvidia.com/gpu=2", nvidia());
+  check(lead.state == Budget::Established && lead.count == 2, "a leading comma is skipped");
 
   // The intended configuration.
   Budget b = parseBudget("memory=2Gi,nvidia.com/gpu=8,rdma/hca=1", nvidia());
@@ -137,7 +146,8 @@ void testPlan() {
 
   // Allocated nothing, can see something: the leak with no request at all.
   p = planIteration(8, zero);
-  check(p.outcome == Plan::Error, "budget 0 with devices visible is an Error");
+  check(p.outcome == Plan::Error && p.message.find("GPU leak") != std::string::npos,
+        "budget 0 with devices visible is an Error that names the leak");
 
   // Unrecognised and malformed budgets never iterate.
   p = planIteration(8, unrec);
@@ -225,6 +235,21 @@ void testFold() {
   Folded u = fold(unread, rules, "sustained_clock_pct");
   check(!u.homogeneityKnown, "an unread identity leaves homogeneity unknown; nothing is declared");
 
+  // A board whose device 0 errored before reporting: devs starts at index 1,
+  // and with the primary key absent everywhere the default worst is the FIRST
+  // REPORT's runtime index, never position 0 — index and bus id must name the
+  // same device.
+  std::vector<DeviceReport> noZero = {
+      dev(1, "b", "X", "1", {{"gpu_temp_c", 70}}),
+      dev(2, "c", "X", "1", {{"gpu_temp_c", 71}}),
+  };
+  Folded nz = fold(noZero, rules, "sustained_clock_pct");
+  check(nz.worstIndex == 1 && nz.worstBusId == "b", "worst index and bus id name the same (first) device when the primary key is absent");
+
+  // Nothing reported at all: nothing is declared.
+  Folded none = fold({}, rules, "sustained_clock_pct");
+  check(!none.homogeneityKnown, "an empty fold declares no homogeneity");
+
   // Single device: worst is itself.
   std::vector<DeviceReport> spark = {dev(0, "0000:01:00.0", "NVIDIA GB10", "12.1", {{"sustained_clock_pct", 83}})};
   Folded s = fold(spark, rules, "sustained_clock_pct");
@@ -243,18 +268,18 @@ void testSpreads() {
   };
   Folded f = fold(board, rules, "sustained_clock_pct");
   Spread sp = spreadOf(board, "sustained_clock_pct", /*absolute=*/false, f, /*mig=*/false);
-  check(sp.measurable && near(sp.pct, (95.0 - 60.0) / 95.0 * 100.0), "spread is (max − min) / max × 100 across the board");
+  check(sp.measurable() && near(sp.pct, (95.0 - 60.0) / 95.0 * 100.0), "spread is (max − min) / max × 100 across the board");
   sp = spreadOf(board, "achieved_tflops", true, f, false);
-  check(sp.measurable && near(sp.pct, (800.0 - 500.0) / 800.0 * 100.0), "an absolute spread on a homogeneous board is measurable");
+  check(sp.measurable() && near(sp.pct, (800.0 - 500.0) / 800.0 * 100.0), "an absolute spread on a homogeneous board is measurable");
 
   // n/a is a POSITIVE claim, in each of its three cases, and the reason is kept.
   std::vector<DeviceReport> spark = {dev(0, "a", "GB10", "12.1", {{"sustained_clock_pct", 83}})};
   Folded s = fold(spark, rules, "sustained_clock_pct");
   sp = spreadOf(spark, "sustained_clock_pct", false, s, false);
-  check(!sp.measurable && std::string(sp.whyNot).find("one device") != std::string::npos, "one device: n/a, nothing to spread across");
+  check(sp.state == Spread::NotApplicable && std::string(sp.whyNot).find("one device") != std::string::npos, "one device: n/a, nothing to spread across");
 
   sp = spreadOf(board, "achieved_tflops", true, f, /*mig=*/true);
-  check(!sp.measurable && std::string(sp.whyNot).find("MIG") != std::string::npos, "under MIG every spread is n/a");
+  check(sp.state == Spread::NotApplicable && std::string(sp.whyNot).find("MIG") != std::string::npos, "under MIG every spread is n/a");
 
   std::vector<DeviceReport> mixed = {
       dev(0, "a", "A100", "8.0", {{"sustained_clock_pct", 90}, {"achieved_tflops", 300}}),
@@ -262,10 +287,10 @@ void testSpreads() {
   };
   Folded m = fold(mixed, rules, "sustained_clock_pct");
   sp = spreadOf(mixed, "achieved_tflops", true, m, false);
-  check(!sp.measurable && std::string(sp.whyNot).find("heterogeneous") != std::string::npos,
+  check(sp.state == Spread::NotApplicable && std::string(sp.whyNot).find("heterogeneous") != std::string::npos,
         "an absolute spread on a heterogeneous board is n/a — it would read ~40% on healthy hardware");
   sp = spreadOf(mixed, "sustained_clock_pct", false, m, false);
-  check(sp.measurable, "a percentage-of-own-rating spread IS measurable on a heterogeneous board");
+  check(sp.measurable(), "a percentage-of-own-rating spread IS measurable on a heterogeneous board");
 
   // Unknown homogeneity blocks an absolute spread but not a relative one.
   std::vector<DeviceReport> unread = {
@@ -273,10 +298,17 @@ void testSpreads() {
       dev(1, "b", "", "", {{"achieved_tflops", 290}, {"sustained_clock_pct", 89}}, false),
   };
   Folded u = fold(unread, rules, "sustained_clock_pct");
-  check(!spreadOf(unread, "achieved_tflops", true, u, false).measurable, "unknown homogeneity: absolute spread n/a");
-  check(spreadOf(unread, "sustained_clock_pct", false, u, false).measurable, "unknown homogeneity: relative spread still measurable");
+  // Unknown homogeneity is not a positive claim either way: an absolute
+  // spread is OMITTED (not n/a), a relative one is still measured.
+  check(spreadOf(unread, "achieved_tflops", true, u, false).state == Spread::Omitted, "unknown homogeneity: absolute spread omitted, not declared");
+  check(spreadOf(unread, "sustained_clock_pct", false, u, false).measurable(), "unknown homogeneity: relative spread still measurable");
 
-  // A key one device did not report: the spread is over the devices that did.
+  // A key one device did NOT report means a probe failed on that device.
+  // "We could not look" is an omission, never a declaration: the spread is
+  // OMITTED, not measured over the survivors and not n/a — the base metric is
+  // absent from the fold and fails closed, and its spread must not be
+  // declared anything a RequiredIfMeasurable gate could read as "not
+  // evaluated" for a board nobody finished measuring.
   std::vector<DeviceReport> partial = {
       dev(0, "a", "H100", "9.0", {{"sustained_clock_pct", 90}}),
       dev(1, "b", "H100", "9.0", {}),
@@ -284,12 +316,16 @@ void testSpreads() {
   };
   Folded p = fold(partial, rules, "sustained_clock_pct");
   sp = spreadOf(partial, "sustained_clock_pct", false, p, false);
-  check(sp.measurable && near(sp.pct, 50), "spread over the two devices that reported");
+  check(sp.state == Spread::Omitted, "a device that did not report the base metric makes the spread an OMISSION, not a number and not n/a");
+  // And on a single device with no report at all: omitted, not "one device".
+  std::vector<DeviceReport> silent = {dev(0, "a", "X", "1", {})};
+  Folded si = fold(silent, rules, "sustained_clock_pct");
+  check(spreadOf(silent, "sustained_clock_pct", false, si, false).state == Spread::Omitted, "one device that reported nothing: omitted, not n/a");
 
-  // A zero maximum admits no ratio.
+  // A zero maximum admits no ratio: no number can be declared. Omitted.
   std::vector<DeviceReport> zeros = {dev(0, "a", "X", "1", {{"k", 0}}), dev(1, "b", "X", "1", {{"k", 0}})};
   Folded z = fold(zeros, {{"k", Fold::Min}}, "k");
-  check(!spreadOf(zeros, "k", false, z, false).measurable, "all-zero readings admit no ratio: n/a");
+  check(spreadOf(zeros, "k", false, z, false).state == Spread::Omitted, "all-zero readings admit no ratio: omitted");
 }
 
 // ── precedence ─────────────────────────────────────────────────────────────
@@ -359,8 +395,23 @@ void testPrintFold() {
   check(out.find("worst_device_pci_bus_id=0000:02:00.0\n") != std::string::npos, "worst_device_pci_bus_id printed");
   check(out.find("device_homogeneous=true\n") != std::string::npos, "device_homogeneous printed when known");
   check(out.find("sustained_clock_spread_pct=36.84\n") != std::string::npos, "a measurable spread prints its number");
-  check(out.find("gemm_throughput_spread_pct=n/a\n") != std::string::npos,
-        "a spread whose base key no device reported prints n/a — a positive claim, never a fabricated 0");
+  check(out.find("gemm_throughput_spread_pct") == std::string::npos,
+        "a spread whose base key no device reported is OMITTED from stdout — neither a fabricated 0 nor an n/a nobody established");
+  // Nothing in key=value shape may reach stderr for a spread: a merged
+  // container log with "<key>=n/a: why" after "<key>=n/a" would let the prose
+  // overwrite the declaration under last-occurrence-wins.
+  // (The stderr line is "# spread <key> not reported: <why>"; asserted by
+  // construction in printFold, and by the absence of '=' after the key here.)
+}
+
+// ── artifact numbers ───────────────────────────────────────────────────────
+
+void testArtifactNumbers() {
+  std::vector<DeviceReport> board = {dev(0, "a", "X", "1", {{"miscompares", 1234567}, {"achieved_tflops", 0.1}, {"big", 1e16}})};
+  const std::string a = renderPerDeviceArtifact(board);
+  check(a.find("\"miscompares\": 1234567") != std::string::npos, "an integral counter renders as an exact integer, not 1.23457e+06");
+  check(a.find("\"achieved_tflops\": 0.10000000000000001") != std::string::npos, "a fraction renders round-trip exact (%.17g)");
+  check(a.find("\"big\": 10000000000000000") != std::string::npos, "a huge integral value falls back to %.17g, which for 1e16 is its exact digits");
 }
 
 }  // namespace
@@ -374,6 +425,7 @@ int main() {
   testPrecedence();
   testArtifact();
   testPrintFold();
+  testArtifactNumbers();
   if (failures != 0) {
     std::printf("%d failure(s)\n", failures);
     return 1;

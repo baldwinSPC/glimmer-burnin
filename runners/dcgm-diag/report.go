@@ -27,7 +27,7 @@ const (
 	keyDiagTimeoutS  = "diag_timeout_s"
 	keyDcgmVersion   = "dcgm_version"
 	keyDriverVersion = "driver_version"
-	keyGPUCount      = "device_count"
+	keyGPUCount      = "devices_visible"
 	keyTestsRun      = "tests_run"
 	keyTestsFailed   = "tests_failed"
 	keyTestsWarned   = "tests_warned"

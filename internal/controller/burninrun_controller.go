@@ -1073,7 +1073,7 @@ func (r *BurnInRunReconciler) advance(
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, pod.Name, &pod, runner.Result{
 				Verdict: runner.VerdictError,
 				Message: fmt.Sprintf("pod never completed within its window (last phase %q) — unschedulable target or stuck image pull; no verdict%s",
-					pod.Status.Phase, unscheduledDetail(&pod)),
+					pod.Status.Phase, pendingDetail(&pod)),
 			})
 			return advanceHarvested, advanceEffect{dirty: true, kill: []*corev1.Pod{&overdue}}, nil
 		}
@@ -2659,30 +2659,6 @@ const maxNamedInvalidMetrics = 8
 // not report an outcome, whatever it may have printed first.
 func runnerChoseExitCode(exitCode int) bool {
 	return exitCode >= 0 && exitCode <= 3
-}
-
-// unscheduledDetail is the scheduler's own account of why a pod never landed,
-// for the overdue Error — the same rule as carrying the kubelet's message for
-// a container that never started (#52): a pod that was never scheduled has no
-// stdout, so the PodScheduled=False condition is the only evidence there is.
-// "0/3 nodes are available: 3 Insufficient nvidia.com/gpu" names the fix — a
-// BurnInTest asking for more accelerators than the node holds — where the
-// generic sentence names only the class. Empty when the pod was scheduled or
-// carries no such condition, so the message reads as before.
-func unscheduledDetail(pod *corev1.Pod) string {
-	for _, c := range pod.Status.Conditions {
-		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse {
-			d := strings.TrimSpace(c.Message)
-			if d == "" {
-				d = c.Reason
-			}
-			if d == "" {
-				return ""
-			}
-			return " (scheduler: " + clampPodDetail(d) + ")"
-		}
-	}
-	return ""
 }
 
 func clampPodDetail(s string) string {

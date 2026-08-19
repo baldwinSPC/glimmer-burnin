@@ -613,7 +613,10 @@ disagree about the same hardware. One brain, two dispatchers.
   its name and is the worst device, direction read off the registry's
   `Aggregation`; `deviceCount` is an ACCEPTANCE gate (a fleet writes
   `deviceCount Equal 8`, so a pod handed one card FAILS instead of
-  certifying it) and supersedes `gpu_count`, unaliased; spreads are named per
+  certifying it) and is claimed ONLY by a runner that folded devices — the
+  read-only node-wide probes and the not-yet-converted runners emit
+  `devices_visible` for the count they saw, which is what their `gpu_count`
+  became, unaliased; spreads are named per
   measurand, are `n/a` on one device / under MIG / on a mixed board — a
   positive claim, so a gate on one is `RequiredIfMeasurable` and the linter
   says so; per-device tables are an ARTIFACT, never a suffix; and **across
@@ -815,7 +818,10 @@ the invariants; the playbook is the procedure, and it does not restate them.
   there. Without it a CUTLASS bump that stopped defining those macros would
   publish an immutable tag reporting every node `Error`.
 - **Environment the operator injects.** `BURNIN_DURATION_SECONDS` and
-  `BURNIN_ATTEMPT` at every scope; a **Pair**-scope pod additionally gets:
+  `BURNIN_ATTEMPT` at every scope, and `BURNIN_RESOURCE_LIMITS` (the pod's own
+  limits, verbatim, sorted; absent when there are none — a multi-device runner
+  reads its allocation out of it, see the multi-device bullet); a
+  **Pair**-scope pod additionally gets:
 
   | Variable | Value |
   |---|---|

@@ -313,8 +313,8 @@ func (r *BurnInRunReconciler) gateClientOnServer(
 		r.completeAttempt(ctx, run, p, t, nodes, attempt, serverPod.Name, serverPod, runner.Result{
 			Verdict: runner.VerdictError,
 			Message: fmt.Sprintf(
-				"the %s endpoint on %s never became ready within its window (last phase %q) — the client was never started and the link was not measured; no verdict",
-				pairRoleServer, serverNode, serverPod.Status.Phase),
+				"the %s endpoint on %s never became ready within its window (last phase %q) — the client was never started and the link was not measured; no verdict%s",
+				pairRoleServer, serverNode, serverPod.Status.Phase, pendingDetail(serverPod)),
 		})
 		return advanceHarvested, advanceEffect{dirty: true, kill: []*corev1.Pod{serverPod}}, nil
 	}
@@ -392,8 +392,8 @@ func (r *BurnInRunReconciler) harvestPair(
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, serverPod.Name, serverPod, runner.Result{
 				Verdict: runner.VerdictError,
 				Message: fmt.Sprintf(
-					"the %s endpoint on %s never completed within its window (last phase %q) — the link was not measured; no verdict",
-					pairRoleClient, clientNode, clientPod.Status.Phase),
+					"the %s endpoint on %s never completed within its window (last phase %q) — the link was not measured; no verdict%s",
+					pairRoleClient, clientNode, clientPod.Status.Phase, pendingDetail(clientPod)),
 			})
 			return advanceHarvested, advanceEffect{dirty: true, kill: []*corev1.Pod{serverPod, clientPod}}, nil
 		}

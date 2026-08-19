@@ -894,7 +894,7 @@ var registry = map[string]Metric{
 	},
 	"devicesVisible": {
 		Name: "devicesVisible", Unit: UnitNone,
-		Description:  "how many accelerator devices the container runtime showed the pod, before the runner applied its allocation budget from BURNIN_RESOURCE_LIMITS. Evidence: a value above deviceCount means the pod could see devices it was not allocated (a legacy-runtime host injecting NVIDIA_VISIBLE_DEVICES=all), which the runner reports as an Error rather than iterating past its budget",
+		Description:  "how many accelerator devices the container runtime showed the pod. A multi-device runner prints it beside deviceCount, before applying its allocation budget from BURNIN_RESOURCE_LIMITS (a value above deviceCount is the leak: devices visible that were never allocated, which the runner reports as an Error rather than iterating past its budget). A runner that only SAW devices — a node-wide read-only probe such as host-health or dcgm-diag, or one that has not yet been converted to fold them — prints this and does not claim deviceCount at all. Evidence; what gpu_count became",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},

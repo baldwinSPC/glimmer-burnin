@@ -75,7 +75,7 @@ written for.
 `retiredPagesPending`, `pcieReplayTotal`, `pcieAerCorrectable`, `pcieAerNonfatal`,
 `pcieAerFatal` (and their `…Total` lifetime forms), `nicCount`, `nicUp`,
 `nicLinkDownTotal`, `ethLinkDownTotal`, `ibLinkDownTotal`, `ibPorts`,
-`ibPortsActive`, `gpuTempC`, `powerDrawW`, `gpuName`, `deviceCount` (`gpu_count` before v0.7), `driverVersion`,
+`ibPortsActive`, `gpuTempC`, `powerDrawW`, `gpuName`, `devicesVisible` (how many GPUs NVML showed; `gpu_count` before v0.7), `driverVersion`,
 `observationWindowS`, `elapsedS`, `nodeReady`, and the probe statuses
 `nvmlStatus`, `xidSource`, `aerStatus`, `nicStatus`, `pcieReplaySource`.
 
@@ -377,7 +377,7 @@ kernel_hw_errors_preexisting=0
 nvml_status=ok
 gpu_name=NVIDIA GB10
 driver_version=580.82.09
-gpu_count=1
+gpu_count=1   # captured before v0.7; the runner now prints devices_visible
 ecc_mode=unsupported
 ecc_errors=n/a
 rows_remapped=n/a

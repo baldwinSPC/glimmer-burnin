@@ -562,9 +562,12 @@ kind this page exists to prevent. The full design, reviewed before code, is
   the first device's meaning; `worstDeviceIndex` and `worstDevicePciBusId`
   name the device behind the gated figure of one window, and the per-device
   table is an **artifact**, never a suffix on a metric name.
-- **`deviceCount` is an acceptance gate.** A fleet writes `deviceCount Equal
-  8`, so a pod handed one card of eight fails instead of certifying that card.
-  It supersedes `gpu_count`, which is not aliased to it.
+- **`deviceCount` is an acceptance gate, claimed only by a runner that folded
+  devices.** A fleet writes `deviceCount Equal 8`, so a pod handed one card of
+  eight fails instead of certifying that card. A runner that merely SAW
+  devices — a node-wide read-only probe, or one not yet converted — reports
+  `devicesVisible` (what `gpu_count` became; not aliased) and does not claim
+  the gate.
 - **Spreads are `n/a` on one device, under MIG and on a mixed board** — a
   positive claim, "nothing to spread across" — so a threshold on one must be
   `RequiredIfMeasurable`, and the threshold linter reports a `Required` gate on
