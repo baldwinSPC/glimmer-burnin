@@ -338,8 +338,8 @@ func (r *BurnInRunReconciler) gateWorkersOnRoot(
 			Verdict: runner.VerdictError,
 			Message: fmt.Sprintf(
 				"rank %d (the root) on %s never became ready within its window (last phase %q) — "+
-					"the other %d rank(s) were never started and the collective was not measured; no verdict",
-				groupRootRank, nodes[groupRootRank], root.Status.Phase, len(nodes)-1),
+					"the other %d rank(s) were never started and the collective was not measured; no verdict%s",
+				groupRootRank, nodes[groupRootRank], root.Status.Phase, len(nodes)-1, pendingDetail(root)),
 		})
 		return advanceHarvested, advanceEffect{dirty: true, kill: pods}, nil
 	}
@@ -412,7 +412,7 @@ func (r *BurnInRunReconciler) harvestGroup(
 		}
 		what := "never finished"
 		if pod == nil || !podStarted(pod) {
-			what = "never started"
+			what = "never started" + pendingDetail(pod)
 		}
 		stillRunning = append(stillRunning, fmt.Sprintf("rank %d (%s) %s", rank, nodes[rank], what))
 	}

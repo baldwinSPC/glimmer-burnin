@@ -82,7 +82,7 @@ threshold is written against.
 | `diag_tests` | `diagTests` | The test list passed to `-r`, when tests were named instead of a level. Absent otherwise |
 | `diag_params` | `diagParams` | The exact `-p` string passed to `dcgmi`. Absent when none was |
 | `diag_timeout_s` | `diagTimeoutS` | The `-t` passed to `dcgmi`, so a run that ended at DCGM's own timeout can be told from one that ended at the runner's |
-| `dcgm_version` / `driver_version` / `gpu_count` | `dcgmVersion`, … | Provenance |
+| `dcgm_version` / `driver_version` / `devices_visible` | `dcgmVersion`, `driverVersion`, `devicesVisible` | Provenance; how many GPUs dcgmi discovered. `devices_visible` was `gpu_count` before v0.7 |
 | `dcgmi_exit_code` / `sample_count` / `counter_baseline_reset` | `dcgmiExitCode`, … | Evidence about the run itself |
 | `pruned_objects` | `prunedObjects` | Only if the site's DCGM tree carries `/usr/share/glimmer-burnin/dcgm-pruned.txt`, listing objects removed for licensing reasons. Absent otherwise |
 
@@ -494,7 +494,7 @@ via `RUNTIME_IMAGE`. Both produce the same result:
 ```
 diag_level=1
 diag_level_source=derived
-gpu_count=1
+gpu_count=1   # captured before v0.7; the runner now prints devices_visible
 dcgm_version=4.2.3
 driver_version=580.82.09
 tests_run=1

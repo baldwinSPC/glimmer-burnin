@@ -980,7 +980,8 @@ func (r *BurnInRunReconciler) advance(
 			overdue := pod
 			r.completeAttempt(ctx, run, p, t, nodes, attempt, pod.Name, &pod, runner.Result{
 				Verdict: runner.VerdictError,
-				Message: fmt.Sprintf("pod never completed within its window (last phase %q) — unschedulable target or stuck image pull; no verdict", pod.Status.Phase),
+				Message: fmt.Sprintf("pod never completed within its window (last phase %q) — unschedulable target or stuck image pull; no verdict%s",
+					pod.Status.Phase, pendingDetail(&pod)),
 			})
 			return advanceHarvested, advanceEffect{dirty: true, kill: []*corev1.Pod{&overdue}}, nil
 		}

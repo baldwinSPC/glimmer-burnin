@@ -99,6 +99,7 @@ func TestThePlaybookNamesItsGuards(t *testing.T) {
 	sources := strings.Join([]string{
 		read(t, "runners/pins_test.go"),
 		read(t, "runners/cxxtests_test.go"),
+		read(t, "runners/devicefold_test.go"),
 		read(t, "api/v1alpha1/samples_test.go"),
 		read(t, "pkg/contract/metrics_test.go"),
 		read(t, "pkg/runner/parse_test.go"),

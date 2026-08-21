@@ -78,6 +78,30 @@ var vendorResources = map[corev1.ResourceName]GPUAccess{
 	"amd.com/gpu":    GPUAMD,
 }
 
+// vendorResourcePrefixes are count-shaped resource FAMILIES: a MIG profile is
+// requested as nvidia.com/mig-1g.5gb, and there is one name per profile. A
+// profile written for a MIG-sliced cluster must mean the same thing here as
+// there — the runner's own allow-set (device_fold.h, nvidiaResources) counts
+// these as instances, and runners/devicefold_test.go holds the two tables to
+// each other — so they are recognised by prefix rather than listed.
+var vendorResourcePrefixes = map[string]GPUAccess{
+	"nvidia.com/mig-": GPUNvidia,
+}
+
+// accessFor maps one resource name to the accelerator access it implies, or
+// GPUNone.
+func accessFor(name corev1.ResourceName) GPUAccess {
+	if access, ok := vendorResources[name]; ok {
+		return access
+	}
+	for prefix, access := range vendorResourcePrefixes {
+		if strings.HasPrefix(string(name), prefix) {
+			return access
+		}
+	}
+	return GPUNone
+}
+
 // memlockTriggers are host paths whose presence means the test does RDMA.
 //
 // Data-driven rather than a list of kinds: any test that reaches the verbs
@@ -230,14 +254,14 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 	// Accelerator access from the resource request, so a profile written for the
 	// cluster asks for a device the same way here.
 	for name := range t.Spec.Resources.Limits {
-		if access, ok := vendorResources[name]; ok {
+		if access := accessFor(name); access != GPUNone {
 			spec.GPUAccess = access
 			break
 		}
 	}
 	if spec.GPUAccess == GPUNone {
 		for name := range t.Spec.Resources.Requests {
-			if access, ok := vendorResources[name]; ok {
+			if access := accessFor(name); access != GPUNone {
 				spec.GPUAccess = access
 				break
 			}
@@ -408,6 +432,12 @@ var reservedEnv = map[string]struct{}{
 	"BURNIN_NRANKS":           {},
 	"BURNIN_ROOT_HOST":        {},
 	"BURNIN_ROOT_NODE":        {},
+	// The pod's own limits, which a runner reads to tell allocated devices from
+	// visible ones. A profile that could set it would tell a runner it owns a
+	// board it was never handed — the spoof the variable exists to prevent.
+	// The CLI does not inject it (on bare metal `--gpus all` IS the
+	// allocation, and absent is the safe reading there); it only refuses it.
+	"BURNIN_RESOURCE_LIMITS": {},
 }
 
 // deadlineGraceSeconds matches the operator's own grace beyond the declared
@@ -461,4 +491,30 @@ func setIf(env map[string]string, k, v string) {
 	if v != "" {
 		env[k] = v
 	}
+}
+
+// VendorResourceNames lists the extended-resource names this package treats as
+// an accelerator request, sorted. Exported for the guard that holds this table
+// and the runners' own allow-sets (device_fold.h, nvidiaResources /
+// amdResources) to the same names: a resource the CLI maps to a vendor that a
+// runner then refuses as unrecognised — or the reverse — is one profile meaning
+// two things across the two dispatchers.
+func VendorResourceNames() []string {
+	names := make([]string, 0, len(vendorResources))
+	for n := range vendorResources {
+		names = append(names, string(n))
+	}
+	sort.Strings(names)
+	return names
+}
+
+// VendorResourcePrefixes lists the count-shaped resource-name prefixes this
+// package treats as an accelerator request, sorted. Same guard, same reason.
+func VendorResourcePrefixes() []string {
+	out := make([]string, 0, len(vendorResourcePrefixes))
+	for p := range vendorResourcePrefixes {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
 }

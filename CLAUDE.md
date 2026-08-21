@@ -616,6 +616,41 @@ disagree about the same hardware. One brain, two dispatchers.
   and is not re-checked, or a lowered cap would strand a running server against
   a peer that never arrives. `spec.cancel` with `CancelImmediate` is the tool
   for getting load off the floor now.
+- **A Node verdict describes EVERY accelerator on the node, gated on the
+  WORST; a single-device measurement on a multi-device node is a bug.** Every
+  CUDA/HIP runner used to take device 0, and every sample requested one GPU,
+  so on an eight-GPU node one arbitrary card was certified as the node and
+  nothing said so. The design is `docs/dev/multi-device.md`, reviewed before
+  code, and the rules that hold it up: the RUNNER iterates over the devices
+  it was ALLOCATED (the operator injects the pod's own limits verbatim as
+  `BURNIN_RESOURCE_LIMITS`, interpreting nothing; the runner sums its own
+  vendor's count-shaped names into a budget, and `budget ≠ visible` is exit 3
+  because a budget is a count and not an identity — under the legacy runtime a
+  pod handed one card sees the whole board and would otherwise load devices
+  that are not its own); the pod requests the SKU's board, one profile and
+  run per SKU; `durationSeconds` is the TEST's budget and does not grow with
+  the board, so a soak kind iterates concurrently and a measurement kind
+  divides the window (`deviceWindowS` says which); the gated metric keeps
+  its name and is the worst device, direction read off the registry's
+  `Aggregation`; `deviceCount` is an ACCEPTANCE gate (a fleet writes
+  `deviceCount Equal 8`, so a pod handed one card FAILS instead of
+  certifying it) and is claimed ONLY by a runner that folded devices — the
+  read-only node-wide probes and the not-yet-converted runners emit
+  `devices_visible` for the count they saw, which is what their `gpu_count`
+  became, unaliased; spreads are named per
+  measurand, are `n/a` on one device / under MIG / on a mixed board — a
+  positive claim, so a gate on one is `RequiredIfMeasurable` and the linter
+  says so; per-device tables are an ARTIFACT, never a suffix; and **across
+  DEVICES the precedence is `Fail > Error > Skip > Pass`, which inverts
+  Pair's `Error > Fail` deliberately** — a device is a PART and a measured
+  miscompare on one is a fact another's enumeration failure does not erase,
+  while a Pair endpoint is HALF A LINK and a machinery failure at either end
+  means the link was never measured. Both orders are invariants; the
+  discriminator is what the reporters are. The fold lives in one CUDA-free
+  header (`device_fold.h`, byte-identical across runners, unit-tested under
+  `make test`); `runners/devicefold_test.go` holds every runner to
+  CONVERTED / EXEMPT-with-reason / PENDING-with-step, so a new accelerator
+  runner cannot regress to device 0 silently.
 - **A runner pod is never safely evictable, and that is not a knob.** Every
   runner pod carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`
   unconditionally, at every scope. It is holding a node this operator CORDONED
@@ -804,7 +839,10 @@ the invariants; the playbook is the procedure, and it does not restate them.
   there. Without it a CUTLASS bump that stopped defining those macros would
   publish an immutable tag reporting every node `Error`.
 - **Environment the operator injects.** `BURNIN_DURATION_SECONDS` and
-  `BURNIN_ATTEMPT` at every scope; a **Pair**-scope pod additionally gets:
+  `BURNIN_ATTEMPT` at every scope, and `BURNIN_RESOURCE_LIMITS` (the pod's own
+  limits, verbatim, sorted; absent when there are none — a multi-device runner
+  reads its allocation out of it, see the multi-device bullet); a
+  **Pair**-scope pod additionally gets:
 
   | Variable | Value |
   |---|---|

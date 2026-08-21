@@ -210,10 +210,31 @@ against those fixtures, and only then publish a tag.
 
 ---
 
+## 3½. Every accelerator, gated on the worst
+
+**A Node verdict describes EVERY accelerator on the node.** If your runner
+opens a device, it iterates over every device it was allocated and folds the
+readings — the gated metric keeps its name and is the WORST device — through
+the shared CUDA-free header `device_fold.h` (its home is `runners/gpu-burn/`;
+take a byte-identical copy, `sharedsource_test.go` refuses drift). The header
+decides how many devices you may touch (`BURNIN_RESOURCE_LIMITS`, budget ≠
+visible is exit 3), how long each gets, how readings combine, which device the
+verdict names, and what stdout says. The design and every refused alternative
+are in [multi-device.md](multi-device.md).
+
+> **Guard:** `runners/devicefold_test.go` →
+> `TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot` is a TOTAL table: a
+> new runner directory is CONVERTED (includes the header), EXEMPT with a reason,
+> or PENDING with an issue, or the build fails.
+> `TestDeviceFoldTablesAgreeWithTheRegistry` holds your `kDeviceFold[]` table to
+> the registry's `Aggregation`; `TestDeviceFoldAllowSetsAgreeWithTheCLI` holds
+> the vendor allow-set to `pkg/localrun`.
+
 ## 4. The environment the operator injects
 
-Every scope gets `BURNIN_DURATION_SECONDS` and `BURNIN_ATTEMPT`, plus
-`BURNIN_VARIANT_<AXIS>` for each variant axis.
+Every scope gets `BURNIN_DURATION_SECONDS`, `BURNIN_ATTEMPT` and (when the test
+declares limits) `BURNIN_RESOURCE_LIMITS`, plus `BURNIN_VARIANT_<AXIS>` for each
+variant axis.
 
 **Pair** additionally:
 
