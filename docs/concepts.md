@@ -868,3 +868,36 @@ own fleet rather than from a spec sheet — see [thresholds](thresholds.md).)*
 `notEvaluated` gates and artifact references. `status.conditions` carries the
 admission decision and the threshold advisory. See [reports](reports.md) for the
 rendered forms.
+
+## The profile library
+
+`config/samples/profile-*.yaml` is a small library of profiles at different
+duration classes, each mirroring a shape operators already run in the field
+rather than an invented one:
+
+| Profile | Duration | Mirrors |
+|---|---|---|
+| `smoke` | ≤ 5 min | CoreWeave's hourly idle-node check, Modal's boot verification |
+| `standard` | ~30 min | NVSM's stress-test profile |
+| `extended` | 2-8 h | a maintenance-window acceptance sweep |
+| `soak` | 24-72 h, segmented | CoreWeave's 24-hour validation stage |
+| `post-maintenance` | varies | Crusoe's "a targeted subset scoped to what changed" — four small profiles, one per change category, not one profile with every test in it |
+| `inference-readiness` | varies | ships with the cells this repo cannot build yet named as comments, not silently omitted — see that file's header and #425 |
+| *periodic* | recurring | `periodic-reverification.yaml` already covers this class (a `BurnInSchedule` with `concurrencyPolicy: Forbid`); no separate `profile-periodic.yaml` duplicates it |
+
+Every file names, in its own header, which of the OTHER sample files it
+reuses tests from by `testRef` and must be applied alongside it —
+`config/samples/*.yaml` is meant to be applied as a whole, not
+file-by-file.
+
+**Which kinds are shipped, in tree, or missing an image is NOT restated
+here.** `docs/vendors/nvidia.md`'s own coverage table said the opposite of
+the truth for a whole release once a fact it hand-transcribed went stale
+(node-acceptance.yaml's header tells that story) — a second hand-written copy
+in this file would be the same trap with a different victim. The one place
+that cannot lie is `pkg/runnerimages.Default` / `.WithoutDefault`, and
+`api/v1alpha1.TestSamplesOfAnUndefaultedKindNameAnImage` holds every sample in
+this library to it: a test naming a kind with no built-in image must set
+`spec.runner.image` or `imagesByVendor`, so a copied profile fails at an
+explicit placeholder rather than silently at plan time. Read that table, not
+a paraphrase of it.

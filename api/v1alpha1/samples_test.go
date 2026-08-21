@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/runnerimages"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
 
@@ -203,6 +204,39 @@ func TestNoSampleSegmentsASoakItCannotDivide(t *testing.T) {
 			t.Errorf("%s document %d: sets both spec.soak and repeatCount %d — a repeat re-runs a whole "+
 				"test and ANDs the verdicts, while a segment is one window of a single verdict",
 				name, i, *n)
+		}
+	})
+}
+
+// TestSamplesOfAnUndefaultedKindNameAnImage holds every sample test to the
+// honesty node-acceptance.yaml's own header describes: a kind in
+// pkg/runnerimages.WithoutDefault() has no built-in image, so a BurnInTest
+// naming one is a plan-time infrastructure Error — "no default image" —
+// unless spec.runner.image or spec.runner.imagesByVendor says where to get
+// one. That is a correct refusal on a freshly-applied sample, but a SILENT
+// one: nothing before `kubectl apply` + a failed run told the author the
+// pod would never schedule.
+//
+// A REPLACE-ME placeholder is enough to pass this guard — the point is not
+// that the image resolves, it is that a profile copied from this repo fails
+// VISIBLY at the placeholder (a string an author notices and has to act on)
+// rather than at plan time with a message that reads like a hardware fault.
+func TestSamplesOfAnUndefaultedKindNameAnImage(t *testing.T) {
+	withoutDefault := map[burninv1alpha1.TestKind]bool{}
+	for _, k := range runnerimages.WithoutDefault() {
+		withoutDefault[k] = true
+	}
+	forEachSampleTest(t, func(t *testing.T, file string, i int, spec burninv1alpha1.BurnInTestSpec) {
+		if !withoutDefault[spec.Kind] {
+			return
+		}
+		named := spec.Runner != nil && (spec.Runner.Image != "" || len(spec.Runner.ImagesByVendor) > 0)
+		if !named {
+			t.Errorf("%s document %d: kind %q has no default runner image and this test sets neither "+
+				"spec.runner.image nor spec.runner.imagesByVendor — it would refuse at plan time with "+
+				"no warning before that; name an image (a REPLACE-ME placeholder is fine) so the failure "+
+				"is visible before apply",
+				filepath.Base(file), i, spec.Kind)
 		}
 	})
 }

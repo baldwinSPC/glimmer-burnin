@@ -1,0 +1,97 @@
+# The soak suite: 24-72 hours, segmented — the shape CoreWeave's 24-hour
+# validation stage and any acceptance process holding a node past a single
+# maintenance window describes. See docs/soaks.md before applying this: it
+# holds a node out of the fleet for the whole window and explains the
+# capacity arithmetic and why segmenting is not optional at this length.
+#
+# APPLY node-acceptance.yaml FIRST — reuses host-fault-counters by testRef,
+# run AFTER the soak so a fault the soak itself provoked (a fresh Xid, a
+# remapped row) is caught by a probe that ran once the load was over, not
+# buried in the soak's own window-scoped counters.
+#
+# NOT INCLUDED: a segmented memory-test kind ("memtest"). It has no TestKind,
+# no runner and no image in this repository — there is nothing to reference.
+# host-memory-stress (node-acceptance.yaml) covers host DIMM correctness but
+# is not itself segmentable in a way that matches memtest86+'s retention
+# testing; when a memory-test runner exists, its segmented soak belongs here
+# beside thermal-soak-soak below.
+#
+# See segmented-soak.yaml for the fuller, single-test worked example this
+# profile's own test is built on (a 7-day soak; this one is 48 hours, the
+# midpoint of the 24-72h class) — read that file for the abortEarly and
+# xidWindowsWatched reasoning this test carries without repeating it.
+
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: thermal-soak-soak
+spec:
+  kind: thermal-soak
+  scope: Node
+  durationSeconds: 172800 # 48 hours
+  runner:
+    # The Xid watch's three-part grant — see segmented-soak.yaml for the full
+    # explanation of why all three are needed together and what a missing one
+    # costs.
+    privileged: true
+    runAsUser: 0
+    hostPaths:
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        type: CharDevice
+  soak:
+    segmentSeconds: 900 # fifteen minutes; 192 segments
+    abortEarly: true
+  checkpointIntervalSeconds: 900
+  thresholds:
+    - metric: elapsedS
+      comparison: GreaterThanOrEqual
+      value: "164160" # 0.95 x 172800
+    - metric: xidEvents
+      comparison: Equal
+      value: "0"
+    - metric: xidWindowsWatched
+      comparison: GreaterThanOrEqual
+      value: "192"
+    - metric: throttleEvents
+      comparison: Equal
+      value: "0"
+    # PLACEHOLDER, same caveat as profile-extended.yaml's ninety-minute test:
+    # retune against a figure measured at 48 hours on your own fleet before
+    # trusting it. thermal-soak's own documented curve only runs to 600s.
+    - metric: sustainedClockPct
+      comparison: GreaterThanOrEqual
+      value: "70"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: soak
+spec:
+  failFast: false
+  tests:
+    - testRef: thermal-soak-soak
+    # After, deliberately: catches a fault the soak's own window-scoped
+    # counters could miss (see the file header) and corroborates the whole
+    # node once the load is off it.
+    - testRef: host-fault-counters
+  sinks: []
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: soak-example
+spec:
+  profileRef: soak
+  target:
+    nodeNames:
+      - node-a
+  maxConcurrentNodes: 1
+  retryOnErrorLimit: 3
+  # Room for the 48h soak, its retries (each re-runs one 15-minute segment,
+  # not the soak — see docs/soaks.md) and the follow-up probe.
+  deadlineSeconds: 198000 # ~55 hours
+  ttlSecondsAfterFinished: 86400

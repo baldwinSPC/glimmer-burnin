@@ -1,0 +1,91 @@
+# Post-maintenance: a targeted subset scoped to what changed, the shape
+# Crusoe's own maintenance-return process describes — a node coming back from
+# a firmware flash does not need a memory soak, and one coming back from a
+# DIMM swap does not need a fabric sweep. Four small profiles, one per change
+# category, so a runbook picks the one that matches rather than re-running
+# everything every time.
+#
+# APPLY THE WHOLE config/samples DIRECTORY FIRST — every test below is a
+# testRef into node-acceptance.yaml, variant-sweep.yaml or
+# pair-network-acceptance.yaml.
+#
+# NOT INCLUDED: "cpu-check" and "nvme-health" name no TestKind, no runner and
+# no image in this repository. The DIMM and drive profiles below are scoped
+# to what this project can actually measure today (host-memory-stress;
+# disk-io) and marked where the fuller subset the runbook wants is not yet
+# buildable.
+
+---
+# Firmware or driver update: re-verify the whole compute and interconnect
+# stack rather than assuming the flash did only what it claimed.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: post-maintenance-firmware
+spec:
+  failFast: false
+  tests:
+    - testRef: fingerprint-probe
+    - testRef: host-fault-counters
+    - testRef: sustained-clock
+    - testRef: fp4-compute-smoke
+    - testRef: memory-bandwidth
+    - testRef: dcgm-diagnostics
+    - testRef: nccl-allreduce-pair
+  sinks: []
+---
+# NIC replacement or a re-seated cable: the fabric is what changed, so the
+# fabric is what gets re-measured — TCP first (cheap, catches a gross
+# misconfiguration before spending a Pair-scope RDMA test on a link that
+# will not come up at all), then the size sweep, then a real soak of it.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: post-maintenance-fabric
+spec:
+  failFast: false
+  tests:
+    - testRef: tcp-baseline
+    - testRef: ib-write-bw
+    - testRef: fabric-soak
+  sinks: []
+---
+# A DIMM swap: host memory is what changed. stressapptest is the sanctioned
+# host-memory tool (see node-acceptance.yaml's host-memory-stress for why
+# stress-ng/memtester are not, on this project's licence policy); there is no
+# CPU-specific kind to pair it with here.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: post-maintenance-dimm
+spec:
+  failFast: false
+  tests:
+    - testRef: host-memory-stress
+  sinks: []
+---
+# A drive replacement: storage is what changed.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: post-maintenance-drive
+spec:
+  failFast: false
+  tests:
+    - testRef: disk-io
+  sinks: []
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: post-maintenance-firmware-example
+spec:
+  # Swap profileRef for whichever of the four above matches the maintenance
+  # that was actually done.
+  profileRef: post-maintenance-firmware
+  target:
+    nodeNames:
+      - node-a
+      - node-b
+  maxConcurrentNodes: 2
+  ttlSecondsAfterFinished: 86400

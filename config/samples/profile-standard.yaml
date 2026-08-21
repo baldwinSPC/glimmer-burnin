@@ -1,0 +1,71 @@
+# The standard suite: roughly thirty minutes, the shape NVSM's stress-test
+# profile and most vendor acceptance scripts describe — long enough to move
+# past liveness into a real sweep, short enough to run on every new node
+# without becoming the fleet's bottleneck.
+#
+# APPLY THE WHOLE config/samples DIRECTORY FIRST — this profile reuses tests
+# by testRef from node-acceptance.yaml, variant-sweep.yaml and
+# pair-network-acceptance.yaml rather than redefining them, and each of those
+# is intended to be applied on its own too.
+#
+# `smoke`'s tests are the first five below; this profile is smoke PLUS a real
+# sweep and the fabric, not a replacement for it — a node that fails smoke has
+# no business being held for thirty minutes to fail standard too.
+
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: standard
+spec:
+  failFast: false
+  tests:
+    - testRef: fingerprint-probe
+    - testRef: host-fault-counters
+    - testRef: sustained-clock
+    - testRef: fp4-compute-smoke
+    - testRef: memory-bandwidth
+    # Every precision this fleet has a baseline for, expanded as one execution
+    # per cell — see variant-sweep.yaml's own comments for why a variant axis
+    # is the right shape here and not a threshold-per-metric-name scheme.
+    - testRef: gemm-sweep
+      variants:
+        - name: fp4
+          axes: {precision: fp4}
+        - name: fp8
+          axes: {precision: fp8}
+        - name: bf16
+          axes: {precision: bf16}
+        - name: tf32
+          axes: {precision: tf32}
+        - name: fp64
+          axes: {precision: fp64}
+    # No explicit BURNIN_DCGM_LEVEL: this test's default level. A site that
+    # wants a specific DCGM run level here should override it via
+    # spec.runner.env on the dcgm-diagnostics test in node-acceptance.yaml
+    # (BURNIN_DCGM_LEVEL: "2") rather than duplicating the test definition.
+    - testRef: dcgm-diagnostics
+    - testRef: host-memory-stress
+    # The fabric half. Both Pair-scope: a link is a property of two nodes, not
+    # one, so these need TWO targets in the run's target list to actually
+    # execute — see pair-network-acceptance.yaml and tcp-baseline.yaml's own
+    # comments for what a Pair scope requires and what it means when it can't
+    # be satisfied.
+    - testRef: tcp-baseline
+    - testRef: ib-write-bw
+  sinks: []
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: standard-example
+spec:
+  profileRef: standard
+  target:
+    nodeNames:
+      # TWO names: the Pair-scope tests above (tcp-baseline, ib-write-bw) need
+      # a link, which needs both ends. A single-node target list would refuse
+      # this run at plan time — see pair-network-acceptance.yaml.
+      - node-a
+      - node-b
+  maxConcurrentNodes: 2
+  ttlSecondsAfterFinished: 86400

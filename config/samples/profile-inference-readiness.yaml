@@ -1,0 +1,117 @@
+# Inference readiness: the cells an inference fleet cares about that a
+# general acceptance sweep does not — low-precision throughput, fabric
+# bandwidth at the message sizes inference actually uses, and enough of a
+# power/memory picture to catch a part that will misbehave under bursty
+# rather than sustained load.
+#
+# APPLY THE WHOLE config/samples DIRECTORY FIRST — every REAL test below is a
+# testRef into node-acceptance.yaml, variant-sweep.yaml or
+# pair-network-acceptance.yaml.
+#
+# WHAT THIS PROFILE CANNOT DO YET, AND WHY IT SAYS SO INSTEAD OF PRETENDING
+# ---------------------------------------------------------------------------
+# Five of the cells an inference-readiness suite wants name a TestKind that
+# does not exist in this repository — no runner, no image, nothing to
+# reference:
+#
+#   power-swing        rapid power-cycling under load (P4.2-shaped; roadmap
+#                       item, docs/vendors/nvidia.md: "Planned, not written")
+#   model-load          time-to-first-token / load-time acceptance (P4.3)
+#   partition-smoke      MIG/partition-aware smoke (no MIG-specific kind yet;
+#                       every existing kind's MIG handling is a SKIP, not a
+#                       measurement of the partition itself)
+#   inference-canary     a short serving-shaped burst plus a longer soak cell
+#                       (P4.1 — the kind this profile most needs and has
+#                       least of)
+#   memory retention      memtest86+-shaped retention testing under sustained
+#                       load; host-memory-stress (below) covers correctness,
+#                       not retention under duration
+#
+# Rather than omit the shape of the suite, each is named below as a comment at
+# the point it would slot in, so a reader sees what is MISSING rather than
+# concluding the list is complete. Tracked in #425 so the gap has one place to
+# close against rather than five silent absences.
+
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: inference-readiness
+spec:
+  failFast: false
+  tests:
+    - testRef: fingerprint-probe
+    - testRef: host-fault-counters
+    # Low-precision throughput: fp4 and fp8 are what inference actually runs
+    # at. bf16/tf32/fp64 are included too — a low-precision floor means little
+    # if the part cannot also do the reference-precision arithmetic those
+    # cells cross-check it against.
+    - testRef: gemm-sweep
+      variants:
+        - name: fp4
+          axes: {precision: fp4}
+        - name: fp8
+          axes: {precision: fp8}
+        - name: bf16
+          axes: {precision: bf16}
+    # MISSING: power-swing (rapid power-cycling). No TestKind exists. Would
+    # slot in here, after the throughput cells and before the fabric ones —
+    # see the file header.
+    - testRef: memory-bandwidth
+    # MISSING: a retention-focused memory test. host-memory-stress below
+    # covers correctness; it is not memtest86+'s retention shape. See header.
+    - testRef: host-memory-stress
+    # Node-scope NCCL: the intra-node collective inference's own tensor-
+    # parallel traffic exercises, at a small message size representative of a
+    # single serving step rather than a training all-reduce's large one.
+    #
+    # BURNIN_NCCL_SIZES is nccl's own env override (spec.runner.env), read as
+    # a comma-separated byte-count list; unset, the runner sweeps its own
+    # default range. 262144 = 256 KiB.
+    - testRef: nccl-node-inference
+    # The fabric half, Pair-scope, at the same small-message shape.
+    - testRef: nccl-allreduce-pair
+    # MISSING: model-load (time-to-first-token / load-time), partition-smoke
+    # (MIG/partition-aware), inference-canary (serving-shaped burst + a
+    # 30-minute soak cell). See the file header; #425 tracks all three plus
+    # power-swing and retention testing together.
+  sinks: []
+---
+# The Node-scope NCCL cell above, sized for inference rather than reused from
+# pair-network-acceptance.yaml's training-shaped nccl-allreduce-pair.
+#
+# Node scope needs >= 2 accelerators on the target — see nccl's own README for
+# the intra-node rendezvous this exercises (ncclCommInitAll) and why it is a
+# different measurement from the Pair-scope fabric test beside it, not a
+# duplicate of it.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: nccl-node-inference
+spec:
+  kind: nccl
+  scope: Node
+  durationSeconds: 60
+  runner:
+    env:
+      - name: BURNIN_NCCL_SIZES
+        value: "262144" # 256 KiB — a single serving step's shape, not training's
+  thresholds:
+    - metric: miscompares
+      comparison: Equal
+      value: "0"
+  resources:
+    limits:
+      nvidia.com/gpu: "2"
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: inference-readiness-example
+spec:
+  profileRef: inference-readiness
+  target:
+    nodeNames:
+      - node-a
+      - node-b
+  maxConcurrentNodes: 2
+  ttlSecondsAfterFinished: 86400
