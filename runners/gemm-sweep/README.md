@@ -92,6 +92,40 @@ The runtime refuses a part the image was not built for **before launching**
 device-side assert under several hundred lines of CUTLASS spew, which would
 overwrite the diagnosis in the stored result.
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md). Request the node's whole board
+(`nvidia.com/gpu: "8"`); sequential iteration is the default, since this kind
+isolates ONE device's throughput and dividing `BURNIN_DURATION_SECONDS` across
+devices is what that isolation requires — `BURNIN_DEVICE_CONCURRENCY=all`
+overrides it, running every device's full window at once in its own thread
+rather than dividing it. A `BURNIN_DURATION_SECONDS` of zero (or unset) keeps
+its single-device meaning — one untimed correctness pass — on every device,
+rather than being divided down into a bogus one-second window.
+
+`nonfiniteCount` and `iterationsCompleted` (Sum), `maxAbsError` and
+`maxRelativeError` (Max), `totalKernelMs` (Sum) and `achievedTflops` (Min, the
+throughput floor — omitted on a device where no kernel timing was measured)
+are the fold across devices. PASS/FAIL is decided per device from its own
+window and then combined (Fail > Error > Skip > Pass), so a healthy device is
+never un-passed by another device's number — but a device whose scope, kernel
+or arch gate refused it leaves the whole test unjudged for that device, and a
+board with an unlaunched device is not soundly certified by the others
+passing. `worstDeviceIndex`/`worstDevicePciBusId` are named from
+`maxRelativeError`, the precision-specific Acceptance gate this kind is built
+around and the one metric every device always reports (`achievedTflops` is
+conditional on a nonzero kernel timing). `built_cuda_arch`, `gemm_shape`,
+`gemm_precision` and `window_seconds` are whole-run constants — identical for
+every device and every precision — printed once rather than per device. New
+keys: `deviceCount`, `devicesVisible`, `deviceWindowS`, `deviceConcurrency`,
+`worstDeviceIndex`/`worstDevicePciBusId`. When more than one device reported,
+a `per-device.json` artifact carries every device's own reading.
+
+**Not verified on multi-GPU hardware** — this project's only NVIDIA
+accelerator is a single GB10 per node, same limitation as the single-device
+engine below.
+
 ## Host requirements
 
 A GPU, via the NVIDIA Container Toolkit's driver injection

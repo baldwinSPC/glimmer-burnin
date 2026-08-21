@@ -116,6 +116,10 @@ COPY gemm_sweep.cu /src/gemm_sweep.cu
 # compiler and no GPU (precision_test.cc, run by `make test` via
 # runners/cxxtests_test.go).
 COPY precision.h /src/precision.h
+# Shared across every runner that iterates devices (docs/dev/multi-device.md);
+# duplicated because each runner is its own Docker build context and COPY
+# cannot leave one. runners/devicefold_test.go refuses drift between copies.
+COPY device_fold.h /src/device_fold.h
 
 # -cudart static is nvcc's default on Linux but stated explicitly so the intent
 # survives a toolchain change.  -static-libstdc++/-static-libgcc are host-compiler

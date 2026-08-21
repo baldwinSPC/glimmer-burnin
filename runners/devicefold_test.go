@@ -60,6 +60,7 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		"clockprobe-rocm":    true,
 		"compute-smoke":      true,
 		"compute-smoke-rocm": true,
+		"gemm-sweep":         true,
 	}
 
 	exempt := map[string]string{
@@ -88,7 +89,6 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		// full conversion.
 		"memory-bw":      "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
 		"memory-bw-rocm": "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
-		"gemm-sweep":     "#400 — delivery step 3 (measurement kinds, sequential default)",
 	}
 
 	for _, d := range runnerDirs(t) {
