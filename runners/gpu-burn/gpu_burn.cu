@@ -53,6 +53,25 @@
 
 namespace {
 
+// Device-fold direction, docs/dev/multi-device.md. gpu-burn's own gate is
+// miscompares/nonfinite/eccErrors (see main()'s assertions below), but
+// sustained_clock_pct is listed FIRST anyway so worstDeviceIndex names the
+// slowest device rather than an arbitrary one among ties on a Sum counter —
+// consistent with thermal-soak, which shares this engine and does gate on it.
+namespace devices = burnin::devices;
+const std::vector<devices::FoldRule> kDeviceFold = {
+    {"sustained_clock_pct", devices::Fold::Min},
+    {"tflops", devices::Fold::Min},
+    {"gpu_temp_c", devices::Fold::Max},
+    {"power_draw_w", devices::Fold::Max},
+    {"throttle_events", devices::Fold::Sum},
+    {"errors", devices::Fold::Sum},
+    {"nonfinite_count", devices::Fold::Sum},
+    // ecc_errors is Last across windows in the registry (an NVML lifetime
+    // total) but Sum across DEVICES, per device_fold.h's Last allowlist.
+    {"ecc_errors", devices::Fold::Sum},
+};
+
 // The stdout vocabulary for this kind. These spellings are not free: the
 // operator's alias table (pkg/runner/parse.go, "gpu-burn") already maps them,
 // and it maps them to upstream gpu_burn's own words so that a site running the
@@ -77,7 +96,7 @@ const soak::Keys kKeys = {
 
 int main() {
   soak::Measurement m;
-  const int rc = soak::run(kKeys, &m);
+  const int rc = soak::run(kKeys, kDeviceFold, &m);
   if (rc != 0) return rc; // Skip or Error; the marker is already printed.
 
   // Every metric is already on stdout, so each branch from here leaves a

@@ -75,6 +75,7 @@ ARG CUDA_ARCH_FLAGS="-gencode arch=compute_80,code=sm_80 \
 COPY thermal_soak.cu /src/thermal_soak.cu
 COPY soak_core.cuh /src/soak_core.cuh
 COPY nvml_dynamic.h /src/nvml_dynamic.h
+COPY device_fold.h /src/device_fold.h
 COPY kmsg/kmsg_watch.h /src/kmsg/kmsg_watch.h
 
 # -cudart static is nvcc's default on Linux but stated explicitly so the intent

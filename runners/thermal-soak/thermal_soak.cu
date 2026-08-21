@@ -47,6 +47,30 @@
 
 namespace {
 
+// Device-fold direction, docs/dev/multi-device.md. The GATED metric
+// (sustained_clock_pct — see main()'s clock-floor check below) is listed
+// FIRST: soak::run() names the primaryKey passed to devices::fold() from this
+// table's first entry, which is what worstDeviceIndex/worstDevicePciBusId end
+// up naming. Aliased with the plain `devices` name devicefold_test.go's
+// regex recognises (`(?:burnin::)?(?:devices::)?Fold::`) — `soak::devices`
+// would not match it.
+namespace devices = burnin::devices;
+const std::vector<devices::FoldRule> kDeviceFold = {
+    {"sustained_clock_pct", devices::Fold::Min},
+    {"sustained_throughput_tflops", devices::Fold::Min},
+    {"peak_temp_c", devices::Fold::Max},
+    {"peak_power_w", devices::Fold::Max},
+    {"throttle_count", devices::Fold::Sum},
+    {"miscompares", devices::Fold::Sum},
+    {"nonfinite_count", devices::Fold::Sum},
+    // ecc_errors is Last across windows in the registry (an NVML lifetime
+    // total, not a per-window measurement) but Sum across DEVICES — each
+    // device's own counter since its own reset, per device_fold.h's Last
+    // allowlist. devicefold_test.go skips checking a registry-Last key's
+    // fold direction for exactly this reason.
+    {"ecc_errors", devices::Fold::Sum},
+};
+
 // The stdout vocabulary for this kind. These spellings are not free: the
 // operator's alias table (pkg/runner/parse.go, "thermal-soak") already maps
 // them, and a key not in that table falls through to generic snake_case ->
@@ -127,7 +151,7 @@ int main() {
   std::printf("temp_ceiling_c=%.2f\n", maxTempC);
 
   soak::Measurement m;
-  const int rc = soak::run(kKeys, &m);
+  const int rc = soak::run(kKeys, kDeviceFold, &m);
   if (rc != 0) return rc; // Skip or Error; the marker is already printed.
 
   // Everything above is already on stdout, so every branch from here leaves a
