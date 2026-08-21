@@ -1082,7 +1082,14 @@ int main() {
     break;
   }
 
-  devices::printFold(stdout, reports, visible, windowS, conc.mode, folded, /*spreads=*/{},
+  // gemmThroughputSpreadPct is achieved_tflops' spread across devices in one
+  // window of the same GEMM at the same precision — an ABSOLUTE figure
+  // (TFLOP/s), not a percentage of a per-part rating, so a heterogeneous
+  // board reports n/a rather than a number that compares unlike parts.
+  const std::vector<devices::SpreadSpec> spreads = {
+      {"gemmThroughputSpreadPct", "achieved_tflops", /*absoluteFigure=*/true},
+  };
+  devices::printFold(stdout, reports, visible, windowS, conc.mode, folded, spreads,
                      /*underMig=*/false);
   if (reports.size() > 1) {
     std::fputs(devices::renderPerDeviceArtifact(reports).c_str(), stdout);

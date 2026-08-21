@@ -117,10 +117,17 @@ passing. `worstDeviceIndex`/`worstDevicePciBusId` are named from
 around and the one metric every device always reports (`achievedTflops` is
 conditional on a nonzero kernel timing). `built_cuda_arch`, `gemm_shape`,
 `gemm_precision` and `window_seconds` are whole-run constants — identical for
-every device and every precision — printed once rather than per device. New
-keys: `deviceCount`, `devicesVisible`, `deviceWindowS`, `deviceConcurrency`,
-`worstDeviceIndex`/`worstDevicePciBusId`. When more than one device reported,
-a `per-device.json` artifact carries every device's own reading.
+every device and every precision — printed once rather than per device.
+`gemmThroughputSpreadPct` is `achievedTflops`' spread across devices in one
+window of the same GEMM at the same precision — an ABSOLUTE figure (TFLOP/s,
+not a percentage of a per-part rating) — and reports `n/a` on a
+single-device node or a heterogeneous board, and is omitted entirely on a
+device where `achievedTflops` itself was never measured (a probe failure is
+an omission, never a claim of 0% spread). New keys: `deviceCount`,
+`devicesVisible`, `deviceWindowS`, `deviceConcurrency`,
+`worstDeviceIndex`/`worstDevicePciBusId`, `gemmThroughputSpreadPct`. When more
+than one device reported, a `per-device.json` artifact carries every device's
+own reading.
 
 **Not verified on multi-GPU hardware** — this project's only NVIDIA
 accelerator is a single GB10 per node, same limitation as the single-device
