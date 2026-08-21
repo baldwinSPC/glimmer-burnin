@@ -405,6 +405,36 @@ time only**. The published image contains our binary on a distroless base and
 runtime from the host driver by the NVIDIA Container Toolkit. The build asserts
 this: it fails if `ldd` finds any `libcuda*`/`libcudart*`/`libnv*` dependency.
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md). Request the node's whole board
+(`nvidia.com/gpu: "8"`); iteration is always sequential — this kind is a
+BURST, one launch per device taking milliseconds, so there is no window to
+divide or run concurrently over. `BURNIN_DEVICE_CONCURRENCY` is read and, if
+set to something other than `sequential`, reported in `config_warnings`
+rather than silently ignored, but it never changes the iteration.
+
+`nonfiniteCount` (Sum) and `maxAbsError` (Max) are the fold across devices;
+`m`/`n`/`k`/`maxAbsRef`/`maxRelativeError`/`elapsedMs`/`throughputTflops` stay
+device 0's, evidence exactly as before (`throughputTflops` was never a
+benchmark on a single device and folding it would not make it one). A device
+whose scope/kernel/arch gate fails leaves the WHOLE test unjudged for that
+device (Error), and the combined verdict across devices is Fail > Error >
+Skip > Pass (device_fold.h's `combineExitCodes`) — a device is a PART, so a
+measured NaN on one device does not erase a measured pass on another, but a
+device that was never launched cannot be soundly folded into a Pass. New
+keys: `deviceCount`, `devicesVisible`, `deviceWindowS` (always `0`, a burst
+has no window), `deviceConcurrency` (always `sequential`),
+`worstDeviceIndex`/`worstDevicePciBusId` (named from `nonfiniteCount`, the
+registered Acceptance metric — `maxAbsError` is Evidence-only). When more
+than one device reported, a `per-device.json` artifact carries every
+device's own reading.
+
+**Not verified on multi-GPU NVIDIA hardware** — this project's only NVIDIA
+accelerator is a single GB10 per node. The single-device path is unchanged
+and continues to run exactly as before on that hardware.
+
 ## Requirements on the node
 
 - NVIDIA Container Toolkit **≥ 1.17** with the `nvidia` runtime registered
