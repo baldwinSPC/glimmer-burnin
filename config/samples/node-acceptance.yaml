@@ -38,6 +38,25 @@
 # instead of failing. Omission is still a failure — a runner that crashed before
 # emitting has not declared anything — so this cannot turn a broken probe into a
 # pass. See the host-fault-counters test at the bottom of this file.
+#
+# ─── MULTI-DEVICE COVERAGE ────────────────────────────────────────────────────
+#
+# resources.limits.nvidia.com/gpu below is set to "1" throughout this file
+# because that is GB10's real board size (one Grace-Blackwell superchip per
+# node) — the fleet every threshold in this file was actually measured
+# against — not because "1" is a safe default. The Kubernetes device plugin
+# injects exactly as many devices as this number requests, so on a
+# MULTI-GPU SKU it must be raised to that SKU's real count (see
+# fingerprint-probe's acceleratorCount metric for what a given node
+# actually has) or a test silently measures one card and calls it the node.
+#
+# compute-smoke and clockprobe (docs/dev/multi-device.md) measure every
+# device they were allocated, and their tests below gate `deviceCount Equal
+# 1` for exactly that reason: a partial allocation is a config error, and
+# the gate turns it into a visible FAILURE instead of a quiet undercount.
+# dcgm-diag, memory-bw and host-health do not yet claim `deviceCount` (some
+# by design, some pending #431) and carry no such gate — see each test's own
+# resources.limits comment for which applies.
 
 # compute-smoke is a BURST, and there is deliberately no durationSeconds here.
 #
@@ -61,8 +80,26 @@ spec:
     - metric: nonfiniteCount
       comparison: Equal
       value: "0"
+    # deviceCount is the gate a PARTIAL allocation trips. compute-smoke
+    # measures every device the pod was allocated (docs/dev/multi-device.md),
+    # not device 0 alone — but it can only measure what the device plugin
+    # actually injects, which is bounded by resources.limits below. "1" here
+    # is GB10's real board size, the fleet this whole file is measured
+    # against (one Grace-Blackwell superchip per node) — on a multi-GPU SKU,
+    # set this to fingerprint-probe's acceleratorCount metric, which says
+    # what a given node actually has, and change resources.limits to match.
+    # A pod handed one card on an eight-GPU node would otherwise certify one
+    # card as the node, with nothing here to fail that pod instead.
+    - metric: deviceCount
+      comparison: Equal
+      value: "1"
   resources:
     limits:
+      # "1" is GB10's own board size, not an arbitrary placeholder — see the
+      # deviceCount gate above. Requesting the whole board is what that gate
+      # depends on: the device plugin injects exactly as many devices as this
+      # number asks for, so under-requesting silently limits coverage no
+      # matter how many accelerators the node actually has.
       nvidia.com/gpu: "1"
 ---
 # The clock gate. This is the one that catches a part pinned in a low P-state:
@@ -114,8 +151,15 @@ spec:
     - metric: throttleEvents
       comparison: Equal
       value: "0"
+    # See fp4-compute-smoke's deviceCount gate above for why this exists:
+    # clockprobe measures every device it was allocated, and the gate is what
+    # turns a partial allocation into a FAILURE instead of a quiet undercount.
+    - metric: deviceCount
+      comparison: Equal
+      value: "1"
   resources:
     limits:
+      # "1" is GB10's own board size — see fp4-compute-smoke above.
       nvidia.com/gpu: "1"
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
@@ -191,6 +235,17 @@ spec:
     # observed.
   resources:
     limits:
+      # "1" is GB10's own board size, not an arbitrary placeholder — see
+      # fp4-compute-smoke above; on a multi-GPU SKU use
+      # fingerprint-probe's acceleratorCount instead. dcgm-diag is a
+      # node-wide, read-only diagnostic (it enumerates and diagnoses every
+      # device the DRIVER exposes, not just what device_fold.h would fold),
+      # but it can still only see what the device plugin injects into this
+      # pod: requesting one GPU on an eight-GPU node has dcgmi diagnose one
+      # card and call it the node. No deviceCount gate here — this kind
+      # reports devicesVisible, not deviceCount
+      # (runners/devicefold_test.go's EXEMPT list), so a deviceCount
+      # threshold would fail closed on every run.
       nvidia.com/gpu: "1"
 ---
 # Bandwidth and compute fail differently: a part that computes at full rate but
@@ -236,6 +291,12 @@ spec:
       value: "109"
   resources:
     limits:
+      # "1" is GB10's own board size — see fp4-compute-smoke above; on a
+      # multi-GPU SKU use fingerprint-probe's acceleratorCount instead. No
+      # deviceCount gate here: memory-bw's nvbandwidth iterates every VISIBLE
+      # device already, but the runner itself does not yet claim deviceCount
+      # (runners/devicefold_test.go's PENDING list, tracked by #431) — a
+      # deviceCount threshold would fail closed on every run until then.
       nvidia.com/gpu: "1"
 ---
 # Host DIMM faults present as accelerator flakiness: a corrupted staging buffer
