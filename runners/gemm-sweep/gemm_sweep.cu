@@ -50,6 +50,37 @@
 // stable throughput figure — it is NOT a thermal soak and does not pretend to
 // be one (the per-iteration readback keeps GPU duty well under saturation;
 // thermal-soak and gpu-burn own sustained load). One kind, one job.
+//
+// MULTI-DEVICE
+// ------------
+// Iterates every device the pod was allocated (docs/dev/multi-device.md).
+// Sequential by default — this is a MEASUREMENT kind, one precision cell run
+// per device, and dividing BURNIN_DURATION_SECONDS across devices is what
+// isolating one device's throughput requires. BURNIN_DEVICE_CONCURRENCY=all
+// overrides it: every device gets the FULL window, in its own thread, exactly
+// as clockprobe's concurrent mode — CUDA's per-calling-thread current-device
+// semantics mean each device's own CUTLASS pipeline is already self-contained,
+// so no lockstep polling is needed the way the soak family's single kernel
+// launch per window requires it.
+//
+// What used to be main()'s body — the scope/kernel/arch gates, then the
+// precision-cell dispatch — is now processDevice(), called once per device
+// (in its own thread under `all`) with cudaSetDevice(index) already done.
+// measureWindow() and the three precision cells (fp4cell::run, fp8cell::run,
+// runDense2x) keep their exact control flow; they no longer print or decide
+// directly, they record into that device's own DeviceResult, and main() prints
+// ONE combined marker at the end (device_fold.h's combineExitCodes: Fail >
+// Error > Skip > Pass — a device is a PART, and a device whose gate refused it
+// leaves the WHOLE test unjudged for that device, so folding over an
+// unlaunched device is not a verdict).
+//
+// nonfiniteCount (Sum), maxAbsError (Max), maxRelativeError (Max — the
+// precision-specific ACCEPTANCE gate, and the fold's primaryKey since it is
+// always reported and is what a threshold actually turns on), achievedTflops
+// (Min — the throughput floor), totalKernelMs (Sum) and iterationsCompleted
+// (Sum) are the fold across devices. gemm_shape/gemm_precision/window_seconds/
+// built_cuda_arch are whole-run constants, printed once, identical for every
+// device by construction — not per-device evidence at all.
 
 #ifndef BURNIN_CUDA_ARCH
 // The Dockerfile passes the real value. The fallback keeps a hand-built binary
@@ -64,7 +95,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Host-only and CUDA-free: every decision that can produce a wrong VERDICT —
@@ -72,6 +105,7 @@
 // image covers this part, and what each refusal says — lives in precision.h so
 // a plain C++ test can drive it exhaustively without a GPU.
 #include "precision.h"
+#include "device_fold.h"
 
 #include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"
@@ -95,6 +129,8 @@
 #include "cutlass/util/reference/host/gett.hpp"
 
 namespace {
+
+namespace devices = burnin::devices;
 
 // One shape for every precision, echoed as gemm_shape= so two throughput
 // figures are only ever compared when they measured the same problem. The same
@@ -125,25 +161,77 @@ using burnin::Precision;
 
 constexpr const char *kBuiltArch = BURNIN_CUDA_ARCH;
 
+// DeviceResult is one device's whole outcome. gCurrent points at the one
+// currently being processed — read only from the calling thread's own device,
+// under `all` concurrency each thread's device is distinct so there is no
+// shared mutable state between them, exactly as clockprobe's runOneDevice.
+struct DeviceResult {
+  int index = 0;
+  int exitCode = kExitPass;
+  std::string reason;
+
+  bool identityRead = false;
+  std::string busId, name, computeCap;
+
+  std::map<std::string, double> values;  // nonfinite_count, max_abs_error, max_relative_error,
+                                         // total_kernel_ms, gemm_iterations, achieved_tflops
+  bool ranGemm = false;                 // false for a device that never reached measureWindow
+  double maxAbsRef = 0.0;
+};
+
+// gCurrent is thread-local: under `all` concurrency, each worker thread runs
+// its own device's whole pipeline start to finish before another device's
+// gCurrent is ever set on that thread, but two DIFFERENT threads must never
+// see or clobber each other's pointer.
+thread_local DeviceResult *gCurrent = nullptr;
+
 // fail() is ONLY for a measured verdict about the silicon. If you are reaching
 // for it because something went wrong, you want errored(). The table in
 // precision.h is the contract; this comment is the tap on the shoulder.
-int fail(const char *why) {
-  std::printf("GEMM_SWEEP_FAIL: %s\n", why);
+int fail(const std::string &why) {
+  if (gCurrent != nullptr) {
+    gCurrent->exitCode = kExitFail;
+    gCurrent->reason = why;
+  }
   return kExitFail;
 }
 
 // errored() is every path where the measurement did not happen. The hardware is
 // unjudged, and saying so is the whole point.
-int errored(const char *why) {
-  std::printf("GEMM_SWEEP_ERROR: %s\n", why);
+int errored(const std::string &why) {
+  if (gCurrent != nullptr) {
+    gCurrent->exitCode = kExitError;
+    gCurrent->reason = why;
+  }
   return kExitError;
 }
 
+int skip(const std::string &why) {
+  if (gCurrent != nullptr) {
+    gCurrent->exitCode = kExitSkip;
+    gCurrent->reason = why;
+  }
+  return kExitSkip;
+}
+
+// stripMarkerPrefix removes precision.h's baked-in "GEMM_SWEEP_XXX: " marker
+// from a message meant for ONE device's `reason`. The combined marker for the
+// whole test is decided once, in main(), from every device's exit code — a
+// per-device reason that already carried its own marker would print a
+// confusing "GEMM_SWEEP_SKIP: device 0: GEMM_SWEEP_SKIP: fp4 needs …". The
+// precision.h functions are also used directly, unstripped, for the one
+// whole-run refusal that happens before any device exists (BURNIN_VARIANT_
+// PRECISION missing or unrecognised) — there the baked-in marker IS the
+// marker.
+std::string stripMarkerPrefix(const std::string &s) {
+  const auto pos = s.find(": ");
+  return pos == std::string::npos ? s : s.substr(pos + 2);
+}
+
 // A CUDA error is never a hardware verdict here: it stopped the measurement, it
-// is not the measurement. The arch gate in main() has already refused the one
-// case (a wrong-arch image) where the runtime's own message would mislead, so
-// this is only the translation to the contract.
+// is not the measurement. The arch gate in processDevice has already refused
+// the one case (a wrong-arch image) where the runtime's own message would
+// mislead, so this is only the translation to the contract.
 int cudaErrored(const char *where, cudaError_t err) {
   char buf[512];
   std::snprintf(buf, sizeof(buf),
@@ -179,7 +267,7 @@ struct WindowStats {
 
 // compareIteration folds one device output into the window's statistics. Every
 // iteration is checked — a transient miscompute at minute nine must not be
-// overwritten by a clean minute ten.
+// overwritten by a clean minute ten. UNCHANGED from the single-device engine.
 template <class TD>
 void compareIteration(const TD *got, const std::vector<double> &ref, WindowStats &s, bool first) {
   double sumAbs = 0.0;
@@ -197,33 +285,35 @@ void compareIteration(const TD *got, const std::vector<double> &ref, WindowStats
 }
 
 // measureWindow runs launch() until the wall-clock window closes (at least
-// once), check()ing every iteration, then emits the evidence and judges.
+// once), check()ing every iteration, then records the evidence and judges into
+// `out`. UNCHANGED control flow from the single-device engine: launch()/check()
+// still return -1 to continue or an exit code they have already recorded (via
+// fail/errored/cudaErrored/cutlassErrored, into gCurrent == out) — only the
+// TERMINAL step changed, from printing metrics and a marker to storing them.
 //
-// launch() and check() return -1 to continue, or an exit code they have already
-// reported — which is how a CUDA failure mid-window stays an Error rather than
-// being laundered into a comparison.
-//
-// The metrics are printed BEFORE the decision, so a failing or erroring run
-// still leaves its full evidence behind.
+// The metrics are recorded BEFORE the decision, so a failing or erroring run
+// still leaves its full evidence behind in `out`.
 template <class LaunchFn, class CheckFn>
-int measureWindow(long windowSeconds, double flopsPerIteration, double tolerance,
-                  double maxAbsRef, LaunchFn &&launch, CheckFn &&check) {
+void measureWindow(long windowSeconds, double flopsPerIteration, double tolerance,
+                  double maxAbsRef, DeviceResult *out, LaunchFn &&launch, CheckFn &&check) {
   cudaEvent_t beg, end;
-  if (cudaError_t e = cudaEventCreate(&beg); e != cudaSuccess) return cudaErrored("cudaEventCreate", e);
-  if (cudaError_t e = cudaEventCreate(&end); e != cudaSuccess) return cudaErrored("cudaEventCreate", e);
+  if (cudaError_t e = cudaEventCreate(&beg); e != cudaSuccess) { cudaErrored("cudaEventCreate", e); return; }
+  if (cudaError_t e = cudaEventCreate(&end); e != cudaSuccess) { cudaErrored("cudaEventCreate", e); return; }
 
   WindowStats s;
   const auto wallStart = std::chrono::steady_clock::now();
   for (;;) {
     cudaEventRecord(beg);
-    if (int rc = launch(); rc >= 0) return rc;
+    if (int rc = launch(); rc >= 0) { (void)rc; return; }
     cudaEventRecord(end);
-    if (cudaError_t e = cudaEventSynchronize(end); e != cudaSuccess)
-      return cudaErrored("cudaEventSynchronize", e);
+    if (cudaError_t e = cudaEventSynchronize(end); e != cudaSuccess) {
+      cudaErrored("cudaEventSynchronize", e);
+      return;
+    }
     float ms = 0.f;
     cudaEventElapsedTime(&ms, beg, end);
     s.totalKernelMs += ms;
-    if (int rc = check(s, s.iterations == 0); rc >= 0) return rc;
+    if (int rc = check(s, s.iterations == 0); rc >= 0) { (void)rc; return; }
     ++s.iterations;
 
     const double elapsed =
@@ -232,16 +322,18 @@ int measureWindow(long windowSeconds, double flopsPerIteration, double tolerance
   }
 
   const double maxRelError = maxAbsRef > 0.0 ? s.maxAbsErr / maxAbsRef : INFINITY;
-  std::printf("gemm_shape=%dx%dx%d\n", kM, kN, kK);
-  std::printf("gemm_iterations=%ld\ntotal_kernel_ms=%.3f\n", s.iterations, s.totalKernelMs);
-  std::printf("max_abs_ref=%g\nmax_abs_error=%g\nmax_relative_error=%g\nnonfinite_count=%lld\n",
-              maxAbsRef, s.maxAbsErr, maxRelError, s.nonfinite);
+  out->ranGemm = true;
+  out->maxAbsRef = maxAbsRef;
+  out->values["nonfinite_count"] = static_cast<double>(s.nonfinite);
+  out->values["max_abs_error"] = s.maxAbsErr;
+  out->values["max_relative_error"] = maxRelError;
+  out->values["total_kernel_ms"] = s.totalKernelMs;
+  out->values["gemm_iterations"] = static_cast<double>(s.iterations);
   // A rate needs a nonzero denominator; if the clock measured nothing, the
-  // honest move is to OMIT the key, never to print a number nobody measured.
+  // honest move is to OMIT the key, never to record a number nobody measured.
   if (s.totalKernelMs > 0.0) {
-    std::printf("achieved_tflops=%.3f\n",
-                flopsPerIteration * static_cast<double>(s.iterations) /
-                    (s.totalKernelMs * 1e-3) / 1e12);
+    out->values["achieved_tflops"] =
+        flopsPerIteration * static_cast<double>(s.iterations) / (s.totalKernelMs * 1e-3) / 1e12;
   }
 
   // The verdict itself — the one place exit 0 and exit 1 are told apart — is
@@ -249,24 +341,30 @@ int measureWindow(long windowSeconds, double flopsPerIteration, double tolerance
   // file drives it exhaustively (ordering included).
   switch (burnin::judgeWindow(s.nonfinite, maxAbsRef, s.sumAbsFirst, maxRelError, tolerance)) {
     case burnin::Judgement::FailNonfinite:
-      return fail("output contains NaN/Inf");
+      fail("output contains NaN/Inf");
+      return;
     case burnin::Judgement::ErrorNoYardstick:
-      return errored("the host reference GEMM came out all zeros; the comparison has no yardstick "
-                     "and nothing was measured about this part");
+      errored("the host reference GEMM came out all zeros; the comparison has no yardstick "
+             "and nothing was measured about this part");
+      return;
     case burnin::Judgement::FailAllZeros:
-      return fail("device output is all zeros");
+      fail("device output is all zeros");
+      return;
     case burnin::Judgement::FailMismatch:
-      return fail("numerical mismatch exceeds tolerance");
+      fail("numerical mismatch exceeds tolerance");
+      return;
     case burnin::Judgement::Pass:
       break;
   }
-  std::printf("GEMM_SWEEP_PASS\n");
-  return kExitPass;
+  if (gCurrent != nullptr) {
+    gCurrent->exitCode = kExitPass;
+    gCurrent->reason.clear();
+  }
 }
 
 // hostReference computes D = A×B on the host in double, from the EXACT operand
 // values the device saw, and returns max|ref|. Independent of every device
-// path: a broken tensor core cannot vouch for itself.
+// path: a broken tensor core cannot vouch for itself. UNCHANGED.
 template <class TensorA, class TensorB>
 double hostReference(TensorA &A, TensorB &B, std::vector<double> &ref) {
   std::vector<double> a(static_cast<std::size_t>(kM) * kK);
@@ -308,9 +406,8 @@ double hostReference(TensorA &A, TensorB &B, std::vector<double> &ref) {
 //      parts this image targets have ~99 KB per block, so a cell built on the
 //      default COMPILES everywhere and then errors at runtime on the exact
 //      fleet it exists to measure. The tiles below stay under 64 KB.
-
 template <class Gemm>
-int runDense2x(long windowSeconds) {
+void runDense2x(long windowSeconds, DeviceResult *out) {
   using ElementAB = typename Gemm::ElementA;
   using ElementCD = typename Gemm::ElementC;
   using ElementAcc = typename Gemm::ElementAccumulator;
@@ -340,14 +437,23 @@ int runDense2x(long windowSeconds) {
   // Everything from here to the comparison is SETUP: none of it measures the
   // part, so none of it may report a hardware verdict.
   Gemm gemm;
-  if (Gemm::can_implement(args) != cutlass::Status::kSuccess)
-    return cutlassErrored("can_implement rejected the problem");
+  if (Gemm::can_implement(args) != cutlass::Status::kSuccess) {
+    cutlassErrored("can_implement rejected the problem");
+    return;
+  }
   cutlass::device_memory::allocation<uint8_t> workspace(Gemm::get_workspace_size(args));
-  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess)
-    return cutlassErrored("gemm.initialize failed");
-  if (gemm() != cutlass::Status::kSuccess) return cutlassErrored("warmup gemm.run failed");
-  if (cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess)
-    return cudaErrored("warmup cudaDeviceSynchronize", e);
+  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess) {
+    cutlassErrored("gemm.initialize failed");
+    return;
+  }
+  if (gemm() != cutlass::Status::kSuccess) {
+    cutlassErrored("warmup gemm.run failed");
+    return;
+  }
+  if (cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) {
+    cudaErrored("warmup cudaDeviceSynchronize", e);
+    return;
+  }
 
   std::vector<double> ref;
   const double maxAbsRef = hostReference(A, B, ref);
@@ -361,8 +467,7 @@ int runDense2x(long windowSeconds) {
     compareIteration(D.host_data(), ref, s, first);
     return -1;
   };
-  return measureWindow(windowSeconds, 2.0 * kM * kN * kK, kDenseTolerance, maxAbsRef, launch,
-                       check);
+  measureWindow(windowSeconds, 2.0 * kM * kN * kK, kDenseTolerance, maxAbsRef, out, launch, check);
 }
 
 }  // namespace
@@ -446,7 +551,7 @@ using SFConfig  = typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledC
 
 template <class T> auto iter(T *p) { return cute::recast_ptr<T>(p); }
 
-int run(long windowSeconds) {
+void run(long windowSeconds, DeviceResult *out) {
   const auto shape = cute::make_shape(kM, kN, kK, 1);
 
   auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {kM, kK, 1});
@@ -484,13 +589,22 @@ int run(long windowSeconds) {
 
   Gemm gemm;
   cutlass::device_memory::allocation<uint8_t> workspace(Gemm::get_workspace_size(args));
-  if (gemm.can_implement(args) != cutlass::Status::kSuccess)
-    return cutlassErrored("can_implement rejected the problem");
-  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess)
-    return cutlassErrored("gemm.initialize failed");
-  if (gemm.run() != cutlass::Status::kSuccess) return cutlassErrored("warmup gemm.run failed");
-  if (cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess)
-    return cudaErrored("warmup cudaDeviceSynchronize", e);
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
+    cutlassErrored("can_implement rejected the problem");
+    return;
+  }
+  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess) {
+    cutlassErrored("gemm.initialize failed");
+    return;
+  }
+  if (gemm.run() != cutlass::Status::kSuccess) {
+    cutlassErrored("warmup gemm.run failed");
+    return;
+  }
+  if (cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) {
+    cudaErrored("warmup cudaDeviceSynchronize", e);
+    return;
+  }
 
   // Independent reference: CUTLASS host block-scaled GETT, fp32 accumulate.
   auto tA = make_tensor(iter(A.host_data()), layout_A);
@@ -523,8 +637,7 @@ int run(long windowSeconds) {
     compareIteration(D.host_data(), ref, s, first);
     return -1;
   };
-  return measureWindow(windowSeconds, 2.0 * kM * kN * kK, kFp4Tolerance, maxAbsRef, launch,
-                       check);
+  measureWindow(windowSeconds, 2.0 * kM * kN * kK, kFp4Tolerance, maxAbsRef, out, launch, check);
 }
 
 }  // namespace fp4cell
@@ -581,7 +694,7 @@ using StrideB = typename Gemm::GemmKernel::StrideB;
 using StrideC = typename Gemm::GemmKernel::StrideC;
 using StrideD = typename Gemm::GemmKernel::StrideD;
 
-int run(long windowSeconds) {
+void run(long windowSeconds, DeviceResult *out) {
   auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {kM, kK, 1});
   auto stride_B = cutlass::make_cute_packed_stride(StrideB{}, {kN, kK, 1});
   auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, {kM, kN, 1});
@@ -606,13 +719,22 @@ int run(long windowSeconds) {
 
   Gemm gemm;
   cutlass::device_memory::allocation<uint8_t> workspace(Gemm::get_workspace_size(args));
-  if (gemm.can_implement(args) != cutlass::Status::kSuccess)
-    return cutlassErrored("can_implement rejected the problem");
-  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess)
-    return cutlassErrored("gemm.initialize failed");
-  if (gemm.run() != cutlass::Status::kSuccess) return cutlassErrored("warmup gemm.run failed");
-  if (cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess)
-    return cudaErrored("warmup cudaDeviceSynchronize", e);
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
+    cutlassErrored("can_implement rejected the problem");
+    return;
+  }
+  if (gemm.initialize(args, workspace.get()) != cutlass::Status::kSuccess) {
+    cutlassErrored("gemm.initialize failed");
+    return;
+  }
+  if (gemm.run() != cutlass::Status::kSuccess) {
+    cutlassErrored("warmup gemm.run failed");
+    return;
+  }
+  if (cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) {
+    cudaErrored("warmup cudaDeviceSynchronize", e);
+    return;
+  }
 
   std::vector<double> ref;
   const double maxAbsRef = hostReference(A, B, ref);
@@ -626,8 +748,7 @@ int run(long windowSeconds) {
     compareIteration(D.host_data(), ref, s, first);
     return -1;
   };
-  return measureWindow(windowSeconds, 2.0 * kM * kN * kK, kDenseTolerance, maxAbsRef, launch,
-                       check);
+  measureWindow(windowSeconds, 2.0 * kM * kN * kK, kDenseTolerance, maxAbsRef, out, launch, check);
 }
 
 }  // namespace fp8cell
@@ -645,42 +766,33 @@ long readWindowSeconds() {
   return v;
 }
 
-}  // namespace
+// processDevice is what main() used to be, scoped to one device, from the
+// point cudaGetDevice(&dev) used to run — dev is now `index`, explicitly set.
+// Every early `return` here means "stop processing THIS device": the arch
+// gates and the precision-cell dispatch are UNCHANGED in substance from the
+// single-device engine; only the wrapping is new. `p` and `raw` are already
+// resolved once, globally, before any device — a precision is the execution's
+// identity and does not vary per device.
+void processDevice(int index, long windowSecondsForThisDevice, Precision p, const std::string &raw,
+                   DeviceResult *out) {
+  out->index = index;
+  gCurrent = out;
 
-int main() {
-  // Emitted first so every exit below — including the ones that never reach a
-  // kernel — leaves the arch this image was built for on the record.
-  std::printf("built_cuda_arch=%s\n", kBuiltArch);
-
-  // The precision is the execution's identity and needs no hardware to read,
-  // so it is settled before anything is asked of the device.
-  const char *rawEnv = std::getenv("BURNIN_VARIANT_PRECISION");
-  const std::string raw = rawEnv == nullptr ? "" : rawEnv;
-  if (raw.empty()) {
-    return errored(
-        "BURNIN_VARIANT_PRECISION is not set. gemm-sweep runs ONE precision per execution; give "
-        "the profile entry variants with axes {precision: fp4|fp8|bf16|tf32|fp64}, one per cell. "
-        "Guessing a precision here would produce a measurement gated by thresholds written for a "
-        "different one");
+  if (cudaError_t e = cudaSetDevice(index); e != cudaSuccess) {
+    cudaErrored("cudaSetDevice", e);
+    return;
   }
-  const Precision p = burnin::parsePrecision(raw);
-  if (p == Precision::Unknown) {
-    std::printf("%s\n", burnin::refuseMessage(p, raw, 0).c_str());
-    return kExitError;
-  }
-  std::printf("gemm_precision=%s\n", burnin::precisionName(p));
-
-  const long windowSeconds = readWindowSeconds();
-  std::printf("window_seconds=%ld\n", windowSeconds);
-
-  int dev = 0;
   cudaDeviceProp props{};
   // No device is an ERROR, not a failure: a pod that got no GPU has told us
   // nothing at all about the node's compute paths.
-  if (cudaError_t e = cudaGetDevice(&dev); e != cudaSuccess)
-    return cudaErrored("no usable CUDA device (cudaGetDevice)", e);
-  if (cudaError_t e = cudaGetDeviceProperties(&props, dev); e != cudaSuccess)
-    return cudaErrored("no usable CUDA device (cudaGetDeviceProperties)", e);
+  if (cudaError_t e = cudaGetDeviceProperties(&props, index); e != cudaSuccess) {
+    cudaErrored("no usable CUDA device (cudaGetDeviceProperties)", e);
+    return;
+  }
+  char busId[32] = {0};
+  out->identityRead = cudaDeviceGetPCIBusId(busId, sizeof(busId), index) == cudaSuccess;
+  if (out->identityRead) out->busId = busId;
+  out->name = props.name;
 
 #if defined(BURNIN_GEMM_FORCE_CC_MAJOR) && defined(BURNIN_GEMM_FORCE_CC_MINOR)
   // TEST-ONLY, and never present in a published image. The Skip path below can
@@ -694,11 +806,13 @@ int main() {
   // self-identifying forever.
   props.major = BURNIN_GEMM_FORCE_CC_MAJOR;
   props.minor = BURNIN_GEMM_FORCE_CC_MINOR;
-  std::printf("forced_compute_cap=%d.%d\n", props.major, props.minor);
+  if (index == 0) std::printf("forced_compute_cap=%d.%d\n", props.major, props.minor);
 #endif
 
-  std::printf("gpu_name=%s\ncompute_cap=%d.%d\n", props.name, props.major, props.minor);
-  const int cc = props.major * 10 + props.minor;
+  char cc[16];
+  std::snprintf(cc, sizeof(cc), "%d.%d", props.major, props.minor);
+  out->computeCap = cc;
+  const int cc_int = props.major * 10 + props.minor;
 
   // The gates, in an order that is load-bearing (precision.h documents each):
   //
@@ -715,28 +829,34 @@ int main() {
   //      an sm_120a image LOADS on a CC 12.1 GB10 and asserts inside the
   //      kernel, stickily, under several hundred lines of CUTLASS spew that
   //      would overwrite this diagnosis in the stored result.
-  switch (burnin::scopeOf(p, cc)) {
+  //
+  // The two message-composing functions bake their own "GEMM_SWEEP_XXX: "
+  // marker in; stripMarkerPrefix removes it here because the marker for the
+  // WHOLE test is decided once, in main(), from every device's exit code.
+  switch (burnin::scopeOf(p, cc_int)) {
     case burnin::Scope::Refuse:
-      std::printf("%s\n", burnin::refuseMessage(p, raw, cc).c_str());
-      return kExitError;
+      errored(stripMarkerPrefix(burnin::refuseMessage(p, raw, cc_int)));
+      return;
     case burnin::Scope::Skip:
-      std::printf("%s\n", burnin::skipMessage(p, cc).c_str());
-      return kExitSkip;
+      skip(stripMarkerPrefix(burnin::skipMessage(p, cc_int)));
+      return;
     case burnin::Scope::Run:
       break;
   }
 
-  if (burnin::archCovers(kBuiltArch, cc) == burnin::ArchCover::Mismatch) {
-    std::printf("%s\n", burnin::mismatchMessage(kBuiltArch, cc).c_str());
-    return kExitError;
+  if (burnin::archCovers(kBuiltArch, cc_int) == burnin::ArchCover::Mismatch) {
+    errored(stripMarkerPrefix(burnin::mismatchMessage(kBuiltArch, cc_int)));
+    return;
   }
 
   switch (p) {
 #if BURNIN_GEMM_HAVE_SM120_MMA
     case Precision::FP4:
-      return fp4cell::run(windowSeconds);
+      fp4cell::run(windowSecondsForThisDevice, out);
+      return;
     case Precision::FP8:
-      return fp8cell::run(windowSeconds);
+      fp8cell::run(windowSecondsForThisDevice, out);
+      return;
 #else
     case Precision::FP4:
     case Precision::FP8:
@@ -744,9 +864,10 @@ int main() {
       // silicon: the part is in scope and UNJUDGED. The exact wording is
       // asserted by the Dockerfile, which compiles this branch on every build
       // and refuses to ship a binary that took it.
-      return errored(
+      errored(
           "this binary was not compiled with SM120/SM121 tensor-core MMA support (need CUTLASS "
           ">= v4.5.0 and -arch=sm_120a/sm_120f/sm_121a); the part is in scope and UNJUDGED");
+      return;
 #endif
     case Precision::BF16: {
       // 128x128x32 / 64x64x32 / 16x8x16 at the default three stages: ~48 KB of
@@ -759,7 +880,8 @@ int main() {
           cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
           cutlass::gemm::GemmShape<128, 128, 32>, cutlass::gemm::GemmShape<64, 64, 32>,
           cutlass::gemm::GemmShape<16, 8, 16>>;
-      return runDense2x<Bf16Gemm>(windowSeconds);
+      runDense2x<Bf16Gemm>(windowSecondsForThisDevice, out);
+      return;
     }
     case Precision::TF32: {
       // The tf32 cell feeds the tensor cores tf32 OPERANDS directly (stored in
@@ -776,7 +898,8 @@ int main() {
           cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
           cutlass::gemm::GemmShape<128, 128, 16>, cutlass::gemm::GemmShape<64, 64, 16>,
           cutlass::gemm::GemmShape<16, 8, 8>>;
-      return runDense2x<Tf32Gemm>(windowSeconds);
+      runDense2x<Tf32Gemm>(windowSecondsForThisDevice, out);
+      return;
     }
     case Precision::FP64: {
       // SIMT double takes the generic SIMT configuration (128x128x8, two
@@ -787,10 +910,203 @@ int main() {
           double, cutlass::layout::RowMajor, double, cutlass::layout::ColumnMajor,
           double, cutlass::layout::RowMajor, double,
           cutlass::arch::OpClassSimt, cutlass::arch::Sm80>;
-      return runDense2x<Fp64Gemm>(windowSeconds);
+      runDense2x<Fp64Gemm>(windowSecondsForThisDevice, out);
+      return;
     }
     case Precision::Unknown:
-      break;  // unreachable: refused above, before the device was touched
+      break;  // unreachable: refused before any device was touched
   }
-  return errored("unreachable precision dispatch — this is a bug in the runner, not the part");
+  errored("unreachable precision dispatch — this is a bug in the runner, not the part");
+}
+
+devices::DeviceReport toDeviceReport(const DeviceResult &r) {
+  devices::DeviceReport rep;
+  rep.index = r.index;
+  rep.busId = r.busId;
+  rep.name = r.name;
+  rep.computeCap = r.computeCap;
+  rep.identityRead = r.identityRead;
+  rep.values = r.values;
+  return rep;
+}
+
+// wholeRunError/wholeRunSkip are for the two decisions made BEFORE any device
+// exists to attribute them to: how many devices are visible and whether the
+// plan allows the run to proceed. fail()/errored()/skip() record into
+// gCurrent, which is null at this point in main(), so these print the marker
+// directly instead.
+int wholeRunError(const std::string &why) {
+  std::printf("GEMM_SWEEP_ERROR: %s\n", why.c_str());
+  return kExitError;
+}
+int wholeRunSkip(const std::string &why) {
+  std::printf("GEMM_SWEEP_SKIP: %s\n", why.c_str());
+  return kExitSkip;
+}
+
+}  // namespace
+
+int main() {
+  // Emitted first so every exit below — including the ones that never reach a
+  // kernel — leaves the arch this image was built for on the record. gemm_shape
+  // is a compile-time constant, identical for every device and every precision,
+  // so it is printed once here rather than per device.
+  std::printf("built_cuda_arch=%s\n", kBuiltArch);
+  std::printf("gemm_shape=%dx%dx%d\n", kM, kN, kK);
+
+  // The precision is the execution's identity and needs no hardware to read,
+  // so it is settled before anything is asked of any device. This is a
+  // WHOLE-RUN refusal, never a per-device one: guessing a precision per device
+  // could disagree between devices, and it would produce a measurement gated
+  // by thresholds written for a different one everywhere.
+  const char *rawEnv = std::getenv("BURNIN_VARIANT_PRECISION");
+  const std::string raw = rawEnv == nullptr ? "" : rawEnv;
+  if (raw.empty()) {
+    return wholeRunError(
+        "BURNIN_VARIANT_PRECISION is not set. gemm-sweep runs ONE precision per execution; give "
+        "the profile entry variants with axes {precision: fp4|fp8|bf16|tf32|fp64}, one per cell. "
+        "Guessing a precision here would produce a measurement gated by thresholds written for a "
+        "different one");
+  }
+  const Precision p = burnin::parsePrecision(raw);
+  if (p == Precision::Unknown) {
+    // refuseMessage already carries its own "GEMM_SWEEP_ERROR: " marker — this
+    // IS the whole-run marker, printed as-is rather than through wholeRunError
+    // (which would add a second one).
+    std::printf("%s\n", burnin::refuseMessage(p, raw, 0).c_str());
+    return kExitError;
+  }
+  std::printf("gemm_precision=%s\n", burnin::precisionName(p));
+
+  const long windowSecondsTotal = readWindowSeconds();
+  std::printf("window_seconds=%ld\n", windowSecondsTotal);
+
+  // ── how many devices, and how ────────────────────────────────────────────
+  int visible = 0;
+  const cudaError_t countErr = cudaGetDeviceCount(&visible);
+  if (countErr != cudaSuccess && countErr != cudaErrorNoDevice) {
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "no usable CUDA device (cudaGetDeviceCount): %s",
+                 cudaGetErrorString(countErr));
+    return wholeRunError(buf);
+  }
+  if (countErr == cudaErrorNoDevice) visible = 0;
+
+  const devices::Budget budget =
+      devices::parseBudget(std::getenv("BURNIN_RESOURCE_LIMITS"), devices::nvidiaResources());
+  const devices::Plan plan = devices::planIteration(visible, budget);
+  if (plan.outcome == devices::Plan::Skip) return wholeRunSkip(plan.message);
+  if (plan.outcome == devices::Plan::Error) return wholeRunError(plan.message);
+  const int planCount = plan.count;
+
+  const char *concEnv = std::getenv("BURNIN_DEVICE_CONCURRENCY");
+  const devices::ConcurrencyChoice conc =
+      devices::resolveConcurrency(concEnv, devices::Concurrency::Sequential);
+  if (concEnv != nullptr && *concEnv != '\0' && !conc.recognised) {
+    std::printf(
+        "config_warnings=BURNIN_DEVICE_CONCURRENCY=\"%s\" is neither \"all\" nor \"sequential\"\n",
+        concEnv);
+  }
+  // windowSecondsTotal <= 0 keeps its single-device meaning — "run once,
+  // untimed" — on EVERY device, rather than being divided/floored to a bogus
+  // 1-second window: deviceWindowSeconds floors any input below 1 up to 1,
+  // which would silently turn "no duration set" into "run repeatedly for up
+  // to a second" instead of the one untimed correctness pass the unsegmented
+  // path has always meant.
+  const long windowS = windowSecondsTotal <= 0
+                           ? 0
+                           : devices::deviceWindowSeconds(windowSecondsTotal, planCount, conc.mode);
+  std::printf("device_window_s=%ld\n", windowS);
+  std::printf("device_concurrency=%s\n", devices::concurrencyName(conc.mode));
+
+  // ── run every device ─────────────────────────────────────────────────────
+  std::vector<DeviceResult> results(planCount);
+  if (conc.mode == devices::Concurrency::All) {
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<std::size_t>(planCount));
+    for (int i = 0; i < planCount; ++i) {
+      threads.emplace_back(processDevice, i, windowS, p, std::cref(raw), &results[static_cast<std::size_t>(i)]);
+    }
+    for (auto &t : threads) t.join();
+  } else {
+    for (int i = 0; i < planCount; ++i) {
+      processDevice(i, windowS, p, raw, &results[static_cast<std::size_t>(i)]);
+    }
+  }
+
+  // Device 0's identity, printed once AFTER every worker has joined — see
+  // device_fold.h's design note on why identity keys keep the first device's
+  // meaning, and clockprobe's runOneDevice for why this print happens here
+  // rather than inside processDevice: under `all` concurrency processDevice
+  // runs on a worker thread, and printf from several threads at once is not
+  // something to rely on being safe merely because glibc happens to serialise
+  // it.
+  if (!results.empty() && results.front().identityRead) {
+    const DeviceResult &d0 = results.front();
+    std::printf("gpu_name=%s\n", d0.name.c_str());
+    std::printf("compute_cap=%s\n", d0.computeCap.c_str());
+    std::printf("pci_bus_id=%s\n", d0.busId.c_str());
+  }
+
+  // ── fold and report ──────────────────────────────────────────────────────
+  std::vector<devices::DeviceReport> reports;
+  for (auto &r : results) {
+    if (!r.ranGemm) continue;  // never reached measureWindow: gated out or errored first
+    reports.push_back(toDeviceReport(r));
+  }
+  static const std::vector<devices::FoldRule> kDeviceFold = {
+      {"nonfinite_count", devices::Fold::Sum},
+      {"max_abs_error", devices::Fold::Max},
+      {"max_relative_error", devices::Fold::Max},
+      {"achieved_tflops", devices::Fold::Min},
+      {"total_kernel_ms", devices::Fold::Sum},
+      {"gemm_iterations", devices::Fold::Sum},
+  };
+  // primaryKey is max_relative_error, not achieved_tflops: max_relative_error
+  // is ALWAYS reported (achieved_tflops is omitted whenever total_kernel_ms is
+  // zero) and is the registered, PRECISION-SPECIFIC Acceptance gate this kind
+  // is built around — the "worst device" a verdict names should be the device
+  // the actual gate turns on.
+  const devices::Folded folded = devices::fold(reports, kDeviceFold, "max_relative_error");
+
+  for (const char *key : {"nonfinite_count", "max_abs_error", "max_relative_error",
+                          "achieved_tflops", "total_kernel_ms", "gemm_iterations"}) {
+    if (auto it = folded.values.find(key); it != folded.values.end()) {
+      std::printf("%s=%.6g\n", key, it->second);
+    }
+  }
+  // Evidence: device 0's, exactly as the single-device engine always reported.
+  for (auto &r : results) {
+    if (!r.ranGemm) continue;
+    std::printf("max_abs_ref=%g\n", r.maxAbsRef);
+    break;
+  }
+
+  devices::printFold(stdout, reports, visible, windowS, conc.mode, folded, /*spreads=*/{},
+                     /*underMig=*/false);
+  if (reports.size() > 1) {
+    std::fputs(devices::renderPerDeviceArtifact(reports).c_str(), stdout);
+  }
+
+  std::vector<int> codes;
+  for (auto &r : results) codes.push_back(r.exitCode);
+  const int combined = devices::combineExitCodes(codes);
+
+  if (combined == kExitPass) {
+    std::printf("GEMM_SWEEP_PASS\n");
+    return kExitPass;
+  }
+  std::string reasons;
+  for (auto &r : results) {
+    if (r.exitCode == combined && !r.reason.empty()) {
+      if (!reasons.empty()) reasons += "; ";
+      reasons += "device " + std::to_string(r.index) + ": " + r.reason;
+    }
+  }
+  if (reasons.empty()) reasons = "no device could be measured";
+  const char *marker = combined == kExitFail   ? "GEMM_SWEEP_FAIL"
+                      : combined == kExitSkip ? "GEMM_SWEEP_SKIP"
+                                              : "GEMM_SWEEP_ERROR";
+  std::printf("%s: %s\n", marker, reasons.c_str());
+  return combined;
 }
