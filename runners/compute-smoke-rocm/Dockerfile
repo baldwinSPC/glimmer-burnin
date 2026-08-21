@@ -46,7 +46,7 @@ FROM ${ROCM_IMAGE} AS build
 # unjudged) rather than pretending otherwise.
 ARG GPU_TARGETS="gfx1151 gfx1100"
 
-COPY compute_smoke_rocm.cc gfx_gate.h wmma_tile.h /src/
+COPY compute_smoke_rocm.cc gfx_gate.h wmma_tile.h device_fold.h /src/
 
 # BURNIN_BUILT_TARGETS bakes the offload list into the binary so it can answer
 # "what was I built for" at runtime.  That is not a convenience: archMatch

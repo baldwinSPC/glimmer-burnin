@@ -129,6 +129,39 @@ Zero would be useless as evidence: a launch that silently did nothing leaves
 the buffer untouched, and against a zero reference that comparison would pass
 and report a matrix path that never executed.
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md). Request the node's whole board
+(`amd.com/gpu: "8"`); iteration is always sequential — this kind is a BURST,
+one bf16 + fp16 launch pair per device taking milliseconds, so there is no
+window to divide or run concurrently over. `BURNIN_DEVICE_CONCURRENCY` is
+read and, if set to something other than `sequential`, reported in
+`config_warnings` rather than silently ignored, but it never changes the
+iteration.
+
+`nonfiniteCount` (Sum) and `maxAbsError` (Max, taken as the worse of the two
+precisions per device) are the fold across devices; `m`/`n`/`k`/`tolerance`/
+`bf16_*`/`fp16_*`/`elapsedMs`/`maxAbsRef` stay device 0's, evidence exactly as
+before. A device whose scope/kernel/arch gate fails leaves the WHOLE test
+unjudged for that device (Error), and the combined verdict across devices is
+Fail > Error > Skip > Pass (device_fold.h's `combineExitCodes`) — a device is
+a PART, so a measured miscompare on one device does not erase a measured pass
+on another, but a device that was never launched cannot be soundly folded
+into a Pass. New keys: `deviceCount`, `devicesVisible`, `deviceWindowS`
+(always `0`), `deviceConcurrency` (always `sequential`),
+`worstDeviceIndex`/`worstDevicePciBusId` (named from `nonfiniteCount`, the
+registered Acceptance metric — `maxAbsError` is Evidence-only). When more
+than one device reported, a `per-device.json` artifact carries every
+device's own reading. `pciBusId` is read directly with
+`hipDeviceGetPCIBusId` — unlike clockprobe-rocm and the soak family, this
+runner touches no sysfs clock/power file, so it needs no card-correlation
+machinery to get it.
+
+**Not verified on multi-GPU AMD hardware, and not verified on hardware at
+all** — no Strix Halo unit was available when either the single-device or
+the multi-device engine was written.
+
 ## Status — read before pinning
 
 - **NOT VERIFIED ON HARDWARE.** No Strix Halo unit was available when this was

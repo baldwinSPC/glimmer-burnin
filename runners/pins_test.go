@@ -235,6 +235,18 @@ func TestDurationIsHonouredOrDeclaredBurstOnly(t *testing.T) {
 			if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, "_test.cc") {
 				return nil
 			}
+			// device_fold.h is copied byte-identical into every accelerator
+			// runner (sharedsource_test.go enforces it) and documents
+			// deviceWindowSeconds, a helper a NON-burst kind calls to divide
+			// BURNIN_DURATION_SECONDS across devices. That comment is real and
+			// belongs in the one shared copy every kind carries — a burst kind
+			// that never calls the function is not "reading" the variable by
+			// including a header that merely explains it, any more than a
+			// README would be. What still catches a burst kind starting to
+			// honour a duration is its OWN source calling getenv on it.
+			if filepath.Base(path) == "device_fold.h" {
+				return nil
+			}
 			src, readErr := os.ReadFile(path)
 			if readErr != nil {
 				return readErr

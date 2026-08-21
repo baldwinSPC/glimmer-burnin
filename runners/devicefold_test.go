@@ -52,12 +52,14 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 	const helper = `#include "device_fold.h"`
 
 	converted := map[string]bool{
-		"gpu-burn":          true,
-		"thermal-soak":      true,
-		"gpu-burn-rocm":     true,
-		"thermal-soak-rocm": true,
-		"clockprobe":        true,
-		"clockprobe-rocm":   true,
+		"gpu-burn":           true,
+		"thermal-soak":       true,
+		"gpu-burn-rocm":      true,
+		"thermal-soak-rocm":  true,
+		"clockprobe":         true,
+		"clockprobe-rocm":    true,
+		"compute-smoke":      true,
+		"compute-smoke-rocm": true,
 	}
 
 	exempt := map[string]string{
@@ -84,11 +86,9 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		// and does not claim deviceCount. memory-bw-rocm is a hand-written HIP
 		// loop on device 0 — no wrapped tool iterates for it — and needs the
 		// full conversion.
-		"memory-bw":          "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
-		"memory-bw-rocm":     "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
-		"compute-smoke":      "#400 — delivery step 3 (a burst; sequential)",
-		"compute-smoke-rocm": "#400 — delivery step 3 (a burst; sequential)",
-		"gemm-sweep":         "#400 — delivery step 3 (measurement kinds, sequential default)",
+		"memory-bw":      "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
+		"memory-bw-rocm": "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
+		"gemm-sweep":     "#400 — delivery step 3 (measurement kinds, sequential default)",
 	}
 
 	for _, d := range runnerDirs(t) {

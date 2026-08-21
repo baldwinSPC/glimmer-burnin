@@ -36,6 +36,33 @@
 // problems, but they are problems with the run, not findings about the node,
 // and Error is the retryable phase (see retryOnErrorLimit). Exit 2 stays what it
 // always was: the part is out of scope, which is neither a fault nor a retry.
+//
+// MULTI-DEVICE
+// ------------
+// Iterates every device the pod was allocated (docs/dev/multi-device.md).
+// Always sequential, one device fully processed before the next starts, and
+// BURNIN_DEVICE_CONCURRENCY is read but never changes that: this is a BURST —
+// one launch, milliseconds — with no window to divide or extend, so the
+// concurrency axis has nothing to apply to (the design note's own exception).
+//
+// The three arch gates and the GEMM itself are UNCHANGED in substance from the
+// single-device engine: what used to be main()'s body is now processDevice(),
+// called once per device with cudaSetDevice(index) already set, and every
+// `return fail(...)/errored(...)/skipped(...)` inside it now means "stop
+// processing THIS device" rather than "exit the process" — the helper
+// functions record the outcome into that device's own DeviceResult instead of
+// printing the marker directly, and main() prints ONE combined marker at the
+// end. A device whose kernel gate or arch gate fails is an Error for the WHOLE
+// test (device_fold.h's combineExitCodes), per the design note: "a fold over a
+// board with an unlaunched device is not a verdict" — a board where device 3
+// has no cubin is not soundly certified by devices 0-2 passing.
+//
+// nonfinite_count and max_abs_error are the fold (Sum, Max) — the two things
+// this kind actually measures per device from the values README.md documents.
+// m/n/k are compile-time constants, identical on every device; max_abs_ref,
+// max_rel_error, elapsed_ms and tflops are device 0's, evidence exactly as
+// before (tflops was never a benchmark on a single device and folding it
+// across devices would not make it one).
 
 #ifndef BURNIN_CUDA_ARCH
 // The Dockerfile passes the real value. The fallback keeps a hand-built binary
@@ -47,12 +74,17 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
 
 // Host-only, CUDA-free, and therefore testable without a GPU: it decides
 // whether the arch this binary was built for covers the part it landed on, and
 // composes the operator-facing message when it does not. See arch_match.h for
 // why that decision cannot be left to the CUDA runtime's error code.
 #include "arch_match.h"
+#include "device_fold.h"
 
 #include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"
@@ -70,6 +102,8 @@
 #include "cutlass/util/reference/host/gett.hpp"
 
 namespace {
+
+namespace devices = burnin::devices;
 
 constexpr int kM = 1024, kN = 1024, kK = 1024;
 // FP4 operands are exact; the residual error comes from BF16 output rounding and
@@ -89,18 +123,46 @@ using burnin::kExitSkip;
 // image that produced it.
 constexpr const char *kBuiltArch = BURNIN_CUDA_ARCH;
 
-// The compute capability this run actually found, latched in main() the moment
-// cudaGetDeviceProperties answers, so that any later failure can be compared
-// against kBuiltArch. Negative means "not read yet", which is a real state: the
-// first two CUDA calls in main() can fail before there is anything to latch,
-// and burnin::archMatch answers Unknown for it rather than guessing.
+// The compute capability THIS DEVICE reports, latched at the top of
+// processDevice so any later failure in that device's own processing can be
+// compared against kBuiltArch. Negative means "not read yet". Deliberately not
+// per-thread: this kind is sequential-only (a burst has no window to run
+// devices concurrently over), so one device's processing completes before the
+// next's begins and these two are never read for two devices at once.
 int gDeviceMajor = -1;
 int gDeviceMinor = -1;
+
+// DeviceResult is one device's whole outcome. gCurrent points at the one
+// currently being processed, so fail()/errored()/skipped() below — called from
+// deep inside the arch-gate logic and the GEMM itself, exactly as before —
+// record into it instead of printing a marker for a device that is not
+// necessarily the one deciding the whole test.
+struct DeviceResult {
+  int index = 0;
+  int exitCode = kExitPass;
+  std::string reason;
+
+  bool identityRead = false;
+  std::string busId, name, computeCap;
+
+  std::map<std::string, double> values; // nonfinite_count, max_abs_error
+
+  bool ranGemm = false; // false for a device that never reached run()
+  double maxAbsRef = 0.0;
+  double maxRelError = 0.0;
+  double elapsedMs = 0.0;
+  double tflops = 0.0;
+};
+
+DeviceResult *gCurrent = nullptr;
 
 // fail() is ONLY for a measured verdict about the silicon. If you are reaching
 // for it because something went wrong, you want errored().
 int fail(const char *why) {
-  std::printf("FP4_GEMM_FAIL: %s\n", why);
+  if (gCurrent != nullptr) {
+    gCurrent->exitCode = kExitFail;
+    gCurrent->reason = why;
+  }
   return kExitFail;
 }
 
@@ -108,12 +170,18 @@ int fail(const char *why) {
 // unjudged, and saying so is the whole point: this run establishes nothing about
 // the node either way.
 int errored(const char *why) {
-  std::printf("FP4_GEMM_ERROR: %s\n", why);
+  if (gCurrent != nullptr) {
+    gCurrent->exitCode = kExitError;
+    gCurrent->reason = why;
+  }
   return kExitError;
 }
 
 int skipped(const char *why) {
-  std::printf("FP4_GEMM_SKIP: %s\n", why);
+  if (gCurrent != nullptr) {
+    gCurrent->exitCode = kExitSkip;
+    gCurrent->reason = why;
+  }
   return kExitSkip;
 }
 
@@ -125,16 +193,17 @@ int skipped(const char *why) {
 //
 //   - cudaErrorNoKernelImageForDevice / cudaErrorInvalidDeviceFunction is the
 //     loader refusing the cubin outright, and it is the case this file once
-//     reported as a hardware failure. The scope gate in main() admits the whole
-//     12.0/12.1 family while a build pins a single arch, so an in-scope part can
-//     legitimately reach the launch with nothing to run. That is a statement
-//     about which image was pinned, not about the part.
+//     reported as a hardware failure. The scope gate in processDevice admits
+//     the whole 12.0/12.1 family while a build pins a single arch, so an
+//     in-scope part can legitimately reach the launch with nothing to run.
+//     That is a statement about which image was pinned, not about the part.
 //   - cudaErrorAssert is a device-side assert, which is STICKY: it poisons the
-//     context, so every later CUDA call in this process fails too. It is named
-//     because the loader does NOT always refuse a wrong-arch cubin — an sm_120a
-//     image loads on a CC 12.1 GB10 and asserts inside the kernel instead — and
-//     because "device-side assert triggered" on its own tells an operator
-//     nothing about what to change.
+//     CONTEXT — this device's own context, not the process — so every later
+//     CUDA call THIS device attempts fails too; another device's own context
+//     is unaffected. It is named because the loader does NOT always refuse a
+//     wrong-arch cubin — an sm_120a image loads on a CC 12.1 GB10 and asserts
+//     inside the kernel instead — and because "device-side assert triggered"
+//     on its own tells an operator nothing about what to change.
 //
 // Whichever code arrived, an established image/part mismatch outranks it as the
 // explanation; describeCudaFailure applies that precedence.
@@ -164,8 +233,8 @@ int cutlassErrored(const char *where) { return cudaErrored(where, cudaGetLastErr
 
 // Whether this build has a block-scaled MMA path at all. Decided ONCE, because
 // the answer is needed in two places — the kernel definition below and the
-// dispatch at the end of main() — and two #if conditions that must agree
-// eventually stop agreeing.
+// dispatch at the end of processDevice() — and two #if conditions that must
+// agree eventually stop agreeing.
 //
 // BURNIN_FP4_ASSUME_NO_BLOCK_SCALED_MMA forces the fallback, and exists for
 // COMPILE COVERAGE ONLY: the #else branch had never been compiled by any build
@@ -244,7 +313,13 @@ using SFConfig  = typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledC
 
 template <class T> auto iter(T *p) { return cute::recast_ptr<T>(p); }
 
-int run() {
+// run() is UNCHANGED from the single-device engine except at its two ends:
+// no marker text or PASS-only stdout line, and the metrics it used to print
+// directly now land in *out for processDevice to fold and report. Every
+// `return fail(...)/errored(...)/cutlassErrored(...)` mid-function still means
+// exactly what it always did — record this device's outcome — because those
+// helpers now write into gCurrent (== out) instead of printing.
+int run(DeviceResult *out) {
   const auto shape = cute::make_shape(kM, kN, kK, 1);
 
   auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, {kM, kK, 1});
@@ -327,12 +402,15 @@ int run() {
   }
   const double max_rel_error = max_abs_ref > 0.0 ? max_abs_err / max_abs_ref : INFINITY;
 
-  // Printed before the decision, so a failing, skipping or erroring run still
-  // leaves its full evidence behind. Identity is already on stdout from main().
-  std::printf("m=%d\nn=%d\nk=%d\n", kM, kN, kK);
-  std::printf("max_abs_ref=%g\nmax_abs_error=%g\nmax_rel_error=%g\nnonfinite_count=%lld\nelapsed_ms=%.4f\ntflops=%.2f\n",
-              max_abs_ref, max_abs_err, max_rel_error, n_bad,
-              elapsed_ms, 2.0 * kM * kN * kK / (elapsed_ms * 1e-3) / 1e12);
+  // Captured for processDevice to report — device 0's identity/evidence, and
+  // this device's own contribution to the fold.
+  out->ranGemm = true;
+  out->maxAbsRef = max_abs_ref;
+  out->maxRelError = max_rel_error;
+  out->elapsedMs = elapsed_ms;
+  out->tflops = 2.0 * kM * kN * kK / (elapsed_ms * 1e-3) / 1e12;
+  out->values["nonfinite_count"] = static_cast<double>(n_bad);
+  out->values["max_abs_error"] = max_abs_err;
 
   // Correctness first, as in thermal-soak: NaN/Inf in the DEVICE output is a
   // self-contained measurement of the part that needs no reference at all, so it
@@ -353,30 +431,39 @@ int run() {
 
   if (sum_abs_got <= 0.0) return fail("device output is all zeros");
   if (!(max_rel_error <= kTolerance)) return fail("numerical mismatch exceeds tolerance");
-  std::printf("FP4_GEMM_PASS\n");
   return kExitPass;
 }
 
 } // namespace
 #endif
 
-int main() {
-  // Emitted first so that every exit below — including the ones that never get
-  // as far as a kernel — leaves the arch this image was built for on the record.
-  std::printf("built_cuda_arch=%s\n", kBuiltArch);
+namespace {
 
-  int dev = 0;
+// processDevice is what main() used to be, scoped to one device. Every
+// `return skipped(...)/errored(...)` here means "stop processing THIS
+// device" — the helper records the outcome into `out` and processDevice
+// returns, and the caller moves on to the next device. The arch-gate logic
+// below is UNCHANGED from the single-device engine; only the wrapping (which
+// device, and what happens to the result) is new.
+void processDevice(int index, DeviceResult *out) {
+  out->index = index;
+  gCurrent = out;
+  gDeviceMajor = -1;
+  gDeviceMinor = -1;
+
+  if (cudaError_t e = cudaSetDevice(index); e != cudaSuccess) {
+    cudaErrored("cudaSetDevice", e);
+    return;
+  }
   cudaDeviceProp props{};
-  // No device is an ERROR, not a failure. A pod that got no GPU (no device
-  // request, a mispresented device plugin, a driver that did not answer) has
-  // told us nothing at all about the node's tensor cores. This used to exit 1,
-  // which recorded a permanent hardware verdict against a node the test never
-  // touched — and, because a Fail is never retried, spent no retry budget
-  // proving it.
-  if (cudaError_t e = cudaGetDevice(&dev); e != cudaSuccess)
-    return cudaErrored("no usable CUDA device (cudaGetDevice)", e);
-  if (cudaError_t e = cudaGetDeviceProperties(&props, dev); e != cudaSuccess)
-    return cudaErrored("no usable CUDA device (cudaGetDeviceProperties)", e);
+  if (cudaError_t e = cudaGetDeviceProperties(&props, index); e != cudaSuccess) {
+    cudaErrored("no usable CUDA device (cudaGetDeviceProperties)", e);
+    return;
+  }
+  char busId[32] = {0};
+  out->identityRead = cudaDeviceGetPCIBusId(busId, sizeof(busId), index) == cudaSuccess;
+  if (out->identityRead) out->busId = busId;
+  out->name = props.name;
 
 #if defined(BURNIN_FP4_FORCE_CC_MAJOR) && defined(BURNIN_FP4_FORCE_CC_MINOR)
   // TEST-ONLY, and never present in a published image.
@@ -397,12 +484,29 @@ int main() {
   // verdict such a binary produced is self-identifying forever.
   props.major = BURNIN_FP4_FORCE_CC_MAJOR;
   props.minor = BURNIN_FP4_FORCE_CC_MINOR;
-  std::printf("forced_compute_cap=%d.%d\n", props.major, props.minor);
+  if (index == 0) std::printf("forced_compute_cap=%d.%d\n", props.major, props.minor);
 #endif
 
   gDeviceMajor = props.major;
   gDeviceMinor = props.minor;
-  std::printf("gpu_name=%s\ncompute_cap=%d.%d\n", props.name, props.major, props.minor);
+  char cc[16];
+  std::snprintf(cc, sizeof(cc), "%d.%d", props.major, props.minor);
+  out->computeCap = cc;
+
+  // Identity keys keep TODAY's meaning — device 0's — per
+  // docs/dev/multi-device.md: a bracket-indexed pseudo-key would not match the
+  // registered gpu_name/compute_cap names at all, and every device's identity
+  // already rides in the per-device.json artifact. Printed here, gated on
+  // index==0 and reached only once cudaGetDeviceProperties has succeeded for
+  // THIS device — exactly as the single-device engine only ever reported
+  // identity for a device whose properties it could read. pci_bus_id is new
+  // for the fold (worst_device_pci_bus_id needs it) and is the one identity
+  // field that can fail independently, so it alone is gated a second time.
+  if (index == 0) {
+    std::printf("gpu_name=%s\n", out->name.c_str());
+    std::printf("compute_cap=%s\n", out->computeCap.c_str());
+    if (out->identityRead) std::printf("pci_bus_id=%s\n", out->busId.c_str());
+  }
 
   // The SCOPE gate — "is NVFP4 block-scaled GEMM a thing this part can be asked
   // to do at all?", which is a property of the hardware and is answered with a
@@ -417,7 +521,8 @@ int main() {
   if (burnin::scopeOf(props.major, props.minor) == burnin::Scope::OutOfScope) {
     char buf[512];
     burnin::describeOutOfScope(buf, sizeof(buf), props.major, props.minor);
-    return skipped(buf);
+    skipped(buf);
+    return;
   }
 
   // The KERNEL gate, and it runs BEFORE the image gate on purpose.
@@ -436,7 +541,8 @@ int main() {
   if (burnin::kernelCovers(props.major, props.minor) == burnin::KernelCoverage::WrongFamily) {
     char buf[640];
     burnin::describeWrongKernelFamily(buf, sizeof(buf), props.major, props.minor);
-    return errored(buf);
+    errored(buf);
+    return;
   }
 
   // The IMAGE gate, and the second of the two questions above: the part is in
@@ -479,17 +585,160 @@ int main() {
   if (burnin::archMatch(kBuiltArch, props.major, props.minor) == burnin::ArchMatch::Mismatch) {
     char buf[768];
     burnin::describeArchMismatch(buf, sizeof(buf), kBuiltArch, props.major, props.minor);
-    return errored(buf);
+    errored(buf);
+    return;
   }
 
 #if BURNIN_FP4_HAVE_BLOCK_SCALED_MMA
-  return run();
+  run(out);
 #else
   // The part is in scope but this binary has no block-scaled MMA path compiled
   // in at all — a build-flag or toolchain mistake in the image, not a fault in
   // the silicon, so it is UNJUDGED and never a hardware verdict.
-  return errored("this binary was not compiled with SM120/SM121 block-scaled MMA support "
-                 "(need CUTLASS >= v4.5.0 and -arch=sm_120a/sm_120f/sm_121a); the part is in "
-                 "scope and UNJUDGED");
+  errored("this binary was not compiled with SM120/SM121 block-scaled MMA support "
+         "(need CUTLASS >= v4.5.0 and -arch=sm_120a/sm_120f/sm_121a); the part is in "
+         "scope and UNJUDGED");
 #endif
+}
+
+devices::DeviceReport toDeviceReport(const DeviceResult &r) {
+  devices::DeviceReport rep;
+  rep.index = r.index;
+  rep.busId = r.busId;
+  rep.name = r.name;
+  rep.computeCap = r.computeCap;
+  rep.identityRead = r.identityRead;
+  rep.values = r.values;
+  return rep;
+}
+
+// wholeRunError/wholeRunSkip are for the handful of decisions made BEFORE any
+// device exists to attribute them to — how many devices are visible, and
+// whether the plan even allows the run to proceed. fail()/errored()/skipped()
+// record into gCurrent, which is null at this point in main(), so these two
+// print the marker directly instead.
+int wholeRunError(const char *why) {
+  std::printf("FP4_GEMM_ERROR: %s\n", why);
+  return kExitError;
+}
+int wholeRunSkip(const char *why) {
+  std::printf("FP4_GEMM_SKIP: %s\n", why);
+  return kExitSkip;
+}
+
+} // namespace
+
+int main() {
+  // Emitted first so that every exit below — including the ones that never get
+  // as far as a kernel — leaves the arch this image was built for on the record.
+  std::printf("built_cuda_arch=%s\n", kBuiltArch);
+
+  // ── how many devices, and how ────────────────────────────────────────────
+  int visible = 0;
+  const cudaError_t countErr = cudaGetDeviceCount(&visible);
+  if (countErr != cudaSuccess && countErr != cudaErrorNoDevice) {
+    char buf[512];
+    burnin::describeCudaFailure(buf, sizeof(buf), "no usable CUDA device (cudaGetDeviceCount)",
+                                burnin::CudaFailure::Other, cudaGetErrorString(countErr), kBuiltArch,
+                                -1, -1);
+    return wholeRunError(buf);
+  }
+  if (countErr == cudaErrorNoDevice) visible = 0;
+
+  const devices::Budget budget =
+      devices::parseBudget(std::getenv("BURNIN_RESOURCE_LIMITS"), devices::nvidiaResources());
+  const devices::Plan plan = devices::planIteration(visible, budget);
+  if (plan.outcome == devices::Plan::Skip) return wholeRunSkip(plan.message.c_str());
+  if (plan.outcome == devices::Plan::Error) return wholeRunError(plan.message.c_str());
+  const int planCount = plan.count;
+
+  // A burst has no window to divide or extend, so BURNIN_DEVICE_CONCURRENCY
+  // changes nothing here — read anyway so an unrecognised value is reported the
+  // same way every other kind reports one, rather than being silently ignored
+  // without comment.
+  const char *concEnv = std::getenv("BURNIN_DEVICE_CONCURRENCY");
+  const devices::ConcurrencyChoice conc =
+      devices::resolveConcurrency(concEnv, devices::Concurrency::Sequential);
+  if (concEnv != nullptr && *concEnv != '\0' && !conc.recognised) {
+    std::printf(
+        "config_warnings=BURNIN_DEVICE_CONCURRENCY=\"%s\" is neither \"all\" nor \"sequential\"; "
+        "compute-smoke is a burst and iterates sequentially regardless\n",
+        concEnv);
+  }
+  // device_window_s and device_concurrency are printed once, below, by
+  // printFold — printing them here too would emit each key twice, and
+  // pkg/runner.Parse is last-occurrence-wins, so the duplicate would just be
+  // silently discarded, but there is no reason to emit it at all.
+
+  std::vector<DeviceResult> results(planCount);
+  for (int i = 0; i < planCount; ++i) {
+    processDevice(i, &results[i]);
+  }
+  gCurrent = nullptr;
+
+  std::vector<devices::DeviceReport> reports;
+  for (auto &r : results) {
+    if (!r.ranGemm) continue; // never reached the GEMM: gated out or errored first
+    reports.push_back(toDeviceReport(r));
+  }
+  static const std::vector<devices::FoldRule> kDeviceFold = {
+      {"nonfinite_count", devices::Fold::Sum},
+      {"max_abs_error", devices::Fold::Max},
+  };
+  // primaryKey is nonfinite_count, not max_abs_error: nonfiniteCount is the
+  // registered Acceptance metric (the sample's own threshold gates on it),
+  // while maxAbsError is Evidence-only (registered ThresholdUseEvidence,
+  // beside the gateable maxRelativeError) — the "worst device" a verdict
+  // names should be the device the GATE actually turns on.
+  const devices::Folded folded = devices::fold(reports, kDeviceFold, "nonfinite_count");
+
+  if (auto it = folded.values.find("nonfinite_count"); it != folded.values.end()) {
+    std::printf("nonfinite_count=%.0f\n", it->second);
+  }
+  if (auto it = folded.values.find("max_abs_error"); it != folded.values.end()) {
+    std::printf("max_abs_error=%.6g\n", it->second);
+  }
+  // Evidence: device 0's, exactly as the single-device engine always reported
+  // (a liveness figure, never a benchmark — see the README). m/n/k are
+  // compile-time constants and identical for every device, but printed only
+  // once a device actually reached the GEMM — matching the single-device
+  // engine, which printed them from inside run() and never for a device that
+  // never got that far.
+  for (auto &r : results) {
+    if (!r.ranGemm) continue;
+    std::printf("m=%d\nn=%d\nk=%d\n", kM, kN, kK);
+    std::printf("max_abs_ref=%.6g\n", r.maxAbsRef);
+    std::printf("max_rel_error=%.6g\n", r.maxRelError);
+    std::printf("elapsed_ms=%.4f\n", r.elapsedMs);
+    std::printf("tflops=%.2f\n", r.tflops);
+    break;
+  }
+
+  devices::printFold(stdout, reports, visible, /*windowS=*/0, conc.mode, folded, /*spreads=*/{},
+                     /*underMig=*/false);
+  if (reports.size() > 1) {
+    std::fputs(devices::renderPerDeviceArtifact(reports).c_str(), stdout);
+  }
+
+  std::vector<int> codes;
+  for (auto &r : results) codes.push_back(r.exitCode);
+  const int combined = devices::combineExitCodes(codes);
+
+  if (combined == kExitPass) {
+    std::printf("FP4_GEMM_PASS\n");
+    return kExitPass;
+  }
+  std::string reasons;
+  for (auto &r : results) {
+    if (r.exitCode == combined && !r.reason.empty()) {
+      if (!reasons.empty()) reasons += "; ";
+      reasons += "device " + std::to_string(r.index) + ": " + r.reason;
+    }
+  }
+  if (reasons.empty()) reasons = "no device could be measured";
+  const char *marker = combined == kExitFail   ? "FP4_GEMM_FAIL"
+                       : combined == kExitSkip ? "FP4_GEMM_SKIP"
+                                               : "FP4_GEMM_ERROR";
+  std::printf("%s: %s\n", marker, reasons.c_str());
+  return combined;
 }
