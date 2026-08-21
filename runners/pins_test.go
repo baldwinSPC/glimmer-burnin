@@ -102,6 +102,13 @@ var vendorVariantSuffixes = []struct {
 	Vendor string // matches the CRD's VendorImage enum
 }{
 	{"-rocm", "amd"},
+	// No -gaudi runner exists yet (pkg/contract.AcceleratorVendors names
+	// "habana" so a BurnInTest CAN select one via imagesByVendor, once one
+	// is built). Declared now so a future clockprobe-gaudi is read as a
+	// vendor variant of clockprobe from the day its directory is added,
+	// rather than as an unknown kind of its own — the exact trap this table
+	// exists to prevent, see the comment above.
+	{"-gaudi", "habana"},
 }
 
 // kindForDir maps a runner directory to the TestKind it implements, and to the

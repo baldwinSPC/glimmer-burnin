@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
 // fakeHost builds a sysfs/etc/proc tree resembling a two-NIC GB10 box.
@@ -291,5 +293,88 @@ func TestPrimaryIPIsEitherAUsableAddressOrEmpty(t *testing.T) {
 func TestProbeCarriesThePrimaryIP(t *testing.T) {
 	if Probe(Options{}).PrimaryIP != PrimaryIP() {
 		t.Error("Probe().PrimaryIP disagrees with PrimaryIP()")
+	}
+}
+
+// vgaFixture builds a single VGA-class (0x0300) PCI device, with a drm/
+// render node only when renderNode is true.
+func vgaFixture(t *testing.T, vendor string, renderNode bool) Options {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "sys/bus/pci/devices/000f:01:00.0")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("class", "0x030000\n")
+	write("vendor", vendor+"\n")
+	write("device", "0x2e12\n")
+	if renderNode {
+		if err := os.MkdirAll(filepath.Join(dir, "drm", "renderD128"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(dir, "drm", "card0"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return Options{SysfsRoot: filepath.Join(root, "sys")}
+}
+
+// TestAGB10CountsDespiteBeingVGAClass is the defect from #380, ported here
+// after runners/fingerprint-probe/rendernode_test.go — this package carried
+// the fix later than its sibling, and this is the fixture that would have
+// caught the gap: a GB10-shaped device (class 0x030000, vendor 0x10de, a
+// drm/renderD128 node) reporting acceleratorCount effectively 0 before this
+// change, on a node compute-smoke measured at 104 TFLOPS in the same run.
+func TestAGB10CountsDespiteBeingVGAClass(t *testing.T) {
+	h := Probe(vgaFixture(t, "0x10de", true))
+	if len(h.Accelerators) != 1 {
+		t.Fatalf("got %d accelerators, want 1 — a GB10 is class 0x030000 and is still an accelerator "+
+			"when it exposes a DRM render node", len(h.Accelerators))
+	}
+	if h.Accelerators[0].Vendor != "nvidia" {
+		t.Errorf("vendor = %q, want nvidia", h.Accelerators[0].Vendor)
+	}
+}
+
+// TestAVGADeviceWithNoRenderNodeIsNotCountedEvenFromAKnownVendor is the other
+// half: a display-class device from a vendor this package names, but with NO
+// render node, is unclassifiable from sysfs alone and must not be guessed
+// into either state.
+func TestAVGADeviceWithNoRenderNodeIsNotCountedEvenFromAKnownVendor(t *testing.T) {
+	h := Probe(vgaFixture(t, "0x10de", false))
+	if len(h.Accelerators) != 0 {
+		t.Errorf("got %d accelerators, want 0 — no render node means this could be a real display "+
+			"adapter, and guessing it in is exactly the false positive the render-node check exists "+
+			"to prevent", len(h.Accelerators))
+	}
+}
+
+// TestPCIVendorsAgreeWithTheContractList holds this package's PCI-vendor-ID
+// table to pkg/contract.AcceleratorVendors — see that list's own doc comment
+// for why four sources are required to agree and how each is checked.
+func TestPCIVendorsAgreeWithTheContractList(t *testing.T) {
+	got := map[string]bool{}
+	for _, name := range pciVendors {
+		got[name] = true
+	}
+	want := map[string]bool{}
+	for _, name := range contract.AcceleratorVendors {
+		want[name] = true
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("pciVendors names %q, which is not in contract.AcceleratorVendors", name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("contract.AcceleratorVendors names %q, which pciVendors has no PCI ID for — "+
+				"add one, or the vendor can never actually be detected from hardware", name)
+		}
 	}
 }

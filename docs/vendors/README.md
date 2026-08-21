@@ -125,6 +125,44 @@ then gate. Counters (`ioErrors`, `tcpRetransmits`, `eccErrors`) are the
 exception: a healthy part reports exactly zero of them, and `Equal 0` is safe on
 day one precisely because the target is not a rate.
 
+## Adding a vendor
+
+Widening the CRD's `VendorImage.Vendor` enum — the step that lets a
+`BurnInTest` actually select an `imagesByVendor` entry for a new vendor — is
+a **name and a PCI ID**, not a controller change. Habana/Gaudi is the worked
+example: it needed
+
+1. Its name added to `pkg/contract.AcceleratorVendors`, the single list four
+   other places are held to agreement with (that list's own doc comment
+   names all four and how each is checked): the CRD's kubebuilder `Enum`
+   marker, `pkg/hostinfo`'s PCI-vendor-ID table, and
+   `runners/fingerprint-probe`'s own copy of that table (a second
+   implementation forced by the image build, issue #250 — a runner's
+   non-test sources cannot import this repo).
+2. Its PCI vendor ID (`0x1da3`) added to both of those tables, so the name
+   can actually be detected from hardware rather than only accepted by the
+   apiserver.
+3. `make generate manifests`, and the chart's CRD mirror kept in sync
+   (`hack/chart` guards that).
+
+Nothing in `internal/controller` needed to change, and that is the point:
+`vendorFromDomain` derives a node's vendor from whichever DNS domain
+published a device fact (`habana.ai/gaudi` → "habana"), with no lookup table
+and no branch on the value, so a vendor this project has never named still
+gets **fingerprinted** correctly — it just cannot be the `vendor:` of an
+`imagesByVendor` entry until the CRD enum accepts it, which is exactly the
+three-step change above.
+
+What adding the name does NOT do: it does not make a `spec.runner.image`
+appear for that vendor. That is a separate, larger piece of work — a runner
+image, a result parser, `runners/pins_test.go`'s
+`vendorVariantSuffixes`/`kindForDir` (already primed with a `-gaudi` suffix
+mapping to `habana`, waiting for the first directory), and everything else
+[the new-TestKind playbook](../dev/new-testkind-playbook.md) walks through.
+Until then, a site with Habana hardware points a kind at its own image the
+same way any proprietary suite is used (below), naming `vendor: habana`
+explicitly rather than relying on a built-in default that does not exist.
+
 ## Per-vendor pages
 
 - [NVIDIA](nvidia.md) — the reference implementation, and the only vendor with
