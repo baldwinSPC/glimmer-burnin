@@ -87,7 +87,15 @@
 #include <thread>
 #include <vector>
 
+#include "kmsg/kmsg_watch.h"
+
 namespace soak {
+
+// The watch lives in burnin::kmsg (its own header, shared with the NVIDIA
+// engines); aliased here so the uses below read the same as every other
+// engine-local name. Without this alias nothing in this namespace could name
+// it at all — caught in review before any of the four images ever built.
+namespace kmsg = burnin::kmsg;
 
 constexpr int kExitPass = 0;
 constexpr int kExitFail = 1;
@@ -403,11 +411,66 @@ struct Measurement {
 	double meanSclkMHz = 0;
 	double minSclkPct = 100.0;
 	double sustainedClockPct = 0;
+
+	// xidAvailable mirrors the NVIDIA engine's own field of the same name: true
+	// only when /dev/kmsg could be opened and positioned at this run's start.
+	// xidCount is then a real measurement (possibly zero); when false, it is
+	// not a measurement at all and report() must not print it. There is no
+	// AMD equivalent of NVIDIA's lastXidCode: amdgpu's reset/RAS log lines
+	// carry no single canonical numeric field the way "NVRM: Xid: NN" does,
+	// so nothing here declares one. See kmsg/kmsg_watch.h.
+	bool xidAvailable = false;
+	bool xidDropped = false;
+	long xidCount = 0;
+	std::string xidUnavailableReason;
 };
+
+// amdFaultPatterns is what THIS engine counts as a driver-logged GPU fault on
+// AMD hardware, via kmsg::MatchesAll — every substring in one inner list must
+// appear in a kernel-log line, case-insensitively, for it to count.
+//
+// Deliberately NARROWER than runners/host-health's own amdgpu heuristic
+// (`(?i)amdgpu.*(gpu reset|ras)`), and that difference is a decision, not an
+// oversight. host-health's match feeds kernelHwErrors, which is registered
+// Evidence-only and never gates a node — so a false positive there costs
+// nothing but a human's attention. This match feeds xidEvents, which IS
+// registered Acceptance and is exactly the metric a profile is expected to
+// write `xidEvents Equal 0` against. host-health's bare "ras" substring would
+// match plenty of ordinary, non-fault amdgpu log lines that merely mention RAS
+// being present or configured, and turning that into a hardware verdict would
+// be the false-Fail this project's whole verdict philosophy exists to prevent
+// ("Fail is never retried"). "reset" and "uncorrectable" are what actually
+// distinguish a fault line from an informational one in AMD's own driver
+// vocabulary — a GPU reset is unambiguously a recovery event, and an
+// uncorrectable RAS error is unambiguously damage, whereas "RAS" alone can
+// appear in a line that is merely reporting the feature is enabled.
+//
+// NOT VERIFIED AGAINST REAL AMD HARDWARE. This project's ROCm fleet
+// (gfx1151/Strix Halo) has never produced a GPU reset or an uncorrectable RAS
+// event to capture the real message shape from; these patterns are built from
+// the AMDGPU kernel driver's own published log-message vocabulary rather than
+// a capture. See issue references in the ROCm README's "Not yet verified"
+// section.
+inline const std::vector<std::vector<std::string>> &amdFaultPatterns() {
+	static const std::vector<std::vector<std::string>> patterns = {
+	    {"amdgpu", "reset"},
+	    {"amdgpu", "uncorrectable"},
+	};
+	return patterns;
+}
 
 // run holds the load for durationSeconds, sampling sysfs between iterations.
 inline Measurement run(long durationSeconds, int matrixN) {
+	// Opened before anything else in this function, for the same reason the
+	// NVIDIA engine opens its own copy first: this soak's Xid window should
+	// start as close to process start as this runner can make it, and every
+	// hipMalloc/GEMM below takes real time. See kmsg/kmsg_watch.h.
+	kmsg::Watch xidWatch;
+	kmsg::Tally xidTally;
+
 	Measurement m;
+	m.xidAvailable = xidWatch.Available();
+	m.xidUnavailableReason = xidWatch.Why();
 	const std::size_t total = static_cast<std::size_t>(matrixN) * matrixN;
 	const std::size_t bytes = total * sizeof(float);
 
@@ -487,6 +550,15 @@ inline Measurement run(long durationSeconds, int matrixN) {
 				m.minSclkPct = std::min(m.minSclkPct, 100.0 * s.currentMHz / s.ratedMHz);
 			}
 		}
+		// Drained on the SAME cadence as the sysfs samples, for the reason the
+		// NVIDIA engine drains on its progress cadence: an undrained descriptor
+		// is a window the ring buffer can wrap PAST. A first draft drained once
+		// at the end, and on a soak the README describes holding load for
+		// hours, ordinary kernel chatter wraps a default-sized ring long before
+		// that — every record older than the wrap unrecoverable, EPIPE on the
+		// final read, and the very fault this watch exists for lost with it. A
+		// drain of an empty source costs one read() returning EAGAIN.
+		xidWatch.Collect([&](const std::string &line) { xidTally.ObserveGeneric(line, amdFaultPatterns()); });
 		std::this_thread::sleep_for(std::chrono::milliseconds(kPollMillis));
 	}
 	m.elapsedSeconds = nowSeconds() - start;
@@ -509,6 +581,12 @@ inline Measurement run(long durationSeconds, int matrixN) {
 	const double flop = 2.0 * static_cast<double>(matrixN) * matrixN * matrixN *
 	                    static_cast<double>(m.iterations);
 	if (m.elapsedSeconds > 0) m.tflops = flop / m.elapsedSeconds / 1e12;
+
+	// The final drain closes the window: whatever arrived between the last
+	// in-loop drain and the load ending.
+	xidWatch.Collect([&](const std::string &line) { xidTally.ObserveGeneric(line, amdFaultPatterns()); });
+	m.xidDropped = xidWatch.Dropped();
+	m.xidCount = xidTally.xidCount;
 
 	cleanup();
 	m.ok = true;
@@ -564,6 +642,31 @@ inline void report(const Keys &k, const Measurement &m) {
 	// gfx1151's LPDDR5X has no ECC. The hardware positively declares the
 	// absence, which is exactly what RequiredIfMeasurable is for.
 	std::printf("ecc_errors=n/a\n");
+
+	// xid_source is printed unconditionally, exactly as the NVIDIA engine and
+	// runners/host-health do: it is the label a reader checks first when
+	// xid_count is absent. No last_xid_code here — amdgpu's reset/RAS lines
+	// carry no equivalent of NVIDIA's "Xid: NN" numeric code, so there is
+	// nothing to declare. See kmsg/kmsg_watch.h and amdFaultPatterns() above.
+	std::printf("xid_source=%s\n", m.xidAvailable ? "kmsg" : "none");
+	// The coverage self-report — see the NVIDIA engine's emitMeasurement for
+	// the full rationale (segmented folding keeps a metric any segment
+	// reported, so a lost window needs its own countable trace).
+	const bool xidClean = m.xidAvailable && !m.xidDropped;
+	std::printf("xid_windows_watched=%d\n", xidClean ? 1 : 0);
+	if (xidClean) {
+		// A genuine, positive zero when nothing amdgpu-fault-shaped appeared —
+		// this probe watched the whole window, exactly as throttle_count=0
+		// would be if this hardware could report one.
+		std::printf("xid_count=%ld\n", m.xidCount);
+	} else if (m.xidAvailable) {
+		// A drain wrapped, errored or hit its bound: the tally is a floor over
+		// a window with unread gaps, not a measurement — omitted, exactly as
+		// host-health omits, with the drop itself on the record.
+		std::printf("xid_log_dropped=1\n");
+	} else if (!m.xidUnavailableReason.empty()) {
+		std::printf("xid_source_detail=%s\n", m.xidUnavailableReason.c_str());
+	}
 }
 
 }  // namespace soak

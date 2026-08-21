@@ -87,6 +87,18 @@ the retry starts the week over from zero.
 spec:
   kind: thermal-soak
   durationSeconds: 604800     # seven days
+  runner:
+    # The xidEvents gate below is only satisfiable with this grant: the soak
+    # reads its own /dev/kmsg, and without the mount + privileged + runAsUser: 0
+    # (all three — the measured trap of issue #134) it reports xid_source=none,
+    # OMITS xid_count, and the gate fails every node in the shape of a hardware
+    # verdict. Drop the grant and the gate together, or keep both.
+    privileged: true
+    runAsUser: 0
+    hostPaths:
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        type: CharDevice      # readOnly defaults to true
   soak:
     segmentSeconds: 900       # fifteen-minute windows; minimum 300
   thresholds:
@@ -94,9 +106,17 @@ spec:
     - metric: elapsedS
       comparison: GreaterThanOrEqual
       value: "574560"         # 0.95 × 604800
+    # "No driver-logged fault DURING the load" — window-scoped, summed.
     - metric: xidEvents
       comparison: Equal
       value: "0"
+    # The coverage pair: 1 per fully-watched window, summed, so a floor at the
+    # segment count refuses a soak whose watch was lost partway. Without it, a
+    # lost segment contributes silence while the others' honest zeros satisfy
+    # the gate above. 604800 / 900 = 672.
+    - metric: xidWindowsWatched
+      comparison: GreaterThanOrEqual
+      value: "672"
 ```
 
 Each segment is its own pod, with `BURNIN_DURATION_SECONDS` and

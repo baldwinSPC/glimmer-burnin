@@ -180,6 +180,8 @@ running this image produce the same canonical metrics.
 | `faults_injected` | `faultsInjected` | always emitted; see [Proving the detector works](#proving-the-detector-works) |
 | `gpu_name`, `compute_cap`, `pci_bus_id`, `driver_version`, `mig_mode`, `ecc_mode` | identity evidence | |
 | `nvml_unsupported`, `unsupported_reads`, `config_warnings` | self-audit | |
+| `xid_count` | `xidEvents` | NVIDIA Xid errors logged **during this burn's own window**, from `/dev/kmsg`. **Opt-in** — needs the `/dev/kmsg` grant; see below |
+| `xid_source`, `xid_source_detail`, `last_xid_code`, `xid_log_dropped` | `xidSource`, `xidSourceDetail`, `lastXidCode`, `xidLogDropped` | the Xid watch's provenance; see below |
 
 `tflops` maps to `sustainedThroughputTflops`, not to `throughputTflops`. The
 latter is compute-smoke's single unwarmed launch and `pkg/contract` marks it
@@ -210,6 +212,29 @@ pass an ECC gate by turning ECC off.
 `applicability: RequiredIfMeasurable` report the gate as *not evaluated* instead
 of failing a healthy Spark — and it is also why `miscompares` carries the whole
 weight of this test on that hardware.
+
+### The Xid watch
+
+An Xid is the one fault signal NVML never carries — the driver reports it only
+to the kernel log — so the burn reads its own `/dev/kmsg` over exactly the
+window it is burning, positioned at the ring buffer's tail at start so nothing
+from before the window is counted. Shared code and shared reasoning with
+thermal-soak: the full write-up, including the three-part pod grant
+(`privileged: true` + `runAsUser: 0` + the `hostPaths` mount) and the
+degradation contract (`xid_source=none`, `xid_count` **omitted**, never a
+fabricated zero), is in
+[`../thermal-soak/README.md`](../thermal-soak/README.md#the-xid-watch-and-what-the-pod-needs-for-it);
+the implementation is [`kmsg/kmsg_watch.h`](kmsg/kmsg_watch.h), byte-identical
+here and there. Like `eccErrors`, `xidEvents` never changes this runner's own
+exit code — it is a metric for a profile's `spec.thresholds` to gate, because a
+verdict baked into the binary would depend on whether an optional host grant
+was remembered.
+
+The pairing this kind exists for makes the Xid watch worth the grant here
+specifically: **a miscompare with a concurrent Xid is a driver-acknowledged
+fault; a miscompare with `xid_count=0` across the same window is the
+silent-corruption case** — the part got the wrong answer and nothing else on
+the machine noticed.
 
 ---
 
@@ -416,4 +441,8 @@ Verified: the shipped binary links `libc.so.6` and nothing else.
   the hardware is fine.
 - device memory for four `N × N` float buffers (1 GiB at the default `N=8192`),
   shrunk automatically if less is free
-- runs as non-root (`65532:65532`); no privileges, no host mounts
+- runs as non-root (`65532:65532`); no privileges, no host mounts — **unless**
+  the profile opts into the [Xid watch](#the-xid-watch), which needs
+  `/dev/kmsg` mounted plus `privileged: true` and `runAsUser: 0`. Declining
+  the grant costs only that evidence: `xid_source=none`, `xid_count` omitted,
+  every other measurement unchanged

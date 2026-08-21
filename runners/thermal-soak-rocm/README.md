@@ -44,6 +44,37 @@ inferred from clocks but not enumerated. A fabricated `throttle_count=0` would
 satisfy a `throttleEvents == 0` gate on a node whose throttle state was never
 read. `eccErrors` is `n/a` for the same discipline — see gpu-burn-rocm's README.
 
+## The kernel-log fault watch (`xidEvents`)
+
+What AMD **can** measure is a driver-logged catastrophic fault. This runner
+reads its own `/dev/kmsg` over exactly the window it is soaking — the shared
+[`kmsg/kmsg_watch.h`](kmsg/kmsg_watch.h), byte-identical with both NVIDIA soak
+runners, positioned at the ring buffer's tail at start so nothing from before
+the window is counted — and reports the count as `xid_count` → `xidEvents`.
+"Xid" is NVIDIA's word; the *severity class* the metric name means is
+vendor-independent, and on this hardware the count is of **amdgpu GPU-reset and
+uncorrectable-RAS lines**.
+
+The pattern is deliberately **narrower** than
+[`../host-health`](../host-health)'s own amdgpu heuristic (`amdgpu` +
+`reset`/`ras`): that one feeds `kernelHwErrors`, which is Evidence-only and
+never gates, while this feeds an Acceptance metric a profile is expected to
+write `xidEvents Equal 0` against — and a bare `ras` substring matches
+informational lines about the feature merely being present, which would turn a
+healthy fleet's boot chatter into hardware verdicts. This match requires
+`amdgpu` plus `reset` or `uncorrectable`. There is no `last_xid_code` here:
+amdgpu's fault lines carry no single canonical numeric field the way
+`NVRM: Xid: NN` does, and inventing one would declare a measurement nobody
+took.
+
+**Opt-in, honest degradation** — same contract as everywhere else in this
+project: the pod needs `/dev/kmsg` mounted (`hostPaths`, `type: CharDevice`)
+plus `privileged: true` and `runAsUser: 0`; without the grant the runner
+reports `xid_source=none` with an actionable `xid_source_detail` and **omits**
+`xid_count`, so a gate on it fails closed rather than certifying a node on a
+zero nobody measured. The full three-part-grant write-up is in
+[`../thermal-soak/README.md`](../thermal-soak/README.md#the-xid-watch-and-what-the-pod-needs-for-it).
+
 ## Verdicts
 
 **Fail (1)** — peak temperature above the ceiling, sustained clock below the
@@ -60,3 +91,10 @@ pass on evidence of corruption it had in hand.
 published-behaviour defaults, not fleet baselines. No published image, no
 registered default; amd64-only (#319). Covers gfx1151, gfx1100 and gfx942 — the
 load is plain fp32 with no matrix-instruction dependency.
+
+The amdgpu fault patterns are likewise **built from the driver's published
+log-message vocabulary, not from a capture**: this project's ROCm fleet has
+never produced a GPU reset or an uncorrectable RAS event to record the real
+message shape from. The window mechanics are unit-tested against fixtures
+(`kmsg/kmsg_watch_test.cc`); the pattern text is what the hardware pass must
+confirm.
