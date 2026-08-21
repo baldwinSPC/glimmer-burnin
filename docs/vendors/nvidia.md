@@ -82,6 +82,51 @@ spec:
 The same pattern any proprietary suite uses — see the
 [overview](README.md#pointing-a-kind-at-your-own-image).
 
+## Not a runner: tests that need the driver unloaded or a reboot
+
+Some vendor tests cannot run inside either dispatcher this project has, at
+any scope. Two examples: **NVIDIA Field Diagnostic** and its DGX Spark
+packaging, **`dgx-spark-fieldiag`** (publicly installable on GB10; `sudo
+./partnerdiag --field`; a PASS/FAIL banner; exit 0 pass, 1 error, 2 retest),
+run with the **GPU driver unloaded**. **memtest86+** needs a **reboot**.
+
+Both `internal/controller.podForTest` and `pkg/localrun.ContainerRuntime`
+(`runtime.go`) are container executors: they start one image, wait for it to
+exit, and read one exit code. A tool that unloads the driver, or that the
+kernel itself has to reboot into, cannot produce "one attempt = one exit
+code" inside either — there is no container left running to report one.
+
+A `TestKind.HostOnly()` alongside `BurstOnly()`, refused at plan time the way
+`validateSoak` already refuses a segmented burst kind, would be a small
+change to declare. What it would need behind it is not: a runner directory
+(`TestEveryRunnerDirectoryNamesARealKind` in `runners/pins_test.go` requires
+one), and a `HostRuntime` implementing `ContainerRuntime` that can drive a
+process across a driver reload or a reboot — a different product, closer to
+a provisioning tool than a test dispatcher.
+
+**Decision: docs only.** Run these as a **provisioning pre-step**, outside
+either dispatcher, and attach the tool's own log as an **artifact** of a
+`custom` test — the same fenced-block mechanism any evidence uses
+(`docs/runner-contract.md`):
+
+```
+-----BEGIN BURNIN ARTIFACT fielddiag.log text/plain-----
+<the tool's own output, verbatim>
+-----END BURNIN ARTIFACT-----
+```
+
+That gets the evidence into the same envelope and the same report as
+everything else this operator measures, without pretending a driver-unload
+tool is a container workload. It is not a verdict — nothing thresholds an
+artifact — but it rides beside the verdicts that ARE measured, on the same
+node, in the same run.
+
+Revisit only if the CLI is ever asked to orchestrate a reboot itself; that is
+a materially different tool than the one described above, and until it
+exists this is the honest answer. Tracked in [#422] so nobody re-derives it.
+
+[#422]: https://github.com/baldwinSPC/glimmer-burnin/issues/422
+
 ## Thresholds
 
 Measured, never from a datasheet. The fleet this project was built against
