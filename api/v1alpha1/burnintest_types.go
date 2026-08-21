@@ -404,7 +404,7 @@ type VendorImage struct {
 	// rather than a map: a typo here is rejected at apply time rather than
 	// resolving to no image on every node of that vendor at 3am.
 	//
-	// +kubebuilder:validation:Enum=nvidia;amd;intel;tenstorrent
+	// +kubebuilder:validation:Enum=nvidia;amd;intel;tenstorrent;habana
 	Vendor string `json:"vendor"`
 
 	// Image is the runner image for that vendor.

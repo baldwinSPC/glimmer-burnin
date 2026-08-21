@@ -106,24 +106,84 @@ type NIC struct {
 
 // PCI vendor IDs for accelerators this project knows by name.
 //
-// A short list on purpose. It resolves the four vendors the suite has runners
-// or plans for; everything else keeps its hex ID, which is more useful than a
-// guess and cannot become wrong.
+// A short list on purpose. It resolves the vendors this project has a NAME
+// for (pkg/contract.AcceleratorVendors — that list, this table's values, and
+// runners/fingerprint-probe's own copy are held to agreement by tests);
+// everything else keeps its hex ID, which is more useful than a guess and
+// cannot become wrong.
 var pciVendors = map[string]string{
 	"0x10de": "nvidia",
 	"0x1002": "amd",
 	"0x8086": "intel",
 	"0x1e52": "tenstorrent",
+	"0x1da3": "habana",
 }
 
-// acceleratorClasses are the PCI class prefixes that identify a device as one.
+// acceleratorClasses are the PCI class prefixes that mean "accelerator"
+// WITHOUT further questions being asked.
 //
-// 0x0302 is a 3D controller, which is what a datacentre GPU presents as.
-// 0x1200 is a processing accelerator. 0x0300 (VGA) is deliberately EXCLUDED:
-// including it would report the motherboard's display adapter as an
-// accelerator, and a report claiming a burn-in target that is really a BMC's
-// video output is worse than one that missed a card.
+// 0x0302 is a 3D controller and 0x1200 is a processing accelerator. VGA
+// (0x0300) is deliberately absent HERE, and is handled separately below: a
+// display adapter is not what this operator measures, and on a node with an
+// onboard VGA it would otherwise be reported as an accelerator the fleet does
+// not have.
 var acceleratorClasses = []string{"0x0302", "0x1200"}
+
+// displayClass is the VGA-compatible-controller prefix.
+//
+// THIS IS NOT A SYNONYM FOR "NOT AN ACCELERATOR". A GB10 presents as
+// 0x030000 — a fact that cost a fleet a false verdict before this package's
+// sibling (runners/fingerprint-probe) special-cased it (#380): excluding VGA
+// outright reported acceleratorCount=0 on a node compute-smoke measured at
+// 104 TFLOPS in the same run, and a threshold on the count turned that into a
+// FAIL, which is never retried. This package carried the fix later than its
+// sibling did — nothing outside the sysfs read differs by vendor, so the
+// discriminator below is the same one.
+//
+// The discriminator is not the class and not the vendor: it is whether the
+// device exposes a DRM RENDER NODE. See hasRenderNode.
+const displayClass = "0x0300"
+
+// hasRenderNode reports whether a PCI device exposes a DRM render node.
+//
+// This is the question "can this thing COMPUTE?", asked of the kernel rather
+// than inferred from a class code or a vendor table.
+//
+// A DRM driver only gets a renderD* node when it declares DRIVER_RENDER. A
+// display-only controller — the ASPEED or Matrox VGA on a server baseboard —
+// exposes drm/card* and no render node, which is exactly the false positive
+// the old VGA exclusion was protecting against. An accelerator exposes both.
+//
+// Measured on a GB10 (2026-08-17): 000f:01:00.0, class 0x030000, driver nvidia,
+// drm/ containing card0 AND renderD128 — and it was the only PCI device on the
+// node with a drm/ directory at all.
+//
+// Deliberately NOT a vendor allowlist and NOT a driver allowlist. Both work on
+// today's evidence and both are lists somebody has to maintain, which is the
+// shape this project keeps out of the reconciler: adding support for a vendor
+// should mean adding a runner, not adding a name to a table here.
+func hasRenderNode(deviceDir string) bool {
+	entries, err := os.ReadDir(filepath.Join(deviceDir, "drm"))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "renderD") {
+			return true
+		}
+	}
+	return false
+}
+
+// knownAcceleratorVendor reports whether this project has a NAME for the
+// vendor. Used ONLY to decide whether an unclassifiable display device is
+// worth reporting as ambiguous rather than silently dropped — never to
+// decide that something IS an accelerator. See runners/fingerprint-probe's
+// copy of this function, which the same reasoning applies to.
+func knownAcceleratorVendor(vendorID string) bool {
+	_, ok := pciVendors[strings.ToLower(vendorID)]
+	return ok
+}
 
 // Options controls where the probe reads from. The zero value reads the real
 // host; tests supply a fixture root.
@@ -304,11 +364,26 @@ func accelerators(sysfsRoot string) []Accelerator {
 	for _, e := range entries {
 		dir := filepath.Join(sysfsRoot, "bus", "pci", "devices", e.Name())
 		class := readTrimmed(filepath.Join(dir, "class"))
-		if !isAccelerator(class) {
+		vendorID := readTrimmed(filepath.Join(dir, "vendor"))
+
+		switch {
+		case isAccelerator(class):
+			// An unambiguous accelerator class. No further question.
+		case strings.HasPrefix(strings.ToLower(class), displayClass) && hasRenderNode(dir):
+			// Display class WITH a render node: it computes, so it counts —
+			// the GB10 case (#380).
+		case strings.HasPrefix(strings.ToLower(class), displayClass) && knownAcceleratorVendor(vendorID):
+			// Display class, no render node, from a vendor that makes
+			// accelerators. Unclassifiable from sysfs alone — could be a
+			// display adapter, could be an accelerator whose driver never
+			// bound. This package has no "ambiguous" list to put it in (its
+			// one caller wants a flat descriptor, not an unmeasurable count);
+			// dropping it is the same answer runners/fingerprint-probe gives
+			// for acceleratorCount either way — neither certifies a guess.
+			continue
+		default:
 			continue
 		}
-
-		vendorID := readTrimmed(filepath.Join(dir, "vendor"))
 		a := Accelerator{
 			PCIAddress: e.Name(),
 			VendorID:   vendorID,

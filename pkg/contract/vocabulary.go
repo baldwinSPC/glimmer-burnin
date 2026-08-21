@@ -521,3 +521,34 @@ func (in *Threshold) DeepCopy() *Threshold {
 	in.DeepCopyInto(out)
 	return out
 }
+
+// AcceleratorVendors is the single source of truth for the vendor names this
+// project has a NAME for, as opposed to a raw PCI hex ID it merely records.
+// Vendor support is data, not code (docs/vendors/README.md) — adding one here
+// is the whole change; nothing in internal/controller ever branches on a
+// vendor name, so this list changing shape is not a controller change.
+//
+// Four sources are required to agree with this list, exactly, and each is
+// checked against it by a test:
+//   - api/v1alpha1.VendorImage's `+kubebuilder:validation:Enum` marker
+//     (api/v1alpha1/burnintest_test.go) — the apiserver's own gate, checked
+//     by scraping the marker text, since a kubebuilder marker is not Go code
+//     a test can call.
+//   - pkg/hostinfo's PCI-vendor-ID table (pkg/hostinfo/hostinfo_test.go).
+//   - runners/fingerprint-probe's OWN COPY of that table
+//     (runners/fingerprint-probe/pci_vendors_test.go) — a second
+//     implementation forced by the image build (issue #250), which is why it
+//     is checked from a _test.go file rather than importing this package
+//     directly: a runner's non-test sources are standard-library-only.
+//   - NodeFingerprint's own vendor is NOT checked against this list, and
+//     deliberately so: internal/controller.vendorFromDomain derives a vendor
+//     name from whichever DNS domain published a device fact, with no
+//     lookup table and no branch on the value — `habana.ai/gaudi` becomes
+//     "habana" the same way `nvidia.com/gpu` becomes "nvidia", before this
+//     list ever existed and without needing to change when it does. A vendor
+//     this project has never named still gets fingerprinted correctly; it
+//     just cannot be the `vendor:` of an imagesByVendor entry, because the
+//     CRD enum — which DOES appear in this list — refuses it.
+//
+// Sorted, so a diff against any of the four sources is stable.
+var AcceleratorVendors = []string{"amd", "habana", "intel", "nvidia", "tenstorrent"}

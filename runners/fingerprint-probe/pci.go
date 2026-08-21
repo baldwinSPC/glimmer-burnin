@@ -53,12 +53,16 @@ var acceleratorClasses = []string{"0x0302", "0x1200"}
 // device exposes a DRM RENDER NODE. See hasRenderNode.
 const displayClass = "0x0300"
 
-// pciVendors resolves the IDs this project has names for.
+// pciVendors resolves the IDs this project has names for — held to
+// pkg/contract.AcceleratorVendors and to pkg/hostinfo's own copy by
+// pci_vendors_test.go (a _test.go file, since this package's non-test
+// sources cannot import the repo; see the header comment above).
 var pciVendors = map[string]string{
 	"0x10de": "nvidia",
 	"0x1002": "amd",
 	"0x8086": "intel",
 	"0x1e52": "tenstorrent",
+	"0x1da3": "habana",
 }
 
 // hasRenderNode reports whether a PCI device exposes a DRM render node.
