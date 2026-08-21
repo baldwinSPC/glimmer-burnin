@@ -91,6 +91,12 @@
 
 namespace soak {
 
+// The watch lives in burnin::kmsg (its own header, shared with the NVIDIA
+// engines); aliased here so the uses below read the same as every other
+// engine-local name. Without this alias nothing in this namespace could name
+// it at all — caught in review before any of the four images ever built.
+namespace kmsg = burnin::kmsg;
+
 constexpr int kExitPass = 0;
 constexpr int kExitFail = 1;
 constexpr int kExitSkip = 2;
@@ -544,6 +550,15 @@ inline Measurement run(long durationSeconds, int matrixN) {
 				m.minSclkPct = std::min(m.minSclkPct, 100.0 * s.currentMHz / s.ratedMHz);
 			}
 		}
+		// Drained on the SAME cadence as the sysfs samples, for the reason the
+		// NVIDIA engine drains on its progress cadence: an undrained descriptor
+		// is a window the ring buffer can wrap PAST. A first draft drained once
+		// at the end, and on a soak the README describes holding load for
+		// hours, ordinary kernel chatter wraps a default-sized ring long before
+		// that — every record older than the wrap unrecoverable, EPIPE on the
+		// final read, and the very fault this watch exists for lost with it. A
+		// drain of an empty source costs one read() returning EAGAIN.
+		xidWatch.Collect([&](const std::string &line) { xidTally.ObserveGeneric(line, amdFaultPatterns()); });
 		std::this_thread::sleep_for(std::chrono::milliseconds(kPollMillis));
 	}
 	m.elapsedSeconds = nowSeconds() - start;
@@ -567,16 +582,11 @@ inline Measurement run(long durationSeconds, int matrixN) {
 	                    static_cast<double>(m.iterations);
 	if (m.elapsedSeconds > 0) m.tflops = flop / m.elapsedSeconds / 1e12;
 
-	// One drain, at the very end: this engine has no periodic-report mechanism
-	// for ANY metric (unlike the NVIDIA soak, which re-emits everything on a
-	// progress interval), so there is no existing cadence to piggyback on and
-	// adding one just for Xid would be new machinery this file does not
-	// otherwise have. xidCount is therefore this whole window's total in one
-	// read, using kmsg::Tally::ObserveGeneric with this file's own,
-	// deliberately narrow amdgpu pattern set — see amdFaultPatterns().
+	// The final drain closes the window: whatever arrived between the last
+	// in-loop drain and the load ending.
 	xidWatch.Collect([&](const std::string &line) { xidTally.ObserveGeneric(line, amdFaultPatterns()); });
 	m.xidDropped = xidWatch.Dropped();
-	m.xidCount = xidTally.faultCount;
+	m.xidCount = xidTally.xidCount;
 
 	cleanup();
 	m.ok = true;
@@ -639,12 +649,21 @@ inline void report(const Keys &k, const Measurement &m) {
 	// carry no equivalent of NVIDIA's "Xid: NN" numeric code, so there is
 	// nothing to declare. See kmsg/kmsg_watch.h and amdFaultPatterns() above.
 	std::printf("xid_source=%s\n", m.xidAvailable ? "kmsg" : "none");
-	if (m.xidAvailable) {
+	// The coverage self-report — see the NVIDIA engine's emitMeasurement for
+	// the full rationale (segmented folding keeps a metric any segment
+	// reported, so a lost window needs its own countable trace).
+	const bool xidClean = m.xidAvailable && !m.xidDropped;
+	std::printf("xid_windows_watched=%d\n", xidClean ? 1 : 0);
+	if (xidClean) {
 		// A genuine, positive zero when nothing amdgpu-fault-shaped appeared —
 		// this probe watched the whole window, exactly as throttle_count=0
 		// would be if this hardware could report one.
 		std::printf("xid_count=%ld\n", m.xidCount);
-		if (m.xidDropped) std::printf("xid_log_dropped=1\n");
+	} else if (m.xidAvailable) {
+		// A drain wrapped, errored or hit its bound: the tally is a floor over
+		// a window with unread gaps, not a measurement — omitted, exactly as
+		// host-health omits, with the drop itself on the record.
+		std::printf("xid_log_dropped=1\n");
 	} else if (!m.xidUnavailableReason.empty()) {
 		std::printf("xid_source_detail=%s\n", m.xidUnavailableReason.c_str());
 	}

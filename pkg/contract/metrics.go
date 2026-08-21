@@ -810,7 +810,7 @@ var registry = map[string]Metric{
 	// could, which is exactly why this field stays Evidence-only.
 	"lastXidCode": {
 		Name: "lastXidCode", Unit: UnitNone,
-		Description:  "code of the most recent NVIDIA Xid error the device reports; 0 when none is reported. dcgm-diag's reading is lifetime-scoped; the soak family's is scoped to that test's own load window. Which Xid, never how many — the count is xidEvents",
+		Description:  "code of the most recent NVIDIA Xid error. dcgm-diag reads a lifetime-scoped device field and prints 0 when it reads 0; the soak family extracts the code from the kmsg line within that test's own load window and OMITS the key when no code was extracted — its 0 would be a value nobody measured. Which Xid, never how many — the count is xidEvents",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
@@ -1198,6 +1198,63 @@ var registry = map[string]Metric{
 		Description:  "where the Xid scan read from: kmsg|kernlog|none. A label naming the PROVENANCE of xidEvents, and the value that matters most is the one a gate cannot express — \"none\" means the scan did not run, and the counters it would have produced are omitted rather than zeroed, so xidEvents already fails closed on its own",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
+	},
+	// A LABEL — free prose naming the path that could not be opened and the
+	// remedy — registered under the same duty as pdWedgeSuspected and friends:
+	// a first-party metric whose value is words must be registered Evidence, so
+	// a gate on it is reported Unsound instead of failing closed on every node
+	// in the shape of a hardware verdict. Emitted by host-health and by all
+	// four soak-family runners when xid_source=none.
+	"xidSourceDetail": {
+		Name: "xidSourceDetail", Unit: UnitNone,
+		Description:  "why the Xid scan could not run: the path(s) tried and, where the cause is the three-part /dev/kmsg grant, the remedy. Free text for a human; never a number, never gateable",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// Registered Evidence even though it is an integer, because its emission
+	// shape makes any gate on it unsatisfiable-or-vacuous: it is printed only
+	// as 1 (a drain lost records — the counters it qualifies are then omitted)
+	// and never as 0, so `xidLogDropped Equal 0` would fail every healthy node
+	// forever. The linter can only say so if the registry knows the name.
+	"xidLogDropped": {
+		Name: "xidLogDropped", Unit: UnitNone,
+		Description:  "1 when a kernel-log drain lost records (ring wrapped, scan failed, or a read bound was hit); absent otherwise. The counters it qualifies are omitted in the same case, so this is the trace of WHY they are missing — not a counter to gate",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// The coverage self-report for the soak family's window-scoped Xid watch:
+	// 1 when a window was watched start to finish, 0 when it was not (no
+	// grant, or a drain lost records). BOTH values are positively established
+	// facts about the probe — like faultsInjected, this is a self-report and
+	// not a hardware measurement, so emitting the 0 breaks no rule.
+	//
+	// It exists for the SEGMENTED case: foldMetrics keeps a metric if ANY
+	// segment reported it, so a 672-segment soak whose segment 300 lost its
+	// watch still sums the other segments' honest zeros into an xidEvents a
+	// gate would accept — the one segmentation-changes-the-verdict shape the
+	// soak rules forbid, reached through a probe rather than a measurement.
+	// Sum-aggregated, this key then reads 671, and a profile pairing
+	// `xidEvents Equal 0` with `xidWindowsWatched GreaterThanOrEqual <segment
+	// count>` certifies only a soak every window of which was observed. On an
+	// unsegmented test it is simply 1 or 0, and Equal 1 is the pairing gate.
+	"xidWindowsWatched": {
+		Name: "xidWindowsWatched", Unit: UnitNone,
+		Description:  "how many of this test's execution windows the kernel-log Xid watch covered start to finish: 1 or 0 per window, summed across a segmented soak's segments. Pair a gate on xidEvents with a floor on this to certify only fully-watched soaks",
+		Aggregation:  AggSum,
+		Combination:  CombineSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	// host-health's count of Xids already in the kernel log when its window
+	// OPENED — this boot's earlier history, as distinct from xidEvents' "during
+	// the window". Registered now because host-health's own README has always
+	// recommended gating it (`xidPreexisting Equal 0`), and writing a threshold
+	// is the moment registration is owed.
+	"xidPreexisting": {
+		Name: "xidPreexisting", Unit: UnitNone,
+		Description:  "count of NVIDIA Xid errors already in the kernel log when the scan's window opened — the node's earlier history this boot, not the test's own window. The windowed count is xidEvents",
+		Aggregation:  AggLast,
+		Combination:  CombineMax,
+		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,

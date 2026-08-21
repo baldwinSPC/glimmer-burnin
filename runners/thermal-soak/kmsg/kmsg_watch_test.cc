@@ -88,6 +88,14 @@ void testExtractXidCode() {
   check(!ExtractXidCode("NVRM: Xid (PCI:0000:01:00), pid=1234", &code),
         "no ':' follows the PCI clause, so there is no code to read — refused, not defaulted to 0");
   check(!ExtractXidCode("no Xid word here at all", &code), "refuses when the word Xid never appears");
+
+  // The anchor is the NVRM-attributed Xid, never the first x-i-d substring in
+  // the line: earlier prose containing those letters must not steal the
+  // anchor and drop (or worse, misread) the real code.
+  check(ExtractXidCode("oxidation state 2 reported; NVRM: Xid: 79", &code) && code == 79,
+        "an earlier 'oxid...' word does not steal the anchor from the real NVRM: Xid clause");
+  check(!ExtractXidCode("oxidation: 42 is not a driver fault", &code),
+        "an x-i-d substring with no NVRM: clause anywhere extracts nothing — 42 is not an Xid code");
 }
 
 // ── pure functions: ParseKmsgRecord / VisitKmsgChunk ────────────────────────
@@ -138,7 +146,6 @@ void testTallyAccumulatesCumulativelyAcrossCalls() {
   t.ObserveNvidia("an unrelated kernel line");
   t.ObserveNvidia("NVRM: Xid: 79");
   check(t.xidCount == 2, "two Xid lines observed across three calls");
-  check(t.faultCount == 2, "the vendor-neutral counter agrees with xidCount for the NVIDIA path");
   check(t.haveLastXidCode && t.lastXidCode == 79, "the LAST code wins, matching AggLast semantics");
 
   // A later call that observes nothing must not reset what was already tallied
@@ -157,12 +164,12 @@ void testTallyObserveGenericIsAnOrAcrossPatternSetsAndCountsOnceOnOverlap() {
   t.ObserveGeneric("amdgpu 0000:01:00.0: GPU reset begin", amdPatterns);
   t.ObserveGeneric("amdgpu 0000:01:00.0: RAS: Uncorrectable Error detected", amdPatterns);
   t.ObserveGeneric("amdgpu 0000:01:00.0: firmware version 1.2.3", amdPatterns); // matches neither set
-  check(t.faultCount == 2, "two amdgpu fault lines matched, the informational firmware line did not");
+  check(t.xidCount == 2, "two amdgpu fault lines matched, the informational firmware line did not");
   check(!t.haveLastXidCode, "the generic (AMD) path never fabricates a code — there is none to extract");
 
   Tally overlap;
   overlap.ObserveGeneric("amdgpu: GPU reset due to an Uncorrectable RAS event", amdPatterns);
-  check(overlap.faultCount == 1, "a line matching BOTH pattern sets counts once, not twice");
+  check(overlap.xidCount == 1, "a line matching BOTH pattern sets counts once, not twice");
 }
 
 // ── Watch: real file mechanics, mirroring host-health's own test pattern ───
@@ -266,6 +273,67 @@ void testTwoDrainsDoNotDoubleCount() {
   unsetenv("BURNIN_KMSG_PATH");
 }
 
+// A record SPLIT ACROSS TWO DRAINS must be seen once, whole. The fd position
+// advances past every byte read, so a partial record held in a local (rather
+// than carried on the Watch) would be discarded on the first drain and only
+// its tail seen on the second — the record's head, which may be the very
+// "NVRM: Xid" that made it matter, silently lost. host-health's kmsgSource
+// keeps `pending` as a struct field for exactly this reason; this test pins
+// the ported version of that decision. Real /dev/kmsg returns whole records
+// per read; a regular file (captured log, fixture) hits this at a writer's
+// mid-line pause.
+void testARecordSplitAcrossTwoDrainsIsSeenOnceWhole() {
+  const std::string path = tempPath();
+  mustWrite(path, "");
+  setenv("BURNIN_KMSG_PATH", path.c_str(), 1);
+  Watch w;
+  check(w.Available(), "the probe opened the fixture file");
+
+  // The writer pauses MID-RECORD; the first drain consumes these bytes from
+  // the fd and must hold them, not discard them.
+  appendTo(path, "3,1,1,-;NVRM: Xi");
+  Tally t;
+  w.Collect([&](const std::string &line) { t.ObserveNvidia(line); });
+  check(t.xidCount == 0, "a partial record is not visited early");
+
+  // The writer finishes the record; the second drain must reunite the halves.
+  appendTo(path, "d (PCI:0000:01:00): 62, thermal shutdown\n");
+  w.Collect([&](const std::string &line) { t.ObserveNvidia(line); });
+  check(t.xidCount == 1,
+        "the split record was counted exactly once, whole — a head discarded at the first drain "
+        "would have lost this Xid entirely");
+  check(t.haveLastXidCode && t.lastXidCode == 62, "and its code was extracted from the reunited line");
+
+  unlink(path.c_str());
+  unsetenv("BURNIN_KMSG_PATH");
+}
+
+// A newline-free source cannot be /dev/kmsg-shaped, and must be declared
+// dropped rather than ground through quadratic reassembly. The kernel caps one
+// record well under 16 KiB, so 100 KiB with no newline is positively not a
+// record — and without the cap, the read bound alone lets a misconfigured
+// BURNIN_KMSG_PATH (a binary file, /dev/zero) turn the drain into an
+// effective hang, which is precisely what the bound claims to prevent.
+void testANewlineFreeSourceIsDroppedNotGroundForever() {
+  const std::string path = tempPath();
+  mustWrite(path, "");
+  setenv("BURNIN_KMSG_PATH", path.c_str(), 1);
+  Watch w;
+  check(w.Available(), "the probe opened the fixture file");
+
+  // Appended AFTER the watch positioned at the tail, so it is all "window"
+  // content — 100 KiB without a single newline, which nothing kmsg-shaped
+  // ever produces.
+  appendTo(path, std::string(100 * 1024, 'x'));
+  Tally t;
+  w.Collect([&](const std::string &line) { t.ObserveNvidia(line); });
+  check(w.Dropped(), "a source that never yields a newline is declared dropped, not trusted");
+  check(t.xidCount == 0, "and nothing was fabricated from the garbage");
+
+  unlink(path.c_str());
+  unsetenv("BURNIN_KMSG_PATH");
+}
+
 // A path that does not exist: the probe must say so, and never fabricate a
 // zero count from "nothing to open".
 void testAMissingPathIsUnavailableWithAReason() {
@@ -302,6 +370,8 @@ int main() {
   testAXidBeforeTheWindowIsNotCountedAndOneDuringItIs();
   testAQuietWindowReportsZeroNeverAbsence();
   testTwoDrainsDoNotDoubleCount();
+  testARecordSplitAcrossTwoDrainsIsSeenOnceWhole();
+  testANewlineFreeSourceIsDroppedNotGroundForever();
   testAMissingPathIsUnavailableWithAReason();
   testCollectOnAnUnavailableWatchIsANoOp();
 

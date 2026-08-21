@@ -242,7 +242,7 @@ snake_case spelling.
 | `first_miscompare_index` | `firstMiscompareIndex` — only when there was one |
 | `faults_injected` | `faultsInjected` — always emitted; see [Proving the detector works](#proving-the-detector-works) |
 | `nvml_unsupported`, `unsupported_reads`, `config_warnings` | `nvmlUnsupported`, `unsupportedReads`, `configWarnings` |
-| `xid_source`, `xid_source_detail`, `last_xid_code`, `xid_log_dropped` | `xidSource`, `xidSourceDetail`, `lastXidCode`, `xidLogDropped` — the Xid watch's provenance and evidence; see [below](#the-xid-watch-and-what-the-pod-needs-for-it) |
+| `xid_source`, `xid_source_detail`, `xid_windows_watched`, `last_xid_code`, `xid_log_dropped` | `xidSource`, `xidSourceDetail`, `xidWindowsWatched`, `lastXidCode`, `xidLogDropped` — the Xid watch's provenance, coverage and evidence; see [below](#the-xid-watch-and-what-the-pod-needs-for-it) |
 
 ### Metrics that are absent rather than zero
 
@@ -328,9 +328,20 @@ gate off this kind and keeps it on `host-health`.
 `xidEvents` is a metric for a *profile* to gate via `spec.thresholds`: the
 runner's own pass/fail stays exactly the five checks listed above, because a
 verdict baked into the binary would depend on whether an optional host grant
-was remembered. `last_xid_code` says *which* Xid arrived (window-scoped, unlike
-`dcgm-diag`'s lifetime-scoped reading of the same name), and `xid_log_dropped=1`
-records a drain the ring buffer wrapped past — the count is then a floor.
+was remembered.
+
+Three companion keys complete the story. `last_xid_code` says *which* Xid
+arrived — window-scoped, unlike `dcgm-diag`'s lifetime-scoped reading of the
+same name, and emitted **only when a code was actually extracted** from a
+counted line (never a fabricated `0`). `xid_log_dropped=1` records a drain the
+ring buffer wrapped past or that failed partway; `xid_count` is then **omitted**
+rather than published — a tally over a window with unread gaps is not a
+measurement a threshold can honestly be written against, the same rule
+host-health applies. And `xid_windows_watched` is the coverage self-report (1
+for a fully-watched window, 0 otherwise, summed across a segmented soak's
+segments): pair `xidEvents Equal 0` with a floor on `xidWindowsWatched` at the
+segment count, as `config/samples/segmented-soak.yaml` does, so a segment whose
+watch was lost cannot hide inside the other segments' honest zeros.
 
 ---
 

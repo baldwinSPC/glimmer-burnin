@@ -140,13 +140,22 @@ namespace kmsg {
 // project has no way to grant a test process /dev/kmsg access in CI, so this
 // boundary is where the logic that decides a VERDICT-FEEDING count is checked.
 
-// ToLowerAscii avoids the locale-sensitive std::tolower, which a kernel log
-// line — English, ASCII, machine-generated — never needs and which a container
-// running under an unexpected LC_ALL could answer differently on two nodes.
+// ToLowerAscii, IsSpaceAscii and IsDigitAscii avoid the locale-sensitive
+// <cctype> classifiers, which a kernel log line — English, ASCII,
+// machine-generated — never needs and which a container running under an
+// unexpected LC_ALL could answer differently on two nodes. IsSpaceAscii is
+// exactly Go's \s ([\t\n\f\r ] plus \v), so the LineHasXid mirror of
+// host-health's regex cannot diverge from it by locale.
 inline char ToLowerAscii(char c) {
   if (c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');
   return c;
 }
+
+inline bool IsSpaceAscii(char c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+inline bool IsDigitAscii(char c) { return c >= '0' && c <= '9'; }
 
 // ContainsCI is a case-insensitive substring search, hand-rolled rather than
 // pulling in <regex>: every pattern this file matches is a fixed literal, never
@@ -170,10 +179,14 @@ inline bool ContainsCI(const std::string &haystack, const std::string &needle) {
 
 // MatchesAll is the generic AND-matcher runners/thermal-soak-rocm/
 // soak_core_rocm.h drives with its own amdgpu pattern list. Every substring in
-// `all` must appear somewhere in the line, case-insensitively, in any order —
-// mirroring the shape of host-health's own `(?i)amdgpu.*(gpu reset|ras)`
-// pattern (an ordered "amdgpu, then later X" regex is, for a single line of log
-// text, equivalent to "both amdgpu and X are present somewhere in it").
+// `all` must appear somewhere in the line, case-insensitively, IN ANY ORDER.
+// That is deliberately WIDER than host-health's ordered
+// `(?i)amdgpu.*(gpu reset|ras)` regex, not equivalent to it: a line shaped
+// "GPU reset requested for amdgpu ..." matches here and not there. Wider is
+// the correct direction for a fault this must not miss, and the pattern SETS
+// this is driven with are already far narrower than host-health's (see
+// soak_core_rocm.h's amdFaultPatterns) — but do not treat the two matchers as
+// interchangeable when reconciling counts between the two runners.
 inline bool MatchesAll(const std::string &line, const std::vector<std::string> &all) {
   for (const auto &needle : all) {
     if (!ContainsCI(line, needle)) return false;
@@ -199,7 +212,7 @@ inline bool LineHasXid(const std::string &line) {
     }
     if (at == std::string::npos) return false;
     size_t j = at + 5;
-    while (j < line.size() && std::isspace(static_cast<unsigned char>(line[j]))) ++j;
+    while (j < line.size() && IsSpaceAscii(line[j])) ++j;
     if (j + 3 <= line.size() && ToLowerAscii(line[j]) == 'x' && ToLowerAscii(line[j + 1]) == 'i' &&
         ToLowerAscii(line[j + 2]) == 'd') {
       return true;
@@ -208,8 +221,8 @@ inline bool LineHasXid(const std::string &line) {
   }
 }
 
-// ExtractXidCode reads the integer that follows the word "Xid" in a line
-// LineHasXid already matched, e.g.
+// ExtractXidCode reads the integer that follows the NVRM-attributed "Xid" in a
+// line LineHasXid already matched, e.g.
 //
 //   NVRM: Xid (PCI:0000:01:00): 13, pid=1234, Graphics SM Warp Exception
 //   NVRM: Xid: 79
@@ -219,41 +232,63 @@ inline bool LineHasXid(const std::string &line) {
 // (skipping an optional parenthesised PCI clause first) — deliberately not
 // "the first number anywhere on the line", because the PCI bus id embeds its
 // own digits and would be read as the code otherwise.
+//
+// The anchor is the "Xid" that FOLLOWS an "NVRM:" clause — the same walk
+// LineHasXid makes — never the first x-i-d substring anywhere in the line. A
+// message whose earlier prose happens to contain those letters ("...oxidation
+// state...; NVRM: Xid: 79") would otherwise lock the extractor onto the wrong
+// position, dropping the real code or, worse, reading an unrelated number as
+// an Xid code and storing it as evidence.
 inline bool ExtractXidCode(const std::string &line, long *code) {
   size_t xid = std::string::npos;
-  for (size_t i = 0; i + 3 <= line.size(); ++i) {
-    if (ToLowerAscii(line[i]) == 'x' && ToLowerAscii(line[i + 1]) == 'i' && ToLowerAscii(line[i + 2]) == 'd') {
-      xid = i;
+  size_t pos = 0;
+  for (;;) {
+    size_t at = std::string::npos;
+    for (size_t i = pos; i + 5 <= line.size(); ++i) {
+      if (ToLowerAscii(line[i]) == 'n' && ToLowerAscii(line[i + 1]) == 'v' &&
+          ToLowerAscii(line[i + 2]) == 'r' && ToLowerAscii(line[i + 3]) == 'm' && line[i + 4] == ':') {
+        at = i;
+        break;
+      }
+    }
+    if (at == std::string::npos) return false;
+    size_t j = at + 5;
+    while (j < line.size() && IsSpaceAscii(line[j])) ++j;
+    if (j + 3 <= line.size() && ToLowerAscii(line[j]) == 'x' && ToLowerAscii(line[j + 1]) == 'i' &&
+        ToLowerAscii(line[j + 2]) == 'd') {
+      xid = j;
       break;
     }
+    pos = at + 5;
   }
-  if (xid == std::string::npos) return false;
   size_t i = xid + 3;
   // Skip one parenthesised clause, e.g. "(PCI:0000:01:00)", if present —
   // otherwise its own digits would be mistaken for the code.
-  while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+  while (i < line.size() && IsSpaceAscii(line[i])) ++i;
   if (i < line.size() && line[i] == '(') {
     size_t close = line.find(')', i);
     if (close == std::string::npos) return false;
     i = close + 1;
   }
-  while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+  while (i < line.size() && IsSpaceAscii(line[i])) ++i;
   if (i >= line.size() || line[i] != ':') return false;
   ++i;
-  while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+  while (i < line.size() && IsSpaceAscii(line[i])) ++i;
   size_t start = i;
-  while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i]))) ++i;
+  while (i < line.size() && IsDigitAscii(line[i])) ++i;
   if (i == start) return false;
   *code = std::strtol(line.substr(start, i - start).c_str(), nullptr, 10);
   return true;
 }
 
-// ParseKmsgRecord extracts the human-readable text of one /dev/kmsg record.
-// Byte-for-byte the same contract as host-health's parseKmsgRecord: a record is
+// ParseKmsgRecord extracts the human-readable text of one /dev/kmsg record,
+// the same contract as host-health's parseKmsgRecord: a record is
 // "<prio>,<seq>,<usec>,<flags>[,<k>=<v>...];<message>", optionally followed by
 // continuation lines the caller has already stripped. Anything not shaped like
 // that is returned as-is rather than dropped, so an unparsed line that still
-// contains "Xid" is still counted.
+// contains "Xid" is still counted. (One knowing difference from the Go: the
+// no-semicolon branch does not trim a trailing newline, because the one
+// caller, VisitKmsgChunk, splits on newlines first and can never pass one.)
 inline std::string ParseKmsgRecord(const std::string &rec) {
   size_t semi = rec.find(';');
   if (semi == std::string::npos) return rec;
@@ -290,18 +325,21 @@ inline std::string VisitKmsgChunk(const std::string &chunk, const std::function<
 // last one, so a pod killed between two drains still has an up-to-date count
 // from the last one it completed, exactly like throttleEvents already does.
 struct Tally {
+  // ONE counter for both vendors, deliberately: the emitted key is xid_count
+  // on both (the metric name means the severity class, not the literal NVIDIA
+  // word — see soak_core_rocm.h's amdFaultPatterns), and a parallel
+  // per-vendor pair here would be write-only on one side of every build,
+  // inviting an increment to land on one and not the other with nothing
+  // compiled that could notice.
   long xidCount = 0;
   bool haveLastXidCode = false;
   long lastXidCode = 0;
-
-  long faultCount = 0; // vendor-neutral: NVIDIA Xid OR (from soak_core_rocm.h) amdgpu
 
   // ObserveNvidia is what kmsg_watch.h's own OS-facing reader calls for the
   // NVIDIA soak kinds.
   void ObserveNvidia(const std::string &line) {
     if (!LineHasXid(line)) return;
     xidCount++;
-    faultCount++;
     long code = 0;
     if (ExtractXidCode(line, &code)) {
       haveLastXidCode = true;
@@ -317,7 +355,7 @@ struct Tally {
   void ObserveGeneric(const std::string &line, const std::vector<std::vector<std::string>> &patternSets) {
     for (const auto &set : patternSets) {
       if (MatchesAll(line, set)) {
-        faultCount++;
+        xidCount++;
         return; // one line counts once, even if it happens to match two sets
       }
     }
@@ -339,11 +377,16 @@ class Watch {
 
     fd_ = open(path_.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd_ < 0) {
-      if (errno == ENOENT) {
+      // errno is captured BEFORE any std::string construction: operator+
+      // evaluation order is unspecified and an allocator is permitted to
+      // clobber errno even on success, which would turn the one diagnostic an
+      // engineer acts on into "cannot open (Success)".
+      const int openErrno = errno;
+      if (openErrno == ENOENT) {
         why_ = path_ + ": not present in this container (mount it with spec.runner.hostPaths)";
       } else {
-        if (errno == EACCES || errno == EPERM) errnoWasPermission_ = true;
-        why_ = path_ + ": cannot open (" + std::string(strerror(errno)) + ")";
+        if (openErrno == EACCES || openErrno == EPERM) errnoWasPermission_ = true;
+        why_ = path_ + ": cannot open (" + std::string(strerror(openErrno)) + ")";
       }
       return;
     }
@@ -351,8 +394,9 @@ class Watch {
     // seek rather than a drain-and-discard, and why a failure here must not
     // fall back to reading from the buffer's start.
     if (lseek(fd_, 0, SEEK_END) < 0) {
+      const int seekErrno = errno; // saved before the allocations below, as above
       why_ = path_ + ": opened, but this kernel refused to position /dev/kmsg at its tail (" +
-             std::string(strerror(errno)) +
+             std::string(strerror(seekErrno)) +
              "); reading from the start would count this node's prior history as part of this "
              "test's window, so this probe is refusing rather than risking that";
       close(fd_);
@@ -396,7 +440,6 @@ class Watch {
   void Collect(const std::function<void(const std::string &)> &onMessage) {
     if (!available_) return;
     char buf[16384];
-    std::string pending;
     for (int reads = 0; reads < kMaxReadsPerDrain; ++reads) {
       const ssize_t n = read(fd_, buf, sizeof(buf));
       if (n < 0) {
@@ -414,7 +457,29 @@ class Watch {
         return;
       }
       if (n == 0) return; // EOF: only a regular file (BURNIN_KMSG_PATH override, or a test) does this
-      pending = VisitKmsgChunk(pending + std::string(buf, static_cast<size_t>(n)), onMessage);
+      // pending_ is a MEMBER, not a local, and that is host-health's own
+      // design (kmsgSource.pending) ported deliberately: the fd position has
+      // already advanced past every byte read, so a trailing partial record
+      // discarded here would be GONE — the next drain resumes after it, sees
+      // only its tail, and the record's head (which may be the "NVRM: Xid"
+      // that made it matter) is silently lost. Real /dev/kmsg returns whole
+      // records per read and never hits this; a regular file (a captured log
+      // via BURNIN_KMSG_PATH, or a test fixture) hits it at every buffer
+      // boundary and at a writer's mid-line EOF.
+      pending_ = VisitKmsgChunk(pending_ + std::string(buf, static_cast<size_t>(n)), onMessage);
+      if (pending_.size() > kMaxPendingBytes) {
+        // Nothing /dev/kmsg-shaped produces a record this long — the kernel
+        // caps one record well under 16 KiB — so a pending buffer past this
+        // bound means the source never yields newlines at all (a misconfigured
+        // BURNIN_KMSG_PATH pointing at a binary file or a chatter device).
+        // Without this cap the read bound below is no protection: 200000
+        // reads of quadratic string reassembly is effectively a hang, and the
+        // guard that exists to stop a bad path from stalling the soak would
+        // itself be the stall.
+        dropped_ = true;
+        pending_.clear();
+        return;
+      }
     }
     // The bound was exhausted without reaching EAGAIN/EOF. Reporting success
     // here would leave the descriptor positioned somewhere arbitrary and let
@@ -428,6 +493,9 @@ class Watch {
   // BURNIN_KMSG_PATH pointing at something that never returns EAGAIN or EOF
   // must not spin this soak forever instead of running its GEMM.
   static constexpr int kMaxReadsPerDrain = 200000;
+  // Far above the kernel's own per-record cap (<16 KiB) and far below anything
+  // that could stall a drain — see the check in Collect.
+  static constexpr size_t kMaxPendingBytes = 64 * 1024;
 
   std::string path_;
   int fd_ = -1;
@@ -435,6 +503,9 @@ class Watch {
   bool dropped_ = false;
   bool errnoWasPermission_ = false;
   std::string why_;
+  // A trailing partial record, carried across reads AND across Collect calls —
+  // see the comment at its use in Collect.
+  std::string pending_;
 };
 
 } // namespace kmsg

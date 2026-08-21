@@ -99,6 +99,12 @@
 
 namespace soak {
 
+// The watch lives in burnin::kmsg (its own header, shared with the ROCm
+// engines); aliased here so the uses below read the same as every other
+// engine-local name. Without this alias nothing in this namespace could name
+// it at all — caught in review before any of the four images ever built.
+namespace kmsg = burnin::kmsg;
+
 constexpr int kExitPass = 0;
 constexpr int kExitFail = 1;
 constexpr int kExitSkip = 2;
@@ -653,26 +659,42 @@ inline void emitMeasurement(const Keys &k, const Measurement &m, long seq) {
   }
   // xid_source is printed unconditionally, exactly as host-health does: it is
   // the label a reader checks FIRST when xid_count is absent, to tell "nothing
-  // happened" from "nothing was watched". xid_count and last_xid_code are only
-  // ever printed when xid_source=kmsg — see kmsg/kmsg_watch.h's header comment
-  // for why a failed probe must never fall back to printing a zero.
+  // happened" from "nothing was watched".
   std::printf("xid_source=%s\n", m.xidAvailable ? "kmsg" : "none");
-  if (m.xidAvailable) {
-    // Both are genuine, POSITIVE measurements even at zero — this probe
-    // watched the whole window and nothing NVRM:Xid-shaped appeared in it,
-    // which is exactly as reportable as throttle_count=0 is when the driver
-    // answered and had nothing to report. last_xid_code=0 matches the
-    // "0 when none is reported" convention dcgm-diag's own lastXidCode
-    // already established for this metric name.
+  // xid_windows_watched is the coverage self-report: 1 when this window was
+  // watched START TO FINISH, 0 otherwise — always printed, because both values
+  // are positively established facts about the PROBE (like faults_injected),
+  // not measurements of the hardware. It exists for the segmented case:
+  // foldMetrics keeps a metric if ANY segment reported it, so a soak whose
+  // segment 300 lost its watch still sums the other segments' honest zeros
+  // into an xidEvents the gate would accept — while this key, Sum-aggregated,
+  // then reads 671 of 672, and a profile pairing `xidEvents Equal 0` with
+  // `xidWindowsWatched GreaterThanOrEqual <segments>` certifies only a soak
+  // every window of which was actually observed.
+  const bool xidClean = m.xidAvailable && !m.xidDropped;
+  std::printf("xid_windows_watched=%d\n", xidClean ? 1 : 0);
+  if (xidClean) {
+    // A genuine, POSITIVE measurement even at zero — this probe watched the
+    // whole window and nothing NVRM:Xid-shaped appeared in it, which is
+    // exactly as reportable as throttle_count=0 is when the driver answered
+    // and had nothing to report.
     std::printf("xid_count=%ld\n", m.xidCount);
-    std::printf("last_xid_code=%ld\n", m.lastXidCode);
-    if (m.xidDropped) {
-      // The ring buffer wrapped faster than a drain could keep up, or a drain
-      // was cut off at its read bound. xid_count above is then a FLOOR, not a
-      // complete count — worth knowing before trusting it, same as
-      // host-health's xid_log_dropped.
-      std::printf("xid_log_dropped=1\n");
-    }
+    // The code only when a code was actually EXTRACTED. dcgm-diag prints 0
+    // for "none" because its device register genuinely reads 0; this runner
+    // has no register, so a printed 0 would be a value nobody measured —
+    // both for a quiet window (nothing to say) and for the nastier case of a
+    // counted Xid whose line shape defeated extraction, where 0 would
+    // positively claim "none" about an event the same result counts.
+    if (m.haveLastXidCode) std::printf("last_xid_code=%ld\n", m.lastXidCode);
+  } else if (m.xidAvailable) {
+    // The watch ran but a drain wrapped (EPIPE), errored, or was cut at its
+    // bound: the tally is a FLOOR over a window with unread gaps, which is
+    // not a measurement a threshold could honestly be written against —
+    // host-health discards and omits in exactly this case, and so does this.
+    // What was positively established still goes on the record: the drop
+    // itself, and any code that was extracted before it.
+    std::printf("xid_log_dropped=1\n");
+    if (m.haveLastXidCode) std::printf("last_xid_code=%ld\n", m.lastXidCode);
   } else if (!m.xidUnavailableReason.empty()) {
     std::printf("xid_source_detail=%s\n", m.xidUnavailableReason.c_str());
   }

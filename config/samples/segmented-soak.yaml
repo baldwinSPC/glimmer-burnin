@@ -47,12 +47,15 @@ spec:
     # time changing pods than measuring hardware. This soak is 672 segments.
     segmentSeconds: 900
     # Left at its default of false. Turning it on ends the soak the moment the
-    # aggregate PROVABLY violates a gate — meaning no later segment could retract
-    # it. Two of the three gates below qualify: sustainedClockPct is a Min under
-    # a floor and a minimum only falls, and gpuTempC is a Max under a ceiling and
-    # a maximum only rises. elapsedS does NOT: it is a Sum under a floor, and a
-    # sum only grows, so that gate can only become satisfied and never provably
-    # broken. Read the abortEarly section of docs/soaks.md before setting it.
+    # aggregate PROVABLY violates a gate — meaning no later segment could
+    # retract it. Three of the five gates below qualify: sustainedClockPct is a
+    # Min under a floor and a minimum only falls; gpuTempC is a Max under a
+    # ceiling and a maximum only rises; and xidEvents is a Sum under Equal 0,
+    # provably broken the moment any segment counts one — the case most worth
+    # turning this on for, since a node that logged an Xid at hour six gains
+    # nothing from six more days of burn. elapsedS and xidWindowsWatched do
+    # NOT qualify: both are Sums under floors, which only grow toward
+    # satisfaction. Read the abortEarly section of docs/soaks.md first.
     abortEarly: false
   # Mid-flight evidence, so a soak that is lost at hour eighty still says what
   # the temperatures were doing. A checkpoint is EVIDENCE and never a verdict:
@@ -84,6 +87,17 @@ spec:
     - metric: xidEvents
       comparison: Equal
       value: "0"
+    # The pairing gate that makes the one above mean what it says over 672
+    # segments. foldMetrics keeps a metric if ANY segment reported it — so a
+    # segment whose watch was lost (a mid-soak reboot that came back without
+    # the grant, a wrapped ring buffer) contributes silence while the other
+    # segments' honest zeros still sum to 0 and the gate above passes. This
+    # key is 1 per fully-watched window, summed, so a floor at the segment
+    # count certifies only a soak EVERY window of which was actually observed.
+    # Matches soak.segmentSeconds: 604800 / 900 = 672.
+    - metric: xidWindowsWatched
+      comparison: GreaterThanOrEqual
+      value: "672"
     # A ceiling on a Max-aggregated metric: the peak across the WHOLE soak, not
     # the peak of the last window.
     - metric: gpuTempC
