@@ -624,6 +624,33 @@ Verified: the shipped binary links `libc.so.6` and nothing else.
 
 ---
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md). Request the node's whole board —
+`nvidia.com/gpu: "8"` on an 8-GPU node — in `spec.resources.limits`; the
+operator injects that as `BURNIN_RESOURCE_LIMITS`, and a pod handed fewer
+devices than the runtime shows is refused (Error), never silently measured
+partially.
+
+Concurrent is the default: every device runs the load at once for the whole
+window, because the measurement IS the board — a soak sliced into eight
+consecutive `duration/8` windows is not a soak.
+`BURNIN_DEVICE_CONCURRENCY=sequential` overrides it, giving each device
+`duration / deviceCount` alone. `sustainedClockPct`, `gpuTempC`, `throttleEvents`
+and `miscompares` are the fold across every device (worst clock, peak
+temperature, summed throttle events, summed miscompares) — the gates above did
+not have to change to mean "every device instead of one".
+
+New keys: `deviceCount` (Acceptance — gate `deviceCount Equal 8` so a pod
+handed one card fails instead of certifying it), `devicesVisible`,
+`deviceWindowS`, `deviceConcurrency`, `worstDeviceIndex`/`worstDevicePciBusId`,
+`deviceHomogeneous`, and `sustainedClockSpreadPct` (n/a on a single-device
+node, under MIG, or on a heterogeneous board — gate it `RequiredIfMeasurable`).
+When more than one device reported, a `per-device.json` artifact carries every
+device's own reading — the only sound attribution across a segmented soak's
+windows, since `worstDeviceIndex` names only the last window's worst device.
+
 ## Requirements on the node
 
 - an NVIDIA accelerator, and the NVIDIA Container Toolkit

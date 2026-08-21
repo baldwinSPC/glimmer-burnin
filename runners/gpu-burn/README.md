@@ -432,6 +432,16 @@ Verified: the shipped binary links `libc.so.6` and nothing else.
 
 ---
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md) — see [thermal-soak's fuller
+write-up](../thermal-soak/README.md#multi-device); the two kinds share this
+engine and the mechanism is identical. Request the node's whole board
+(`nvidia.com/gpu: "8"`); concurrent iteration is the default; `miscompares`,
+`nonfinite_count` and `eccErrors` sum across devices, so this kind's gate
+fires if ANY device returned a wrong answer, not just device 0.
+
 ## Requirements on the node
 
 - an NVIDIA accelerator, and the NVIDIA Container Toolkit

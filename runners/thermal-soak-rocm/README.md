@@ -85,6 +85,28 @@ pass on evidence of corruption it had in hand.
 
 **Error (3)** — HIP failure, or zero iterations completed. Hardware unjudged.
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md), mirroring the NVIDIA soak family's mechanism:
+request the node's whole board (`amd.com/gpu: "N"`), concurrent iteration by
+default, `sustainedClockPct`/`gpuTempC`/`powerDrawW`/`miscompares` fold across
+devices exactly as on NVIDIA.
+
+**The one piece with no NVIDIA precedent, and NOT VERIFIED AGAINST REAL
+MULTI-GPU AMD HARDWARE**: correlating a HIP device ordinal to its own sysfs
+`hwmon` directory. CUDA gets this for free (`cudaDeviceGetPCIBusId` +
+`nvmlDeviceGetHandleByPciBusId`); sysfs has no HIP-provided equivalent, so
+this runner reads the PCI domain/bus/device HIP reports for each device and
+matches it against each sysfs card's own resolved PCI address (the target of
+its `device` symlink) — never on directory enumeration order, which has no
+documented relationship to HIP's device ordering. This project's ROCm fleet
+(gfx1151/Strix Halo) is one iGPU per box, so the correlation has never had a
+second device to prove itself against. A wrong match would silently sample
+one device's temperature while loading another's — the hardware pass (#402)
+must confirm the addresses actually agree before this is trusted on a real
+multi-GPU AMD node.
+
 ## Status
 
 **Not verified on hardware** (#320). The temperature ceiling and clock floor are
@@ -98,3 +120,6 @@ never produced a GPU reset or an uncorrectable RAS event to record the real
 message shape from. The window mechanics are unit-tested against fixtures
 (`kmsg/kmsg_watch_test.cc`); the pattern text is what the hardware pass must
 confirm.
+
+The per-device sysfs correlation above is unverified for the same reason: no
+second AMD device to test it against.

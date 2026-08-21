@@ -51,7 +51,12 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 	// header is only ever included by a runner that iterates through it.
 	const helper = `#include "device_fold.h"`
 
-	converted := map[string]bool{}
+	converted := map[string]bool{
+		"gpu-burn":          true,
+		"thermal-soak":      true,
+		"gpu-burn-rocm":     true,
+		"thermal-soak-rocm": true,
+	}
 
 	exempt := map[string]string{
 		"dcgm-diag":         "a node-wide, read-only diagnostic: dcgmi enumerates and diagnoses every device the driver exposes, loads nothing, and reports devices_visible rather than claiming deviceCount",
@@ -79,10 +84,6 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		// full conversion.
 		"memory-bw":          "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
 		"memory-bw-rocm":     "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
-		"gpu-burn":           "#399 — delivery step 2 (soak family, concurrent default)",
-		"thermal-soak":       "#399 — delivery step 2 (soak family, concurrent default)",
-		"gpu-burn-rocm":      "#399 — delivery step 2 (soak family, concurrent default)",
-		"thermal-soak-rocm":  "#399 — delivery step 2 (soak family, concurrent default)",
 		"clockprobe":         "#400 — delivery step 3 (measurement kinds, sequential default)",
 		"clockprobe-rocm":    "#400 — delivery step 3 (measurement kinds, sequential default)",
 		"compute-smoke":      "#400 — delivery step 3 (a burst; sequential)",

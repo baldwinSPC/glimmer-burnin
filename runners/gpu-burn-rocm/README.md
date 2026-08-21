@@ -67,6 +67,16 @@ places.
 
 **Error (3)** — HIP failure, or zero iterations completed. Hardware unjudged.
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md) — see [thermal-soak-rocm's fuller
+write-up](../thermal-soak-rocm/README.md#multi-device), including the
+NOT-VERIFIED-ON-MULTI-GPU-HARDWARE caveat on the per-device sysfs
+correlation; the two kinds share this engine and the mechanism is identical.
+`miscompares` and `nonfinite_count` sum across devices, so this kind's gate
+fires if ANY device returned a wrong answer, not just device 0.
+
 ## Status
 
 **Not verified on hardware** (#320). No published image, no registered default;
