@@ -80,6 +80,35 @@
 // unknown measurement must never buy the more lenient floor; that is the same
 // fail-closed rule the verdict package follows.
 //
+// MULTI-DEVICE
+// ------------
+// Iterates every device the pod was allocated (docs/dev/multi-device.md),
+// sequential by default: this probe isolates ONE device's clock behaviour, and
+// that is a measurement kind's job, not a soak's — see the design note's
+// "sequential vs concurrent" reasoning. BURNIN_DEVICE_CONCURRENCY=all overrides
+// it, and unlike the soak family's single-host-thread lockstep, concurrent mode
+// here is genuinely one std::thread per device: this probe's per-device pipeline
+// is already fully self-contained and blocking (cudaStreamQuery-poll-and-sample
+// is a per-device pattern, not a cross-device one), and `cudaSetDevice` scopes
+// to the CALLING THREAD, so N threads each pinned to their own device via
+// cudaSetDevice at the top is the standard multi-GPU-via-threads pattern —
+// no interleaving machinery to build. NVML's query calls are assumed
+// thread-safe (documented NVIDIA behaviour and the basis of every concurrent
+// GPU-monitoring tool built on it); nothing here calls an NVML mutator.
+// Per-thread config-warning/unsupported-reads strings avoid a data race on the
+// two process-global ones and are merged into them after every thread joins —
+// see mergeDeviceNotes.
+//
+// The gated metric (sustainedClockPct) is the WORST device, exactly as the
+// design note requires — but this file has no separate "fold the aggregate,
+// then decide" step the way the soak family does: DECIDING is per device (the
+// same classification/floor logic below, run once per device against ITS OWN
+// samples), and the OVERALL test result is combineExitCodes across devices.
+// Folding via device_fold.h is what turns "8 devices' passes" into the single
+// FOLDED metric line a consumer reads (Min of sustained_clock_pct, worst
+// device named), not what decides the verdict — a device that clears its own
+// floor is not un-passed by another device's number.
+//
 // OUTPUT CONTRACT
 //   metrics as key=value lines, ALWAYS printed before the decision, then one of
 //     CLOCKPROBE_PASS               exit 0
@@ -95,11 +124,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
+#include "device_fold.h"
 #include "nvml_dynamic.h"
 
 namespace {
+
+namespace devices = burnin::devices;
 
 constexpr int kExitPass = 0;
 constexpr int kExitFail = 1;
@@ -176,18 +211,16 @@ void sleepMillis(long ms) {
   nanosleep(&ts, nullptr);
 }
 
+// Process-global: written only from the main thread, either directly
+// (sequential mode, one device at a time) or via mergeDeviceNotes after every
+// worker thread has joined (concurrent mode) — never concurrently.
 std::string configWarnings;
-
 void warn(const std::string &s) {
   if (!configWarnings.empty()) configWarnings += "; ";
   configWarnings += s;
 }
 
-// A list of NVML reads the driver refused. Recorded rather than substituted:
-// emitting a sentinel for an unsupported read would be a fabricated number that
-// a threshold could not tell from a measured one.
 std::string unsupportedReads;
-
 void noteUnsupported(const char *what) {
   if (!unsupportedReads.empty()) unsupportedReads += ",";
   unsupportedReads += what;
@@ -296,11 +329,22 @@ struct Samples {
   double mean(double sum, long count) const { return count > 0 ? sum / count : 0.0; }
 };
 
-// takeSample reads one instant of the device's state. A read the driver refuses
-// disables that field for the rest of the run rather than being retried every
-// sample; NOT_SUPPORTED does not become supported mid-probe.
-void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, bool *memOK,
-                bool *tempOK, bool *powerOK, bool *utilOK, bool *reasonsOK) {
+// SamplerState is which optional NVML reads are still believed to work, per
+// device — a read the driver refuses on one device says nothing about another.
+struct SamplerState {
+  bool mem = true, temp = true, power = true, util = true, reasons = true;
+};
+
+// takeSample reads one instant of the device's state. notes carries this
+// device's OWN unsupported-reads list (merged into the process-global one
+// after every device is done), so two devices probing NVML concurrently never
+// touch the shared string.
+void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, SamplerState *ok,
+               std::string *notes) {
+  auto note = [&](const char *what) {
+    if (!notes->empty()) *notes += ",";
+    *notes += what;
+  };
   unsigned int sm = 0;
   if (nvml.deviceGetClockInfo(dev, nvmlrt::kClockSM, &sm) != nvmlrt::kSuccess) return;
 
@@ -310,7 +354,7 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, boo
 
   double temp = 0.0;
   bool tempKnown = false;
-  if (*tempOK && nvml.deviceGetTemperature != nullptr) {
+  if (ok->temp && nvml.deviceGetTemperature != nullptr) {
     unsigned int t = 0;
     if (nvml.deviceGetTemperature(dev, nvmlrt::kTemperatureGpu, &t) == nvmlrt::kSuccess) {
       temp = t;
@@ -319,8 +363,8 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, boo
       s->tempSum += temp;
       s->tempMax = std::max(s->tempMax, temp);
     } else {
-      *tempOK = false;
-      noteUnsupported("temperature");
+      ok->temp = false;
+      note("temperature");
     }
   }
 
@@ -333,18 +377,18 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, boo
     s->tempAtMinSm = temp;
   }
 
-  if (*memOK) {
+  if (ok->mem) {
     unsigned int mem = 0;
     if (nvml.deviceGetClockInfo(dev, nvmlrt::kClockMem, &mem) == nvmlrt::kSuccess) {
       s->memN++;
       s->memSum += mem;
     } else {
-      *memOK = false;
-      noteUnsupported("memClock");
+      ok->mem = false;
+      note("memClock");
     }
   }
 
-  if (*powerOK && nvml.deviceGetPowerUsage != nullptr) {
+  if (ok->power && nvml.deviceGetPowerUsage != nullptr) {
     unsigned int mw = 0;
     if (nvml.deviceGetPowerUsage(dev, &mw) == nvmlrt::kSuccess) {
       const double w = mw / 1000.0;
@@ -352,24 +396,24 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, boo
       s->powerSum += w;
       s->powerMax = std::max(s->powerMax, w);
     } else {
-      *powerOK = false;
-      noteUnsupported("powerDraw");
+      ok->power = false;
+      note("powerDraw");
     }
   }
 
-  if (*utilOK && nvml.deviceGetUtilizationRates != nullptr) {
+  if (ok->util && nvml.deviceGetUtilizationRates != nullptr) {
     nvmlrt::Utilization u{0, 0};
     if (nvml.deviceGetUtilizationRates(dev, &u) == nvmlrt::kSuccess) {
       s->utilN++;
       s->utilSum += u.gpu;
       s->memUtilSum += u.memory;
     } else {
-      *utilOK = false;
-      noteUnsupported("utilization");
+      ok->util = false;
+      note("utilization");
     }
   }
 
-  if (*reasonsOK && nvml.deviceGetCurrentClocksThrottleReasons != nullptr) {
+  if (ok->reasons && nvml.deviceGetCurrentClocksThrottleReasons != nullptr) {
     unsigned long long mask = 0;
     if (nvml.deviceGetCurrentClocksThrottleReasons(dev, &mask) == nvmlrt::kSuccess) {
       s->reasonsN++;
@@ -382,8 +426,8 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, boo
       if (capped && !s->prevThrottled) s->throttleEvents++;
       s->prevThrottled = capped;
     } else {
-      *reasonsOK = false;
-      noteUnsupported("throttleReasons");
+      ok->reasons = false;
+      note("throttleReasons");
     }
   }
 }
@@ -422,6 +466,421 @@ void emitCommon() {
   if (!configWarnings.empty()) std::printf("config_warnings=%s\n", configWarnings.c_str());
 }
 
+// ── per-device state and pipeline ───────────────────────────────────────────
+
+struct DeviceResult {
+  int index = 0;
+  int exitCode = kExitPass; // 0 pass, 1 fail, 2 skip, 3 error — THIS device's own outcome
+  std::string reason;       // why, for the terminal marker if this device decides it
+
+  bool identityRead = false;
+  std::string busId, name, computeCap;
+
+  // Raw values for device_fold.h, keyed exactly as printed.
+  std::map<std::string, double> values;
+
+  // Evidence carried through for the artifact / device-0 "representative"
+  // printing, mirroring the soak family's "Once" fields.
+  double meanTemp = 0.0;
+  bool tempKnown = false;
+  double meanPower = 0.0;
+  double peakPower = 0.0;
+  bool powerKnown = false;
+  double meanUtil = 0.0;
+  double meanMemUtil = 0.0;
+  bool utilKnown = false;
+  unsigned long long reasonMask = 0;
+  long reasonCount[kNumReasonBits] = {0};
+  bool reasonsKnown = false;
+  double smClockMHz = 0.0;
+  double maxSmClockPct = 0.0;
+  double memClockMHz = 0.0;
+  bool memClockKnown = false;
+  unsigned int ratedBoostMHz = 0;
+  bool ratedKnown = false;
+  double sustainedTflops = 0.0;
+  double peakTflops = 0.0;
+  bool tflopsKnown = false;
+  long samplesTaken = 0;
+  long loadLaunches = 0;
+  double loadThreads = 0;
+  int loadItersPerLaunch = 0;
+  long warmupSeconds = 0;
+  long sampleWindowSeconds = 0;
+  double elapsedS = 0.0;
+  double tempAtMinSm = 0.0;
+  bool tempAtMinSmKnown = false;
+  double enforcedLimitW = 0.0, defaultLimitW = 0.0;
+  bool haveEnforcedLimit = false, haveDefaultLimit = false;
+  const char *classification = "none";
+  const char *pdWedge = "false";
+  double floorApplied = 0.0;
+  const char *floorBasis = "general";
+
+  std::string configWarnings;   // merged into the process-global after this device finishes
+  std::string unsupportedReads; // ditto
+};
+
+// runOneDevice is TODAY's single-device pipeline — NVML handle resolution
+// through calibration, warm-up, the windowed load, classification and the
+// per-device pass/fail decision — scoped to one CUDA ordinal and one window.
+// Unchanged in substance from the pre-multi-device engine; only parameterised
+// by device index and window, and returning a result instead of exiting the
+// process.
+void runOneDevice(int index, long windowSecondsTotal, double clockFloorPct,
+                  double thermalClockFloorPct, double thermalTempC, long sampleIntervalMs,
+                  const nvmlrt::Library &nvml, DeviceResult *out) {
+  out->index = index;
+
+  if (cudaSetDevice(index) != cudaSuccess) {
+    out->exitCode = kExitError;
+    out->reason = "cudaSetDevice failed";
+    return;
+  }
+  cudaDeviceProp props{};
+  if (cudaGetDeviceProperties(&props, index) != cudaSuccess) {
+    out->exitCode = kExitError;
+    out->reason = "could not read CUDA device properties";
+    return;
+  }
+  char busIdBuf[32] = {0};
+  const bool busIdOK = cudaDeviceGetPCIBusId(busIdBuf, sizeof(busIdBuf), index) == cudaSuccess;
+  out->busId = busIdOK ? busIdBuf : "";
+  out->name = props.name;
+  char cc[16];
+  std::snprintf(cc, sizeof(cc), "%d.%d", props.major, props.minor);
+  out->computeCap = cc;
+  out->identityRead = busIdOK;
+
+  nvmlrt::Device nvdev = nullptr;
+  bool haveHandle = false;
+  // Prefer the PCI bus id: NVML index order and CUDA ordinal order are not
+  // guaranteed to agree, and probing the clock of a different GPU than the one
+  // under load would produce a confident, wrong verdict.
+  if (busIdOK && nvml.deviceGetHandleByPciBusId != nullptr) {
+    haveHandle = nvml.deviceGetHandleByPciBusId(out->busId.c_str(), &nvdev) == nvmlrt::kSuccess;
+  }
+  if (!haveHandle) {
+    out->configWarnings += (out->configWarnings.empty() ? "" : "; ") +
+                           ("device " + std::to_string(index) +
+                            ": NVML handle resolved by index, not PCI bus id");
+    if (nvml.deviceGetHandleByIndex(static_cast<unsigned int>(index), &nvdev) != nvmlrt::kSuccess) {
+      out->exitCode = kExitError;
+      out->reason = "could not resolve an NVML handle for this device";
+      return;
+    }
+  }
+
+  // MIG: clocks are a whole-device property, so a clock sampled from inside a
+  // MIG instance cannot be attributed to this instance's load. This device is
+  // Skip, not the whole test.
+  if (nvml.deviceGetMigMode != nullptr) {
+    unsigned int current = 0, pending = 0;
+    if (nvml.deviceGetMigMode(nvdev, &current, &pending) == nvmlrt::kSuccess && index == 0) {
+      std::printf("mig_mode=%s\n", current == nvmlrt::kMigEnable ? "enabled" : "disabled");
+    }
+    if (nvml.deviceGetMigMode(nvdev, &current, &pending) == nvmlrt::kSuccess &&
+        current == nvmlrt::kMigEnable) {
+      out->exitCode = kExitSkip;
+      out->reason = "MIG is enabled; SM clock is a device-wide property and cannot be "
+                    "attributed to one instance's load";
+      return;
+    }
+  }
+
+  // The denominator. Without a rated clock there is no portable percentage, and
+  // a missing nameplate is an UNJUDGED part rather than a slow one — Skip.
+  unsigned int ratedBoostMHz = 0;
+  nvmlrt::Return rc = nvml.deviceGetMaxClockInfo(nvdev, nvmlrt::kClockSM, &ratedBoostMHz);
+  if (rc != nvmlrt::kSuccess || ratedBoostMHz == 0) {
+    out->exitCode = kExitSkip;
+    out->reason = std::string("rated SM boost clock unavailable (") + nvml.errorString(rc) +
+                 "); without a nameplate denominator the part is unjudged, not slow";
+    return;
+  }
+  out->ratedKnown = true;
+  out->ratedBoostMHz = ratedBoostMHz;
+
+  double enforcedLimitW = 0.0, defaultLimitW = 0.0;
+  bool haveEnforced = false, haveDefault = false;
+  if (nvml.deviceGetEnforcedPowerLimit != nullptr) {
+    unsigned int mw = 0;
+    if (nvml.deviceGetEnforcedPowerLimit(nvdev, &mw) == nvmlrt::kSuccess) {
+      enforcedLimitW = mw / 1000.0;
+      haveEnforced = true;
+    } else {
+      out->unsupportedReads += (out->unsupportedReads.empty() ? "" : ",") + std::string("enforcedPowerLimit");
+    }
+  }
+  if (nvml.deviceGetPowerManagementDefaultLimit != nullptr) {
+    unsigned int mw = 0;
+    if (nvml.deviceGetPowerManagementDefaultLimit(nvdev, &mw) == nvmlrt::kSuccess) {
+      defaultLimitW = mw / 1000.0;
+      haveDefault = true;
+    } else {
+      out->unsupportedReads += (out->unsupportedReads.empty() ? "" : ",") + std::string("defaultPowerLimit");
+    }
+  }
+  const bool limitBelowDefault =
+      haveEnforced && haveDefault && defaultLimitW > 0.0 && enforcedLimitW < defaultLimitW * 0.95;
+  out->haveEnforcedLimit = haveEnforced;
+  out->enforcedLimitW = enforcedLimitW;
+  out->haveDefaultLimit = haveDefault;
+  out->defaultLimitW = defaultLimitW;
+
+  // ── build the load ──────────────────────────────────────────────────────
+  const int blocks = std::max(1, props.multiProcessorCount * kBlocksPerSM);
+  const double totalThreads = static_cast<double>(blocks) * kThreadsPerBlock;
+
+  cudaStream_t stream = nullptr;
+  cudaEvent_t evStart = nullptr, evStop = nullptr;
+  if (cudaStreamCreate(&stream) != cudaSuccess || cudaEventCreate(&evStart) != cudaSuccess ||
+      cudaEventCreate(&evStop) != cudaSuccess) {
+    out->exitCode = kExitError;
+    out->reason = "could not create CUDA stream/events";
+    return;
+  }
+  auto cleanup = [&]() {
+    if (evStart) cudaEventDestroy(evStart);
+    if (evStop) cudaEventDestroy(evStop);
+    if (stream) cudaStreamDestroy(stream);
+  };
+
+  // Calibrate: how many loop iterations make one launch take ~kLaunchSeconds?
+  // Done on the live part so the load is sized for the clock it actually runs
+  // at, including a clock that is already wedged low.
+  int iters = 4096;
+  {
+    fmaLoadKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(nullptr, 1024);
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr == cudaSuccess) launchErr = cudaStreamSynchronize(stream);
+    if (launchErr != cudaSuccess) {
+      out->exitCode = kExitError;
+      out->reason = std::string("initial launch failed: ") + cudaGetErrorString(launchErr);
+      cleanup();
+      return;
+    }
+    for (int round = 0; round < 2; ++round) {
+      cudaEventRecord(evStart, stream);
+      fmaLoadKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(nullptr, iters);
+      cudaEventRecord(evStop, stream);
+      cudaError_t e = cudaGetLastError();
+      if (e == cudaSuccess) e = cudaStreamSynchronize(stream);
+      if (e != cudaSuccess) {
+        out->exitCode = kExitError;
+        out->reason = std::string("calibration launch failed: ") + cudaGetErrorString(e);
+        cleanup();
+        return;
+      }
+      float ms = 0.0f;
+      if (cudaEventElapsedTime(&ms, evStart, evStop) != cudaSuccess || ms <= 0.0f) break;
+      const double scaled = iters * (kLaunchSeconds * 1000.0) / ms;
+      iters = static_cast<int>(std::max(1024.0, std::min(scaled, 2.0e6)));
+    }
+  }
+  const double flopsPerLaunch = totalThreads * iters * kFlopsPerIterPerThread;
+  const int launchesPerWindow = std::max(1, static_cast<int>(kWindowSeconds / kLaunchSeconds));
+  out->loadThreads = totalThreads;
+  out->loadItersPerLaunch = iters;
+
+  // Warm-up: an unwarmed part sits at idle clocks legitimately, so sampling
+  // must not begin until the load has had time to bring it up. Derived from
+  // THIS device's own window, matching the single-device engine's original
+  // proportions.
+  long warmupSeconds = std::max(2L, std::min(10L, windowSecondsTotal / 5));
+  if (warmupSeconds >= windowSecondsTotal) warmupSeconds = windowSecondsTotal / 2;
+  out->warmupSeconds = warmupSeconds;
+  out->sampleWindowSeconds = windowSecondsTotal - warmupSeconds;
+
+  SamplerState ok;
+  double totalFlops = 0.0, totalWindowSeconds = 0.0, peakWindowTflops = 0.0;
+  long launches = 0;
+  std::string runErr;
+
+  auto runPhase = [&](double deadline, Samples *samples) -> bool {
+    while (nowSeconds() < deadline) {
+      cudaEventRecord(evStart, stream);
+      for (int i = 0; i < launchesPerWindow; ++i) {
+        fmaLoadKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(nullptr, iters);
+      }
+      cudaEventRecord(evStop, stream);
+      const cudaError_t launchErr = cudaGetLastError();
+      if (launchErr != cudaSuccess) {
+        runErr = std::string("load launch failed: ") + cudaGetErrorString(launchErr);
+        return false;
+      }
+      for (;;) {
+        const cudaError_t q = cudaStreamQuery(stream);
+        if (q == cudaSuccess) break;
+        if (q != cudaErrorNotReady) {
+          runErr = std::string("load kernel failed: ") + cudaGetErrorString(q);
+          return false;
+        }
+        if (samples != nullptr) takeSample(nvml, nvdev, samples, &ok, &out->unsupportedReads);
+        sleepMillis(sampleIntervalMs);
+      }
+      float ms = 0.0f;
+      if (cudaEventElapsedTime(&ms, evStart, evStop) != cudaSuccess || ms <= 0.0f) continue;
+      if (samples != nullptr) {
+        const double windowFlops = flopsPerLaunch * launchesPerWindow;
+        const double seconds = ms / 1000.0;
+        totalFlops += windowFlops;
+        totalWindowSeconds += seconds;
+        launches += launchesPerWindow;
+        peakWindowTflops = std::max(peakWindowTflops, windowFlops / seconds / 1e12);
+      }
+    }
+    return true;
+  };
+
+  const double started = nowSeconds();
+  if (!runPhase(started + warmupSeconds, nullptr)) {
+    out->exitCode = kExitError;
+    out->reason = runErr;
+    cleanup();
+    return;
+  }
+
+  Samples s;
+  const bool loadOK = runPhase(started + windowSecondsTotal, &s);
+  out->elapsedS = nowSeconds() - started;
+  out->samplesTaken = s.n;
+  out->loadLaunches = launches;
+
+  if (!loadOK) {
+    out->exitCode = kExitError;
+    out->reason = runErr;
+    cleanup();
+    return;
+  }
+  if (s.n == 0) {
+    out->exitCode = kExitError;
+    out->reason = "no clock samples were taken; the probe measured nothing";
+    cleanup();
+    return;
+  }
+
+  const double meanSm = s.smSum / s.n;
+  const double sustainedClockPct = 100.0 * meanSm / ratedBoostMHz;
+  out->smClockMHz = meanSm;
+  out->values["sustained_clock_pct"] = sustainedClockPct;
+  out->values["min_sm_clock_pct"] = 100.0 * s.smMin / ratedBoostMHz;
+  out->maxSmClockPct = 100.0 * s.smMax / ratedBoostMHz;
+  out->tempAtMinSmKnown = s.tempAtMinSmKnown;
+  out->tempAtMinSm = s.tempAtMinSm;
+  if (s.memN > 0) {
+    out->memClockKnown = true;
+    out->memClockMHz = s.memSum / s.memN;
+  }
+
+  out->tempKnown = s.tempN > 0;
+  const double meanTemp = s.mean(s.tempSum, s.tempN);
+  out->meanTemp = meanTemp;
+  if (out->tempKnown) out->values["gpu_temp_c"] = s.tempMax;
+
+  out->powerKnown = s.powerN > 0;
+  if (out->powerKnown) {
+    out->meanPower = s.mean(s.powerSum, s.powerN);
+    out->peakPower = s.powerMax;
+  }
+
+  out->utilKnown = s.utilN > 0;
+  const double meanUtil = s.mean(s.utilSum, s.utilN);
+  out->meanUtil = meanUtil;
+  out->meanMemUtil = s.mean(s.memUtilSum, s.utilN);
+
+  if (totalWindowSeconds > 0.0) {
+    out->tflopsKnown = true;
+    out->sustainedTflops = totalFlops / totalWindowSeconds / 1e12;
+    out->peakTflops = peakWindowTflops;
+  }
+
+  out->reasonsKnown = s.reasonsN > 0;
+  if (out->reasonsKnown) {
+    out->values["throttle_events"] = static_cast<double>(s.throttleEvents);
+    out->values["throttled_samples"] = static_cast<double>(s.throttledSamples);
+    out->reasonMask = s.reasonMask;
+    for (int i = 0; i < kNumReasonBits; ++i) out->reasonCount[i] = s.reasonCount[i];
+  }
+
+  // ── classify (per device) ────────────────────────────────────────────────
+  const bool shortfall = sustainedClockPct < clockFloorPct;
+  const bool thermalLatched = out->reasonsKnown && (s.reasonMask & kThermalReasons) != 0;
+  const bool powerLatched = out->reasonsKnown && (s.reasonMask & kPowerReasons) != 0;
+  const bool appClocksLatched =
+      out->reasonsKnown && (s.reasonMask & nvmlrt::kReasonApplicationsClocksSetting) != 0;
+  const bool hot = out->tempKnown && meanTemp >= thermalTempC;
+
+  if (shortfall) {
+    if (hot && thermalLatched) {
+      out->classification = "thermal";
+    } else if (powerLatched || limitBelowDefault) {
+      out->classification = "powerCap";
+    } else if (appClocksLatched) {
+      out->classification = "applicationClocks";
+    } else {
+      out->classification = "unknown";
+    }
+  }
+
+  const bool pdWedgeSuspected = shortfall && out->tempKnown && !hot && !thermalLatched;
+  if (shortfall && !out->tempKnown) {
+    out->pdWedge = "unknown";
+  } else if (pdWedgeSuspected) {
+    out->pdWedge = "true";
+  }
+
+  out->floorApplied = clockFloorPct;
+  if (shortfall && hot && thermalLatched) {
+    out->floorApplied = std::min(clockFloorPct, thermalClockFloorPct);
+    out->floorBasis = "thermal";
+  }
+
+  cleanup();
+
+  // ── decide (per device) ──────────────────────────────────────────────────
+  if (out->utilKnown && meanUtil < kMinCredibleUtilizationPct) {
+    out->exitCode = kExitError;
+    out->reason = "device utilization averaged " + std::to_string(static_cast<int>(meanUtil)) +
+                 "% under load; the sampled clock is not attributable to this test";
+    return;
+  }
+  if (sustainedClockPct >= out->floorApplied) {
+    out->exitCode = kExitPass;
+    return;
+  }
+  char reason[512];
+  if (std::strcmp(out->floorBasis, "thermal") == 0) {
+    std::snprintf(reason, sizeof(reason),
+                  "device %d: sustained SM clock %.1f%% of rated boost, below the %.1f%% thermal "
+                  "floor; attributed to heat (mean %.1fC, thermal throttle latched)",
+                  index, sustainedClockPct, out->floorApplied, meanTemp);
+  } else if (pdWedgeSuspected) {
+    std::snprintf(reason, sizeof(reason),
+                  "device %d: sustained SM clock %.1f%% of rated boost at only %.1fC with no "
+                  "thermal throttle — power-delivery wedge suspected (classification=%s)",
+                  index, sustainedClockPct, meanTemp, out->classification);
+  } else {
+    std::snprintf(reason, sizeof(reason),
+                  "device %d: sustained SM clock %.1f%% of rated boost, below the %.1f%% floor "
+                  "(classification=%s)",
+                  index, sustainedClockPct, out->floorApplied, out->classification);
+  }
+  out->exitCode = kExitFail;
+  out->reason = reason;
+}
+
+devices::DeviceReport toDeviceReport(const DeviceResult &r) {
+  devices::DeviceReport rep;
+  rep.index = r.index;
+  rep.busId = r.busId;
+  rep.name = r.name;
+  rep.computeCap = r.computeCap;
+  rep.identityRead = r.identityRead;
+  rep.values = r.values;
+  return rep;
+}
+
 } // namespace
 
 int main() {
@@ -446,56 +905,43 @@ int main() {
     durationSeconds = kMinDurationSeconds;
   }
   sampleIntervalMs = std::max(10L, std::min(sampleIntervalMs, 5000L));
-  // A thermal allowance must never be STRICTER than the general floor: it exists
-  // to excuse an expected shortfall, not to invent a second way to fail.
   if (thermalClockFloorPct > clockFloorPct) {
     warn("CLOCKPROBE_MIN_THERMAL_CLOCK_PCT exceeds CLOCKPROBE_MIN_SUSTAINED_CLOCK_PCT; clamped");
     thermalClockFloorPct = clockFloorPct;
   }
 
-  // Warm-up: an unwarmed part sits at idle clocks legitimately, so sampling
-  // must not begin until the load has had time to bring it up.
-  long warmupSeconds = std::max(2L, std::min(10L, durationSeconds / 5));
-  if (warmupSeconds >= durationSeconds) warmupSeconds = durationSeconds / 2;
-  const long windowSeconds = durationSeconds - warmupSeconds;
-
-  // ── device ────────────────────────────────────────────────────────────────
-  int deviceCount = 0;
-  const cudaError_t countErr = cudaGetDeviceCount(&deviceCount);
-  if (countErr == cudaErrorNoDevice || (countErr == cudaSuccess && deviceCount == 0)) {
-    // Not applicable rather than broken: a node with no accelerator has nothing
-    // whose clock could be probed.
-    return skip("no accelerator visible to this container");
-  }
-  if (countErr != cudaSuccess) {
-    return errored(std::string("cudaGetDeviceCount: ") + cudaGetErrorString(countErr));
-  }
-
-  int device = 0;
-  cudaDeviceProp props{};
-  if (cudaGetDevice(&device) != cudaSuccess ||
-      cudaGetDeviceProperties(&props, device) != cudaSuccess) {
-    return errored("could not read CUDA device properties");
-  }
-  char busId[32] = {0};
-  const bool busIdOK = cudaDeviceGetPCIBusId(busId, sizeof(busId), device) == cudaSuccess;
-
-  std::printf("gpu_name=%s\n", props.name);
-  std::printf("compute_cap=%d.%d\n", props.major, props.minor);
-  if (busIdOK) std::printf("pci_bus_id=%s\n", busId);
   std::printf("duration_requested_s=%ld\n", durationRequested);
-  std::printf("warmup_s=%ld\n", warmupSeconds);
-  std::printf("sample_window_s=%ld\n", windowSeconds);
   std::printf("clock_floor_pct=%.2f\n", clockFloorPct);
   std::printf("thermal_clock_floor_pct=%.2f\n", thermalClockFloorPct);
   std::printf("thermal_temp_threshold_c=%.2f\n", thermalTempC);
 
-  // ── NVML ──────────────────────────────────────────────────────────────────
-  // An accelerator IS present at this point. If its management library is
-  // missing, the container was built or run without the "utility" driver
-  // capability — a misconfiguration, not a property of the hardware. Skipping
-  // here would quietly report "not applicable" for every node in a fleet whose
-  // toolkit was set up wrong, so this is an Error: unjudged, and visible.
+  // ── how many devices, and how ────────────────────────────────────────────
+  int visible = 0;
+  const cudaError_t countErr = cudaGetDeviceCount(&visible);
+  if (countErr != cudaSuccess && countErr != cudaErrorNoDevice) {
+    return errored(std::string("cudaGetDeviceCount: ") + cudaGetErrorString(countErr));
+  }
+  if (countErr == cudaErrorNoDevice) visible = 0;
+
+  const devices::Budget budget =
+      devices::parseBudget(std::getenv("BURNIN_RESOURCE_LIMITS"), devices::nvidiaResources());
+  const devices::Plan plan = devices::planIteration(visible, budget);
+  if (plan.outcome == devices::Plan::Skip) return skip(plan.message);
+  if (plan.outcome == devices::Plan::Error) return errored(plan.message);
+  const int planCount = plan.count;
+
+  const char *concEnv = std::getenv("BURNIN_DEVICE_CONCURRENCY");
+  const devices::ConcurrencyChoice conc =
+      devices::resolveConcurrency(concEnv, devices::Concurrency::Sequential);
+  if (!conc.recognised) {
+    warn(std::string("BURNIN_DEVICE_CONCURRENCY=\"") + concEnv +
+         "\" is neither \"all\" nor \"sequential\"; using this kind's default (sequential)");
+  }
+  const long windowS = devices::deviceWindowSeconds(durationSeconds, planCount, conc.mode);
+  std::printf("device_window_s=%ld\n", windowS);
+  std::printf("device_concurrency=%s\n", devices::concurrencyName(conc.mode));
+
+  // ── NVML, opened ONCE for the whole process ─────────────────────────────
   nvmlrt::Library nvml;
   std::string nvmlErr;
   if (!nvml.open(&nvmlErr)) {
@@ -509,25 +955,6 @@ int main() {
     nvml.close();
     return errored(std::string("nvmlInit: ") + nvml.errorString(rc));
   }
-
-  nvmlrt::Device nvdev = nullptr;
-  bool haveHandle = false;
-  // Prefer the PCI bus id: NVML index order and CUDA ordinal order are not
-  // guaranteed to agree, and probing the clock of a different GPU than the one
-  // under load would produce a confident, wrong verdict.
-  if (busIdOK && nvml.deviceGetHandleByPciBusId != nullptr) {
-    haveHandle = nvml.deviceGetHandleByPciBusId(busId, &nvdev) == nvmlrt::kSuccess;
-  }
-  if (!haveHandle) {
-    warn("NVML handle resolved by index, not PCI bus id");
-    rc = nvml.deviceGetHandleByIndex(0, &nvdev);
-    if (rc != nvmlrt::kSuccess) {
-      emitCommon();
-      nvml.close();
-      return errored(std::string("nvmlDeviceGetHandleByIndex: ") + nvml.errorString(rc));
-    }
-  }
-
   if (nvml.systemGetDriverVersion != nullptr) {
     char driver[96] = {0};
     if (nvml.systemGetDriverVersion(driver, sizeof(driver)) == nvmlrt::kSuccess) {
@@ -535,357 +962,165 @@ int main() {
     }
   }
 
-  // MIG: clocks are a whole-device property, so a clock sampled from inside a
-  // MIG instance cannot be attributed to this instance's load. Unjudgeable on
-  // this hardware configuration, which is a Skip.
-  if (nvml.deviceGetMigMode != nullptr) {
-    unsigned int current = 0, pending = 0;
-    if (nvml.deviceGetMigMode(nvdev, &current, &pending) == nvmlrt::kSuccess) {
-      std::printf("mig_mode=%s\n", current == nvmlrt::kMigEnable ? "enabled" : "disabled");
-      if (current == nvmlrt::kMigEnable) {
-        emitCommon();
-        nvml.close();
-        return skip("MIG is enabled; SM clock is a device-wide property and cannot be "
-                    "attributed to one instance's load");
-      }
+  // ── run every device ─────────────────────────────────────────────────────
+  std::vector<DeviceResult> results(planCount);
+  if (conc.mode == devices::Concurrency::All) {
+    std::vector<std::thread> threads;
+    threads.reserve(planCount);
+    for (int i = 0; i < planCount; ++i) {
+      threads.emplace_back(runOneDevice, i, windowS, clockFloorPct, thermalClockFloorPct,
+                           thermalTempC, sampleIntervalMs, std::cref(nvml), &results[i]);
+    }
+    for (auto &t : threads) t.join();
+  } else {
+    for (int i = 0; i < planCount; ++i) {
+      runOneDevice(i, windowS, clockFloorPct, thermalClockFloorPct, thermalTempC, sampleIntervalMs,
+                  nvml, &results[i]);
     }
   }
-
-  // The denominator. Without a rated clock there is no portable percentage, and
-  // a missing nameplate is an UNJUDGED part rather than a slow one — so this is
-  // a Skip, exactly as the TestKind's documentation requires.
-  unsigned int ratedBoostMHz = 0;
-  rc = nvml.deviceGetMaxClockInfo(nvdev, nvmlrt::kClockSM, &ratedBoostMHz);
-  if (rc != nvmlrt::kSuccess || ratedBoostMHz == 0) {
-    emitCommon();
-    nvml.close();
-    return skip(std::string("rated SM boost clock unavailable (") + nvml.errorString(rc) +
-                "); without a nameplate denominator the part is unjudged, not slow");
-  }
-  std::printf("rated_boost_clock_mhz=%u\n", ratedBoostMHz);
-
-  // Power limits are the PD contract made visible: on a wedged GB10 the enforced
-  // limit sits well below the board's default limit.
-  double enforcedLimitW = 0.0, defaultLimitW = 0.0;
-  bool haveEnforced = false, haveDefault = false;
-  if (nvml.deviceGetEnforcedPowerLimit != nullptr) {
-    unsigned int mw = 0;
-    if (nvml.deviceGetEnforcedPowerLimit(nvdev, &mw) == nvmlrt::kSuccess) {
-      enforcedLimitW = mw / 1000.0;
-      haveEnforced = true;
-      std::printf("enforced_power_limit_w=%.2f\n", enforcedLimitW);
-    } else {
-      noteUnsupported("enforcedPowerLimit");
-    }
-  }
-  if (nvml.deviceGetPowerManagementDefaultLimit != nullptr) {
-    unsigned int mw = 0;
-    if (nvml.deviceGetPowerManagementDefaultLimit(nvdev, &mw) == nvmlrt::kSuccess) {
-      defaultLimitW = mw / 1000.0;
-      haveDefault = true;
-      std::printf("default_power_limit_w=%.2f\n", defaultLimitW);
-    } else {
-      noteUnsupported("defaultPowerLimit");
-    }
-  }
-  const bool limitBelowDefault =
-      haveEnforced && haveDefault && defaultLimitW > 0.0 && enforcedLimitW < defaultLimitW * 0.95;
-  if (haveEnforced && haveDefault && defaultLimitW > 0.0) {
-    std::printf("power_limit_ratio_pct=%.2f\n", 100.0 * enforcedLimitW / defaultLimitW);
-  }
-
-  // ── build the load ────────────────────────────────────────────────────────
-  const int blocks = std::max(1, props.multiProcessorCount * kBlocksPerSM);
-  const double totalThreads = static_cast<double>(blocks) * kThreadsPerBlock;
-
-  cudaStream_t stream = nullptr;
-  cudaEvent_t evStart = nullptr, evStop = nullptr;
-  if (cudaStreamCreate(&stream) != cudaSuccess || cudaEventCreate(&evStart) != cudaSuccess ||
-      cudaEventCreate(&evStop) != cudaSuccess) {
-    emitCommon();
-    nvml.close();
-    return errored("could not create CUDA stream/events");
-  }
-
-  // Calibrate: how many loop iterations make one launch take ~kLaunchSeconds?
-  // Done on the live part so the load is sized for the clock it actually runs
-  // at, including a clock that is already wedged low.
-  //
-  // The first launch of the process pays for CUDA context creation and module
-  // load, which is tens to hundreds of milliseconds and has nothing to do with
-  // the kernel. Timing it would size the load far too small, the windows would
-  // be short, and the probe would take few samples. So: one throwaway launch to
-  // pay that cost, then measure, then refine once against the measured rate.
-  int iters = 4096;
-  {
-    // A launch-configuration error is reported synchronously by
-    // cudaGetLastError, not by the later synchronise. Checking only the
-    // synchronise would let a kernel that never ran look like a completed load,
-    // and the idle clock that follows would be blamed on the hardware.
-    fmaLoadKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(nullptr, 1024);
-    cudaError_t launchErr = cudaGetLastError();
-    if (launchErr == cudaSuccess) launchErr = cudaStreamSynchronize(stream);
-    if (launchErr != cudaSuccess) {
-      emitCommon();
-      nvml.close();
-      return errored(std::string("initial launch failed: ") + cudaGetErrorString(launchErr));
-    }
-    for (int round = 0; round < 2; ++round) {
-      cudaEventRecord(evStart, stream);
-      fmaLoadKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(nullptr, iters);
-      cudaEventRecord(evStop, stream);
-      cudaError_t e = cudaGetLastError();
-      if (e == cudaSuccess) e = cudaStreamSynchronize(stream);
-      if (e != cudaSuccess) {
-        emitCommon();
-        nvml.close();
-        return errored(std::string("calibration launch failed: ") + cudaGetErrorString(e));
-      }
-      float ms = 0.0f;
-      if (cudaEventElapsedTime(&ms, evStart, evStop) != cudaSuccess || ms <= 0.0f) break;
-      const double scaled = iters * (kLaunchSeconds * 1000.0) / ms;
-      // Bounded on both sides: too few iterations makes launch overhead the
-      // measurement, too many makes a single launch outrun the pod's deadline.
-      iters = static_cast<int>(std::max(1024.0, std::min(scaled, 2.0e6)));
-    }
-  }
-  const double flopsPerLaunch = totalThreads * iters * kFlopsPerIterPerThread;
-  const int launchesPerWindow =
-      std::max(1, static_cast<int>(kWindowSeconds / kLaunchSeconds));
-
-  std::printf("load_threads=%.0f\n", totalThreads);
-  std::printf("load_iters_per_launch=%d\n", iters);
-
-  // runPhase drives the load until deadline, sampling only while the device is
-  // demonstrably busy. samples==nullptr is the warm-up: same load, no evidence.
-  bool memOK = true, tempOK = true, powerOK = true, utilOK = true, reasonsOK = true;
-  double totalFlops = 0.0;
-  double totalWindowSeconds = 0.0;
-  double peakWindowTflops = 0.0;
-  long launches = 0;
-  std::string runErr;
-
-  auto runPhase = [&](double deadline, Samples *samples) -> bool {
-    while (nowSeconds() < deadline) {
-      cudaEventRecord(evStart, stream);
-      for (int i = 0; i < launchesPerWindow; ++i) {
-        fmaLoadKernel<<<blocks, kThreadsPerBlock, 0, stream>>>(nullptr, iters);
-      }
-      cudaEventRecord(evStop, stream);
-      const cudaError_t launchErr = cudaGetLastError();
-      if (launchErr != cudaSuccess) {
-        runErr = std::string("load launch failed: ") + cudaGetErrorString(launchErr);
-        return false;
-      }
-
-      for (;;) {
-        const cudaError_t q = cudaStreamQuery(stream);
-        if (q == cudaSuccess) break;
-        if (q != cudaErrorNotReady) {
-          runErr = std::string("load kernel failed: ") + cudaGetErrorString(q);
-          return false;
-        }
-        if (samples != nullptr) takeSample(nvml, nvdev, samples, &memOK, &tempOK, &powerOK, &utilOK,
-                                           &reasonsOK);
-        sleepMillis(sampleIntervalMs);
-      }
-
-      float ms = 0.0f;
-      if (cudaEventElapsedTime(&ms, evStart, evStop) != cudaSuccess || ms <= 0.0f) continue;
-      if (samples != nullptr) {
-        const double windowFlops = flopsPerLaunch * launchesPerWindow;
-        const double seconds = ms / 1000.0;
-        totalFlops += windowFlops;
-        totalWindowSeconds += seconds;
-        launches += launchesPerWindow;
-        peakWindowTflops = std::max(peakWindowTflops, windowFlops / seconds / 1e12);
-      }
-    }
-    return true;
-  };
-
-  const double started = nowSeconds();
-  if (!runPhase(started + warmupSeconds, nullptr)) {
-    emitCommon();
-    nvml.close();
-    return errored(runErr);
-  }
-
-  Samples s;
-  const bool loadOK = runPhase(started + durationSeconds, &s);
-  const double elapsed = nowSeconds() - started;
-
-  // ── derive ────────────────────────────────────────────────────────────────
-  std::printf("elapsed_s=%.2f\n", elapsed);
-  std::printf("samples_taken=%ld\n", s.n);
-  std::printf("load_launches=%ld\n", launches);
-
-  if (!loadOK) {
-    emitCommon();
-    nvml.close();
-    return errored(runErr);
-  }
-  if (s.n == 0) {
-    emitCommon();
-    nvml.close();
-    return errored("no clock samples were taken; the probe measured nothing");
-  }
-
-  const double meanSm = s.smSum / s.n;
-  const double sustainedClockPct = 100.0 * meanSm / ratedBoostMHz;
-  std::printf("sm_clock_mhz=%.0f\n", meanSm);
-  std::printf("sustained_clock_pct=%.2f\n", sustainedClockPct);
-  // Reported as percentages, not MHz: only the three aliased *_mhz keys are
-  // mapped to the MHz unit by pkg/runner, and an unaliased "*_mhz" key would
-  // normalise to a name that declares no unit — a clock stored as a bare number.
-  std::printf("min_sm_clock_pct=%.2f\n", 100.0 * s.smMin / ratedBoostMHz);
-  std::printf("max_sm_clock_pct=%.2f\n", 100.0 * s.smMax / ratedBoostMHz);
-  if (s.memN > 0) std::printf("mem_clock_mhz=%.0f\n", s.memSum / s.memN);
-
-  const bool tempKnown = s.tempN > 0;
-  const double meanTemp = s.mean(s.tempSum, s.tempN);
-  if (tempKnown) {
-    std::printf("gpu_temp_c=%.1f\n", s.tempMax);
-    std::printf("mean_temp_under_load_c=%.1f\n", meanTemp);
-    if (s.tempAtMinSmKnown) std::printf("temp_at_min_clock_c=%.1f\n", s.tempAtMinSm);
-  }
-  if (s.powerN > 0) {
-    std::printf("power_draw_w=%.2f\n", s.powerMax);
-    std::printf("mean_power_w=%.2f\n", s.mean(s.powerSum, s.powerN));
-  }
-
-  const bool utilKnown = s.utilN > 0;
-  const double meanUtil = s.mean(s.utilSum, s.utilN);
-  if (utilKnown) {
-    // The headline symptom of the wedge: this reads healthy while the clock does
-    // not. Emitting both side by side is what makes the fault legible.
-    std::printf("gpu_utilization_pct=%.2f\n", meanUtil);
-    std::printf("mem_utilization_pct=%.2f\n", s.mean(s.memUtilSum, s.utilN));
-  }
-
-  // NOT "sustained_throughput_tflops". That canonical name belongs to gpu-burn's
-  // heavy GEMM burn, and this is a synthetic register-resident FMA chain with no
-  // memory traffic — the two differ by a large factor on the same healthy part.
-  // pkg/contract's own rule is that sharing a name across two differently-obtained
-  // figures is the failure the convention exists to prevent: a profile author
-  // whose threshold was calibrated on gpu-burn would silently condemn every node
-  // this runner touched, and the stored series would interleave two quantities.
-  double sustainedTflops = 0.0;
-  if (totalWindowSeconds > 0.0) {
-    sustainedTflops = totalFlops / totalWindowSeconds / 1e12;
-    std::printf("sustained_fma_throughput_tflops=%.3f\n", sustainedTflops);
-    std::printf("peak_fma_throughput_tflops=%.3f\n", peakWindowTflops);
-    if (peakWindowTflops > 0.0) {
-      // Sustained against best window. A part that starts fast and collapses
-      // scores low here even when its mean clock still clears the floor.
-      std::printf("throughput_consistency_pct=%.2f\n", 100.0 * sustainedTflops / peakWindowTflops);
-    }
-  }
-
-  // Throttle counters are emitted ONLY when the driver actually answered. A
-  // fabricated throttleEvents=0 would satisfy a `throttleEvents == 0` threshold
-  // on a node whose throttle state was never read — a missing measurement
-  // silently passing acceptance, which is exactly what the fails-closed rule
-  // forbids. Omitting the metric makes such a threshold fail instead.
-  const bool reasonsKnown = s.reasonsN > 0;
-  if (reasonsKnown) {
-    std::printf("throttle_events=%ld\n", s.throttleEvents);
-    std::printf("throttled_samples=%ld\n", s.throttledSamples);
-    std::printf("throttle_reasons_mask=%llu\n", s.reasonMask);
-    std::string labels;
-    for (int i = 0; i < kNumReasonBits; ++i) {
-      std::printf("%s=%ld\n", kReasonBits[i].key, s.reasonCount[i]);
-      if ((s.reasonMask & kReasonBits[i].bit) != 0) {
-        if (!labels.empty()) labels += ",";
-        labels += kReasonBits[i].label;
-      }
-    }
-    std::printf("throttle_reasons=%s\n", labels.empty() ? "none" : labels.c_str());
-  }
-
-  // ── classify ──────────────────────────────────────────────────────────────
-  const bool shortfall = sustainedClockPct < clockFloorPct;
-  const bool thermalLatched = reasonsKnown && (s.reasonMask & kThermalReasons) != 0;
-  const bool powerLatched = reasonsKnown && (s.reasonMask & kPowerReasons) != 0;
-  const bool appClocksLatched = reasonsKnown && (s.reasonMask & nvmlrt::kReasonApplicationsClocksSetting) != 0;
-  // Unknown temperature is NOT hot. Fails closed: an unread sensor must not buy
-  // the lenient thermal floor.
-  const bool hot = tempKnown && meanTemp >= thermalTempC;
-
-  const char *classification = "none";
-  if (shortfall) {
-    if (hot && thermalLatched) {
-      classification = "thermal";
-    } else if (powerLatched || limitBelowDefault) {
-      classification = "powerCap";
-    } else if (appClocksLatched) {
-      classification = "applicationClocks";
-    } else {
-      classification = "unknown";
-    }
-  }
-  std::printf("throttle_classification=%s\n", classification);
-
-  // The wedge signature: slow, cool, and not thermally throttled.
-  //
-  // Tri-state, not a bool. "false" has to mean "we looked and it is not this",
-  // which is a different claim from "we could not tell" — and without a
-  // temperature we genuinely cannot tell a PD wedge from a thermal throttle.
-  // Collapsing the two would let an unread sensor read as an all-clear.
-  const bool pdWedgeSuspected = shortfall && tempKnown && !hot && !thermalLatched;
-  const char *pdWedge = "false";
-  if (shortfall && !tempKnown) {
-    pdWedge = "unknown";
-  } else if (pdWedgeSuspected) {
-    pdWedge = "true";
-  }
-  std::printf("pd_wedge_suspected=%s\n", pdWedge);
-
-  double floorApplied = clockFloorPct;
-  const char *floorBasis = "general";
-  if (shortfall && hot && thermalLatched) {
-    floorApplied = std::min(clockFloorPct, thermalClockFloorPct);
-    floorBasis = "thermal";
-  }
-  std::printf("clock_floor_applied_pct=%.2f\n", floorApplied);
-  std::printf("clock_floor_basis=%s\n", floorBasis);
-
-  emitCommon();
   nvml.close();
 
-  // ── decide ────────────────────────────────────────────────────────────────
-  // Everything above is already on stdout, so every branch from here leaves a
-  // complete record behind it.
-
-  // A load that did not land makes the clock unattributable. Refusing to judge
-  // is the honest answer; calling it a hardware failure would condemn a node
-  // for the runner's own problem.
-  if (utilKnown && meanUtil < kMinCredibleUtilizationPct) {
-    return errored("device utilization averaged " + std::to_string(static_cast<int>(meanUtil)) +
-                   "% under load; the sampled clock is not attributable to this test");
+  // Merge every device's own warnings/unsupported-reads into the process
+  // globals, single-threaded (every worker has already joined).
+  for (auto &r : results) {
+    if (!r.configWarnings.empty()) warn(r.configWarnings);
+    for (size_t pos = 0; pos < r.unsupportedReads.size();) {
+      size_t comma = r.unsupportedReads.find(',', pos);
+      if (comma == std::string::npos) comma = r.unsupportedReads.size();
+      noteUnsupported(r.unsupportedReads.substr(pos, comma - pos).c_str());
+      pos = comma + 1;
+    }
   }
 
-  char reason[512];
-  if (sustainedClockPct >= floorApplied) {
-    return emitMarker("CLOCKPROBE_PASS", "", kExitPass);
+  // Device 0's identity, printed once — see device_fold.h's design note on
+  // why identity keys keep the first device's meaning.
+  if (!results.empty() && results.front().identityRead) {
+    const DeviceResult &d0 = results.front();
+    std::printf("gpu_name=%s\n", d0.name.c_str());
+    std::printf("compute_cap=%s\n", d0.computeCap.c_str());
+    if (!d0.busId.empty()) std::printf("pci_bus_id=%s\n", d0.busId.c_str());
+    if (d0.ratedKnown) std::printf("rated_boost_clock_mhz=%u\n", d0.ratedBoostMHz);
   }
-  if (std::strcmp(floorBasis, "thermal") == 0) {
-    std::snprintf(reason, sizeof(reason),
-                  "sustained SM clock %.1f%% of rated boost, below the %.1f%% thermal floor; "
-                  "attributed to heat (mean %.1fC, thermal throttle latched)",
-                  sustainedClockPct, floorApplied, meanTemp);
-    return fail(reason);
+
+  // ── fold and report ──────────────────────────────────────────────────────
+  std::vector<devices::DeviceReport> reports;
+  for (auto &r : results) {
+    if (r.values.empty()) continue; // never measured (setup failed before sampling)
+    reports.push_back(toDeviceReport(r));
   }
-  if (pdWedgeSuspected) {
-    std::snprintf(reason, sizeof(reason),
-                  "sustained SM clock %.1f%% of rated boost at only %.1fC with no thermal "
-                  "throttle — power-delivery wedge suspected (classification=%s)",
-                  sustainedClockPct, meanTemp, classification);
-    return fail(reason);
+  static const std::vector<devices::FoldRule> kDeviceFold = {
+      {"sustained_clock_pct", devices::Fold::Min},
+      {"min_sm_clock_pct", devices::Fold::Min},
+      {"gpu_temp_c", devices::Fold::Max},
+      {"throttled_samples", devices::Fold::Sum},
+      {"throttle_events", devices::Fold::Sum},
+  };
+  const devices::Folded folded = devices::fold(reports, kDeviceFold, "sustained_clock_pct");
+
+  if (auto it = folded.values.find("sustained_clock_pct"); it != folded.values.end()) {
+    std::printf("sustained_clock_pct=%.2f\n", it->second);
   }
-  std::snprintf(reason, sizeof(reason),
-                "sustained SM clock %.1f%% of rated boost, below the %.1f%% floor "
-                "(classification=%s)",
-                sustainedClockPct, floorApplied, classification);
-  return fail(reason);
+  if (auto it = folded.values.find("min_sm_clock_pct"); it != folded.values.end()) {
+    std::printf("min_sm_clock_pct=%.2f\n", it->second);
+  }
+  if (auto it = folded.values.find("gpu_temp_c"); it != folded.values.end()) {
+    std::printf("gpu_temp_c=%.2f\n", it->second);
+  }
+  if (auto it = folded.values.find("throttled_samples"); it != folded.values.end()) {
+    std::printf("throttled_samples=%.0f\n", it->second);
+  }
+  if (auto it = folded.values.find("throttle_events"); it != folded.values.end()) {
+    std::printf("throttle_events=%.0f\n", it->second);
+  }
+
+  // Evidence, device 0's — mirrors the soak family's "Once" fields, and every
+  // one of these was already unconditional single-device output.
+  if (!results.empty()) {
+    const DeviceResult &d0 = results.front();
+    std::printf("elapsed_s=%.2f\n", d0.elapsedS);
+    std::printf("samples_taken=%ld\n", d0.samplesTaken);
+    std::printf("load_launches=%ld\n", d0.loadLaunches);
+    std::printf("load_threads=%.0f\n", d0.loadThreads);
+    std::printf("load_iters_per_launch=%d\n", d0.loadItersPerLaunch);
+    std::printf("warmup_s=%ld\n", d0.warmupSeconds);
+    std::printf("sample_window_s=%ld\n", d0.sampleWindowSeconds);
+    if (d0.ratedKnown) {
+      std::printf("sm_clock_mhz=%.0f\n", d0.smClockMHz);
+      std::printf("max_sm_clock_pct=%.2f\n", d0.maxSmClockPct);
+    }
+    if (d0.memClockKnown) std::printf("mem_clock_mhz=%.0f\n", d0.memClockMHz);
+    if (d0.tempKnown) {
+      std::printf("mean_temp_under_load_c=%.1f\n", d0.meanTemp);
+      if (d0.tempAtMinSmKnown) std::printf("temp_at_min_clock_c=%.1f\n", d0.tempAtMinSm);
+    }
+    if (d0.haveEnforcedLimit) std::printf("enforced_power_limit_w=%.2f\n", d0.enforcedLimitW);
+    if (d0.haveDefaultLimit) std::printf("default_power_limit_w=%.2f\n", d0.defaultLimitW);
+    if (d0.haveEnforcedLimit && d0.haveDefaultLimit && d0.defaultLimitW > 0.0) {
+      std::printf("power_limit_ratio_pct=%.2f\n", 100.0 * d0.enforcedLimitW / d0.defaultLimitW);
+    }
+    if (d0.powerKnown) {
+      std::printf("power_draw_w=%.2f\n", d0.peakPower);
+      std::printf("mean_power_w=%.2f\n", d0.meanPower);
+    }
+    if (d0.utilKnown) {
+      std::printf("gpu_utilization_pct=%.2f\n", d0.meanUtil);
+      std::printf("mem_utilization_pct=%.2f\n", d0.meanMemUtil);
+    }
+    if (d0.tflopsKnown) {
+      std::printf("sustained_fma_throughput_tflops=%.3f\n", d0.sustainedTflops);
+      std::printf("peak_fma_throughput_tflops=%.3f\n", d0.peakTflops);
+      if (d0.peakTflops > 0.0) {
+        std::printf("throughput_consistency_pct=%.2f\n", 100.0 * d0.sustainedTflops / d0.peakTflops);
+      }
+    }
+    if (d0.reasonsKnown) {
+      std::printf("throttle_reasons_mask=%llu\n", d0.reasonMask);
+      std::string labels;
+      for (int i = 0; i < kNumReasonBits; ++i) {
+        std::printf("%s=%ld\n", kReasonBits[i].key, d0.reasonCount[i]);
+        if ((d0.reasonMask & kReasonBits[i].bit) != 0) {
+          if (!labels.empty()) labels += ",";
+          labels += kReasonBits[i].label;
+        }
+      }
+      std::printf("throttle_reasons=%s\n", labels.empty() ? "none" : labels.c_str());
+    }
+    std::printf("throttle_classification=%s\n", d0.classification);
+    std::printf("pd_wedge_suspected=%s\n", d0.pdWedge);
+    std::printf("clock_floor_applied_pct=%.2f\n", d0.floorApplied);
+    std::printf("clock_floor_basis=%s\n", d0.floorBasis);
+  }
+
+  const std::vector<devices::SpreadSpec> spreads = {
+      {"sustainedClockSpreadPct", "sustained_clock_pct", /*absoluteFigure=*/false},
+      {"fmaThroughputSpreadPct", "sustained_fma_throughput_tflops", /*absoluteFigure=*/true},
+  };
+  devices::printFold(stdout, reports, visible, windowS, conc.mode, folded, spreads, /*underMig=*/false);
+  if (reports.size() > 1) {
+    std::fputs(devices::renderPerDeviceArtifact(reports).c_str(), stdout);
+  }
+
+  emitCommon();
+
+  // ── combine per-device outcomes into the machinery/verdict exit code ─────
+  std::vector<int> codes;
+  for (auto &r : results) codes.push_back(r.exitCode);
+  const int combined = devices::combineExitCodes(codes);
+
+  if (combined == kExitPass) return emitMarker("CLOCKPROBE_PASS", "", kExitPass);
+
+  // The message names the device(s) that decided it — a fold over eight
+  // devices is not a verdict about a board nobody finished measuring, and a
+  // single culprit should read as one, not as "device 3: ...".
+  std::string reasons;
+  for (auto &r : results) {
+    if (r.exitCode == combined && !r.reason.empty()) {
+      if (!reasons.empty()) reasons += "; ";
+      reasons += r.reason;
+    }
+  }
+  if (reasons.empty()) reasons = "no device could be measured";
+  if (combined == kExitFail) return fail(reasons);
+  if (combined == kExitSkip) return skip(reasons);
+  return errored(reasons);
 }

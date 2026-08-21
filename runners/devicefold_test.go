@@ -56,6 +56,8 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		"thermal-soak":      true,
 		"gpu-burn-rocm":     true,
 		"thermal-soak-rocm": true,
+		"clockprobe":        true,
+		"clockprobe-rocm":   true,
 	}
 
 	exempt := map[string]string{
@@ -84,8 +86,6 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		// full conversion.
 		"memory-bw":          "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
 		"memory-bw-rocm":     "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
-		"clockprobe":         "#400 — delivery step 3 (measurement kinds, sequential default)",
-		"clockprobe-rocm":    "#400 — delivery step 3 (measurement kinds, sequential default)",
 		"compute-smoke":      "#400 — delivery step 3 (a burst; sequential)",
 		"compute-smoke-rocm": "#400 — delivery step 3 (a burst; sequential)",
 		"gemm-sweep":         "#400 — delivery step 3 (measurement kinds, sequential default)",

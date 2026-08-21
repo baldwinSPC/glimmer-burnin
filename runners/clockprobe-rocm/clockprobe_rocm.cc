@@ -46,12 +46,25 @@
 // is an unjudged part, not a slow one — matching the rule clockprobe's kind
 // documentation states.
 //
+// MULTI-DEVICE. Iterates every device the pod was allocated
+// (docs/dev/multi-device.md), sequential by default. Concurrent mode
+// (BURNIN_DEVICE_CONCURRENCY=all) is one std::thread per device, exactly as
+// clockprobe.cu's NVIDIA engine: each device's pipeline is already
+// self-contained and blocking, hipSetDevice scopes to the calling thread, and
+// sysfs reads of DIFFERENT devices' files never touch shared state. Per-device
+// telemetry is matched by PCI address (FindAmdgpuCardForDevice in
+// sysfs_clocks.h), not by sysfs directory order, for the same reason CUDA
+// resolves its NVML handle by PCI bus id rather than by enumeration order.
+//
 // NOT VERIFIED ON HARDWARE. No Strix Halo unit was available when this was
 // written; the load kernel, the sampling loop and the DPM behaviour under load
 // are exercised in CI (compile) and in the header's unit tests (logic), not on
-// silicon. The default floors below are chosen conservatively and are stated
-// per metric in the README; do not tighten any of them until the hardware
-// verification pass this runner is queued for has produced measured numbers.
+// silicon — and the multi-device PCI-address correlation has never had a
+// second AMD device to prove itself against, same caveat as the soak family's
+// ROCm engine. The default floors below are chosen conservatively and are
+// stated per metric in the README; do not tighten any of them until the
+// hardware verification pass this runner is queued for has produced measured
+// numbers.
 //
 // OUTPUT CONTRACT
 //   metrics as key=value lines, ALWAYS printed before the decision, then one of
@@ -67,12 +80,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "device_fold.h"
 #include "sysfs_clocks.h"
 
 namespace {
+
+namespace devices = burnin::devices;
 
 constexpr int kExitPass = 0;
 constexpr int kExitFail = 1;
@@ -84,7 +102,6 @@ constexpr long kMinDurationSeconds = 10;
 constexpr long kDefaultDurationSeconds = 60;
 
 std::string configWarnings;
-
 void warn(const std::string &w) {
 	if (!configWarnings.empty()) configWarnings += "; ";
 	configWarnings += w;
@@ -163,126 +180,141 @@ struct Samples {
 	double busySum = 0;
 };
 
-} // namespace
+// DeviceResult is one device's whole outcome — identity, raw values for
+// device_fold.h, evidence, and this device's own exit code/reason. Mirrors
+// clockprobe.cu's DeviceResult exactly.
+struct DeviceResult {
+	int index = 0;
+	int exitCode = kExitPass;
+	std::string reason;
 
-int main() {
-	std::string cfgErr;
-	long durationSeconds, sampleIntervalMs;
-	double clockFloorPct, thermalClockFloorPct, thermalTempC;
-	if (!envLong("BURNIN_DURATION_SECONDS", kDefaultDurationSeconds, &durationSeconds, &cfgErr) ||
-	    !envLong("CLOCKPROBE_SAMPLE_INTERVAL_MS", 200, &sampleIntervalMs, &cfgErr) ||
-	    !envDouble("CLOCKPROBE_MIN_SUSTAINED_CLOCK_PCT", 60.0, &clockFloorPct, &cfgErr) ||
-	    !envDouble("CLOCKPROBE_MIN_THERMAL_CLOCK_PCT", 40.0, &thermalClockFloorPct, &cfgErr) ||
-	    // 90 C, not clockprobe's 80: the gfx1151 parts this variant exists for
-	    // run 87-91 C edge under ordinary sustained inference by design, and an
-	    // 80 C threshold would classify a healthy part as thermally throttled.
-	    !envDouble("CLOCKPROBE_THERMAL_TEMP_C", 90.0, &thermalTempC, &cfgErr)) {
-		return errored(cfgErr);
-	}
-	if (durationSeconds < kMinDurationSeconds) {
-		warn("BURNIN_DURATION_SECONDS raised to the " + std::to_string(kMinDurationSeconds) +
-		     "s floor");
-		durationSeconds = kMinDurationSeconds;
-	}
-	if (sampleIntervalMs < 50) {
-		warn("CLOCKPROBE_SAMPLE_INTERVAL_MS raised to 50");
-		sampleIntervalMs = 50;
-	}
-	if (thermalClockFloorPct > clockFloorPct) {
-		warn("CLOCKPROBE_MIN_THERMAL_CLOCK_PCT exceeds CLOCKPROBE_MIN_SUSTAINED_CLOCK_PCT; clamped");
-		thermalClockFloorPct = clockFloorPct;
-	}
+	bool identityRead = false;
+	std::string pciAddress, name, gfxTarget;
 
-	// BURNIN_SYSFS_ROOT exists for tests and for a pod that mounts the host's
-	// /sys somewhere else; the default is the ordinary in-pod view.
-	const char *rootEnv = std::getenv("BURNIN_SYSFS_ROOT");
-	const std::filesystem::path sysfsRoot = (rootEnv && *rootEnv) ? rootEnv : "/sys";
+	std::map<std::string, double> values;
 
-	// ── discover ──────────────────────────────────────────────────────────────
-	const auto card = sysfsclocks::FindAmdgpuCard(sysfsRoot);
+	double ratedMHz = 0;
+	bool ratedKnown = false;
+	double smClockMHz = 0;
+	double maxSmClockPct = 0;
+	long samplesTaken = 0;
+	long loadLaunches = 0;
+	int loadThreads = 0;
+	int loadItersPerLaunch = 0;
+	long warmupSeconds = 0;
+	double elapsedS = 0;
+	double meanTemp = 0;
+	bool tempKnown = false;
+	double meanPower = 0;
+	double peakPower = 0;
+	bool powerKnown = false;
+	double meanBusy = 0;
+	bool busyKnown = false;
+	double sustainedTflops = 0;
+	const char *throttleClassification = "none";
+	const char *idleClockLock = "false";
+	double floorAppliedPct = 0;
+	const char *floorBasis = "general";
+
+	std::string configWarnings; // merged into the process-global after this device finishes
+};
+
+// runOneDevice is TODAY's single-device pipeline — card discovery through the
+// load, the sampling loop and the judgement — scoped to one HIP ordinal and
+// one window. Unchanged in substance; parameterised by device index and
+// window, returning a result instead of exiting the process.
+void runOneDevice(int index, long windowSecondsTotal, long sampleIntervalMs, double clockFloorPct,
+                  double thermalClockFloorPct, double thermalTempC,
+                  const std::filesystem::path &sysfsRoot, DeviceResult *out) {
+	out->index = index;
+
+	if (hipSetDevice(index) != hipSuccess) {
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) + ": hipSetDevice failed";
+		return;
+	}
+	hipDeviceProp_t props;
+	std::memset(&props, 0, sizeof(props));
+	hipError_t hs = hipGetDeviceProperties(&props, index);
+	if (hs != hipSuccess) {
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) + ": hipGetDeviceProperties failed";
+		return;
+	}
+	out->name = props.name;
+	out->gfxTarget = props.gcnArchName;
+
+	// PCI-address correlation, not sysfs enumeration order — see the file
+	// header. props.pciDomainID/pciBusID/pciDeviceID are HIP's own report of
+	// where THIS ordinal lives.
+	const auto card =
+	    sysfsclocks::FindAmdgpuCardForDevice(sysfsRoot, props.pciDomainID, props.pciBusID, props.pciDeviceID);
 	if (!card) {
-		// No AMD accelerator: this image was scheduled somewhere it does not
-		// apply. A skip, and the reason says where it looked.
-		return skip("no amdgpu device with a pp_dpm_sclk ladder under " + sysfsRoot.string() +
-		            "/class/drm");
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) +
+		             ": no sysfs card matched this device's PCI address; nothing to sample or judge";
+		return;
 	}
+	out->pciAddress = card->pciAddress;
+	out->identityRead = !out->pciAddress.empty();
 
 	const auto ladderText = sysfsclocks::ReadFileTrim(card->device / "pp_dpm_sclk");
 	sysfsclocks::DpmTable ladder;
 	std::string parseErr;
 	if (!ladderText || !sysfsclocks::ParseDpmSclk(*ladderText, &ladder, &parseErr)) {
-		// The kind's rule: no readable rated clock means an UNJUDGED part.
-		return skip("pp_dpm_sclk unreadable, so this part has no rated clock to judge against" +
-		            (parseErr.empty() ? std::string() : (": " + parseErr)));
+		out->exitCode = kExitSkip;
+		out->reason = "device " + std::to_string(index) +
+		             ": pp_dpm_sclk unreadable, so this part has no rated clock to judge against" +
+		             (parseErr.empty() ? std::string() : (": " + parseErr));
+		return;
 	}
 	const double ratedMHz = ladder.ratedMHz();
 	if (ratedMHz <= 0) {
-		return skip("pp_dpm_sclk ladder has no positive level; no rated clock to judge against");
+		out->exitCode = kExitSkip;
+		out->reason = "device " + std::to_string(index) +
+		             ": pp_dpm_sclk ladder has no positive level; no rated clock to judge against";
+		return;
 	}
-
-	std::printf("duration_requested_s=%ld\n", durationSeconds);
-	std::printf("sample_interval_ms=%ld\n", sampleIntervalMs);
-	std::printf("clock_floor_pct=%.2f\n", clockFloorPct);
-	std::printf("thermal_clock_floor_pct=%.2f\n", thermalClockFloorPct);
-	std::printf("thermal_temp_threshold_c=%.2f\n", thermalTempC);
-	std::printf("rated_boost_clock_mhz=%.0f\n", ratedMHz);
-	std::printf("dpm_level_count=%zu\n", ladder.levelsMHz.size());
-
-	// ── HIP: hardware present, so a runtime failure is an ERROR, not a skip ───
-	int devCount = 0;
-	hipError_t hs = hipGetDeviceCount(&devCount);
-	if (hs != hipSuccess || devCount == 0) {
-		return errored(std::string("an amdgpu device is visible in sysfs but HIP reports no usable "
-		                           "device (") +
-		               (hs == hipSuccess ? "zero devices" : hipGetErrorString(hs)) +
-		               "); driver/runtime mismatch or missing /dev/kfd — hardware unjudged");
-	}
-	if ((hs = hipSetDevice(0)) != hipSuccess) {
-		return errored(std::string("hipSetDevice: ") + hipGetErrorString(hs));
-	}
-	hipDeviceProp_t props;
-	std::memset(&props, 0, sizeof(props));
-	if ((hs = hipGetDeviceProperties(&props, 0)) == hipSuccess) {
-		std::printf("gpu_name=%s\n", props.name);
-		std::printf("gfx_target=%s\n", props.gcnArchName);
-	}
+	out->ratedKnown = true;
+	out->ratedMHz = ratedMHz;
+	if (index == 0) std::printf("dpm_level_count=%zu\n", ladder.levelsMHz.size());
 
 	float *sink = nullptr;
 	if ((hs = hipMalloc(&sink, sizeof(float))) != hipSuccess) {
-		return errored(std::string("hipMalloc: ") + hipGetErrorString(hs));
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) + ": hipMalloc: " + hipGetErrorString(hs);
+		return;
 	}
+	auto cleanup = [&]() { (void)hipFree(sink); };
 
-	// Saturate the part: enough blocks to cover every CU several times over.
 	const int threads = 256;
 	const int blocks = (props.multiProcessorCount > 0 ? props.multiProcessorCount : 40) * 8;
 
-	// ── calibrate one launch to ~100 ms so sampling interleaves with load ─────
 	int iters = 20000;
 	{
 		const auto t0 = std::chrono::steady_clock::now();
 		hipLaunchKernelGGL(fmaLoad, dim3(blocks), dim3(threads), 0, nullptr, sink, iters);
 		if ((hs = hipDeviceSynchronize()) != hipSuccess) {
-			return errored(std::string("calibration launch failed: ") + hipGetErrorString(hs));
+			out->exitCode = kExitError;
+			out->reason =
+			    "device " + std::to_string(index) + ": calibration launch failed: " + hipGetErrorString(hs);
+			cleanup();
+			return;
 		}
 		const double ms = std::chrono::duration<double, std::milli>(
 		                      std::chrono::steady_clock::now() - t0)
 		                      .count();
 		if (ms > 0.05) {
 			const double scale = 100.0 / ms;
-			// Clamp hard: on a locked-slow part a launch is much longer than
-			// calibrated; the deadline, not the iteration count, must bound it.
 			iters = static_cast<int>(std::fmin(std::fmax(iters * scale, 1000.0), 2e7));
 		}
 	}
-	std::printf("load_threads=%d\n", blocks * threads);
-	std::printf("load_iters_per_launch=%d\n", iters);
 
-	// The warmup rule the kind documents: an unwarmed part is legitimately at
-	// idle clocks, so the first stretch of samples is discarded.
-	const long warmupSeconds = std::max(3L, std::min(10L, durationSeconds / 6));
-	std::printf("warmup_s=%ld\n", warmupSeconds);
+	const long warmupSeconds = std::max(3L, std::min(10L, windowSecondsTotal / 6));
+	out->loadThreads = blocks * threads;
+	out->loadItersPerLaunch = iters;
+	out->warmupSeconds = warmupSeconds;
 
-	// ── load + sample ─────────────────────────────────────────────────────────
 	Samples s;
 	long launches = 0;
 	const auto start = std::chrono::steady_clock::now();
@@ -292,17 +324,18 @@ int main() {
 
 	hipLaunchKernelGGL(fmaLoad, dim3(blocks), dim3(threads), 0, nullptr, sink, iters);
 	launches++;
-	while (secondsSince() < static_cast<double>(durationSeconds)) {
-		// Keep the device busy: queue the next launch as soon as the previous
-		// one is no longer pending, then sample sysfs while it runs.
+	while (secondsSince() < static_cast<double>(windowSecondsTotal)) {
 		if (hipStreamQuery(nullptr) == hipSuccess) {
 			hipLaunchKernelGGL(fmaLoad, dim3(blocks), dim3(threads), 0, nullptr, sink, iters);
 			launches++;
 		} else {
 			hipError_t qs = hipGetLastError();
 			if (qs != hipSuccess && qs != hipErrorNotReady) {
-				(void)hipFree(sink);
-				return errored(std::string("load launch failed mid-run: ") + hipGetErrorString(qs));
+				out->exitCode = kExitError;
+				out->reason = "device " + std::to_string(index) +
+				             ": load launch failed mid-run: " + hipGetErrorString(qs);
+				cleanup();
+				return;
 			}
 		}
 
@@ -336,65 +369,237 @@ int main() {
 		}
 	}
 	hs = hipDeviceSynchronize();
-	const double elapsed = secondsSince();
-	(void)hipFree(sink);
+	out->elapsedS = secondsSince();
+	cleanup();
 	if (hs != hipSuccess) {
-		return errored(std::string("final synchronize failed: ") + hipGetErrorString(hs));
+		out->exitCode = kExitError;
+		out->reason =
+		    "device " + std::to_string(index) + ": final synchronize failed: " + hipGetErrorString(hs);
+		return;
 	}
-
-	std::printf("elapsed_s=%.2f\n", elapsed);
-	std::printf("samples_taken=%ld\n", s.n);
-	std::printf("load_launches=%ld\n", launches);
+	out->samplesTaken = s.n;
+	out->loadLaunches = launches;
 
 	if (s.n == 0) {
-		// The ladder was readable at start and unreadable, or starless, for the
-		// whole window: nothing was measured, so nothing is judged.
-		return errored("no post-warmup clock sample could be read from pp_dpm_sclk; hardware unjudged");
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) +
+		             ": no post-warmup clock sample could be read from pp_dpm_sclk; hardware unjudged";
+		return;
 	}
 
 	const double meanClk = s.clkSum / static_cast<double>(s.n);
 	const double sustainedPct = 100.0 * meanClk / ratedMHz;
-	std::printf("sm_clock_mhz=%.0f\n", meanClk);
-	std::printf("sustained_clock_pct=%.2f\n", sustainedPct);
-	std::printf("min_sm_clock_pct=%.2f\n", 100.0 * s.clkMin / ratedMHz);
-	std::printf("max_sm_clock_pct=%.2f\n", 100.0 * s.clkMax / ratedMHz);
+	out->smClockMHz = meanClk;
+	out->values["sustained_clock_pct"] = sustainedPct;
+	out->values["min_sm_clock_pct"] = 100.0 * s.clkMin / ratedMHz;
+	out->maxSmClockPct = 100.0 * s.clkMax / ratedMHz;
 
-	const bool tempKnown = s.tempN > 0;
-	if (tempKnown) {
-		std::printf("gpu_temp_c=%.1f\n", s.tempMax);
-		std::printf("mean_temp_under_load_c=%.1f\n", s.tempSum / static_cast<double>(s.tempN));
+	out->tempKnown = s.tempN > 0;
+	if (out->tempKnown) {
+		out->meanTemp = s.tempSum / static_cast<double>(s.tempN);
+		out->values["gpu_temp_c"] = s.tempMax;
 	}
-	if (s.powerN > 0) {
-		std::printf("power_draw_w=%.2f\n", s.powerMax);
-		std::printf("mean_power_w=%.2f\n", s.powerSum / static_cast<double>(s.powerN));
+	out->powerKnown = s.powerN > 0;
+	if (out->powerKnown) {
+		out->meanPower = s.powerSum / static_cast<double>(s.powerN);
+		out->peakPower = s.powerMax;
 	}
-	const bool busyKnown = s.busyN > 0;
-	const double meanBusy = busyKnown ? s.busySum / static_cast<double>(s.busyN) : 0.0;
-	if (busyKnown) std::printf("gpu_utilization_pct=%.2f\n", meanBusy);
+	out->busyKnown = s.busyN > 0;
+	if (out->busyKnown) out->meanBusy = s.busySum / static_cast<double>(s.busyN);
 
-	// FLOP accounting is exact per launch (2 FMA = 4 FLOP per iteration per
-	// thread), approximate per window only in that launches straddle the
-	// warmup boundary; reported over the whole load, matching elapsed_s.
-	const double tflops = (static_cast<double>(launches) * blocks * threads *
+	out->sustainedTflops = (static_cast<double>(launches) * blocks * threads *
 	                       static_cast<double>(iters) * 4.0) /
-	                      elapsed / 1e12;
-	std::printf("sustained_fma_throughput_tflops=%.3f\n", tflops);
+	                      out->elapsedS / 1e12;
 
-	// ── judge ─────────────────────────────────────────────────────────────────
-	const auto j = sysfsclocks::Judge(sustainedPct, tempKnown, s.tempMax, busyKnown, meanBusy,
-	                                  clockFloorPct, thermalClockFloorPct, thermalTempC);
-	std::printf("throttle_classification=%s\n", j.throttleClassification);
-	std::printf("idle_clock_lock_suspected=%s\n", j.idleClockLock);
-	std::printf("clock_floor_applied_pct=%.2f\n", j.floorAppliedPct);
-	std::printf("clock_floor_basis=%s\n", j.floorBasis);
+	const auto j = sysfsclocks::Judge(sustainedPct, out->tempKnown, s.tempMax, out->busyKnown,
+	                                  out->meanBusy, clockFloorPct, thermalClockFloorPct, thermalTempC);
+	out->throttleClassification = j.throttleClassification;
+	out->idleClockLock = j.idleClockLock;
+	out->floorAppliedPct = j.floorAppliedPct;
+	out->floorBasis = j.floorBasis;
 
 	if (j.pass) {
-		return emitMarker("CLOCKPROBE_PASS", "", kExitPass);
+		out->exitCode = kExitPass;
+		return;
 	}
-	char reason[256];
+	char reason[300];
 	std::snprintf(reason, sizeof(reason),
-	              "sustained clock %.1f%% of the DPM ladder top (%.0f MHz) is under the %s floor of "
-	              "%.1f%% (idle_clock_lock_suspected=%s)",
-	              sustainedPct, ratedMHz, j.floorBasis, j.floorAppliedPct, j.idleClockLock);
-	return fail(reason);
+	              "device %d: sustained clock %.1f%% of the DPM ladder top (%.0f MHz) is under the "
+	              "%s floor of %.1f%% (idle_clock_lock_suspected=%s)",
+	              index, sustainedPct, ratedMHz, j.floorBasis, j.floorAppliedPct, j.idleClockLock);
+	out->exitCode = kExitFail;
+	out->reason = reason;
+}
+
+devices::DeviceReport toDeviceReport(const DeviceResult &r) {
+	devices::DeviceReport rep;
+	rep.index = r.index;
+	rep.busId = r.pciAddress;
+	rep.name = r.name;
+	rep.computeCap = r.gfxTarget;
+	rep.identityRead = r.identityRead;
+	rep.values = r.values;
+	return rep;
+}
+
+} // namespace
+
+int main() {
+	std::string cfgErr;
+	long durationSeconds, sampleIntervalMs;
+	double clockFloorPct, thermalClockFloorPct, thermalTempC;
+	if (!envLong("BURNIN_DURATION_SECONDS", kDefaultDurationSeconds, &durationSeconds, &cfgErr) ||
+	    !envLong("CLOCKPROBE_SAMPLE_INTERVAL_MS", 200, &sampleIntervalMs, &cfgErr) ||
+	    !envDouble("CLOCKPROBE_MIN_SUSTAINED_CLOCK_PCT", 60.0, &clockFloorPct, &cfgErr) ||
+	    !envDouble("CLOCKPROBE_MIN_THERMAL_CLOCK_PCT", 40.0, &thermalClockFloorPct, &cfgErr) ||
+	    // 90 C, not clockprobe's 80: the gfx1151 parts this variant exists for
+	    // run 87-91 C edge under ordinary sustained inference by design, and an
+	    // 80 C threshold would classify a healthy part as thermally throttled.
+	    !envDouble("CLOCKPROBE_THERMAL_TEMP_C", 90.0, &thermalTempC, &cfgErr)) {
+		return errored(cfgErr);
+	}
+	if (durationSeconds < kMinDurationSeconds) {
+		warn("BURNIN_DURATION_SECONDS raised to the " + std::to_string(kMinDurationSeconds) +
+		     "s floor");
+		durationSeconds = kMinDurationSeconds;
+	}
+	if (sampleIntervalMs < 50) {
+		warn("CLOCKPROBE_SAMPLE_INTERVAL_MS raised to 50");
+		sampleIntervalMs = 50;
+	}
+	if (thermalClockFloorPct > clockFloorPct) {
+		warn("CLOCKPROBE_MIN_THERMAL_CLOCK_PCT exceeds CLOCKPROBE_MIN_SUSTAINED_CLOCK_PCT; clamped");
+		thermalClockFloorPct = clockFloorPct;
+	}
+
+	const char *rootEnv = std::getenv("BURNIN_SYSFS_ROOT");
+	const std::filesystem::path sysfsRoot = (rootEnv && *rootEnv) ? rootEnv : "/sys";
+
+	std::printf("duration_requested_s=%ld\n", durationSeconds);
+	std::printf("sample_interval_ms=%ld\n", sampleIntervalMs);
+	std::printf("clock_floor_pct=%.2f\n", clockFloorPct);
+	std::printf("thermal_clock_floor_pct=%.2f\n", thermalClockFloorPct);
+	std::printf("thermal_temp_threshold_c=%.2f\n", thermalTempC);
+
+	// ── how many devices, and how ─────────────────────────────────────────
+	int visible = 0;
+	hipError_t hs = hipGetDeviceCount(&visible);
+	if (hs != hipSuccess) visible = 0;
+
+	const devices::Budget budget =
+	    devices::parseBudget(std::getenv("BURNIN_RESOURCE_LIMITS"), devices::amdResources());
+	const devices::Plan plan = devices::planIteration(visible, budget);
+	if (plan.outcome == devices::Plan::Skip) return skip(plan.message);
+	if (plan.outcome == devices::Plan::Error) return errored(plan.message);
+	const int planCount = plan.count;
+
+	const char *concEnv = std::getenv("BURNIN_DEVICE_CONCURRENCY");
+	const devices::ConcurrencyChoice conc =
+	    devices::resolveConcurrency(concEnv, devices::Concurrency::Sequential);
+	if (!conc.recognised) {
+		warn(std::string("BURNIN_DEVICE_CONCURRENCY=\"") + concEnv +
+		     "\" is neither \"all\" nor \"sequential\"; using this kind's default (sequential)");
+	}
+	const long windowS = devices::deviceWindowSeconds(durationSeconds, planCount, conc.mode);
+	std::printf("device_window_s=%ld\n", windowS);
+	std::printf("device_concurrency=%s\n", devices::concurrencyName(conc.mode));
+
+	std::vector<DeviceResult> results(planCount);
+	if (conc.mode == devices::Concurrency::All) {
+		std::vector<std::thread> threads;
+		threads.reserve(planCount);
+		for (int i = 0; i < planCount; ++i) {
+			threads.emplace_back(runOneDevice, i, windowS, sampleIntervalMs, clockFloorPct,
+			                     thermalClockFloorPct, thermalTempC, std::cref(sysfsRoot), &results[i]);
+		}
+		for (auto &t : threads) t.join();
+	} else {
+		for (int i = 0; i < planCount; ++i) {
+			runOneDevice(i, windowS, sampleIntervalMs, clockFloorPct, thermalClockFloorPct, thermalTempC,
+			            sysfsRoot, &results[i]);
+		}
+	}
+
+	for (auto &r : results) {
+		if (!r.configWarnings.empty()) warn(r.configWarnings);
+	}
+
+	if (!results.empty() && results.front().identityRead) {
+		const DeviceResult &d0 = results.front();
+		std::printf("gpu_name=%s\n", d0.name.c_str());
+		std::printf("gfx_target=%s\n", d0.gfxTarget.c_str());
+		if (d0.ratedKnown) std::printf("rated_boost_clock_mhz=%.0f\n", d0.ratedMHz);
+	}
+
+	std::vector<devices::DeviceReport> reports;
+	for (auto &r : results) {
+		if (r.values.empty()) continue;
+		reports.push_back(toDeviceReport(r));
+	}
+	static const std::vector<devices::FoldRule> kDeviceFold = {
+	    {"sustained_clock_pct", devices::Fold::Min},
+	    {"min_sm_clock_pct", devices::Fold::Min},
+	    {"gpu_temp_c", devices::Fold::Max},
+	};
+	const devices::Folded folded = devices::fold(reports, kDeviceFold, "sustained_clock_pct");
+
+	if (auto it = folded.values.find("sustained_clock_pct"); it != folded.values.end()) {
+		std::printf("sustained_clock_pct=%.2f\n", it->second);
+	}
+	if (auto it = folded.values.find("min_sm_clock_pct"); it != folded.values.end()) {
+		std::printf("min_sm_clock_pct=%.2f\n", it->second);
+	}
+	if (auto it = folded.values.find("gpu_temp_c"); it != folded.values.end()) {
+		std::printf("gpu_temp_c=%.2f\n", it->second);
+	}
+
+	if (!results.empty()) {
+		const DeviceResult &d0 = results.front();
+		std::printf("elapsed_s=%.2f\n", d0.elapsedS);
+		std::printf("samples_taken=%ld\n", d0.samplesTaken);
+		std::printf("load_launches=%ld\n", d0.loadLaunches);
+		std::printf("load_threads=%d\n", d0.loadThreads);
+		std::printf("load_iters_per_launch=%d\n", d0.loadItersPerLaunch);
+		std::printf("warmup_s=%ld\n", d0.warmupSeconds);
+		if (d0.ratedKnown) {
+			std::printf("sm_clock_mhz=%.0f\n", d0.smClockMHz);
+			std::printf("max_sm_clock_pct=%.2f\n", d0.maxSmClockPct);
+		}
+		if (d0.tempKnown) std::printf("mean_temp_under_load_c=%.1f\n", d0.meanTemp);
+		if (d0.powerKnown) {
+			std::printf("power_draw_w=%.2f\n", d0.peakPower);
+			std::printf("mean_power_w=%.2f\n", d0.meanPower);
+		}
+		if (d0.busyKnown) std::printf("gpu_utilization_pct=%.2f\n", d0.meanBusy);
+		if (d0.ratedKnown) std::printf("sustained_fma_throughput_tflops=%.3f\n", d0.sustainedTflops);
+		std::printf("throttle_classification=%s\n", d0.throttleClassification);
+		std::printf("idle_clock_lock_suspected=%s\n", d0.idleClockLock);
+		std::printf("clock_floor_applied_pct=%.2f\n", d0.floorAppliedPct);
+		std::printf("clock_floor_basis=%s\n", d0.floorBasis);
+	}
+
+	const std::vector<devices::SpreadSpec> spreads = {
+	    {"sustainedClockSpreadPct", "sustained_clock_pct", /*absoluteFigure=*/false},
+	};
+	devices::printFold(stdout, reports, visible, windowS, conc.mode, folded, spreads, /*underMig=*/false);
+	if (reports.size() > 1) {
+		std::fputs(devices::renderPerDeviceArtifact(reports).c_str(), stdout);
+	}
+
+	std::vector<int> codes;
+	for (auto &r : results) codes.push_back(r.exitCode);
+	const int combined = devices::combineExitCodes(codes);
+
+	if (combined == kExitPass) return emitMarker("CLOCKPROBE_PASS", "", kExitPass);
+	std::string reasons;
+	for (auto &r : results) {
+		if (r.exitCode == combined && !r.reason.empty()) {
+			if (!reasons.empty()) reasons += "; ";
+			reasons += r.reason;
+		}
+	}
+	if (reasons.empty()) reasons = "no device could be measured";
+	if (combined == kExitFail) return fail(reasons);
+	if (combined == kExitSkip) return skip(reasons);
+	return errored(reasons);
 }
