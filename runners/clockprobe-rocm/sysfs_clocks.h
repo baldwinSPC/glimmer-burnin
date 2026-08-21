@@ -128,11 +128,15 @@ inline bool ParseDpmSclk(const std::string &text, DpmTable *out, std::string *er
 	return true;
 }
 
-// Card is one discovered amdgpu device: its sysfs device directory and its
-// hwmon directory (empty when the driver exposed no sensors).
+// Card is one discovered amdgpu device: its sysfs device directory, its hwmon
+// directory (empty when the driver exposed no sensors), and its PCI address —
+// the target of the `device` symlink, e.g. "0000:c1:00.0" — which is what lets
+// a specific card be matched to a specific HIP device ordinal. See
+// FindAmdgpuCardForDevice.
 struct Card {
 	std::filesystem::path device; // <root>/class/drm/cardN/device
 	std::filesystem::path hwmon;  // <device>/hwmon/hwmonM, or empty
+	std::string pciAddress;
 };
 
 inline std::optional<std::string> ReadFileTrim(const std::filesystem::path &p) {
@@ -145,22 +149,27 @@ inline std::optional<std::string> ReadFileTrim(const std::filesystem::path &p) {
 	return s;
 }
 
-// FindAmdgpuCard scans <root>/class/drm for the first card whose PCI vendor is
-// AMD (0x1002) and which exposes pp_dpm_sclk. Cards are visited in name order
-// so the answer is deterministic on a machine with more than one.
+// AllAmdgpuCards scans <root>/class/drm for every card whose PCI vendor is
+// AMD (0x1002) and which exposes pp_dpm_sclk, in name order for determinism.
 //
 // The pp_dpm_sclk requirement is part of the selection, not a later failure:
 // a display-only device or a partially initialised driver directory is not a
-// part this probe can judge, and skipping past it to one it can judge is the
-// correct reading of "the first AMD accelerator".
-inline std::optional<Card> FindAmdgpuCard(const std::filesystem::path &root) {
+// part this probe can judge.
+//
+// FindAmdgpuCard (single-device callers) takes the first; multi-device
+// callers use FindAmdgpuCardForDevice to match a SPECIFIC card to a specific
+// HIP device ordinal by PCI address, never by this list's order — HIP's
+// device enumeration and sysfs's directory order have no documented
+// relationship.
+inline std::vector<Card> AllAmdgpuCards(const std::filesystem::path &root) {
 	const auto drm = root / "class" / "drm";
 	std::error_code ec;
 	std::vector<std::filesystem::path> entries;
 	for (const auto &e : std::filesystem::directory_iterator(drm, ec)) {
 		entries.push_back(e.path());
 	}
-	if (ec) return std::nullopt;
+	std::vector<Card> out;
+	if (ec) return out;
 	std::sort(entries.begin(), entries.end());
 	for (const auto &p : entries) {
 		const std::string name = p.filename().string();
@@ -172,6 +181,9 @@ inline std::optional<Card> FindAmdgpuCard(const std::filesystem::path &root) {
 		if (!std::filesystem::exists(device / "pp_dpm_sclk", ec)) continue;
 		Card c;
 		c.device = device;
+		std::error_code linkEc;
+		const auto resolved = std::filesystem::canonical(device, linkEc);
+		if (!linkEc) c.pciAddress = resolved.filename().string();
 		std::vector<std::filesystem::path> hwmons;
 		for (const auto &h : std::filesystem::directory_iterator(device / "hwmon", ec)) {
 			hwmons.push_back(h.path());
@@ -180,7 +192,30 @@ inline std::optional<Card> FindAmdgpuCard(const std::filesystem::path &root) {
 			std::sort(hwmons.begin(), hwmons.end());
 			c.hwmon = hwmons.front();
 		}
-		return c;
+		out.push_back(c);
+	}
+	return out;
+}
+
+// FindAmdgpuCard is the single-device convenience: the first card
+// AllAmdgpuCards finds, deterministic on a machine with more than one.
+inline std::optional<Card> FindAmdgpuCard(const std::filesystem::path &root) {
+	const auto all = AllAmdgpuCards(root);
+	if (all.empty()) return std::nullopt;
+	return all.front();
+}
+
+// FindAmdgpuCardForDevice matches a HIP device's own reported PCI
+// domain/bus/device against every card sysfs shows — the same cross-check
+// CUDA gets for free via cudaDeviceGetPCIBusId + nvmlDeviceGetHandleByPciBusId.
+// Returns nullopt if nothing matches; callers treat that as "no sysfs
+// telemetry for this device" rather than silently sampling the wrong one.
+inline std::optional<Card> FindAmdgpuCardForDevice(const std::filesystem::path &root, int domain,
+                                                   int bus, int device) {
+	char want[16];
+	std::snprintf(want, sizeof(want), "%04x:%02x:%02x.0", domain, bus, device);
+	for (auto &c : AllAmdgpuCards(root)) {
+		if (c.pciAddress == want) return c;
 	}
 	return std::nullopt;
 }

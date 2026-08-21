@@ -66,7 +66,7 @@ RUN set -eu; \
       exit 1; \
     }
 
-COPY clockprobe_rocm.cc sysfs_clocks.h /src/
+COPY clockprobe_rocm.cc sysfs_clocks.h device_fold.h /src/
 RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \
       -std=c++17 -O3 \
       $(for t in ${GPU_TARGETS}; do printf -- '--offload-arch=%s ' "$t"; done) \

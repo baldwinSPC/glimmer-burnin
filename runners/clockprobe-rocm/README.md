@@ -83,6 +83,19 @@ Same rules as clockprobe, with the vocabulary sysfs supports:
   clock is unjudged, not slow. An amdgpu device visible in sysfs that HIP
   cannot use → **error** (exit 3): hardware present, unjudged.
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md), mirroring clockprobe's NVIDIA engine — see its
+README's fuller write-up. **The one piece with no NVIDIA precedent**: sysfs
+has no HIP-provided device<->telemetry correlation, so `sysfs_clocks.h`'s
+`FindAmdgpuCardForDevice` matches each HIP device's own reported PCI
+domain/bus/device against each sysfs card's resolved PCI address — never
+sysfs enumeration order, which has no documented relationship to HIP's device
+ordering. **NOT VERIFIED AGAINST REAL MULTI-GPU AMD HARDWARE** for the same
+reason as the rest of this runner: no second AMD device to prove the
+correlation against.
+
 ## Status — read before pinning
 
 - **NOT VERIFIED ON HARDWARE.** No Strix Halo unit was available when this was

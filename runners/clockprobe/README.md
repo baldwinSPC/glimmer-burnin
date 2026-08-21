@@ -469,6 +469,24 @@ would put a `DT_NEEDED` entry for an NVIDIA redistributable into the shipped
 binary. The driver's own `libnvidia-ml.so.1` and `libcuda.so.1` are injected
 into the container at runtime by the NVIDIA Container Toolkit.
 
+## Multi-device
+
+This runner measures **every device the pod was allocated**, not device 0
+(docs/dev/multi-device.md). Request the node's whole board
+(`nvidia.com/gpu: "8"`); sequential iteration is the default, since this kind
+isolates ONE device's clock behaviour and dividing `BURNIN_DURATION_SECONDS`
+across devices is what that isolation requires — `BURNIN_DEVICE_CONCURRENCY=all`
+overrides it, running every device's full pipeline at once in its own thread
+rather than dividing the window. `sustainedClockPct`, `minSmClockPct` and
+`gpuTempC` are the fold across devices (worst clock, worst floor, peak
+temperature); PASS/FAIL is decided per device from its OWN samples and then
+combined (Fail > Error > Skip > Pass), so a healthy device is never un-passed
+by another device's number. New keys: `deviceCount`, `devicesVisible`,
+`deviceWindowS`, `deviceConcurrency`, `worstDeviceIndex`/`worstDevicePciBusId`,
+`sustainedClockSpreadPct` and `fmaThroughputSpreadPct` (both n/a on a
+single-device node). When more than one device reported, a `per-device.json`
+artifact carries every device's own reading.
+
 ## Requirements on the node
 
 - NVIDIA Container Toolkit **≥ 1.17** with the `nvidia` runtime registered

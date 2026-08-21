@@ -69,6 +69,7 @@ ARG CUDA_ARCH_FLAGS="-gencode arch=compute_80,code=sm_80 \
 
 COPY clockprobe.cu /src/clockprobe.cu
 COPY nvml_dynamic.h /src/nvml_dynamic.h
+COPY device_fold.h /src/device_fold.h
 
 # -cudart static is nvcc's default on Linux but stated explicitly so the intent
 # survives a toolchain change.  -static-libstdc++/-static-libgcc are host-compiler
