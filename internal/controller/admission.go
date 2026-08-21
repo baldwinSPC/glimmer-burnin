@@ -260,9 +260,8 @@ func (r *BurnInRunReconciler) admit(
 //
 // It mirrors finalizeError rather than reusing it because the two say different
 // things: finalizeError means the run's own spec could not be resolved, this
-// means the run is fine and the fleet is busy. The result carries an empty Kind,
-// which is how the controller marks a synthetic result throughout — a real
-// BurnInTest always has one.
+// means the run is fine and the fleet is busy. The result is synthetic — no
+// Kind, which is the marker (TestResult.IsSynthetic), no Scope, no Nodes.
 func (r *BurnInRunReconciler) refuse(
 	ctx context.Context,
 	run *burninv1alpha1.BurnInRun,
@@ -272,7 +271,7 @@ func (r *BurnInRunReconciler) refuse(
 	log.FromContext(ctx).Info("refusing to admit run", "run", run.Name, "reason", message)
 	now := metav1.NewTime(r.now())
 	run.Status.Results = append(run.Status.Results, burninv1alpha1.TestResult{
-		Name:       "admission",
+		Name:       burninv1alpha1.SyntheticResultAdmission,
 		Phase:      burninv1alpha1.RunError,
 		FinishedAt: &now,
 		Message:    message,

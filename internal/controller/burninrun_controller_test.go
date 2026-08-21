@@ -116,6 +116,12 @@ func (h *harness) reconcile(name string) ctrl.Result {
 	if err != nil {
 		h.t.Fatalf("Reconcile: %v", err)
 	}
+	// After EVERY pass, not only when a test happens to read the run back
+	// through h.run: the invariant is about what the controller writes.
+	var run burninv1alpha1.BurnInRun
+	if err := h.c.Get(context.Background(), types.NamespacedName{Namespace: "burnin", Name: name}, &run); err == nil {
+		assertResultIdentities(h.t, &run)
+	}
 	return res
 }
 
@@ -138,7 +144,40 @@ func (h *harness) run(name string) *burninv1alpha1.BurnInRun {
 	if err := h.c.Get(context.Background(), types.NamespacedName{Namespace: "burnin", Name: name}, &run); err != nil {
 		h.t.Fatalf("get run: %v", err)
 	}
+	assertResultIdentities(h.t, &run)
 	return &run
+}
+
+// assertResultIdentities holds every result the controller wrote to the shape
+// a consumer is told to expect: a REAL result carries the scope it ran at, and
+// a SYNTHETIC one (TestResult.IsSynthetic) is one of the two the controller
+// mints about the run itself and carries no scope, because it has none.
+//
+// Checked after every reconcile because the CRD no longer does it: making
+// TestResult.Scope optional was the fix for #391 (see
+// test/envtest/synthetic_result_test.go), and this is what keeps the real
+// results honest now that the schema cannot.
+func assertResultIdentities(t *testing.T, run *burninv1alpha1.BurnInRun) {
+	t.Helper()
+	for i := range run.Status.Results {
+		res := &run.Status.Results[i]
+		if res.IsSynthetic() {
+			if res.Name != burninv1alpha1.SyntheticResultResolve && res.Name != burninv1alpha1.SyntheticResultAdmission {
+				t.Errorf("result %q has no Kind but is not a synthetic result the controller mints", res.Name)
+			}
+			if res.Scope != "" || len(res.Nodes) != 0 {
+				t.Errorf("synthetic result %q carries scope %q / nodes %v — it is about the run, not about any hardware",
+					res.Name, res.Scope, res.Nodes)
+			}
+			continue
+		}
+		// Only emptiness is checked: settleWithoutPod records a REFUSED scope
+		// verbatim, so "one of the three" would be the wrong test.
+		if res.Scope == "" {
+			t.Errorf("result %q (kind %s) has no scope — a real result must carry the scope it ran at; "+
+				"the CRD no longer refuses this, so nothing else would notice", res.Name, res.Kind)
+		}
+	}
 }
 
 func (h *harness) node(name string) *corev1.Node {
@@ -892,6 +931,35 @@ func TestRun_UnsupportedScopeIsErrorNotSkip(t *testing.T) {
 		t.Errorf("a pod was scheduled for a scope the operator cannot run")
 	}
 	h.assertNoStrandedCordons()
+}
+
+// A BurnInTest whose scope was never defaulted — the fake client applies no
+// CRD defaults, which is exactly the shape of a plan pinned from a spec the
+// apiserver never saw — still yields a real result that says Node. Now that
+// the schema no longer refuses a scope-less result, this is the only thing
+// standing between "the apiserver happened to default it" and a real result
+// with no scope stored silently.
+func TestRun_EmptySpecScopeIsRecordedAsNode(t *testing.T) {
+	undefaulted := smokeTest("fp4")
+	undefaulted.Spec.Scope = ""
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		undefaulted,
+		profile("acceptance", nil, false, testRef("fp4")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	h.finishPod(h.pods("run1")["spark-a"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+
+	run := h.run("run1")
+	if run.Status.Phase != burninv1alpha1.RunPassed {
+		t.Fatalf("phase = %q, want Passed", run.Status.Phase)
+	}
+	if got := run.Status.Results[0].Scope; got != burninv1alpha1.ScopeNode {
+		t.Errorf("result scope = %q for an undefaulted spec, want Node", got)
+	}
 }
 
 func TestRun_MissingProfileIsTerminalError(t *testing.T) {
@@ -4658,8 +4726,8 @@ func TestThresholdReportsElideDetailButNeverTheCount(t *testing.T) {
 	}
 
 	// Malformed: refused, with the full count and a bounded list.
-	err := refuseUnsatisfiableThresholds([]resolvedTest{{
-		name: "many", spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindCustom, Thresholds: broken},
+	err := refuseUnsatisfiableThresholds([]plannedTest{{
+		Name: "many", Spec: burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindCustom, Thresholds: broken},
 	}})
 	if err == nil {
 		t.Fatal("a profile of unsatisfiable gates was accepted")

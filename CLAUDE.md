@@ -18,46 +18,39 @@ useful to anyone running GPU fleets, not only to its first consumer.
 
 ## The standalone invariant (the most important rule here)
 
-**This repository must never import the Glimmer control plane.**
+**This repository must never import its control-plane consumer.**
 
-CI fails any PR adding an import of `github.com/baldwinSPC/glimmer/…`. There is
+CI fails any PR adding an import of a control plane's module path. There is
 no exception, including "just for a type" or "just in a test".
 
-- Dependency direction is one-way: Glimmer MAY depend on this project; this
-  project MUST NEVER depend on Glimmer.
+- Dependency direction is one-way: a consuming control plane MAY depend on this
+  project; this project MUST NEVER depend on one.
 - Integration happens through the `BurnInSink` export contract — a delivery
   envelope over a webhook — not through shared code.
 - This is what allows the repo to be open-sourced and adopted independently. If
-  you need something from Glimmer, the answer is to widen the contract, not to
-  add an import.
+  you need something from a control plane that consumes this project, the
+  answer is to widen the contract, not to add an import.
 
-If a task appears to require reaching into Glimmer, stop and raise it rather
-than working around the guard.
+If a task appears to require reaching into a consumer's own codebase, stop and
+raise it rather than working around the guard.
 
 ---
 
-## Cross-repo context
+## Design tracking
 
-The Glimmer solution spans several repositories. The canonical registry and the
-cross-repo rules live in the `baldwinSPC/glimmer` repo's own `CLAUDE.md`, which
-is **private** — so the rules that matter here are restated below rather than
-linked, since public contributors cannot read the original.
+This project is developed alongside a private planning repository that is not
+readable by public contributors, so the rules that matter for working in this
+repo are stated here directly rather than by reference:
 
-| Repo | Visibility | Role |
-|------|------------|------|
-| `baldwinSPC/glimmer` | private | Control plane, and the planning home for the whole solution |
-| `baldwinSPC/glimmer-burnin` | this repo | The burn-in operator |
-| `baldwinSPC/glimmer-releases` | public | Release artifacts only; never source |
-
-Rules that apply to work in this repo:
-
-- **Design proposals (GEPs) live in `glimmer`**, at `docs/geps/NNNN-name.md`,
-  even when the code lands here. This project's design is GEP-0178. The GEP
-  states which repo owns which piece.
 - **Implementation issues are filed here**, in the repo where the code lands,
-  and linked to the workstream's tracking issue in `glimmer`.
-- The dependency and license rules apply to every repo in the solution, and
-  most strictly to this one, because it is the one that gets published.
+  and linked to the workstream's tracking issue in the planning repo when one
+  exists.
+- **Significant design changes are written up as a design proposal (a GEP,
+  `docs/geps/NNNN-name.md`) and tracked outside this repo**, even when the code
+  lands here — not as a design document in this repo. This project's own design
+  is GEP-0178.
+- The dependency and license rules in this file apply most strictly to this
+  repo, because it is the one that gets published.
 
 ---
 
@@ -138,7 +131,7 @@ After changing anything in `api/v1alpha1`, run `make generate manifests` and
 `config/rbac/*`). CI checks for drift.
 
 CI (`.github/workflows/ci.yml`) runs build, vet, gofmt, test, the
-no-glimmer-import guard, the CRD drift check, and the supply-chain job (licence
+standalone-import guard, the CRD drift check, and the supply-chain job (licence
 policy, `govulncheck`, `golangci-lint`). All of them are **blocking** — nothing
 there is informational.
 
@@ -238,6 +231,18 @@ pkg/runner/          runner exit-code + key=value stdout parsing
                      NO Kubernetes dependency. Measured: 0 k8s modules.
 pkg/verdict/         threshold evaluation, no I/O
                      NO Kubernetes dependency. Measured: 0 k8s modules.
+pkg/group/           folds N ranks' reports into the ONE result a collective is
+                     judged on: the verdict precedence and the per-metric
+                     Combination election
+                     NO Kubernetes dependency. Measured: 0 k8s modules.
+```
+
+Shared by both dispatchers, but Kubernetes-coupled (see the ledger below):
+
+```
+pkg/plan/            profile entry -> executions: variant expansion, the axis
+                     vocabulary, and the refusal of an axis a runner could
+                     never receive
 ```
 
 **`pkg/verdict` was not Kubernetes-free until #274 was fixed, and this file has
@@ -251,22 +256,38 @@ every name as a type ALIAS. A Go alias is the same type, so the CRD wire format
 is byte-identical (the regenerated manifests showed zero drift), controller-gen
 reads the kubebuilder markers where they now live, and no caller had to change.
 
-It was cheap only because it was done early: Glimmer imported `pkg/contract`
-alone, so there were zero external callers of `Evaluate` to break. That window
-would have closed the moment Path A adopted `pkg/localrun`.
+It was cheap only because it was done early: the only external consumer at the
+time imported `pkg/contract` alone, so there were zero external callers of
+`Evaluate` to break. That window would have closed the moment Path A adopted
+`pkg/localrun`.
 
-`pkg/localrun` and `pkg/runnerimages` are STILL coupled, through the EXECUTION
-vocabulary rather than the acceptance one — `BurnInTestSpec`, `RunnerSpec`,
-`VendorImage`. Freeing them would make the CRD a thin Kubernetes wrapper over a
-neutral core, which is a larger decision left to the GEP-0178 amendment and to
-the moment Path A can say what it actually needs.
+`pkg/localrun`, `pkg/runnerimages` and `pkg/plan` are STILL coupled, through the
+EXECUTION vocabulary rather than the acceptance one — `BurnInTestSpec`,
+`RunnerSpec`, `VendorImage`, `TestVariant`. Freeing them would make the CRD a
+thin Kubernetes wrapper over a neutral core, which is a larger decision left to
+the GEP-0178 amendment and to the moment Path A can say what it actually needs.
+`pkg/localrun.PlannedTest` is an ALIAS for `pkg/plan.Test`, so those two entries
+describe one coupling and must leave the ledger together.
+
+**`pkg/plan` is profile resolution, and it exists because the two dispatchers
+disagreed about it.** Variant expansion lived unexported in the reconciler, so
+`burnin run` SILENTLY DROPPED `spec.tests[].variants` — a four-cell precision
+sweep ran as one execution of the parent test, with none of the cell's
+thresholds applied and no `BURNIN_VARIANT_*` reaching the runner, and nothing in
+the output said a cell was missing. Both dispatchers now call
+`plan.ExpandVariants`, and `plan.RefuseUnreachableAxes` / `plan.VariantEnv` are
+shared for the same reason: WHICH axes reach a runner and UNDER WHAT NAME is one
+decision, and a second implementation of it is the drift this package ends. Each
+dispatcher still renders the result in its own shape (a `corev1.EnvVar` list
+in-cluster, a map for `docker run -e` on bare metal), which is the part that
+genuinely differs.
 
 The claim is no longer prose: `hack/invariants/kubernetesfree_test.go` is a
 two-sided ledger — a clean package that acquires a Kubernetes dependency fails,
 and a coupled one that becomes clean fails until its entry is deleted. Nothing
 was enforcing this when the original wrong claim survived a release.
 
-`pkg/verdict` and `pkg/runner` are public because Glimmer's pre-Kubernetes
+`pkg/verdict` and `pkg/runner` are public because a separate, pre-Kubernetes
 burn-in path runs the same runner images: if the two dispatchers derived
 different metrics or different verdicts from identical runner output, they would
 disagree about the same hardware. One brain, two dispatchers.
@@ -948,11 +969,11 @@ Follow Kubernetes community conventions. Do not leave findings only in chat or
 as bare TODOs in code:
 
 - Unfinished or deferred work → a GitHub issue **in this repo**, linked to the
-  GEP tracking issue in `glimmer`.
+  workstream's tracking issue in the design-tracking repo when one exists.
 - Bugs, security issues, untested paths → a GitHub issue with a minimal
   reproduction, written so someone without the session's context can act on it.
-- New workstreams or significant design changes → a GEP in `glimmer`
-  (`docs/geps/`), not a design document here.
+- New workstreams or significant design changes → a GEP (`docs/geps/`) in the
+  design-tracking repo, not a design document here.
 
 ---
 

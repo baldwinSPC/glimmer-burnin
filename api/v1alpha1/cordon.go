@@ -75,8 +75,8 @@ const (
 	// "<namespace>/<name>/<uid>/<RFC3339 expiry>".
 	//
 	// It exists because the two safety systems on this fleet were fighting each
-	// other. The Glimmer agent runs a thermal watchdog that drains a node when
-	// it passes its trip point, and a thermal soak drives the part past that
+	// other. A separate fleet agent runs a thermal watchdog that drains a node
+	// when it passes its trip point, and a thermal soak drives the part past that
 	// point BY DESIGN — so every soak was drained, its runner pods SIGKILLed,
 	// and the hardware recorded as "Error — hardware unjudged". The watchdog was
 	// working; it simply had no way to tell a soak from a cooling failure. This

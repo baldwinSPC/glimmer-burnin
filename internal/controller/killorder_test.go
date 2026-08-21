@@ -198,8 +198,8 @@ func TestKillOrder_TheRetryBudgetIsChargedForAnOverduePod(t *testing.T) {
 	}
 }
 
-// The FOUR remaining paths are not covered here — three Group, and the Pair
-// lingering-server case — and this note is the honest half of #372 Gap B.
+// The THREE remaining paths are not covered here — all Group — and this note is
+// the honest half of #372 Gap B.
 //
 // An earlier version of this note said the harness could not drive a rendezvous
 // to its timeout, and used a SKIPPING Pair test as the evidence. That was
@@ -210,14 +210,18 @@ func TestKillOrder_TheRetryBudgetIsChargedForAnOverduePod(t *testing.T) {
 // — a test that skips itself and is then believed — is the one this file is
 // otherwise about.
 //
+// The fourth Pair path, the lingering server, is covered in
+// killorder_linger_test.go. It is kept separate because it is the one that was
+// BROKEN rather than merely unasserted: harvestPair deleted that pod inline,
+// and the test failed against main until #247's ordering was applied there too.
+//
 // Still owed, each able to regress independently:
 //
-//	lingering server after client exit   Pair
-//	root timeout                         Group
-//	hung collective                      Group
-//	root exited before its workers       Group
+//	root timeout                     Group
+//	hung collective                  Group
+//	root exited before its workers   Group
 //
-// killOrderWatcher works unchanged for all four. What Group needs is a harness
+// killOrderWatcher works unchanged for all three. What Group needs is a harness
 // that can create N ranks and make rank 0 Ready, which pairPod's two-role shape
 // does not express.
 // ─── Pair scope ───────────────────────────────────────────────────────────────

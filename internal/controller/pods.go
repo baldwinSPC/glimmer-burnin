@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	burninplan "github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runnerimages"
 )
 
@@ -873,53 +873,23 @@ func resourceLimitsEnv(res corev1.ResourceRequirements) string {
 	return strings.Join(parts, ",")
 }
 
-// variantEnv renders a variant's axes as BURNIN_VARIANT_<AXIS>=<value>.
+// variantEnv renders a variant's axes as BURNIN_VARIANT_<AXIS>=<value>, in the
+// shape a container's env list wants.
 //
-// Sorted by axis name so a pod spec is deterministic: an unsorted map would make
-// two identical plans produce two different pod specs, and a diff of a pod
-// against itself is a diff nobody can act on.
-//
-// An axis whose name is not usable as an environment variable is SKIPPED rather
-// than mangled. A mangled name would collide two axes onto one variable, and the
-// runner would read one cell's value while reporting the other's — the same
-// class of error as rewriting an artifact name into a colliding ConfigMap key.
+// The DECISION — which axes reach the runner, under what name, in what order —
+// is pkg/plan's, so cmd/burnin makes the same one. Only the shape is local: the
+// CLI puts these in a map for `docker run -e`, and a shared helper that arrived
+// pre-shaped for a PodSpec would make that side unpack it again.
 func variantEnv(axes map[string]string) []corev1.EnvVar {
-	if len(axes) == 0 {
+	vars := burninplan.VariantEnv(axes)
+	if len(vars) == 0 {
 		return nil
 	}
-	names := make([]string, 0, len(axes))
-	for k := range axes {
-		if envSafeAxis(k) {
-			names = append(names, k)
-		}
-	}
-	sort.Strings(names)
-
-	out := make([]corev1.EnvVar, 0, len(names))
-	for _, k := range names {
-		out = append(out, corev1.EnvVar{
-			Name:  "BURNIN_VARIANT_" + strings.ToUpper(k),
-			Value: axes[k],
-		})
+	out := make([]corev1.EnvVar, 0, len(vars))
+	for _, v := range vars {
+		out = append(out, corev1.EnvVar{Name: v.Name, Value: v.Value})
 	}
 	return out
-}
-
-// envSafeAxis is whether an axis name maps to an environment variable without
-// rewriting. Letters, digits and underscore only, and not leading with a digit.
-func envSafeAxis(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
-		case r >= '0' && r <= '9' && i > 0:
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // annotationSafeToEvict is the cluster-autoscaler's own key. Spelled out here

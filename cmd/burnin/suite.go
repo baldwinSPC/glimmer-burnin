@@ -14,6 +14,7 @@ import (
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/hostinfo"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/localrun"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 )
 
 // A suite file is multi-document YAML of the SAME objects the CRDs use.
@@ -128,9 +129,15 @@ func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.
 		return localrun.Plan{}, nil, err
 	}
 
+	// Both host facts are probed ONCE, here, and pinned into the plan. The
+	// alternative — probing inside Translate — would make translation depend on
+	// the machine it happens to run on, and would re-answer the same question
+	// per test.
+	h := hostinfo.Probe(hostinfo.Options{})
 	p := localrun.Plan{
 		Node:              node,
-		Vendor:            hostVendor(),
+		Vendor:            vendorOf(h),
+		HostIP:            h.PrimaryIP,
 		FailFast:          profile.Spec.FailFast,
 		RetryOnErrorLimit: retries,
 		Rendezvous:        rz,
@@ -144,26 +151,49 @@ func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.
 		if err != nil {
 			return localrun.Plan{}, nil, err
 		}
-		// Test name is result identity, and the operator enforces uniqueness at
-		// plan time. Enforced here too, or two results would collide in the
-		// report and one would silently win.
-		if seen[name] {
-			return localrun.Plan{}, nil, fmt.Errorf(
-				"profile %s names the test %q twice — a test name is a result's identity", profile.Name, name)
+
+		// Variants expand HERE, before anything downstream, exactly as they do
+		// in the operator — and through the same function, so the two
+		// dispatchers cannot plan a different number of executions from one
+		// profile. Until this call existed, spec.tests[].variants was read,
+		// parsed, validated by the CRD schema, and then silently discarded: a
+		// four-cell precision sweep ran once, under the parent's name, with
+		// none of the cell's thresholds and no BURNIN_VARIANT_* reaching the
+		// runner. Nothing in the output said a cell was missing.
+		//
+		// Every check below (the duplicate-name check, the cluster-only
+		// warnings) then applies PER CELL, which is what makes a cell's name a
+		// result identity here as well.
+		for _, cell := range plan.ExpandVariants(name, spec, pt.Required == nil || *pt.Required, pt.Variants) {
+			// Test name is result identity, and the operator enforces
+			// uniqueness at plan time. Enforced here too, or two results would
+			// collide in the report and one would silently win. After expansion
+			// this also catches two variants of one test sharing a name, which
+			// is the same failure by a different route.
+			if seen[cell.Name] {
+				return localrun.Plan{}, nil, fmt.Errorf(
+					"profile %s names the test %q twice — a test name is a result's identity", profile.Name, cell.Name)
+			}
+			seen[cell.Name] = true
+
+			warnings = append(warnings, clusterOnlyFields(cell.Name, cell.Spec, rz)...)
+			warnings = append(warnings, unresolvableEnvWarnings(p, cell.Name, cell.Spec)...)
+			p.Tests = append(p.Tests, cell)
 		}
-		seen[name] = true
-
-		warnings = append(warnings, clusterOnlyFields(name, spec, rz)...)
-
-		p.Tests = append(p.Tests, localrun.PlannedTest{
-			Name:     name,
-			Spec:     spec,
-			Required: pt.Required == nil || *pt.Required,
-		})
 	}
 
 	if len(p.Tests) == 0 {
 		return localrun.Plan{}, nil, fmt.Errorf("profile %s lists no tests", profile.Name)
+	}
+
+	// The same refusal the operator makes, for the same reason and with the
+	// same message: an axis that cannot become an environment variable would
+	// run the cell's DEFAULT configuration while the run reported it under a
+	// distinct label. Refused before a single container starts, because a run
+	// that quietly produces a meaningless sweep is a much worse report than one
+	// that refuses at start and says which axis and why.
+	if err := plan.RefuseUnreachableAxes(p.Tests); err != nil {
+		return localrun.Plan{}, nil, err
 	}
 	return p, warnings, nil
 }
@@ -238,14 +268,12 @@ func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendez
 					"--role client --peer <ip> on the other machine to actually measure the link", name))
 		}
 	case api.ScopeGroup:
-		// Group needs N hosts started together against one root, which is real
-		// orchestration and is not wired up. Warned about specifically rather
-		// than lumped in with Pair: the fix for Pair is two flags, and telling
-		// someone the same thing here would send them somewhere that does not
-		// exist.
-		out = append(out, fmt.Sprintf(
-			"%s is Group-scope: multi-host Group orchestration is not wired up in this command yet, "+
-				"so it will skip; run it in a cluster", name))
+		if rz == nil || rz.Rank == nil {
+			out = append(out, fmt.Sprintf(
+				"%s is Group-scope and no --rank was given: it will run with BURNIN_RANK unset, which a "+
+					"fabric runner treats as not-applicable and skips — pass --rank i --nranks n on each "+
+					"machine (--root <ip> on every rank but 0), then `burnin merge` the records", name))
+		}
 	}
 
 	if spec.Runner != nil && spec.Runner.ReadinessProbe != nil && spec.Scope != api.ScopePair {
@@ -257,7 +285,26 @@ func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendez
 	return out
 }
 
-// hostVendor is this machine's accelerator vendor, read off the PCI bus.
+// unresolvableEnvWarnings names the variables a test declares that will NOT be
+// set on this machine.
+//
+// Warned about for the same reason clusterOnlyFields warns about a
+// nodeSelector: the author has a belief about what the runner will receive, and
+// letting it pass without a word would leave the belief intact and wrong. The
+// variable is left UNSET rather than set to "" — see localrun.ResolveEnv — so
+// this warning is the only thing standing between a profile that reads a Secret
+// and a runner that quietly behaves as if the Secret were blank.
+func unresolvableEnvWarnings(p localrun.Plan, name string, spec api.BurnInTestSpec) []string {
+	var out []string
+	for _, v := range localrun.UnresolvableEnv(p, spec) {
+		out = append(out, fmt.Sprintf(
+			"%s declares env %s, which has no meaning outside a cluster: it will be UNSET rather than "+
+				"empty, so a runner can tell it apart from a variable the cluster set to nothing", name, v))
+	}
+	return out
+}
+
+// vendorOf is this machine's accelerator vendor, read off the PCI bus.
 //
 // It decides which image a test resolves to, so the operator and this path must
 // answer the same question from equally authoritative sources: the operator asks
@@ -270,8 +317,10 @@ func clusterOnlyFields(name string, spec api.BurnInTestSpec, rz *localrun.Rendez
 // vendors existed. Only the FIRST accelerator is consulted, matching the
 // operator's own vendorOf; a host with two vendors' cards in it is a case
 // neither side handles yet and neither should pretend to.
-func hostVendor() string {
-	h := hostinfo.Probe(hostinfo.Options{})
+//
+// It takes an ALREADY-PROBED host so buildPlan can take the vendor and the
+// primary IP from one probe rather than two.
+func vendorOf(h hostinfo.Host) string {
 	for _, a := range h.Accelerators {
 		if a.Vendor != "" {
 			return a.Vendor

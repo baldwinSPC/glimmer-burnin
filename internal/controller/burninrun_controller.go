@@ -22,6 +22,7 @@ import (
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 	"github.com/baldwinSPC/glimmer-burnin/internal/metrics"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+	burninplan "github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
@@ -148,24 +149,6 @@ func (r *BurnInRunReconciler) forgetMetrics(namespace, name string) {
 		return
 	}
 	metrics.Default.Forget(namespace, name)
-}
-
-// resolvedTest is one entry of a profile with its spec materialised.
-type resolvedTest struct {
-	name     string
-	spec     burninv1alpha1.BurnInTestSpec
-	required bool
-	// axes are the variant labels this execution came from, or nil for a test
-	// with no variants. They are carried, echoed and never interpreted.
-	axes map[string]string
-	// parent is the profile entry this cell was expanded from, or empty when the
-	// entry was not expanded at all.
-	//
-	// Recorded rather than recovered from the name. Splitting "<test>-<variant>"
-	// on the last hyphen works until a test is called "gemm-sweep" or a variant
-	// "fp8-dense", and then it is wrong silently — which is the same reason
-	// TestResult.VariantAxes exists instead of asking a consumer to parse names.
-	parent string
 }
 
 // resolveGracePeriod is how long a young run tolerates NotFound on its
@@ -459,13 +442,13 @@ func profileSinks(profile *burninv1alpha1.BurnInProfile) []string {
 	return profile.Spec.Sinks
 }
 
-func (r *BurnInRunReconciler) resolveProfile(ctx context.Context, run *burninv1alpha1.BurnInRun) (*burninv1alpha1.BurnInProfile, []resolvedTest, error) {
+func (r *BurnInRunReconciler) resolveProfile(ctx context.Context, run *burninv1alpha1.BurnInRun) (*burninv1alpha1.BurnInProfile, []plannedTest, error) {
 	var profile burninv1alpha1.BurnInProfile
 	if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: run.Spec.ProfileRef}, &profile); err != nil {
 		return nil, nil, fmt.Errorf("profile %q: %w", run.Spec.ProfileRef, err)
 	}
 
-	tests := make([]resolvedTest, 0, len(profile.Spec.Tests))
+	tests := make([]plannedTest, 0, len(profile.Spec.Tests))
 	for i, pt := range profile.Spec.Tests {
 		required := pt.Required == nil || *pt.Required
 		switch {
@@ -487,98 +470,23 @@ func (r *BurnInRunReconciler) resolveProfile(ctx context.Context, run *burninv1a
 	return &profile, tests, nil
 }
 
-// expandVariants turns one profile entry into one resolvedTest per cell.
+// expandVariants is pkg/plan's, and lives there so cmd/burnin gets the same
+// expansion rather than a second implementation of it.
 //
-// This is the whole of the matrix feature, and it is deliberately the whole of
-// it. Expansion happens ONCE, here, before buildPlan — so every stage
-// downstream (the duplicate-name check, Pair and Group topology validation, pod
-// naming, result identity, verdict, delivery keys, TestResult.Nodes) works
-// unchanged, because none of them ever learns variants exist. That is why this
-// is a small change rather than a reconciler rewrite, and it is the property to
-// protect if this is ever extended.
-//
-// With no variants it returns exactly the one test it was given, so a profile
-// written before variants existed plans identically.
+// It was unexported here for a while, and the consequence was that `burnin run`
+// SILENTLY DROPPED spec.tests[].variants: a four-cell precision sweep ran as
+// one execution of the parent test, with none of the cell's thresholds applied
+// and no BURNIN_VARIANT_* reaching the runner. See pkg/plan's package comment.
 func expandVariants(
 	name string,
 	spec burninv1alpha1.BurnInTestSpec,
 	required bool,
 	variants []burninv1alpha1.TestVariant,
-) []resolvedTest {
-	if len(variants) == 0 {
-		return []resolvedTest{{name: name, spec: spec, required: required}}
-	}
-
-	out := make([]resolvedTest, 0, len(variants))
-	for _, v := range variants {
-		// A deep copy per cell: the overlays below must not reach back into the
-		// parent spec, or the second variant would inherit the first's edits and
-		// a sweep would silently measure the wrong thing in every cell after the
-		// first.
-		cell := *spec.DeepCopy()
-
-		if v.DurationSeconds != nil {
-			cell.DurationSeconds = *v.DurationSeconds
-		}
-		// A VARIANT THAT OVERLAYS A RUNNER FIELD IS ASKING FOR A RUNNER BLOCK,
-		// and the test it overlays usually has none: a built-in kind resolves its
-		// image from pkg/runnerimages, so there is nothing for its author to put
-		// in `runner:`. That is the CANONICAL use of this feature — five cells
-		// differing by one environment variable — and writing through a nil
-		// pointer panicked the reconciler on the first profile anybody wrote.
-		//
-		// A nil dereference here is not one failed run. controller-runtime
-		// recovers the panic and requeues, so it crash-loops every pass and the
-		// operator stops making progress for every OTHER run in the cluster too.
-		//
-		// Creating an empty block is safe for image resolution: Resolve treats an
-		// empty Image and an empty ImagesByVendor exactly as it treats a nil
-		// RunnerSpec, so a cell that gains one still lands on the kind's default.
-		if v.Args != nil || v.Env != nil {
-			if cell.Runner == nil {
-				cell.Runner = &burninv1alpha1.RunnerSpec{}
-			}
-		}
-		if v.Args != nil {
-			cell.Runner.Args = append([]string(nil), v.Args...)
-		}
-		if v.Env != nil {
-			cell.Runner.Env = append([]corev1.EnvVar(nil), v.Env...)
-		}
-		if v.RepeatCount != nil {
-			cell.RepeatCount = v.RepeatCount
-		}
-		if v.Thresholds != nil {
-			// REPLACE, never merge. See TestVariant.Thresholds: merging by
-			// metric name would silently retain a gate the author believed
-			// replaced, and a node failed against a threshold nobody can find
-			// in the profile has a verdict with nothing to read that explains
-			// it. An empty non-nil list therefore means "no thresholds", which
-			// is a thing a variant may legitimately want.
-			cell.Thresholds = append([]burninv1alpha1.Threshold(nil), v.Thresholds...)
-		}
-
-		out = append(out, resolvedTest{
-			name:     name + "-" + v.Name,
-			spec:     cell,
-			required: required,
-			axes:     copyAxes(v.Axes),
-			parent:   name,
-		})
-	}
-	return out
+) []plannedTest {
+	return burninplan.ExpandVariants(name, spec, required, variants)
 }
 
-func copyAxes(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
+func copyAxes(in map[string]string) map[string]string { return burninplan.CopyAxes(in) }
 
 func (r *BurnInRunReconciler) resolveTargets(ctx context.Context, sel burninv1alpha1.TargetSelector) ([]string, error) {
 	if len(sel.NodeNames) > 0 {
@@ -2139,11 +2047,13 @@ func (r *BurnInRunReconciler) finalize(ctx context.Context, run *burninv1alpha1.
 // finalizeError terminates a run the operator cannot execute at all.
 func (r *BurnInRunReconciler) finalizeError(ctx context.Context, run *burninv1alpha1.BurnInRun, sinks []string, cause error) (ctrl.Result, error) {
 	log.FromContext(ctx).Error(cause, "run cannot be executed")
-	// Kind is required on every real BurnInTest, so an empty Kind marks this
-	// result as synthetic — a real test named "resolve" cannot shadow it.
+	// A synthetic result: no Kind (which is the marker — see
+	// TestResult.IsSynthetic), no Scope, no Nodes. It is a result and not a
+	// condition because it is the only carrier of the reason that reaches a
+	// sink.
 	now := metav1.NewTime(r.now())
 	run.Status.Results = append(run.Status.Results, burninv1alpha1.TestResult{
-		Name:       "resolve",
+		Name:       burninv1alpha1.SyntheticResultResolve,
 		Phase:      burninv1alpha1.RunError,
 		FinishedAt: &now,
 		Message:    cause.Error(),
@@ -2604,10 +2514,9 @@ func hasRequiredError(run *burninv1alpha1.BurnInRun, p *plan) bool {
 		if res.Phase != burninv1alpha1.RunError {
 			continue
 		}
-		// The synthetic resolve result is marked by its empty Kind — every
-		// real BurnInTest has one (the field is required) — so a real test
-		// that happens to be named "resolve" gates on its own required flag.
-		if res.Name == "resolve" && res.Kind == "" {
+		// A synthetic result is marked by its empty Kind, so a real test that
+		// happens to be named "resolve" gates on its own required flag.
+		if res.IsSynthetic() && res.Name == burninv1alpha1.SyntheticResultResolve {
 			return true
 		}
 		if req[res.Name] {

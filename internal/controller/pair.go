@@ -379,7 +379,6 @@ func (r *BurnInRunReconciler) harvestPair(
 	attempt int32,
 	serverPod, clientPod *corev1.Pod,
 ) (advanceState, advanceEffect, error) {
-	var none advanceEffect
 	serverNode, clientNode := nodes[0], nodes[1]
 
 	_, clientDone, _, _ := podOutcome(clientPod)
@@ -414,14 +413,26 @@ func (r *BurnInRunReconciler) harvestPair(
 	server := pairSide{role: pairRoleServer, node: serverNode, pod: serverPod.Name}
 
 	logErr := clientLogErr
+	// A lingering server is CONDEMNED, not deleted here — issue #247.
+	//
+	// This was the one Pair path that destroyed a pod inline. The client has
+	// reported, so the measurement exists, and deleting the server before the
+	// status carrying it is durable is exactly the ordering the two sites above
+	// defer through pass.kill to avoid: lose the write and the pod is gone with
+	// nothing recording that the pair ever ran, so the unit re-mints under the
+	// same attempt number and measures the link again.
+	//
+	// Deferring costs the server one more reconcile pass, which is the same
+	// price the other condemn sites pay and is why killPods is safe to fail.
+	var condemned []*corev1.Pod
 	if _, serverDone, _, _ := podOutcome(serverPod); serverDone {
 		serverParsed, serverLogErr := r.harvestPod(ctx, t, serverPod)
 		server.result = &serverParsed
 		if logErr == nil {
 			logErr = serverLogErr
 		}
-	} else if err := r.Delete(ctx, serverPod); err != nil && !apierrors.IsNotFound(err) {
-		return advancePending, none, err
+	} else {
+		condemned = append(condemned, serverPod)
 	}
 
 	combined := combinePair(server, client, logErr, &t.Spec)
@@ -433,7 +444,7 @@ func (r *BurnInRunReconciler) harvestPair(
 	if server.result != nil {
 		r.harvestArtifacts(ctx, run, t.Name, nodes, serverPod.Name, server.result.Artifacts)
 	}
-	return advanceHarvested, advanceEffect{dirty: true}, nil
+	return advanceHarvested, advanceEffect{dirty: true, kill: condemned}, nil
 }
 
 // pairPod fetches one endpoint's pod. A missing pod is (nil, nil): not existing

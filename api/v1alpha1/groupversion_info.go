@@ -1,10 +1,10 @@
 // Package v1alpha1 contains the API types for the Glimmer Burn-In Operator —
 // a vendor-neutral, Kubernetes-native hardware acceptance-testing controller.
 //
-// It is deliberately standalone: nothing here imports the Glimmer control plane.
+// It is deliberately standalone: nothing here imports its control-plane consumer.
 // Results are exported through a BurnInSink (a generic contract), so the operator
-// runs on any cluster and integrates with Glimmer — or anything else — without a
-// code dependency. CI enforces the no-Glimmer-import rule.
+// runs on any cluster and integrates with a control plane — or anything else —
+// without a code dependency. CI enforces the no-import rule.
 //
 // +kubebuilder:object:generate=true
 // +groupName=burnin.glimmer.ai

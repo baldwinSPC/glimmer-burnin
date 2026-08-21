@@ -44,6 +44,7 @@ import (
 	"time"
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runner"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
@@ -64,6 +65,17 @@ type Plan struct {
 	// dispatchers cannot resolve different images for the same test on the same
 	// hardware.
 	Vendor string
+	// HostIP is this machine's primary address, as pkg/hostinfo establishes it
+	// from the routing table. Empty where none could be found.
+	//
+	// It is here for the same reason Vendor is: a BurnInTest may ask for it,
+	// and the two dispatchers must answer from equally authoritative sources.
+	// In a cluster `valueFrom.fieldRef: status.hostIP` is filled by the kubelet;
+	// here it is filled from this field, which the caller probes. Resolved by
+	// the CALLER rather than by Translate so that translation stays a pure
+	// function of the plan — the same reason Node and Vendor are not probed
+	// here either.
+	HostIP string
 	// Tests run in order. A profile is an ordered list, and the order is part of
 	// what it means: a smoke test that gates a soak has to run first.
 	Tests []PlannedTest
@@ -130,14 +142,38 @@ func (r *Rendezvous) pairNodes(local string) []string {
 	return []string{local, r.PeerNode}
 }
 
-// PlannedTest is one test, with its spec pinned.
-type PlannedTest struct {
-	Name string
-	Spec api.BurnInTestSpec
-	// Required tests participate in FailFast and in the run's own verdict. An
-	// optional test that fails is recorded and does not condemn the run.
-	Required bool
+// groupNodes returns the nodes ONE RANK can honestly name.
+//
+// Just itself — and that is the whole reason `burnin merge` exists.
+//
+// A Group result names EVERY rank's node, because the verdict is about the
+// collective. But no single rank knows the others' node names: the rendezvous
+// contract carries BURNIN_ROOT_NODE and DELIBERATELY NOT A RANK LIST, so a rank
+// that invented the roster would be inventing hardware it never heard from.
+// The operator knows the roster because it planned the run; here the roster is
+// only assembled when the per-rank records are merged.
+//
+// So a rank's own record names one node, truthfully, and the merged result
+// names all N. A rank that padded its list with the root's name would produce
+// a record claiming to be about two machines when it is about one.
+func (r *Rendezvous) groupNodes(local string) []string {
+	return []string{local}
 }
+
+// PlannedTest is one test, with its spec pinned.
+//
+// An ALIAS for plan.Test, which is the same type the operator materialises its
+// own plan into. It is the same type on purpose: variant expansion produces
+// these, and expansion is shared (see pkg/plan) precisely because this
+// dispatcher used to drop variants on the floor. A parallel struct here would
+// have made "the two dispatchers plan the same executions" a claim rather than
+// a fact.
+//
+// Required tests participate in FailFast and in the run's own verdict; an
+// optional test that fails is recorded and does not condemn the run. Axes and
+// Parent are the variant labels the cell came from, carried and echoed and
+// never interpreted.
+type PlannedTest = plan.Test
 
 // Hooks let an embedding agent observe a run as it happens.
 //
@@ -152,6 +188,47 @@ type Hooks struct {
 	OnAttempt func(test string, attempt int32, res runner.Result)
 	// OnTestComplete fires once per test, when it settles.
 	OnTestComplete func(TestResult)
+	// OnCheckpoint fires while a test is still running, every
+	// spec.checkpointIntervalSeconds, with the metrics the runner has emitted
+	// so far.
+	//
+	// A CHECKPOINT IS EVIDENCE, NEVER A VERDICT. Nothing in this package reads
+	// what it publishes; thresholds are evaluated once, at the end, against the
+	// completed execution. A mid-run sample that dips below a floor is not a
+	// failure, because the run is not over — and a consumer that treated one as
+	// a verdict would condemn hardware for a moment it was told to expect.
+	OnCheckpoint func(Checkpoint)
+}
+
+// Checkpoint is a test's progress, published while it is still running.
+//
+// It exists for the case a long soak is most likely to meet: a multi-hour
+// thermal soak that is cancelled, killed at its deadline, or lost to a reboot
+// at minute 200 otherwise reports NOTHING AT ALL, because a runner's metrics
+// only reach the report when the container exits. The operator has published
+// these since checkpointIntervalSeconds was added; this dispatcher buffered
+// stdout until exit and so could not, which is the drift the parity ledger
+// pins.
+type Checkpoint struct {
+	// Test is the execution's name — a variant cell's own name, where the entry
+	// was expanded.
+	Test string
+	// Sequence orders checkpoints within one run. Derived from elapsed time
+	// rather than counted, exactly as the operator derives it, so it is stable
+	// across a retry and a receiver's dedupe still works.
+	Sequence int
+	// Attempt is which execution of this test is being sampled.
+	Attempt int32
+	// Metrics is what the runner has emitted so far, parsed by the same
+	// pkg/runner both dispatchers use.
+	Metrics map[string]string
+	At      time.Time
+}
+
+func (h Hooks) checkpoint(c Checkpoint) {
+	if h.OnCheckpoint != nil {
+		h.OnCheckpoint(c)
+	}
 }
 
 func (h Hooks) testStart(name string) {
@@ -204,6 +281,12 @@ type TestResult struct {
 	FinishedAt time.Time
 	Metrics    map[string]string
 	Message    string
+
+	// VariantAxes are the labels of the variant cell this execution came from,
+	// or nil for a test with no variants. Delivered in the envelope so a report
+	// can group a sweep's cells without parsing them back out of names — see
+	// contract.TestResult.VariantAxes, which is the field this feeds.
+	VariantAxes map[string]string
 
 	Violations   []api.Violation
 	NotEvaluated []api.NotEvaluated
@@ -259,7 +342,7 @@ func runWithClock(ctx context.Context, p Plan, rt ContainerRuntime, h Hooks, now
 		}
 
 		h.testStart(t.Name)
-		res, err := runTest(ctx, p, t, rt, h, now)
+		res, err := runTest(ctx, p, t, rt, h, now, rep.StartedAt)
 		if err != nil {
 			return rep, err
 		}
@@ -285,7 +368,7 @@ func runWithClock(ctx context.Context, p Plan, rt ContainerRuntime, h Hooks, now
 //
 // This is the loop that mirrors completeAttempt. Every branch below names the
 // controller behaviour it reproduces.
-func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h Hooks, now Clock) (TestResult, error) {
+func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h Hooks, now Clock, runStarted time.Time) (TestResult, error) {
 	res := TestResult{
 		Name: t.Name,
 		Kind: string(t.Spec.Kind),
@@ -293,7 +376,13 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 		// defaults an unset scope to Node, and a dispatcher that reads the
 		// YAML verbatim must apply the same default or the two disagree about
 		// the same document.
-		Scope:           scopeOf(t.Spec),
+		Scope: scopeOf(t.Spec),
+		// COPIED, not shared: the result outlives the plan and a consumer must
+		// not be able to reach back into it. Echoed and never interpreted —
+		// pkg/contract tells a consumer to group a sweep's cells BY these, and
+		// a result that carried the name but not the labels would make a
+		// four-cell precision sweep four results nothing can group.
+		VariantAxes:     plan.CopyAxes(t.Axes),
 		Nodes:           NodesFor(p, t),
 		StartedAt:       now(),
 		RepeatsRequired: repeatCount(t.Spec),
@@ -320,7 +409,7 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 		spec.Env["BURNIN_ATTEMPT"] = fmt.Sprint(attempt)
 
 		started := now()
-		exec, err := rt.Run(ctx, spec)
+		exec, err := runOnce(ctx, rt, spec, t, attempt, started, runStarted, p, h, now)
 		if err != nil {
 			// The runtime itself failed. Recorded as an Error attempt so the
 			// retry budget applies, rather than aborting the whole run: a
@@ -398,6 +487,114 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 			return settle(api.RunError), nil
 		}
 	}
+}
+
+// runOnce executes one attempt, publishing checkpoints along the way when the
+// test asked for them and the runtime can stream.
+//
+// The timing decision lives HERE and not in the runtime, because the interval
+// is a property of the test — which is in the plan, which the engine owns. A
+// runtime that decided when to sample would need to be told the plan, and every
+// implementation of the interface would have to reproduce the rule.
+//
+// A checkpoint publishes nothing back into the attempt: the returned Execution
+// is exactly what the runtime produced. That is the "evidence, never a verdict"
+// rule expressed as a signature — there is no path from here into the phase.
+func runOnce(
+	ctx context.Context,
+	rt ContainerRuntime,
+	spec RunSpec,
+	t PlannedTest,
+	attempt int32,
+	started time.Time,
+	runStarted time.Time,
+	p Plan,
+	h Hooks,
+	now Clock,
+) (Execution, error) {
+	interval := checkpointInterval(t.Spec)
+	stream, canStream := rt.(StreamingRuntime)
+	if interval <= 0 || !canStream || h.OnCheckpoint == nil {
+		// Nothing to publish, nobody to publish to, or a runtime that cannot
+		// stream. The last case degrades the EVIDENCE and never the verdict,
+		// which is why it is silent rather than an error.
+		return rt.Run(ctx, spec)
+	}
+
+	// last is read and written only from the runtime's write goroutine, which
+	// calls onOutput serially — liveBuffer notifies outside its lock but never
+	// concurrently with itself.
+	last := started
+	return stream.RunStreaming(ctx, spec, func(stdoutSoFar string) {
+		at := now()
+		if at.Sub(last) < interval {
+			return
+		}
+
+		// The exit code is deliberately not consulted: the container has not
+		// exited, and only the parsed metrics are wanted. Passing 0 selects no
+		// behaviour — the phase logic is not on this path at all, which is the
+		// same choice the operator's own checkpoint makes.
+		parsed := runner.Parse(string(t.Spec.Kind), stdoutSoFar, 0)
+		if len(parsed.Metrics) == 0 {
+			// Nothing to publish yet. `last` is NOT advanced, so the next write
+			// tries again rather than waiting out another whole interval for a
+			// runner that is simply slow to emit its first line.
+			return
+		}
+		last = at
+
+		h.checkpoint(Checkpoint{
+			Test:     t.Name,
+			Sequence: checkpointSequence(p, runStarted, at),
+			Attempt:  attempt,
+			Metrics:  parsed.Metrics,
+			At:       at,
+		})
+	})
+}
+
+// checkpointInterval is how often one test publishes its in-progress metrics.
+// Zero or nil disables it, matching the operator's own reading of the field.
+func checkpointInterval(spec api.BurnInTestSpec) time.Duration {
+	if spec.CheckpointIntervalSeconds == nil || *spec.CheckpointIntervalSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(*spec.CheckpointIntervalSeconds) * time.Second
+}
+
+// checkpointSequence numbers a run's checkpoints.
+//
+// DERIVED from elapsed time rather than counted, which is the operator's own
+// choice and for its reason: the sequence feeds the envelope's DeliveryID, and
+// a key that moved on every attempt would mint a new identity per retry and
+// defeat the receiver's dedupe — turning a flaky endpoint into a flood of
+// near-identical records.
+//
+// The interval used is the RUN's — the shortest positive one any test asked
+// for — so two tests with different cadences still produce one monotonic
+// sequence for the run, which is what a consumer orders by.
+func checkpointSequence(p Plan, started, at time.Time) int {
+	interval := runCheckpointInterval(p)
+	if interval <= 0 {
+		return 0
+	}
+	elapsed := at.Sub(started)
+	if elapsed <= 0 {
+		return 0
+	}
+	return int(elapsed / interval)
+}
+
+// runCheckpointInterval is the shortest positive interval any test declares.
+func runCheckpointInterval(p Plan) time.Duration {
+	var shortest time.Duration
+	for i := range p.Tests {
+		if d := checkpointInterval(p.Tests[i].Spec); d > 0 && (shortest == 0 || d < shortest) {
+			shortest = d
+		}
+	}
+	return shortest
 }
 
 // evidence is what an attempt established beyond its phase.
@@ -610,8 +807,14 @@ func finalPhase(results []TestResult) api.RunPhase {
 // point-to-point measurement to one machine sends an engineer to replace the
 // wrong part.
 func NodesFor(p Plan, t PlannedTest) []string {
-	if t.Spec.Scope == api.ScopePair && p.Rendezvous != nil {
+	if p.Rendezvous == nil {
+		return []string{p.Node}
+	}
+	switch t.Spec.Scope {
+	case api.ScopePair:
 		return p.Rendezvous.pairNodes(p.Node)
+	case api.ScopeGroup:
+		return p.Rendezvous.groupNodes(p.Node)
 	}
 	return []string{p.Node}
 }

@@ -85,11 +85,53 @@ single-rank run would print `busbw=0.00` on perfectly healthy hardware and fail
 every floor gate forever, so the runner **refuses `nranks < 2`** as a config
 error rather than reporting that zero.
 
-This matters on Strix Halo specifically: each box has one iGPU, so a meaningful
-figure requires a **pair of nodes**. (RCCL does have an AMD-only escape hatch,
+This matters on Strix Halo specifically: each box has **one** iGPU, so a
+meaningful figure requires a **pair of nodes** — on this SKU the Node-scope path
+below always finds one device and skips, which is correct for this hardware, not
+a gap. (RCCL does have an AMD-only escape hatch,
 `NCCL_MULTI_RANK_GPU_ENABLE=1`, to put two ranks on one device. It is not used
 here: it would measure a loopback, not a fabric, while reporting under a metric
 name that means fabric.)
+
+## Node scope: intra-node, `ncclCommInitAll`
+
+No `BURNIN_ROLE` and no `BURNIN_NRANKS` means Node scope. What decides whether
+this pod may run a collective is a **positive** fact about the hardware — how
+many devices HIP reports — never the mere absence of those variables.
+
+- **Fewer than two devices skips**, with the count in the message. On Strix
+  Halo (one iGPU per box) this is the ONLY path this runner's shipped hardware
+  ever takes.
+- **Two or more devices runs the collective**, joined via `ncclCommInitAll`,
+  over the collective named by the `collective` variant axis
+  (`BURNIN_VARIANT_COLLECTIVE`) — `allreduce` by default, or `allgather`,
+  `reducescatter`, `alltoall`.
+
+This is aimed at a **different** AMD SKU than the rest of this file: a
+multi-GPU-per-box part (MI300X-class), which is what AMD's CVF gates intra-node
+all-reduce bandwidth on. This repository has no such hardware. `ranks` is
+reported (Evidence); `ncclTransport` is **not** — unlike NVIDIA's `nccl`, this
+runner has no wrapper process to capture `RCCL_DEBUG=INFO` from, and adding a
+same-process stderr-capture trick was judged not worth the risk for a label
+that never gates anything.
+
+Same naming decision as NVIDIA's runner: `busBandwidthGBs`/`algBandwidthGBs`
+keep their names at every scope and for every collective — see
+`pkg/contract/metrics.go`'s doc comment.
+
+**`BURNIN_DURATION_SECONDS` bounds this sweep, and NVIDIA's `nccl` does not
+follow the same shape.** This file's cross-node path has always swept sizes
+geometrically until the duration budget ran out, so the new Node-scope path
+follows that pre-existing convention; `nccl_pair.cu`'s Node-scope path instead
+follows NCCL's own pre-existing convention of a fixed 5-size list, unbounded by
+duration, matching how its Pair/Group paths have always worked (there,
+`BURNIN_DURATION_SECONDS` bounds only the rendezvous wait). Neither vendor's
+Node-scope path invented this difference — each inherited its own file's
+established sweep shape — but it means a profile setting `durationSeconds` on
+`nccl` gets a wall-clock-bounded sweep on AMD and a fixed one on NVIDIA. This
+is accepted rather than papered over: harmonising the two would mean rewriting
+one vendor's PRE-EXISTING cross-node sweep, which is out of scope for the
+Node-scope addition that motivated this note.
 
 At **n=2 the factor is exactly 1**, so `busBandwidthGBs == algBandwidthGBs` for
 a Pair. That is not a rounding artifact — a two-rank all-reduce moves each byte
@@ -118,14 +160,16 @@ wrong is the one hardware verdict this runner returns.
 **Error (3)** — bootstrap failure, HIP/RCCL API failure, fewer than two ranks,
 or no size producing a timed result. Hardware unjudged, retry available.
 
-**Skip (2)** — a Node-scope invocation, where there is no second rank to collect
-with.
+**Skip (2)** — a Node-scope invocation with fewer than two devices — every
+Strix Halo box, one iGPU each.
 
 ## Status — read before pinning
 
 - **NOT VERIFIED ON HARDWARE.** The bandwidth arithmetic and sweep selection are
   unit-tested without a GPU (`collective_bw_test.cc`); the HIP/RCCL path is
-  compile-verified only. Tracked in issue #320.
+  compile-verified only. Tracked in issue #320. The Node-scope `>=2`-device
+  path additionally has no MI300X-class hardware to run on at all — see issue
+  #406.
 - **AMD's own multi-node validation on gfx1151 is thin.** PR #3415's test plan
   states testing was on *a single gfx1151 GPU only; multi-GPU and multi-node
   cluster validation is still pending.* The only two-node evidence is a

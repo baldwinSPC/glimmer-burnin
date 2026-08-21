@@ -8,15 +8,15 @@ import (
 // SinkType is where a BurnInRun's verdict is exported.
 //
 // This is the ONLY integration seam with an external control plane. The operator
-// never imports Glimmer (or any consumer); it POSTs a generic result document to
-// a webhook, so Glimmer — or Prometheus, or a customer's own system — consumes
-// burn-in verdicts without a code dependency. That standalone contract is what
-// makes this repo publishable on its own.
+// never imports a consumer; it POSTs a generic result document to
+// a webhook, so a control plane — or Prometheus, or a customer's own system —
+// consumes burn-in verdicts without a code dependency. That standalone contract
+// is what makes this repo publishable on its own.
 // +kubebuilder:validation:Enum=Webhook;Prometheus;ConfigMap
 type SinkType string
 
 const (
-	// SinkWebhook POSTs the result JSON to a URL (Glimmer cloud registers one here).
+	// SinkWebhook POSTs the result JSON to a URL (a control plane registers one here).
 	SinkWebhook SinkType = "Webhook"
 	// SinkPrometheus exposes per-run metrics for scrape.
 	SinkPrometheus SinkType = "Prometheus"

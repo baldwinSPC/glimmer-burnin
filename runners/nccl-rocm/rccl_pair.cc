@@ -65,6 +65,7 @@
 #include <hip/hip_runtime.h>
 #include <rccl/rccl.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -74,6 +75,24 @@
 #include <vector>
 
 #include "collective_bw.h"
+
+// ── THE SECOND PATH: intra-node, ncclCommInitAll ─────────────────────────────
+//
+// Everything above main() is the ORIGINAL path: this process is one rank, and
+// two of them find each other over TCP and join one communicator ACROSS
+// NODES. Node scope is a second, disjoint path: one process, EVERY device the
+// pod was allocated, joined into N communicators via ncclCommInitAll — no
+// bootstrap handle exchange needed, because there is no second process. See
+// collective_bw.h for the collective-specific arithmetic and buffer sizing,
+// ported from runners/nccl/collective/collective.h.
+//
+// NOT PORTED: ncclTransport. NVIDIA's nccl_pair is driven by a Go wrapper that
+// execs this binary as a child process and can capture NCCL_DEBUG=INFO from
+// its combined output; this file has no such wrapper — it IS the process, and
+// there is nothing else to capture its own stderr from without a same-process
+// redirection trick this runner does not take on. Node-scope RCCL runs
+// therefore report no ncclTransport label; the metric stays Evidence-only and
+// its absence changes no verdict.
 
 namespace {
 
@@ -291,6 +310,226 @@ int fetchUniqueId(const std::string &peer, int port, int budgetSec, ncclUniqueId
 		}                                                                                \
 	} while (0)
 
+// launchGroup issues one collective across every device, batched as a SINGLE
+// RCCL group. AllToAll is composed from nranks*nranks point-to-point
+// ncclSend/ncclRecv pairs inside the same group — RCCL has no native
+// AllToAll, the same as NCCL, and the pattern is the one NCCL's own user
+// guide gives for implementing one. A device must be hipSetDevice'd as
+// current immediately before the call that targets it, group or not.
+int launchGroup(burnin::Collective collective, int devices, const std::vector<int> &devList,
+                 std::vector<ncclComm_t> &comms, std::vector<hipStream_t> &streams,
+                 std::vector<float *> &sendBufs, std::vector<float *> &recvBufs,
+                 const burnin::BufferPlan &plan) {
+	RCCL_CHECK(ncclGroupStart());
+	if (collective == burnin::Collective::AllToAll) {
+		for (int i = 0; i < devices; ++i) {
+			HIP_CHECK(hipSetDevice(devList[i]));
+			for (int j = 0; j < devices; ++j) {
+				RCCL_CHECK(ncclSend(sendBufs[i] + static_cast<std::size_t>(j) * plan.ChunkCount, plan.ChunkCount,
+				                     ncclFloat, j, comms[i], streams[i]));
+				RCCL_CHECK(ncclRecv(recvBufs[i] + static_cast<std::size_t>(j) * plan.ChunkCount, plan.ChunkCount,
+				                     ncclFloat, j, comms[i], streams[i]));
+			}
+		}
+	} else {
+		for (int i = 0; i < devices; ++i) {
+			HIP_CHECK(hipSetDevice(devList[i]));
+			switch (collective) {
+			case burnin::Collective::AllReduce:
+				RCCL_CHECK(
+				    ncclAllReduce(sendBufs[i], recvBufs[i], plan.SendCount, ncclFloat, ncclSum, comms[i], streams[i]));
+				break;
+			case burnin::Collective::AllGather:
+				RCCL_CHECK(ncclAllGather(sendBufs[i], recvBufs[i], plan.SendCount, ncclFloat, comms[i], streams[i]));
+				break;
+			case burnin::Collective::ReduceScatter:
+				RCCL_CHECK(ncclReduceScatter(sendBufs[i], recvBufs[i], plan.RecvCount, ncclFloat, ncclSum, comms[i],
+				                              streams[i]));
+				break;
+			case burnin::Collective::AllToAll:
+				break;  // handled above; unreachable here
+			}
+		}
+	}
+	RCCL_CHECK(ncclGroupEnd());
+	return kExitPass;
+}
+
+// runLocalMultiGpu is the Node-scope path — see the file header. One process,
+// every visible device, one collective chosen by BURNIN_VARIANT_COLLECTIVE,
+// joined via ncclCommInitAll rather than the bootstrap handshake main()'s
+// cross-node path uses.
+int runLocalMultiGpu(int devices, int durationSeconds, burnin::Collective collective) {
+	std::vector<int> devList(devices);
+	for (int i = 0; i < devices; ++i) devList[i] = i;
+
+	for (int i = 0; i < devices; ++i) {
+		hipDeviceProp_t props;
+		std::memset(&props, 0, sizeof(props));
+		HIP_CHECK(hipGetDeviceProperties(&props, i));
+		std::fprintf(stderr, "rccl_pair: device %d of %d: %s (%s)\n", i, devices, props.name, props.gcnArchName);
+	}
+	{
+		int version = 0;
+		if (ncclGetVersion(&version) == ncclSuccess) {
+			std::fprintf(stderr, "rccl_pair: rccl_version=%d.%d.%d collective=%s\n", version / 10000,
+			             (version / 100) % 100, version % 100, burnin::CollectiveName(collective));
+		}
+	}
+	std::printf("ranks=%d\n", devices);
+
+	std::vector<ncclComm_t> comms(devices);
+	RCCL_CHECK(ncclCommInitAll(comms.data(), devices, devList.data()));
+
+	// Every message size the timed sweep will use, up front, so ONE allocation
+	// per device serves all of them — the measurement is of the collective, not
+	// of an allocator. The sweep itself is a fixed geometric progression, same
+	// as main()'s cross-node path, not a CLI-configurable list: this file takes
+	// no arguments at all (everything comes from the environment).
+	std::size_t maxCount = 32 * 1024 * 1024;  // 128 MiB of float, matching main()'s cross-node ceiling
+	const burnin::BufferPlan maxPlan = burnin::PlanBuffers(collective, maxCount, devices);
+
+	std::vector<hipStream_t> streams(devices);
+	std::vector<float *> sendBufs(devices), recvBufs(devices);
+
+	for (int i = 0; i < devices; ++i) {
+		HIP_CHECK(hipSetDevice(devList[i]));
+		HIP_CHECK(hipStreamCreate(&streams[i]));
+		HIP_CHECK(hipMalloc(&sendBufs[i], maxPlan.BufElements * sizeof(float)));
+		HIP_CHECK(hipMalloc(&recvBufs[i], maxPlan.BufElements * sizeof(float)));
+
+		// Seeded ONCE — for AllReduce, ReduceScatter and AllGather ONLY, for
+		// the reason given at runners/nccl/nccl_pair.cu's runLocalMultiGpu:
+		// neither pattern depends on where a chunk boundary falls, so one seed
+		// at the largest layout is correct at every swept size. AllToAll is NOT
+		// seeded here — its seed is keyed on chunk OFFSET, which varies with
+		// the swept size, so it is reseeded per size below.
+		std::vector<float> host(maxPlan.BufElements);
+		switch (collective) {
+		case burnin::Collective::AllReduce:
+		case burnin::Collective::ReduceScatter:
+			std::fill(host.begin(), host.end(), 1.0f);
+			HIP_CHECK(hipMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), hipMemcpyHostToDevice));
+			break;
+		case burnin::Collective::AllGather:
+			std::fill(host.begin(), host.end(), burnin::SeedForAllGather(i));
+			HIP_CHECK(hipMemcpy(sendBufs[i], host.data(), maxPlan.BufElements * sizeof(float), hipMemcpyHostToDevice));
+			break;
+		case burnin::Collective::AllToAll:
+			break;  // seeded per size, below
+		}
+	}
+
+	long long wrong = 0;
+	const auto started = std::chrono::steady_clock::now();
+
+	for (std::size_t count = 256 * 1024; count <= maxCount; count *= 4) {
+		const burnin::BufferPlan plan = burnin::PlanBuffers(collective, count, devices);
+		const std::size_t bytes = count * sizeof(float);
+
+		// See the identical comment in runners/nccl/nccl_pair.cu: seeding
+		// AllToAll once at the max layout and launching at a smaller one reads
+		// every peer's chunk from the wrong offset (every peer but the last
+		// receives peer 0's data), which the correctness check below would
+		// then report as a hardware miscompare that never happened.
+		if (collective == burnin::Collective::AllToAll) {
+			for (int i = 0; i < devices; ++i) {
+				std::vector<float> host(plan.BufElements, 0.0f);
+				for (int j = 0; j < devices; ++j) {
+					const float v = burnin::SeedForAllToAll(i, j);
+					const std::size_t base = static_cast<std::size_t>(j) * plan.ChunkCount;
+					for (std::size_t k = 0; k < plan.ChunkCount && base + k < host.size(); ++k) host[base + k] = v;
+				}
+				HIP_CHECK(hipSetDevice(devList[i]));
+				HIP_CHECK(hipMemcpy(sendBufs[i], host.data(), host.size() * sizeof(float), hipMemcpyHostToDevice));
+			}
+		}
+
+		int rc = launchGroup(collective, devices, devList, comms, streams, sendBufs, recvBufs, plan);
+		if (rc != kExitPass) return rc;
+		for (int i = 0; i < devices; ++i) {
+			HIP_CHECK(hipSetDevice(devList[i]));
+			HIP_CHECK(hipStreamSynchronize(streams[i]));
+		}
+
+		const auto t0 = std::chrono::steady_clock::now();
+		rc = launchGroup(collective, devices, devList, comms, streams, sendBufs, recvBufs, plan);
+		if (rc != kExitPass) return rc;
+		for (int i = 0; i < devices; ++i) {
+			HIP_CHECK(hipSetDevice(devList[i]));
+			HIP_CHECK(hipStreamSynchronize(streams[i]));
+		}
+		const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+		double algbw = 0;
+		if (burnin::algBandwidthGBs(bytes, seconds, &algbw)) {
+			const double busbw = burnin::BusBandwidthFor(collective, algbw, devices);
+			std::fprintf(stderr, "rccl_pair: size=%zu time=%.3fus algbw=%.4f busbw=%.4f\n", bytes, seconds * 1e6,
+			             algbw, busbw);
+			std::printf("RESULT size_bytes=%zu time_us=%.3f algbw_gbs=%.4f busbw_gbs=%.4f\n", bytes, seconds * 1e6,
+			            algbw, busbw);
+		}
+
+		for (int i = 0; i < devices; ++i) {
+			// See nccl_pair.cu's identical comment: current device is stated
+			// explicitly rather than relied upon.
+			HIP_CHECK(hipSetDevice(devList[i]));
+			std::vector<float> back(plan.RecvCount);
+			HIP_CHECK(hipMemcpy(back.data(), recvBufs[i], plan.RecvCount * sizeof(float), hipMemcpyDeviceToHost));
+			switch (collective) {
+			case burnin::Collective::AllReduce:
+			case burnin::Collective::ReduceScatter: {
+				const float expect = static_cast<float>(devices);
+				for (float v : back) {
+					if (v != expect) wrong++;
+				}
+				break;
+			}
+			case burnin::Collective::AllGather:
+				for (int seg = 0; seg < devices; ++seg) {
+					const float expect = burnin::ExpectedAllGatherSegment(seg);
+					const std::size_t base = static_cast<std::size_t>(seg) * plan.SendCount;
+					for (std::size_t k = 0; k < plan.SendCount && base + k < back.size(); ++k) {
+						if (back[base + k] != expect) wrong++;
+					}
+				}
+				break;
+			case burnin::Collective::AllToAll:
+				for (int sender = 0; sender < devices; ++sender) {
+					const float expect = burnin::ExpectedAllToAllChunk(sender, i);
+					const std::size_t base = static_cast<std::size_t>(sender) * plan.ChunkCount;
+					for (std::size_t k = 0; k < plan.ChunkCount && base + k < back.size(); ++k) {
+						if (back[base + k] != expect) wrong++;
+					}
+				}
+				break;
+			}
+		}
+
+		if (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >
+		    static_cast<double>(durationSeconds)) {
+			break;
+		}
+	}
+
+	for (int i = 0; i < devices; ++i) {
+		(void)hipSetDevice(devList[i]);
+		ncclCommDestroy(comms[i]);
+		(void)hipStreamDestroy(streams[i]);
+		(void)hipFree(sendBufs[i]);
+		(void)hipFree(recvBufs[i]);
+	}
+
+	const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+	std::printf("elapsed_s=%.2f\n", elapsed);
+
+	if (wrong > 0) {
+		return fail("the " + std::string(burnin::CollectiveName(collective)) + " returned incorrect data at " +
+		            std::to_string(wrong) + " element(s): every element should equal its expected value");
+	}
+	return pass();
+}
+
 int main() {
 	// ── who am I ─────────────────────────────────────────────────────────────
 	// Group scope sets BURNIN_RANK/BURNIN_NRANKS/BURNIN_ROOT_HOST; Pair scope
@@ -312,8 +551,22 @@ int main() {
 		// Pair scope: two ranks, server is rank 0 and the client fetches from
 		// BURNIN_PEER_HOST.
 		if (role.empty()) {
-			return skip("no BURNIN_ROLE and no BURNIN_NRANKS: this image runs a collective and "
-			            "needs at least two ranks, so it is not applicable to a Node-scope run");
+			// Node scope. What decides whether this pod may run a collective is
+			// a POSITIVE fact about the hardware — how many devices HIP can see
+			// — never the mere absence of BURNIN_ROLE/BURNIN_NRANKS. See
+			// DecideNodeScope's own doc comment.
+			int devCount = 0;
+			if (hipGetDeviceCount(&devCount) != hipSuccess) devCount = 0;
+			const burnin::NodeScopeDecision decision = burnin::DecideNodeScope(devCount);
+			if (decision.Skip) return skip(decision.Reason);
+
+			burnin::Collective collective;
+			if (!burnin::ParseCollective(env("BURNIN_VARIANT_COLLECTIVE"), &collective)) {
+				return errored("BURNIN_VARIANT_COLLECTIVE=\"" + env("BURNIN_VARIANT_COLLECTIVE") +
+				                "\" is not one of allreduce, allgather, reducescatter, alltoall — refusing "
+				                "rather than measuring a different collective than the profile asked for");
+			}
+			return runLocalMultiGpu(devCount, durationSeconds, collective);
 		}
 		nranks = 2;
 		rank = (role == "server") ? 0 : 1;

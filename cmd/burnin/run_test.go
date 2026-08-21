@@ -293,7 +293,7 @@ func TestTheTwoHalvesOfTheCLIFitTogether(t *testing.T) {
 	// reads. If that ever stops being true the CLI has two halves and no
 	// feature, so it is asserted rather than assumed.
 	dir := t.TempDir()
-	if err := writeResults(dir, sampleReport(), nil); err != nil {
+	if err := writeResults(dir, sampleReport(), nil, localrun.Plan{Tests: []localrun.PlannedTest{{Name: "compute-smoke", Required: true}}}); err != nil {
 		t.Fatalf("writeResults: %v", err)
 	}
 
@@ -314,12 +314,293 @@ func TestTheTwoHalvesOfTheCLIFitTogether(t *testing.T) {
 
 func TestResultsDirectoryLayoutIsStable(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeResults(dir, sampleReport(), nil); err != nil {
+	if err := writeResults(dir, sampleReport(), nil, localrun.Plan{Tests: []localrun.PlannedTest{{Name: "compute-smoke", Required: true}}}); err != nil {
 		t.Fatalf("writeResults: %v", err)
 	}
 	for _, want := range []string{"run.json", "envelopes", "raw"} {
 		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
 			t.Errorf("missing %s: %v", want, err)
 		}
+	}
+}
+
+// ─── Variants ────────────────────────────────────────────────────────────────
+
+// THE BUG THIS PINS: buildPlan read spec.tests[].variants, the CRD schema
+// validated them, and then they were silently discarded. A four-cell precision
+// sweep — the entire point of the profile — ran as ONE execution of the parent
+// test, under the parent's name, with none of the cell's thresholds applied.
+// Nothing in the output said a cell was missing, so the only way to notice was
+// to run the same profile in a cluster and count the results.
+func TestVariantsExpandIntoOneExecutionPerCell(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: sweep
+spec:
+  tests:
+    - testRef: gemm
+      variants:
+        - name: fp4
+          axes: {precision: fp4}
+          thresholds:
+            - metric: achievedTflops
+              comparison: GreaterThanOrEqual
+              value: "700"
+        - name: bf16
+          axes: {precision: bf16}
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: gemm
+spec:
+  kind: compute-smoke
+  thresholds:
+    - metric: nonfiniteCount
+      comparison: Equal
+      value: "0"
+`
+	s, err := loadSuite([]string{writeSuite(t, body)})
+	if err != nil {
+		t.Fatalf("loadSuite: %v", err)
+	}
+	p, _, err := s.buildPlan("", "n1", 0, nil)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+
+	if len(p.Tests) != 2 {
+		t.Fatalf("got %d executions, want 2 — the profile's variants were dropped", len(p.Tests))
+	}
+	if p.Tests[0].Name != "gemm-fp4" || p.Tests[1].Name != "gemm-bf16" {
+		t.Fatalf("names = %q/%q, want gemm-fp4/gemm-bf16 — a cell's name is its result identity",
+			p.Tests[0].Name, p.Tests[1].Name)
+	}
+	if got := p.Tests[0].Axes["precision"]; got != "fp4" {
+		t.Errorf("fp4 cell axes = %v, want precision=fp4 carried onto the execution", p.Tests[0].Axes)
+	}
+	if p.Tests[0].Parent != "gemm" {
+		t.Errorf("Parent = %q, want gemm", p.Tests[0].Parent)
+	}
+	// The overlay REPLACES: the fp4 cell must not still carry the parent's gate.
+	if th := p.Tests[0].Spec.Thresholds; len(th) != 1 || th[0].Metric != "achievedTflops" {
+		t.Errorf("fp4 thresholds = %+v, want only its own — a retained parent gate is invisible in the profile", th)
+	}
+	// A cell with no threshold overlay INHERITS.
+	if th := p.Tests[1].Spec.Thresholds; len(th) != 1 || th[0].Metric != "nonfiniteCount" {
+		t.Errorf("bf16 thresholds = %+v, want the parent's inherited", th)
+	}
+}
+
+// The axes must reach the RUNNER, not merely the plan. A cell that planned
+// correctly but ran without BURNIN_VARIANT_PRECISION would run the default
+// configuration and be reported as the fp4 cell — the same wrong answer the
+// unreachable-axis refusal exists to prevent, reached by forgetting to inject.
+func TestAVariantCellsAxesReachTheRunnersEnvironment(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: sweep
+spec:
+  tests:
+    - testRef: t
+      variants:
+        - name: fp4
+          axes: {precision: fp4, class: smoke}
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: t
+spec:
+  kind: custom
+  runner:
+    image: example.invalid/runner:test
+`
+	s, _ := loadSuite([]string{writeSuite(t, body)})
+	p, _, err := s.buildPlan("", "n1", 0, nil)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+	spec, err := localrun.Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if got := spec.Env["BURNIN_VARIANT_PRECISION"]; got != "fp4" {
+		t.Errorf("BURNIN_VARIANT_PRECISION = %q, want fp4; env was %v", got, spec.Env)
+	}
+	if got := spec.Env["BURNIN_VARIANT_CLASS"]; got != "smoke" {
+		t.Errorf("BURNIN_VARIANT_CLASS = %q, want smoke", got)
+	}
+}
+
+// #296, on this dispatcher: an axis that cannot become an environment variable
+// is refused before a container starts, rather than skipped — the cell would
+// otherwise run the DEFAULT configuration while the run reported it under a
+// distinct label, which is a confident wrong answer dressed as evidence.
+func TestAnAxisThatCannotReachTheRunnerIsRefused(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: sweep
+spec:
+  tests:
+    - testRef: t
+      variants:
+        - name: big
+          axes: {message-bytes: "8"}
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: t
+spec:
+  kind: custom
+  runner:
+    image: example.invalid/runner:test
+`
+	s, _ := loadSuite([]string{writeSuite(t, body)})
+	_, _, err := s.buildPlan("", "n1", 0, nil)
+	if err == nil {
+		t.Fatal("buildPlan accepted an axis the runner could never receive")
+	}
+	if !strings.Contains(err.Error(), "message-bytes") || !strings.Contains(err.Error(), "t-big") {
+		t.Errorf("the refusal must name both the axis and the cell: %v", err)
+	}
+}
+
+// Two variants of one test sharing a name collide exactly as two tests sharing
+// one do: the second would never run and its verdict would silently overwrite
+// the first's.
+func TestTwoVariantsWithTheSameNameAreRefused(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: sweep
+spec:
+  tests:
+    - testRef: t
+      variants:
+        - name: a
+        - name: a
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: t
+spec:
+  kind: custom
+  runner:
+    image: example.invalid/runner:test
+`
+	s, _ := loadSuite([]string{writeSuite(t, body)})
+	if _, _, err := s.buildPlan("", "n1", 0, nil); err == nil {
+		t.Fatal("two variants named the same were accepted")
+	}
+}
+
+// ─── valueFrom environment ───────────────────────────────────────────────────
+
+// THE BUG THIS PINS: a BurnInTest whose spec.runner.env uses valueFrom rather
+// than value survives podForTest verbatim and is resolved by the kubelet in a
+// cluster. This dispatcher copied e.Value, and e.Value on a valueFrom entry is
+// the EMPTY STRING — so the variable was SET, and set to nothing. A runner
+// testing `if [ -n "$HOST_IP" ]` took the wrong branch; one that used it built
+// ":9000". The same BurnInTest worked in-cluster.
+func TestAnEnvValueFromIsWarnedAboutRatherThanSilentlyEmptied(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: p
+spec:
+  tests:
+    - testRef: t
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: t
+spec:
+  kind: custom
+  runner:
+    image: example.invalid/runner:test
+    env:
+      - name: TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: creds
+            key: token
+`
+	s, err := loadSuite([]string{writeSuite(t, body)})
+	if err != nil {
+		t.Fatalf("loadSuite: %v", err)
+	}
+	p, warnings, err := s.buildPlan("", "n1", 0, nil)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+
+	joined := strings.Join(warnings, " ")
+	if !strings.Contains(joined, "TOKEN") || !strings.Contains(joined, "secretKeyRef creds/token") {
+		t.Errorf("a valueFrom this dispatcher cannot resolve must be warned about by name: %v", warnings)
+	}
+
+	spec, err := localrun.Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if v, present := spec.Env["TOKEN"]; present {
+		t.Errorf("TOKEN = %q and is present; it must be ABSENT so a runner can tell "+
+			"\"nobody could answer this\" from \"the cluster set it to nothing\"", v)
+	}
+}
+
+// status.hostIP is the documented way a runner learns the address its peers
+// reach it on, and this dispatcher is standing on the machine — so it answers,
+// from the same routing question a kubelet answers.
+func TestTheHostsOwnFieldRefsAreResolvedFromTheMachine(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: p
+spec:
+  tests:
+    - testRef: t
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: t
+spec:
+  kind: custom
+  runner:
+    image: example.invalid/runner:test
+    env:
+      - name: NODE
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+`
+	s, _ := loadSuite([]string{writeSuite(t, body)})
+	p, warnings, err := s.buildPlan("", "spark-a", 0, nil)
+	if err != nil {
+		t.Fatalf("buildPlan: %v", err)
+	}
+	if strings.Contains(strings.Join(warnings, " "), "NODE") {
+		t.Errorf("spec.nodeName is resolvable here and must not be warned about: %v", warnings)
+	}
+	spec, err := localrun.Translate(p, p.Tests[0])
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if spec.Env["NODE"] != "spark-a" {
+		t.Errorf("NODE = %q, want spark-a", spec.Env["NODE"])
 	}
 }

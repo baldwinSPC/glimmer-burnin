@@ -21,17 +21,41 @@ spec:
   kind: thermal-soak
   scope: Node
   durationSeconds: 604800 # seven days
+  runner:
+    # The Xid watch's grant — all three parts, and they only mean anything
+    # together (see runners/thermal-soak/README.md, "The Xid watch", and the
+    # measured three-way trap in runners/host-health/README.md, issue #134):
+    # the mount supplies the device node, privileged supplies the
+    # device-cgroup grant, and runAsUser: 0 is what lets a capability survive
+    # into the effective set. Drop all three and the soak still runs — it
+    # reports xid_source=none and OMITS xid_count — but then the xidEvents
+    # gate below must be dropped with them, because a gate on a metric the
+    # runner cannot produce fails every node in the shape of a hardware
+    # verdict.
+    privileged: true
+    runAsUser: 0
+    hostPaths:
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        # readOnly defaults to true. Asserting CharDevice means the kubelet
+        # refuses the pod on a node with no /dev/kmsg rather than creating
+        # anything — an infrastructure Error, the node unjudged, which is
+        # honest.
+        type: CharDevice
   soak:
     # One pod's window. The floor is 300: below five minutes the run spends more
     # time changing pods than measuring hardware. This soak is 672 segments.
     segmentSeconds: 900
     # Left at its default of false. Turning it on ends the soak the moment the
-    # aggregate PROVABLY violates a gate — meaning no later segment could retract
-    # it. Two of the three gates below qualify: sustainedClockPct is a Min under
-    # a floor and a minimum only falls, and gpuTempC is a Max under a ceiling and
-    # a maximum only rises. elapsedS does NOT: it is a Sum under a floor, and a
-    # sum only grows, so that gate can only become satisfied and never provably
-    # broken. Read the abortEarly section of docs/soaks.md before setting it.
+    # aggregate PROVABLY violates a gate — meaning no later segment could
+    # retract it. Three of the five gates below qualify: sustainedClockPct is a
+    # Min under a floor and a minimum only falls; gpuTempC is a Max under a
+    # ceiling and a maximum only rises; and xidEvents is a Sum under Equal 0,
+    # provably broken the moment any segment counts one — the case most worth
+    # turning this on for, since a node that logged an Xid at hour six gains
+    # nothing from six more days of burn. elapsedS and xidWindowsWatched do
+    # NOT qualify: both are Sums under floors, which only grow toward
+    # satisfaction. Read the abortEarly section of docs/soaks.md first.
     abortEarly: false
   # Mid-flight evidence, so a soak that is lost at hour eighty still says what
   # the temperatures were doing. A checkpoint is EVIDENCE and never a verdict:
@@ -44,17 +68,36 @@ spec:
     - metric: elapsedS
       comparison: GreaterThanOrEqual
       value: "574560"
-    # NO XID GATE HERE, deliberately. thermal-soak does not measure the kernel
-    # ring buffer and never emits xidEvents — it reports eccErrors and the
-    # throttle counters — so gating it here would fail EVERY healthy node after
-    # seven days of burn, with "metric was not reported by the runner". That is a
-    # Failed, the one phase this operator never retries, so the retry budget goes
-    # unspent and the node is permanently indicted on a reading nobody took.
-    # A missing measurement failing closed is correct; asking the wrong runner
-    # for it is the authoring error, and this is where it was made.
+    # "Zero Xids DURING seven days of load" — the criterion every operator
+    # write-up states and this operator could not express until thermal-soak
+    # grew its own /dev/kmsg watch. The gate is only satisfiable because of
+    # the spec.runner grant above: an EARLIER revision of this sample carried a
+    # long comment here explaining that thermal-soak "never emits xidEvents"
+    # and that gating it would fail every healthy node — true then, and the
+    # trap it described is still armed if the grant above is removed while
+    # this gate stays.
     #
-    # Xids over the same window belong on a host-health test in this profile,
-    # which reads /dev/kmsg and does emit them.
+    # WINDOW-SCOPED, and Sum across segments: each segment's pod counts only
+    # what arrived while IT was loading the part (the watch positions at the
+    # ring buffer's tail at segment start), and foldMetrics sums the segments
+    # — so this value is "Xids during the whole soak's own load", never "Xids
+    # since boot". host-health's xidPreexisting is the gate for held-over
+    # history, and a host-health test after this one still corroborates the
+    # whole node.
+    - metric: xidEvents
+      comparison: Equal
+      value: "0"
+    # The pairing gate that makes the one above mean what it says over 672
+    # segments. foldMetrics keeps a metric if ANY segment reported it — so a
+    # segment whose watch was lost (a mid-soak reboot that came back without
+    # the grant, a wrapped ring buffer) contributes silence while the other
+    # segments' honest zeros still sum to 0 and the gate above passes. This
+    # key is 1 per fully-watched window, summed, so a floor at the segment
+    # count certifies only a soak EVERY window of which was actually observed.
+    # Matches soak.segmentSeconds: 604800 / 900 = 672.
+    - metric: xidWindowsWatched
+      comparison: GreaterThanOrEqual
+      value: "672"
     # A ceiling on a Max-aggregated metric: the peak across the WHOLE soak, not
     # the peak of the last window.
     - metric: gpuTempC

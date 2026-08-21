@@ -69,8 +69,18 @@ func (f pairFlags) rendezvous() (*localrun.Rendezvous, error) {
 // The client is the deciding side, here as at Pair scope in the operator: it is
 // where perftest and nccl-tests report. A server that also emitted a verdict
 // would be a second claim about one measurement, and the two would be compared.
+// A GROUP RANK NEVER DECIDES. rank 0 holds the bandwidth figure, but "did every
+// rank take part" is a fact no rank can see — so a collective's verdict is
+// rendered by `burnin merge`, which is the only thing that can count to N. See
+// groupDeciding.
 func deciding(rz *localrun.Rendezvous) bool {
-	return rz == nil || rz.Role == localrun.RoleClient
+	if rz == nil {
+		return true
+	}
+	if rz.Rank != nil {
+		return groupDeciding(rz)
+	}
+	return rz.Role == localrun.RoleClient
 }
 
 // announceServerReady watches for the server's listener and says when it opens.

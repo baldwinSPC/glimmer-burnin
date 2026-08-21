@@ -55,6 +55,15 @@ var kubernetesFree = []string{
 	// so the shared verdict brain no longer imports the CRD to get its own
 	// words. This is the entry that had to move for the ledger to stay exact.
 	"pkg/verdict",
+	// Kubernetes-free BY CONSTRUCTION, and it had to be: the whole point of
+	// hoisting the group fold out of internal/controller was that cmd/burnin
+	// could reach it, and the bare-metal path is the one that can afford
+	// controller-runtime least. The fold is expressed over pkg/runner's Result
+	// and pkg/contract's Combination, neither of which needs a cluster — so
+	// nothing here should ever grow a CRD type. If it does, the fold has
+	// started depending on something only the operator has, and the two
+	// dispatchers are about to disagree about a collective's verdict.
+	"pkg/group",
 }
 
 // kubernetesCoupled are the packages that DO cost a consumer Kubernetes, each
@@ -71,9 +80,18 @@ var kubernetesCoupled = map[string]string{
 	// the right time to design that seam is when Path A is built and can say
 	// what it actually needs — not speculatively.
 	"pkg/localrun": "PlannedTest holds api.BurnInTestSpec whole, plus RunPhase, Violation, " +
-		"TestScope and AttemptTrigger. This is the package GEP-0178 has Glimmer's Path A " +
+		"TestScope and AttemptTrigger. This is the package GEP-0178 has Path A " +
 		"adopt, so the coupling lands on the path that can use Kubernetes least",
 	"pkg/runnerimages": "resolution is expressed over api.RunnerSpec and api.VendorImage",
+	// Coupled by the same EXECUTION vocabulary as pkg/localrun, and not by a
+	// new decision: Test.Spec is the api.BurnInTestSpec a profile entry
+	// resolves to, and ExpandVariants overlays api.TestVariant onto it.
+	// pkg/localrun.PlannedTest is an ALIAS for plan.Test, so this entry and
+	// that one describe one coupling, not two — freeing either frees both,
+	// and they must leave this ledger together.
+	"pkg/plan": "Test holds api.BurnInTestSpec whole and ExpandVariants overlays " +
+		"api.TestVariant onto it; it is the profile-resolution half of the same " +
+		"execution vocabulary pkg/localrun is coupled through",
 }
 
 func TestPublicPackagesDeclareWhatTheyCostAConsumer(t *testing.T) {

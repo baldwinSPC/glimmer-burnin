@@ -21,6 +21,25 @@ part with ECC: with no ECC to catch a flipped bit in memory, the bitwise
 self-comparison is the only thing in the entire suite that would notice. A
 miscompare found on a Halo is something nothing else can see.
 
+## The kernel-log fault watch (`xidEvents`)
+
+The one *other* thing that can corroborate a miscompare here is the kernel log.
+This runner reads its own `/dev/kmsg` over exactly the window it is burning and
+counts **amdgpu GPU-reset and uncorrectable-RAS lines** as `xid_count` →
+`xidEvents` — a miscompare *with* a concurrent driver fault is
+driver-acknowledged damage, and a miscompare with `xid_count=0` is the true
+silent-corruption case, which on an ECC-less part is worth being able to state
+precisely.
+
+Shared implementation ([`kmsg/kmsg_watch.h`](kmsg/kmsg_watch.h), byte-identical
+across all four soak-family runners), same opt-in grant (`/dev/kmsg` mount +
+`privileged: true` + `runAsUser: 0`), same honest degradation
+(`xid_source=none`, `xid_count` **omitted**, never a fabricated zero). The
+pattern-narrowness reasoning and the no-`last_xid_code` decision are in
+[`../thermal-soak-rocm/README.md`](../thermal-soak-rocm/README.md#the-kernel-log-fault-watch-xidevents);
+the pod-grant write-up is in
+[`../thermal-soak/README.md`](../thermal-soak/README.md#the-xid-watch-and-what-the-pod-needs-for-it).
+
 ## The comparison is bitwise, and a tolerance would be wrong
 
 The first GEMM's output is the reference; every later GEMM is compared against

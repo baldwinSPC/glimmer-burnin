@@ -24,7 +24,7 @@
 // here to look at" are different claims about the hardware.
 //
 // This is public and free of Kubernetes types — genuinely, unlike pkg/verdict,
-// which depends on api/v1alpha1 (issue #274). Glimmer's
+// which depends on api/v1alpha1 (issue #274). A separate,
 // pre-Kubernetes burn-in path runs the SAME runner images, and if the two
 // dispatchers derived different metrics from identical output they would reach
 // different verdicts about the same hardware. One brain, two dispatchers.
@@ -226,6 +226,11 @@ var aliases = map[string]map[string]string{
 		// reserved for the unwarmed single launch and is marked unsafe to
 		// threshold on. Mapping here would make a real benchmark ungateable.
 		"tflops": "sustainedThroughputTflops",
+		// The SAME alias host-health already declares for the SAME quantity,
+		// read from the SAME source (/dev/kmsg) — this kind's own copy of it,
+		// scoped to this test's own load window rather than to a Node-scope
+		// probe's shorter one. See kmsg/kmsg_watch.h's header comment.
+		"xid_count": "xidEvents",
 	},
 
 	"dcgm-diag": {
@@ -241,8 +246,13 @@ var aliases = map[string]map[string]string{
 		// but that field holds the last Xid CODE rather than a count, so the
 		// subtraction was not a number of anything (#311). It now emits
 		// last_xid_code, which normalises to lastXidCode without an alias
-		// because that is merely a different spelling. xidEvents keeps one
-		// derivation, in host-health, which counts events from /dev/kmsg.
+		// because that is merely a different spelling. xidEvents is derived
+		// from /dev/kmsg by counting events — host-health does this over its
+		// own Node-scope window, and the soak family ("thermal-soak",
+		// "gpu-burn" below) does it independently over each test's own load
+		// window. See pkg/contract's xidEvents doc comment for why two sources
+		// counting their own separate windows is safe rather than a repeat of
+		// this same bug.
 		"pcie_replay_count": "pcieReplayErrors",
 		"rows_remapped":     "remappedRows",
 		// DCGM reports correctable (SBE) and uncorrectable (DBE) ECC counts
@@ -288,6 +298,9 @@ var aliases = map[string]map[string]string{
 		// "soak_seconds" would normalise to soakSeconds, whose lowercase "s"
 		// is not the Seconds suffix — a duration stored as dimensionless.
 		"soak_seconds": "elapsedS",
+		// See the identical entry and comment under "gpu-burn" — the two kinds
+		// share kmsg/kmsg_watch.h and print the same raw key.
+		"xid_count": "xidEvents",
 	},
 
 	"nccl": {

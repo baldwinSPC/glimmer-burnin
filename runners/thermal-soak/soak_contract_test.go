@@ -34,16 +34,18 @@ import (
 )
 
 const (
-	thermalSoakDir = "."
-	gpuBurnDir     = "../gpu-burn"
-	clockprobeDir  = "../clockprobe"
+	thermalSoakDir     = "."
+	gpuBurnDir         = "../gpu-burn"
+	clockprobeDir      = "../clockprobe"
+	thermalSoakRocmDir = "../thermal-soak-rocm"
+	gpuBurnRocmDir     = "../gpu-burn-rocm"
 )
 
 // sharedSources are byte-identical in both runner directories. They are copies
 // rather than a shared path because the publish-runner workflow builds each
 // runner with its OWN directory as the Docker build context, and COPY cannot
 // reach outside a build context.
-var sharedSources = []string{"soak_core.cuh", "nvml_dynamic.h"}
+var sharedSources = []string{"soak_core.cuh", "nvml_dynamic.h", "kmsg/kmsg_watch.h"}
 
 // TestSharedSoakSourcesAreIdentical is what makes "two kinds, one
 // implementation" a fact rather than an intention.
@@ -68,6 +70,62 @@ func TestSharedSoakSourcesAreIdentical(t *testing.T) {
 				"copy one over the other", name, len(a), len(b))
 		}
 	}
+}
+
+// TestKmsgWatchIsIdenticalAcrossAllFourSoakRunners is the FOUR-WAY version of
+// the check above, for the one file kmsg/kmsg_watch.h's own header comment
+// promises is identical everywhere: thermal-soak, gpu-burn, and BOTH -rocm
+// counterparts.
+//
+// It lives here rather than in runners/sharedsource_test.go because that
+// guard's scan is deliberately top-level-only (os.ReadDir, no recursion), so a
+// file inside a kmsg/ subdirectory — needed because runners/thermal-soak/
+// already holds this Go package and cannot also hold a .cc file — is invisible
+// to it. Nothing else checks the ROCm pair's copies, or checks any copy against
+// the NVIDIA ones, without this.
+//
+// The highest-risk code in kmsg/kmsg_watch.h is the OS-facing fd/lseek/EPIPE
+// mechanics, reused byte-for-byte by all four rather than hand-folded
+// separately into each engine — see that file's own header comment for why a
+// second, independently-maintained copy of exactly that logic is the drift this
+// project's "duplication that has to be checked" rule exists to catch.
+func TestKmsgWatchIsIdenticalAcrossAllFourSoakRunners(t *testing.T) {
+	const rel = "kmsg/kmsg_watch.h"
+	dirs := map[string]string{
+		"thermal-soak":      thermalSoakDir,
+		"gpu-burn":          gpuBurnDir,
+		"thermal-soak-rocm": thermalSoakRocmDir,
+		"gpu-burn-rocm":     gpuBurnRocmDir,
+	}
+	const canonical = "thermal-soak"
+	want, err := os.ReadFile(filepath.Join(dirs[canonical], rel))
+	if err != nil {
+		t.Fatalf("reading %s/%s: %v", canonical, rel, err)
+	}
+	for _, name := range sortedDirNames(dirs) {
+		if name == canonical {
+			continue
+		}
+		got, err := os.ReadFile(filepath.Join(dirs[name], rel))
+		if err != nil {
+			t.Fatalf("reading %s/%s: %v", name, rel, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s/%s has drifted from %s/%s (%d vs %d bytes); copy one over the other — "+
+				"the fd/lseek/EPIPE mechanics in this file are meant to be ONE implementation, "+
+				"not four independently-maintained copies of similar logic",
+				name, rel, canonical, rel, len(got), len(want))
+		}
+	}
+}
+
+func sortedDirNames(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // nvmlConstantPattern finds the NVML ABI constants a runner header declares —
@@ -273,7 +331,7 @@ func TestBothKindsReportTheSameMeasurands(t *testing.T) {
 	shared := []string{
 		"elapsedS", "iterationsCompleted", "miscompares", "sdcDetections",
 		"nonfiniteCount", "sustainedThroughputTflops", "sustainedClockPct",
-		"gpuTempC", "powerDrawW", "throttleEvents",
+		"gpuTempC", "powerDrawW", "throttleEvents", "xidEvents",
 	}
 	for _, name := range shared {
 		if !containsValue(thermal, name) {

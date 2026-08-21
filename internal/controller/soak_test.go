@@ -900,7 +900,7 @@ func TestSoak_PlanRefusals(t *testing.T) {
 			spec := soakTest("soak", 2700, 900).Spec
 			c.spec(&spec)
 			_, err := buildPlan(&burninv1alpha1.BurnInProfile{},
-				[]resolvedTest{{name: "soak", spec: spec, required: true}},
+				[]plannedTest{{Name: "soak", Spec: spec, Required: true}},
 				[]string{"spark-a"}, 1, false)
 			if err == nil {
 				t.Fatalf("buildPlan accepted a soak it should have refused")

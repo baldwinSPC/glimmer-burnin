@@ -367,46 +367,46 @@ func truncateAttempts(res *burninv1alpha1.TestResult) {
 // validateTopology does: a soak that is wrong about its own arithmetic does not
 // fail loudly, it produces a plausible-looking verdict about a burn-in that did
 // not happen, and days later.
-func validateSoak(t resolvedTest) error {
-	s := t.spec.Soak
+func validateSoak(t plannedTest) error {
+	s := t.Spec.Soak
 	if s == nil {
 		return nil
 	}
-	if t.spec.Kind.BurstOnly() {
+	if t.Spec.Kind.BurstOnly() {
 		return fmt.Errorf(
 			"test %q sets spec.soak but kind %q is burst-only: its runner does one bounded burst of work and "+
 				"ignores BURNIN_DURATION_SECONDS entirely, so segmenting it would run the same millisecond-long "+
 				"measurement over and over and report it as a soak. Pair it with a duration-bearing kind in the "+
 				"profile instead — a burst is a correctness gate and a soak is a different test",
-			t.name, t.spec.Kind)
+			t.Name, t.Spec.Kind)
 	}
 	if s.SegmentSeconds < minSegmentSeconds {
 		return fmt.Errorf(
 			"test %q sets spec.soak.segmentSeconds to %d, below the %d-second floor — a segment boundary costs a "+
 				"pod teardown, a pod creation and a scheduling round-trip, and below that the run spends more time "+
 				"changing pods than measuring hardware",
-			t.name, s.SegmentSeconds, minSegmentSeconds)
+			t.Name, s.SegmentSeconds, minSegmentSeconds)
 	}
-	if t.spec.DurationSeconds <= 0 {
+	if t.Spec.DurationSeconds <= 0 {
 		return fmt.Errorf(
 			"test %q sets spec.soak but no spec.durationSeconds — a soak that does not say how long it soaks cannot "+
 				"be divided into segments, and defaulting it would decide the length of somebody's burn-in for them",
-			t.name)
+			t.Name)
 	}
-	if s.SegmentSeconds > t.spec.DurationSeconds {
+	if s.SegmentSeconds > t.Spec.DurationSeconds {
 		return fmt.Errorf(
 			"test %q asks for %d-second segments of a %d-second soak — a segment longer than the soak is a soak "+
 				"that burns the fleet longer than it was asked to; lower spec.soak.segmentSeconds, or raise "+
 				"spec.durationSeconds to what you actually want burned in",
-			t.name, s.SegmentSeconds, t.spec.DurationSeconds)
+			t.Name, s.SegmentSeconds, t.Spec.DurationSeconds)
 	}
-	if n := repeatsRequired(&t.spec); n > 1 {
+	if n := repeatsRequired(&t.Spec); n > 1 {
 		return fmt.Errorf(
 			"test %q sets both spec.soak and spec.repeatCount %d, and this operator will not guess which one the "+
 				"verdict is about — a repeat re-runs a whole test and ANDs the verdicts, while a segment is one "+
 				"window of a single verdict rendered over the aggregate. Express the length you want as "+
 				"spec.durationSeconds and leave repeatCount at 1",
-			t.name, n)
+			t.Name, n)
 	}
 	return nil
 }

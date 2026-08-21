@@ -215,9 +215,9 @@ spec:
     - testRef: ib-write-bw
     - testRef: nccl-allreduce-pair
   sinks:
-    - glimmer-cloud
+    - results-webhook
 ---
-# Export verdicts back to Glimmer with no code dependency — a plain webhook POST.
+# Export verdicts to your own system with no code dependency — a plain webhook POST.
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInSink
 metadata:

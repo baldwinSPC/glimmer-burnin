@@ -7,8 +7,8 @@ verdict you can gate provisioning on.
 
 > **Standalone by design.** This operator does **not** import any control plane. It
 > exports verdicts through a generic `BurnInSink` (webhook / ConfigMap / Prometheus),
-> so it integrates with [Glimmer](https://github.com/baldwinSPC/glimmer) — or your own
-> system — with zero code dependency. CI enforces the no-import rule.
+> so it integrates with a control plane of your choice — or your own system — with
+> zero code dependency. CI enforces the no-import rule.
 
 ## Scope: what runs today
 
@@ -161,8 +161,8 @@ NVIDIA redistributable.
 
 A new accelerator or NIC ships a **runner image**, not a controller change — the
 `runner` field on a test overrides the built-in image/command. The controller stays
-vendor-neutral; vendor specifics live in images (mirrors how Glimmer keeps vendor
-logic behind a single seam).
+vendor-neutral; vendor specifics live in images, kept behind a single seam rather
+than scattered through the reconciler.
 
 ### Host architecture is not GPU architecture
 
@@ -203,6 +203,7 @@ The GPU axis is per runner and is documented in each runner's README:
 | [`docs/sinks.md`](docs/sinks.md) | the delivery envelope, idempotency, the three sinks |
 | [`docs/reports.md`](docs/reports.md) | JUnit, HTML, markdown and the NVVS-compatible document |
 | [`docs/soaks.md`](docs/soaks.md) | running a soak, and the capacity it costs |
+| [`docs/bare-metal.md`](docs/bare-metal.md) | `burnin run` on a host that is not a cluster member, and exactly what differs |
 | [`docs/vendors/`](docs/vendors/README.md) | running a mixed fleet: what works on which vendor, and what to bring yourself |
 | [`docs/verifying-images.md`](docs/verifying-images.md) | verifying the cosign signature on what you pulled |
 | [`docs/dev/invariants.md`](docs/dev/invariants.md) | **the design rationale** — the rules and the failures each prevents |

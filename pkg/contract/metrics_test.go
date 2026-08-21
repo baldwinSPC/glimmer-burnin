@@ -141,6 +141,8 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		// Dimensional.
 		"algBandwidthGBs":            {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"busBandwidthGBs":            {UnitGigabytesPerSecond, ThresholdUseAcceptance},
+		"ranks":                      {UnitNone, ThresholdUseEvidence},
+		"ncclTransport":              {UnitNone, ThresholdUseEvidence},
 		"hostToDeviceBandwidthGBs":   {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"deviceToHostBandwidthGBs":   {UnitGigabytesPerSecond, ThresholdUseAcceptance},
 		"deviceToDeviceBandwidthGBs": {UnitGigabytesPerSecond, ThresholdUseAcceptance},
@@ -279,6 +281,10 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"eccVendorConflict":       {UnitNone, ThresholdUseEvidence},
 		"amdRasUnreadableFiles":   {UnitNone, ThresholdUseEvidence},
 		"xidSource":               {UnitNone, ThresholdUseEvidence},
+		"xidSourceDetail":         {UnitNone, ThresholdUseEvidence},
+		"xidLogDropped":           {UnitNone, ThresholdUseEvidence},
+		"xidWindowsWatched":       {UnitNone, ThresholdUseAcceptance},
+		"xidPreexisting":          {UnitNone, ThresholdUseAcceptance},
 		// gemm-sweep. The two labels are Evidence because their values are
 		// words and a shape — a threshold is compared as a float64, so a gate on
 		// either fails closed on every node forever while reading as a hardware

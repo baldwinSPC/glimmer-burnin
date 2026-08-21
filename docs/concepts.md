@@ -159,6 +159,18 @@ the verdict; nothing in the reconciler branches on it.
 Every scope additionally gets `BURNIN_DURATION_SECONDS`, `BURNIN_ATTEMPT`, and
 one `BURNIN_VARIANT_<AXIS>` per variant axis.
 
+A test's own `spec.runner.env` is passed through on both dispatchers, including
+`valueFrom`. In a cluster the kubelet resolves it. On a bare host `burnin run`
+answers the two field paths that name the **machine** — `status.hostIP` (from
+the routing table, the same question a kubelet answers) and `spec.nodeName`
+(the run's `--node`) — and everything else, a Secret, a ConfigMap, or a field
+path that names a *pod*, is **left unset and warned about by name**. It is
+never set to the empty string: a runner meeting an unset variable can fail
+loudly, while one meeting an empty variable cannot tell "nobody could answer
+this" from "the cluster says it is blank". A test that asks for
+`status.hostIP` on a host with no routable address is refused at plan time
+rather than run without it.
+
 **Never split a Pair or Group result per node.** A point-to-point measurement is
 a property of the link, and attributing it to one endpoint sends an engineer to
 replace the wrong part. On a collective it is worse: every healthy rank blocks
@@ -258,7 +270,9 @@ A resolution failure is classified before it is acted on. Transient failures
 run waits out a two-minute grace period, because `kubectl apply -f dir/` creates
 the run and its profile together and the run's watch event can arrive first.
 Only a confirmed-permanent misconfiguration finalises the run as `Error`, with a
-synthetic result named `resolve`.
+synthetic result named `resolve` — no kind, no scope, no nodes, because it is
+about the run and not about any hardware; the message names what could not be
+resolved (see [sinks.md](sinks.md#synthetic-results--a-run-that-never-got-as-far-as-hardware)).
 
 ### 2. Admit
 
@@ -278,7 +292,9 @@ nothing to say the cause was another run.
 The check **refuses rather than queues**. A burn-in is scheduled maintenance
 against hardware somebody is waiting on, and a run that silently waits behind
 another has an unpredictable end time, which is exactly what a maintenance
-window cannot tolerate. `spec.force` admits anyway and is recorded as
+window cannot tolerate. A refusal settles the run `Error` with the second
+synthetic result, named `admission`, whose message names the run in the way
+and the contested nodes. `spec.force` admits anyway and is recorded as
 `Admitted=True` with reason `AdmittedByForce`, so a verdict produced under
 deliberate contention is identifiable as such months later.
 
@@ -457,14 +473,14 @@ the same node passes from a soak to a passive read without being released in
 between. Expiry would clear it eventually, but eventually is a whole pod window
 of suppressed thermal response bought by a test that never asked for it.
 
-It exists because two safety systems were fighting each other. The Glimmer agent
-runs a thermal watchdog that drains a node when the part passes its trip point,
-and a thermal soak drives the part past that point **by design** — so every soak
-on a fleet running both was drained by the watchdog, its runner pods killed with
-SIGKILL, and the hardware recorded as `Error — hardware unjudged`. The watchdog
-was not wrong; it had no way to tell a soak from a cooling failure. This
-annotation is that way. The operator declares the heat; the reader gates its
-drain on the declaration.
+It exists because two safety systems were fighting each other. A separate fleet
+agent runs a thermal watchdog that drains a node when the part passes its trip
+point, and a thermal soak drives the part past that point **by design** — so
+every soak on a fleet running both was drained by the watchdog, its runner pods
+killed with SIGKILL, and the hardware recorded as `Error — hardware unjudged`.
+The watchdog was not wrong; it had no way to tell a soak from a cooling
+failure. This annotation is that way. The operator declares the heat; the
+reader gates its drain on the declaration.
 
 **The value carries an absolute expiry, and that is what makes it safe.** The
 reader is on the node and knows nothing about whether the run is still alive. A
@@ -658,6 +674,16 @@ verdict, delivery keys — works unchanged because none of them ever learns
 variants exist. A profile with no variants plans identically to one written
 before variants existed.
 
+**Both dispatchers expand, through the same code.** `burnin run` on a bare host
+resolves the same profile into the same cells as the operator does in-cluster,
+because expansion lives in `pkg/plan` and both call it. This was not always
+true: the CLI once read `variants`, let the schema validate them, and then
+discarded them — a four-cell sweep ran as one execution of the parent test,
+under the parent's name, with none of the cell's thresholds applied and no
+`BURNIN_VARIANT_*` reaching the runner. Nothing in the output said a cell was
+missing, so the only way to notice was to run the same profile in a cluster and
+count the results. `burnin run --dry-run` now prints each cell with its axes.
+
 **The arithmetic is invisible in the profile, so the run states it.** One entry
 with four variants across eight nodes at a cap of 1 is thirty-two sequential
 node-executions. The `PlanExpanded` condition says so at start — a condition
@@ -757,7 +783,7 @@ spec:
     - testRef: gemm
     - testRef: soak
       required: false
-  sinks: [glimmer]
+  sinks: [prod]
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInRun
@@ -790,7 +816,7 @@ own fleet rather than from a spec sheet — see [thresholds](thresholds.md).)*
    schedulable — **this is the record the release will restore, and it is never
    recomputed**. `status.fingerprint` captures each node's kernel, OS image,
    architecture and accelerator labels. `ThresholdsSound=True`. A `Running`
-   envelope goes to the `glimmer` sink.
+   envelope goes to the `prod` sink.
 5. **Wave 1.** `gemm` is the first test with work. `spark-a` is free, the cap is
    1, so: stamp `spark-a` with the cordon owner, cordon it, create the pod
    (`acceptance-2026-08-t0-a1-<hash>` — deterministic, so a crashed controller

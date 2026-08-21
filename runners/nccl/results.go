@@ -66,6 +66,35 @@ func busBandwidthFactor(nranks int) float64 {
 	return 2.0 * float64(nranks-1) / float64(nranks)
 }
 
+// busBandwidthFactorForCollective is busBandwidthFactor generalised to the
+// Node-scope collectives — duplicated from collective.h's BusBandwidthScale
+// for the SAME reason busBandwidthFactor is duplicated from nccl_pair.cu: so
+// the arithmetic can be cross-checked from the Go side against whichever
+// binary produced it.
+//
+// AllReduce keeps calling busBandwidthFactor unchanged — this function must
+// never compute a different number for "allreduce" than that one does, or a
+// Node-scope all-reduce and a Pair-scope all-reduce would cross-check against
+// two different formulas for the same collective.
+//
+// AllGather, ReduceScatter and AllToAll each move every byte across the
+// interconnect exactly once per rank's share — nccl-tests computes all three
+// identically for that reason — so their factor is (n-1)/n rather than
+// AllReduce's 2*(n-1)/n. An unrecognised collective name falls back to
+// busBandwidthFactor: resolveCollective has already refused anything this
+// runner does not know before a sweep can happen, so this branch exists only
+// as the same defensive default the rest of this file uses rather than as a
+// case this can actually reach.
+func busBandwidthFactorForCollective(collective string, nranks int) float64 {
+	if collective == "allgather" || collective == "reducescatter" || collective == "alltoall" {
+		if nranks < 2 {
+			return 0
+		}
+		return float64(nranks-1) / float64(nranks)
+	}
+	return busBandwidthFactor(nranks)
+}
+
 // sample is one message size's measurement.
 type sample struct {
 	Bytes  int64
@@ -180,5 +209,56 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%d KiB", n>>10)
 	default:
 		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// classifyTransport is a BEST-EFFORT reading of which transport NCCL actually
+// selected for an intra-node collective, from NCCL_DEBUG=INFO's own log text.
+//
+// THIS IS THE ONE DELIBERATE EXCEPTION to the rule at the top of this file:
+// "NCCL's own diagnostics go to stderr and are echoed to the log, never
+// scanned for numbers — NCCL's output format is not a contract and mining it
+// would make this runner break on an NCCL upgrade." That rule protects the
+// VERDICT — busbw, algbw, latency and miscompares are parsed only from lines
+// this runner itself printed, and nothing here changes that. ncclTransport is
+// Evidence, never Acceptance, and this function influences NOTHING about the
+// exit code: if NCCL's wording moves under an upgrade, the worst outcome is
+// that ok comes back false and the metric is simply absent from that run —
+// never a wrong verdict, never a build break.
+//
+// It exists because an intra-node run raises a question a cross-node one
+// never does: did the collective actually cross NVLink, or silently fall back
+// to a slower path within the same box. The tokens matched
+// ("NVLS", "P2P", "SHM", "NET", and any literal mention of NVLink) are NCCL's
+// own internal transport names, but this has NOT been checked against a real
+// multi-GPU NCCL_DEBUG=INFO capture — this project has no multi-GPU node. See
+// issue #406, which names capturing this as one of the
+// things a real run must confirm before this label is trusted.
+//
+// Precedence when a log shows more than one channel or more than one
+// candidate word — NVLS is the most specific claim ("this used NVLink's own
+// multicast tree"), so it wins over a bare P2P match, which in turn beats SHM,
+// which beats NET. Absence of every token means "could not tell", which is
+// omitted rather than guessed — a runner may only declare what it positively
+// established.
+func classifyTransport(out string) (transport string, ok bool) {
+	upper := strings.ToUpper(out)
+	switch {
+	// Anchored the same way as the other three branches, and for the same
+	// reason: NCCL_DEBUG_SUBSYS=INIT,GRAPH is set for this run so GRAPH's own
+	// topology dump names NVLink whenever the hardware HAS it, whether or not
+	// the collective actually used it as its transport. An unanchored match
+	// would read that topology line as a transport decision.
+	case strings.Contains(upper, "VIA NVLS") || strings.Contains(upper, "/NVLS/") ||
+		strings.Contains(upper, "VIA NVLINK") || strings.Contains(upper, "/NVLINK/"):
+		return "nvlink", true
+	case strings.Contains(upper, "VIA P2P") || strings.Contains(upper, "/P2P/"):
+		return "p2p", true
+	case strings.Contains(upper, "VIA SHM") || strings.Contains(upper, "/SHM/"):
+		return "shm", true
+	case strings.Contains(upper, "VIA NET") || strings.Contains(upper, "/NET/"):
+		return "net", true
+	default:
+		return "", false
 	}
 }

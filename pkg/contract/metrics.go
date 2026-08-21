@@ -320,17 +320,35 @@ var registry = map[string]Metric{
 	},
 	"busBandwidthGBs": {
 		Name: "busBandwidthGBs", Unit: UnitGigabytesPerSecond,
-		Description:  "NCCL bus bandwidth: algorithm bandwidth scaled by the collective's communication pattern",
+		Description: "NCCL bus bandwidth: algorithm bandwidth scaled by the collective's communication pattern. " +
+			"NAMED THE SAME AT EVERY SCOPE AND FOR EVERY COLLECTIVE (Pair's cross-node all-reduce, Group's, and " +
+			"Node's intra-node all-reduce/allgather/reducescatter/alltoall), a deliberate decision against the " +
+			"registry's own 'two differently-obtained figures under one name' rule: it is warranted here because " +
+			"the SAME nccl-tests formula computes it in every case (busBandwidth(algbw, nranks) is one function, " +
+			"reused, not reimplemented per scope), Scope on the TestResult already discriminates a link's number " +
+			"from a collective's, and a threshold is written per BurnInTest rather than globally on the metric " +
+			"name — so nothing ever compares a Node-scope reading against a Pair-scope gate by accident. Contrast " +
+			"throughputTflops vs sustainedThroughputTflops, which stayed separate because they are measured by " +
+			"different PROTOCOLS on the same part; this is one protocol run in more places",
 		Aggregation:  AggMin,
 		Combination:  CombineCollective,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"algBandwidthGBs": {
 		Name: "algBandwidthGBs", Unit: UnitGigabytesPerSecond,
-		Description:  "NCCL algorithm bandwidth: message size over collective time, with no scaling for the communication pattern; unlike busBandwidthGBs it is not comparable across collectives or rank counts",
+		Description: "NCCL algorithm bandwidth: message size over collective time, with no scaling for the " +
+			"communication pattern; unlike busBandwidthGBs it is not comparable across collectives or rank " +
+			"counts on its own — busBandwidthGBs is. Shares its name across scopes and collectives for the same " +
+			"reason busBandwidthGBs does; see that entry",
 		Aggregation:  AggMin,
 		Combination:  CombineCollective,
 		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"ranks": {
+		Name: "ranks", Unit: UnitNone,
+		Description:  "how many ranks joined this collective. At Node scope this is the device count ncclCommInitAll actually used, printed so a fleet reading busBandwidthGBs from an intra-node run can tell an 8-GPU result from a 2-GPU one without cross-referencing the node's inventory. Evidence, not a gate: whether the count is what a profile expects is a plan-time or topology question, not this metric's job",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
 	},
 
 	// --- Memory copy and stress bandwidth ----------------------------------
@@ -734,9 +752,36 @@ var registry = map[string]Metric{
 		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	// TWO SOURCES, BOTH READING /dev/kmsg, DIFFERENT WINDOWS — a deliberate
+	// decision, not the drift #311 fixed. runners/host-health counts Xid lines
+	// (and, on any vendor, the amdgpu reset/RAS lines its own broader
+	// kernelHwErrors heuristic matches) over ITS OWN, usually short, Node-scope
+	// window. runners/thermal-soak and runners/gpu-burn (and their -rocm
+	// counterparts) additionally count them over THEIR OWN load window — the
+	// specific interval this test held the part under stress — using a
+	// deliberately NARROWER amdgpu pattern than host-health's (see
+	// runners/thermal-soak/kmsg/kmsg_watch.h), because this reaches an
+	// Acceptance gate rather than host-health's Evidence-only kernelHwErrors,
+	// and a false positive here is a fabricated hardware verdict rather than a
+	// merely-noisy diagnostic.
+	//
+	// This is safe for the SAME reason foldMetrics' Sum aggregation is safe
+	// across a segmented soak's windows: each source counts only what it
+	// itself observed, in its own scope, and Combination:CombineSum is what a
+	// Group-scope collective's multiple ranks already rely on to mean "the
+	// total across every reporter", not "one reporter's exclusive domain". A
+	// profile running BOTH host-health and a soak test gets two independent
+	// TestResults, each honestly scoped to what THAT test's own window covered
+	// — not one shared counter two runners race to write.
+	//
+	// On AMD, the value counts amdgpu reset/uncorrectable-RAS log lines rather
+	// than an NVIDIA Xid; the name is kept rather than split, matching the
+	// busBandwidthGBs precedent in runners/nccl: the SEVERITY CLASS this name
+	// means — a driver-logged, catastrophic, kernel-log-visible GPU fault — is
+	// vendor-independent even though the literal word "Xid" is NVIDIA's own.
 	"xidEvents": {
 		Name: "xidEvents", Unit: UnitNone,
-		Description:  "count of NVIDIA Xid errors the driver logged during the test window",
+		Description:  "count of driver-logged catastrophic GPU faults during the test window — NVIDIA Xid errors, or on AMD hardware the soak family's own amdgpu reset/uncorrectable-RAS pattern",
 		Aggregation:  AggSum,
 		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
@@ -748,13 +793,24 @@ var registry = map[string]Metric{
 	// xidEvents until #311, and read 0 for a GPU sitting at one code all window.
 	//
 	// Evidence rather than Acceptance, for a reason that outlives the naming
-	// fix: the field is LIFETIME-scoped. A non-zero code may name an Xid from
-	// weeks before this run, so a gate on it condemns a node for history the
-	// test never observed. The window-scoped count is xidEvents, which
-	// host-health derives from /dev/kmsg by counting events.
+	// fix: dcgm-diag's OWN reading is LIFETIME-scoped, so a non-zero code may
+	// name an Xid from weeks before this run — gating on it would condemn a
+	// node for history the test never observed. The window-scoped COUNT is
+	// xidEvents, above.
+	//
+	// runners/thermal-soak and runners/gpu-burn (NVIDIA only — there is no AMD
+	// equivalent numeric code, see kmsg/kmsg_watch.h) ALSO emit this name, and
+	// their reading is WINDOW-scoped — the specific Xid, if any, seen during
+	// THAT TEST'S OWN load window — which is why it stays Evidence rather than
+	// gaining Acceptance now that a second, safer-scoped source exists: under a
+	// SEGMENTED soak, AggLast keeps only the final segment's window-scoped
+	// code, so an earlier segment's Xid can vanish from the aggregate even
+	// though xidEvents (Sum) still correctly counts it. That loss is
+	// acceptable for a field nothing may gate on and unacceptable for one that
+	// could, which is exactly why this field stays Evidence-only.
 	"lastXidCode": {
 		Name: "lastXidCode", Unit: UnitNone,
-		Description:  "code of the most recent NVIDIA Xid error the device reports, lifetime-scoped; 0 when none is reported. Which Xid, never how many — the count is xidEvents",
+		Description:  "code of the most recent NVIDIA Xid error. dcgm-diag reads a lifetime-scoped device field and prints 0 when it reads 0; the soak family extracts the code from the kmsg line within that test's own load window and OMITS the key when no code was extracted — its 0 would be a value nobody measured. Which Xid, never how many — the count is xidEvents",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
@@ -1136,6 +1192,18 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	"ncclTransport": {
+		Name: "ncclTransport", Unit: UnitNone,
+		Description: "which transport NCCL actually selected for an intra-node (Node-scope) collective: one of " +
+			"nvlink|p2p|shm|net. BEST-EFFORT and self-omitting, not a probe result: it is read from " +
+			"NCCL_DEBUG=INFO's own log text rather than from anything this runner measured directly, so an " +
+			"NCCL upgrade that changes its wording makes this label simply absent from a future run rather than " +
+			"wrong — it can never become a hardware verdict, because it is Evidence and nothing in this project " +
+			"gates on it. It answers the question an intra-node run raises that a cross-node one never does: did " +
+			"the collective cross NVLink, or silently fall back to something slower within the same box",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"pdWedgeSuspected": {
 		Name: "pdWedgeSuspected", Unit: UnitNone,
 		Description:  "whether the run matched the power-delivery wedge signature — slow, cool, and not thermally throttled: one of true|false|unknown. Deliberately TRI-STATE and therefore a label, not a boolean: without a temperature a wedge cannot be told from a thermal throttle, and \"we could not tell\" must not collapse into \"false\" and read as an all-clear. The runner fails the node on this itself; a threshold cannot express the three states and fails closed on all of them",
@@ -1215,6 +1283,63 @@ var registry = map[string]Metric{
 		Description:  "where the Xid scan read from: kmsg|kernlog|none. A label naming the PROVENANCE of xidEvents, and the value that matters most is the one a gate cannot express — \"none\" means the scan did not run, and the counters it would have produced are omitted rather than zeroed, so xidEvents already fails closed on its own",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
+	},
+	// A LABEL — free prose naming the path that could not be opened and the
+	// remedy — registered under the same duty as pdWedgeSuspected and friends:
+	// a first-party metric whose value is words must be registered Evidence, so
+	// a gate on it is reported Unsound instead of failing closed on every node
+	// in the shape of a hardware verdict. Emitted by host-health and by all
+	// four soak-family runners when xid_source=none.
+	"xidSourceDetail": {
+		Name: "xidSourceDetail", Unit: UnitNone,
+		Description:  "why the Xid scan could not run: the path(s) tried and, where the cause is the three-part /dev/kmsg grant, the remedy. Free text for a human; never a number, never gateable",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// Registered Evidence even though it is an integer, because its emission
+	// shape makes any gate on it unsatisfiable-or-vacuous: it is printed only
+	// as 1 (a drain lost records — the counters it qualifies are then omitted)
+	// and never as 0, so `xidLogDropped Equal 0` would fail every healthy node
+	// forever. The linter can only say so if the registry knows the name.
+	"xidLogDropped": {
+		Name: "xidLogDropped", Unit: UnitNone,
+		Description:  "1 when a kernel-log drain lost records (ring wrapped, scan failed, or a read bound was hit); absent otherwise. The counters it qualifies are omitted in the same case, so this is the trace of WHY they are missing — not a counter to gate",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// The coverage self-report for the soak family's window-scoped Xid watch:
+	// 1 when a window was watched start to finish, 0 when it was not (no
+	// grant, or a drain lost records). BOTH values are positively established
+	// facts about the probe — like faultsInjected, this is a self-report and
+	// not a hardware measurement, so emitting the 0 breaks no rule.
+	//
+	// It exists for the SEGMENTED case: foldMetrics keeps a metric if ANY
+	// segment reported it, so a 672-segment soak whose segment 300 lost its
+	// watch still sums the other segments' honest zeros into an xidEvents a
+	// gate would accept — the one segmentation-changes-the-verdict shape the
+	// soak rules forbid, reached through a probe rather than a measurement.
+	// Sum-aggregated, this key then reads 671, and a profile pairing
+	// `xidEvents Equal 0` with `xidWindowsWatched GreaterThanOrEqual <segment
+	// count>` certifies only a soak every window of which was observed. On an
+	// unsegmented test it is simply 1 or 0, and Equal 1 is the pairing gate.
+	"xidWindowsWatched": {
+		Name: "xidWindowsWatched", Unit: UnitNone,
+		Description:  "how many of this test's execution windows the kernel-log Xid watch covered start to finish: 1 or 0 per window, summed across a segmented soak's segments. Pair a gate on xidEvents with a floor on this to certify only fully-watched soaks",
+		Aggregation:  AggSum,
+		Combination:  CombineSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	// host-health's count of Xids already in the kernel log when its window
+	// OPENED — this boot's earlier history, as distinct from xidEvents' "during
+	// the window". Registered now because host-health's own README has always
+	// recommended gating it (`xidPreexisting Equal 0`), and writing a threshold
+	// is the moment registration is owed.
+	"xidPreexisting": {
+		Name: "xidPreexisting", Unit: UnitNone,
+		Description:  "count of NVIDIA Xid errors already in the kernel log when the scan's window opened — the node's earlier history this boot, not the test's own window. The windowed count is xidEvents",
+		Aggregation:  AggLast,
+		Combination:  CombineMax,
+		ThresholdUse: ThresholdUseAcceptance,
 	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,

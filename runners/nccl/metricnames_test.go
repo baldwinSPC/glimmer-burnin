@@ -128,6 +128,70 @@ func TestNodeScopeSkipIsSkip(t *testing.T) {
 	}
 }
 
+// Node scope's own key set — busbw/algbw/latency/wrong_count unchanged, plus
+// ranks and (best-effort) nccl_transport. CONSTRUCTED, not captured: this
+// project has no multi-GPU node, but every key on this line is one main.go
+// itself prints (metric() calls this file's own code makes), unlike the NCCL
+// transport-line SCANNING in classifyTransport, which genuinely does need a
+// real capture and is tested separately, with its own fixtures marked as
+// constructed, in nodescope_test.go.
+const nodeScopeStdout = `[burnin-nccl] NCCL v2.27.7-1; Node scope, collective=allreduce, gpus=8
+| nccl_pair: NCCL runtime version 2.27.7; collective=allreduce
+| RESULT size_bytes=8 time_us=12.400 algbw_gbs=0.0006 busbw_gbs=0.0011
+| RESULT size_bytes=268435456 time_us=9800.000 algbw_gbs=27.3934 busbw_gbs=47.9384
+ranks=8
+nccl_transport=nvlink
+busbw=47.94
+algbw=27.39
+latency_us=12.40
+wrong_count=0
+NCCL_PASS: peak bus bandwidth 47.94 GB/s at 256 MiB over 8 ranks (allreduce) with 8 devices on this node; acceptance is the profile's thresholds to decide
+`
+
+func TestNodeScopeEmittedKeysReachTheirCanonicalNames(t *testing.T) {
+	res := runner.Parse(kind, nodeScopeStdout, 0)
+	if res.Verdict != runner.VerdictPass {
+		t.Fatalf("verdict = %v, want Pass", res.Verdict)
+	}
+	for name, want := range map[string]string{
+		"busBandwidthGBs": "47.94",
+		"algBandwidthGBs": "27.39",
+		"latencyUs":       "12.40",
+		"miscompares":     "0",
+		"ranks":           "8",
+		"ncclTransport":   "nvlink",
+	} {
+		got, ok := res.Metrics[name]
+		if !ok {
+			t.Errorf("metric %q missing; the operator got %v", name, res.Metrics)
+			continue
+		}
+		if got != want {
+			t.Errorf("metric %q = %q, want %q", name, got, want)
+		}
+	}
+	if len(res.InvalidNames) != 0 {
+		t.Errorf("invalid metric names: %v", res.InvalidNames)
+	}
+	if err := contract.ValidateMetrics(res.Metrics); err != nil {
+		t.Errorf("ValidateMetrics: %v", err)
+	}
+}
+
+// ranks and ncclTransport must both be Evidence, never Acceptance: ranks is a
+// bookkeeping fact and ncclTransport is a label whose parsing is best-effort
+// by design (see classifyTransport). Neither should ever be able to gate a
+// fleet the way busBandwidthGBs does.
+func TestNodeScopeMetricsAreEvidenceNotAcceptance(t *testing.T) {
+	for _, name := range []string{"ranks", "ncclTransport"} {
+		if contract.SafeToThresholdOn(name) == false {
+			continue // Evidence, as expected — SafeToThresholdOn false is correct here
+		}
+		t.Errorf("%s: registry does not mark this Evidence (or leaves it unregistered), "+
+			"so a threshold on it would pass every authoring-time check while gating on a label", name)
+	}
+}
+
 // A wrong answer from the collective is a FAIL, not an Error: the hardware ran
 // the test and returned bad data, which is a hardware verdict.
 func TestMiscompareIsFail(t *testing.T) {
