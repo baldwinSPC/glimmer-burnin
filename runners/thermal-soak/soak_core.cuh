@@ -94,6 +94,7 @@
 #include <ctime>
 #include <string>
 
+#include "kmsg/kmsg_watch.h"
 #include "nvml_dynamic.h"
 
 namespace soak {
@@ -564,6 +565,17 @@ struct Measurement {
   bool eccKnown = false; // a real delta was computed
   unsigned long long eccErrors = 0;
 
+  // xidAvailable mirrors host-health's xid_source: true only when /dev/kmsg
+  // could be opened and positioned. xidCount and haveLastXidCode are then a
+  // real measurement (possibly zero); when false, nothing below is a
+  // measurement at all and must not be printed — see kmsg/kmsg_watch.h.
+  bool xidAvailable = false;
+  bool xidDropped = false;
+  long xidCount = 0;
+  bool haveLastXidCode = false;
+  long lastXidCode = 0;
+  std::string xidUnavailableReason;
+
   double sustainedTflops = 0.0;
 };
 
@@ -639,6 +651,31 @@ inline void emitMeasurement(const Keys &k, const Measurement &m, long seq) {
   } else if (m.eccKnown) {
     std::printf("ecc_errors=%llu\n", m.eccErrors);
   }
+  // xid_source is printed unconditionally, exactly as host-health does: it is
+  // the label a reader checks FIRST when xid_count is absent, to tell "nothing
+  // happened" from "nothing was watched". xid_count and last_xid_code are only
+  // ever printed when xid_source=kmsg — see kmsg/kmsg_watch.h's header comment
+  // for why a failed probe must never fall back to printing a zero.
+  std::printf("xid_source=%s\n", m.xidAvailable ? "kmsg" : "none");
+  if (m.xidAvailable) {
+    // Both are genuine, POSITIVE measurements even at zero — this probe
+    // watched the whole window and nothing NVRM:Xid-shaped appeared in it,
+    // which is exactly as reportable as throttle_count=0 is when the driver
+    // answered and had nothing to report. last_xid_code=0 matches the
+    // "0 when none is reported" convention dcgm-diag's own lastXidCode
+    // already established for this metric name.
+    std::printf("xid_count=%ld\n", m.xidCount);
+    std::printf("last_xid_code=%ld\n", m.lastXidCode);
+    if (m.xidDropped) {
+      // The ring buffer wrapped faster than a drain could keep up, or a drain
+      // was cut off at its read bound. xid_count above is then a FLOOR, not a
+      // complete count — worth knowing before trusting it, same as
+      // host-health's xid_log_dropped.
+      std::printf("xid_log_dropped=1\n");
+    }
+  } else if (!m.xidUnavailableReason.empty()) {
+    std::printf("xid_source_detail=%s\n", m.xidUnavailableReason.c_str());
+  }
   std::fflush(stdout);
 }
 
@@ -669,6 +706,20 @@ inline bool readEccTotal(const nvmlrt::Library &nvml, nvmlrt::Device dev,
 // hardware. Any other return is a process exit code and the marker has ALREADY
 // been printed — the caller returns it unchanged.
 inline int run(const Keys &k, Measurement *m) {
+  // ── /dev/kmsg, opened before anything else in this function ────────────────
+  //
+  // Positioning happens here, deliberately before config parsing and every
+  // CUDA/NVML call below: the window this soak reports Xids over should start
+  // as close to process start as this runner can make it, and none of the
+  // setup between here and the load loop is instant. See kmsg/kmsg_watch.h's
+  // header comment for the full design — this is opt-in evidence, never a
+  // hardware verdict on its own, and every field below stays at its "probe
+  // never ran" default if the mount was not granted.
+  kmsg::Watch xidWatch;
+  kmsg::Tally xidTally;
+  m->xidAvailable = xidWatch.Available();
+  m->xidUnavailableReason = xidWatch.Why();
+
   // ── configuration ─────────────────────────────────────────────────────────
   std::string cfgErr;
   long durationSeconds = 0, sampleIntervalMs = 0, progressIntervalS = 0, matrixN = 0;
@@ -1010,6 +1061,17 @@ inline int run(const Keys &k, Measurement *m) {
       out->meanUtilPct = s.mean(s.utilSum, s.utilN);
     }
     if (totalGemmSeconds > 0.0) out->sustainedTflops = totalFlops / totalGemmSeconds / 1e12;
+
+    // xidWatch/xidTally are shared, cumulative, run-lifetime state — see their
+    // construction at the top of this function. `out` may be a fresh, local
+    // Measurement (the periodic path constructs one per call), so every field
+    // below is copied in rather than assumed to already be set on `out`.
+    out->xidAvailable = xidWatch.Available();
+    out->xidDropped = xidWatch.Dropped();
+    out->xidUnavailableReason = xidWatch.Why();
+    out->xidCount = xidTally.xidCount;
+    out->haveLastXidCode = xidTally.haveLastXidCode;
+    out->lastXidCode = xidTally.lastXidCode;
   };
 
   while (nowSeconds() < deadline) {
@@ -1065,6 +1127,12 @@ inline int run(const Keys &k, Measurement *m) {
 
     const double now = nowSeconds();
     if (now - lastProgress >= progressIntervalS) {
+      // Drained on the SAME cadence as every other periodic metric, and for
+      // the same reason: a pod killed between two progress prints still has an
+      // xidCount current as of the last one it completed, rather than nothing
+      // at all. xidTally ACCUMULATES across calls — see kmsg/kmsg_watch.h —
+      // so this adds only what arrived since the previous drain.
+      xidWatch.Collect([&](const std::string &line) { xidTally.ObserveNvidia(line); });
       Measurement snap;
       snapshot(&snap, now);
       emitMeasurement(k, snap, ++seq);
@@ -1073,6 +1141,7 @@ inline int run(const Keys &k, Measurement *m) {
   }
 
   const double finished = nowSeconds();
+  xidWatch.Collect([&](const std::string &line) { xidTally.ObserveNvidia(line); });
   snapshot(m, finished);
 
   // ── report, then let the caller judge ─────────────────────────────────────

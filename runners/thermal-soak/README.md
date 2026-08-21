@@ -199,6 +199,7 @@ right. The mapping for this kind lives in `pkg/runner/parse.go` under
 | `soak_seconds` | `elapsedS` | wall time the soak body ran |
 | `iterations_completed` | `iterationsCompleted` | GEMM+verify iterations, including warm-up |
 | `ecc_errors` | `eccErrors` | delta over the soak window, **or the `n/a` sentinel** — see [ECC](#ecc-and-the-unmeasurable-sentinel) |
+| `xid_count` | `xidEvents` | NVIDIA Xid errors the driver logged **during this soak's own window**, from `/dev/kmsg`. **Opt-in**: emitted only when the pod can read `/dev/kmsg` — see [The Xid watch](#the-xid-watch-and-what-the-pod-needs-for-it) |
 
 ### Load, thermal and power evidence
 
@@ -241,6 +242,7 @@ snake_case spelling.
 | `first_miscompare_index` | `firstMiscompareIndex` — only when there was one |
 | `faults_injected` | `faultsInjected` — always emitted; see [Proving the detector works](#proving-the-detector-works) |
 | `nvml_unsupported`, `unsupported_reads`, `config_warnings` | `nvmlUnsupported`, `unsupportedReads`, `configWarnings` |
+| `xid_source`, `xid_source_detail`, `last_xid_code`, `xid_log_dropped` | `xidSource`, `xidSourceDetail`, `lastXidCode`, `xidLogDropped` — the Xid watch's provenance and evidence; see [below](#the-xid-watch-and-what-the-pod-needs-for-it) |
 
 ### Metrics that are absent rather than zero
 
@@ -276,6 +278,59 @@ a way to pass an ECC gate by turning ECC off.
 `ecc_errors=n/a`. GB10's unified LPDDR5X has on-die ECC that NVML cannot see, so
 a bare `eccErrors Equal 0` fails every healthy Spark — pair it with
 `applicability: RequiredIfMeasurable` (below).
+
+### The Xid watch, and what the pod needs for it
+
+"Zero Xids **during** a one-hour load" is the commonest pass criterion in every
+operator's own burn-in write-up, and an Xid is the one fault signal this
+runner's NVML sampler can never see: the driver reports it only to the kernel
+log. So the soak reads its own `/dev/kmsg`, in-process, over exactly the window
+it is already measuring clock and temperature over — no companion pod, no
+second schedule. [`../host-health`](../host-health) reads the same source over
+its *own* (usually 30-second) window; this is the same measurement scoped to
+**this test's own load window**, which is what lets a profile finally say "the
+part logged nothing while I was hammering it" about the test doing the
+hammering.
+
+At open, the descriptor is positioned at the ring buffer's **current tail**
+(`lseek(fd, 0, SEEK_END)`, the same "start from now" operation `dmesg` uses),
+so an Xid that happened *before* this soak — last week, or during the previous
+test in the profile — is never counted against this soak's window.
+[`kmsg/kmsg_watch.h`](kmsg/kmsg_watch.h) is the implementation, shared
+byte-identically by all four soak-family runners and unit-tested without a GPU
+in [`kmsg/kmsg_watch_test.cc`](kmsg/kmsg_watch_test.cc).
+
+**It is opt-in, and it degrades honestly.** `/dev/kmsg` is not in a container's
+default `/dev`, and this image runs as uid 65532 with no privileges. The pod
+needs the same three things host-health's README documents at length
+(measured, issues #134/#302): the **mount**, **`privileged: true`** for the
+device-cgroup grant, and **`runAsUser: 0`** because a capability does nothing
+for a non-root uid:
+
+```yaml
+  runner:
+    privileged: true
+    runAsUser: 0
+    hostPaths:
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        type: CharDevice # readOnly defaults to true
+```
+
+Without the grant the runner reports `xid_source=none` plus an actionable
+`xid_source_detail`, and **omits** `xid_count` rather than printing a zero it
+never measured — so an `xidEvents Equal 0` gate on an ungranted pod **fails the
+node** instead of certifying it, exactly the fail-closed rule every other
+counter here follows. A site that declines root soak pods simply leaves the
+gate off this kind and keeps it on `host-health`.
+
+**The Xid watch never changes this runner's own exit code.** Like `eccErrors`,
+`xidEvents` is a metric for a *profile* to gate via `spec.thresholds`: the
+runner's own pass/fail stays exactly the five checks listed above, because a
+verdict baked into the binary would depend on whether an optional host grant
+was remembered. `last_xid_code` says *which* Xid arrived (window-scoped, unlike
+`dcgm-diag`'s lifetime-scoped reading of the same name), and `xid_log_dropped=1`
+records a drain the ring buffer wrapped past — the count is then a floor.
 
 ---
 
@@ -327,6 +382,17 @@ spec:
       comparison: Equal
       value: "0"
       applicability: RequiredIfMeasurable
+
+    # "Zero Xids DURING the load" — the gate this runner's Xid watch exists
+    # for. ADD THIS ONLY WITH THE /dev/kmsg GRANT (privileged + runAsUser: 0 +
+    # the hostPaths mount; see "The Xid watch" above): without the grant the
+    # runner omits xid_count and this gate fails every node, in the shape of a
+    # hardware verdict, for a measurement nobody took. That direction is
+    # deliberate — the alternative would certify a fleet on a zero nobody
+    # measured — but it means this gate and the grant must travel together.
+    #- metric: xidEvents
+    #  comparison: Equal
+    #  value: "0"
 ```
 
 ### The clock floor: 60, not 90 — and it depends on how long you soak
@@ -556,4 +622,9 @@ Verified: the shipped binary links `libc.so.6` and nothing else.
   and the runner exits Error rather than pretending the hardware is fine.
 - device memory for four `N × N` float buffers (1 GiB at the default `N=8192`),
   shrunk automatically if less is free
-- runs as non-root (`65532:65532`); no privileges, no host mounts
+- runs as non-root (`65532:65532`); no privileges, no host mounts — **unless**
+  the profile opts into the Xid watch, which needs `/dev/kmsg` mounted plus
+  `privileged: true` and `runAsUser: 0` (see [The Xid
+  watch](#the-xid-watch-and-what-the-pod-needs-for-it)). Declining the grant
+  costs only that evidence: `xid_source=none`, `xid_count` omitted, every other
+  measurement unchanged
