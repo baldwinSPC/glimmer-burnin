@@ -52,8 +52,10 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 	const helper = `#include "device_fold.h"`
 
 	converted := map[string]bool{
-		"gpu-burn":     true,
-		"thermal-soak": true,
+		"gpu-burn":          true,
+		"thermal-soak":      true,
+		"gpu-burn-rocm":     true,
+		"thermal-soak-rocm": true,
 	}
 
 	exempt := map[string]string{
@@ -82,8 +84,6 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		// full conversion.
 		"memory-bw":          "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
 		"memory-bw-rocm":     "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
-		"gpu-burn-rocm":      "#399 — delivery step 2 (soak family, concurrent default)",
-		"thermal-soak-rocm":  "#399 — delivery step 2 (soak family, concurrent default)",
 		"clockprobe":         "#400 — delivery step 3 (measurement kinds, sequential default)",
 		"clockprobe-rocm":    "#400 — delivery step 3 (measurement kinds, sequential default)",
 		"compute-smoke":      "#400 — delivery step 3 (a burst; sequential)",

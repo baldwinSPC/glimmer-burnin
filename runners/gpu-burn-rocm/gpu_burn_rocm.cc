@@ -33,6 +33,21 @@
 
 namespace {
 
+// Device-fold direction, docs/dev/multi-device.md. gpu-burn's own gate is
+// miscompares/nonfinite (see main()'s assertions below), but
+// sustained_clock_pct is listed FIRST anyway so worstDeviceIndex names the
+// slowest device rather than an arbitrary one among ties on a Sum counter —
+// consistent with thermal-soak, which shares this engine and does gate on it.
+namespace devices = burnin::devices;
+const std::vector<devices::FoldRule> kDeviceFold = {
+    {"sustained_clock_pct", devices::Fold::Min},
+    {"tflops", devices::Fold::Min},
+    {"gpu_temp_c", devices::Fold::Max},
+    {"power_draw_w", devices::Fold::Max},
+    {"errors", devices::Fold::Sum},
+    {"nonfinite_count", devices::Fold::Sum},
+};
+
 // The stdout vocabulary for this kind — spelled as the operator's alias table
 // for "gpu-burn" expects, so both vendors' images land on the same canonical
 // metric names.
@@ -67,35 +82,25 @@ int main() {
 		matrixN = std::min<long>(std::max<long>(matrixN, soak::kMinMatrixN), soak::kMaxMatrixN);
 	}
 
-	int devCount = 0;
-	const hipError_t de = hipGetDeviceCount(&devCount);
-	if (de != hipSuccess || devCount == 0) {
-		return soak::errored(kKeys, std::string("no usable HIP device (") +
-		                                (de == hipSuccess ? "zero devices"
-		                                                  : hipGetErrorString(de)) +
-		                                "); hardware unjudged");
-	}
-	if (hipSetDevice(0) != hipSuccess) return soak::errored(kKeys, "hipSetDevice failed");
+	// Device enumeration, per-device identity and matrix_n now live in
+	// soak::run() / setupDevice() — see docs/dev/multi-device.md.
+	std::printf("duration_requested_s=%ld\n", durationSeconds);
 
-	hipDeviceProp_t props;
-	std::memset(&props, 0, sizeof(props));
-	if (hipGetDeviceProperties(&props, 0) == hipSuccess) {
-		std::printf("gpu_name=%s\ngfx_target=%s\n", props.name, props.gcnArchName);
-	}
-	std::printf("duration_requested_s=%ld\nmatrix_n=%ld\n", durationSeconds, matrixN);
-
-	const soak::Measurement m = soak::run(durationSeconds, static_cast<int>(matrixN));
+	const soak::Measurement m = soak::run(kKeys, kDeviceFold, durationSeconds, static_cast<int>(matrixN));
+	if (m.skip) return soak::skip(kKeys, m.error);
 	if (!m.ok) return soak::errored(kKeys, m.error + "; hardware unjudged");
-	soak::report(kKeys, m);
 
 	// ── this kind's assertions ───────────────────────────────────────────────
 	// Correctness only. Temperature and clock are reported as evidence and
 	// deliberately NOT gated here: they are thermal-soak's verdict, and two
 	// kinds failing a node for the same reason would double-count one fault
 	// while telling an engineer to look in two places.
-	if (m.iterations == 0) {
-		return soak::errored(kKeys, "the burn completed no iteration; hardware unjudged");
-	}
+	//
+	// No "iterations == 0" check here: m.iterations is device 0's count
+	// specifically (evidence, not folded — see Measurement's comment), and
+	// device 0 alone reading zero while other devices measured fine must not
+	// discard their result. soak::run() already refuses to return m.ok when
+	// NO device produced any iteration at all.
 	if (m.miscompares > 0) {
 		return soak::fail(kKeys,
 		                  std::to_string(m.miscompares) +

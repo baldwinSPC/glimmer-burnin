@@ -46,7 +46,7 @@ RUN set -eu; \
       exit 1; \
     }
 
-COPY gpu_burn_rocm.cc soak_core_rocm.h /src/
+COPY gpu_burn_rocm.cc soak_core_rocm.h device_fold.h /src/
 COPY kmsg/kmsg_watch.h /src/kmsg/kmsg_watch.h
 RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \
       -std=c++17 -O3 \
