@@ -1,0 +1,106 @@
+# The smoke suite: everything a node needs to pass before anything else runs
+# on it. Target duration: under five minutes, total, sequentially — the shape
+# CoreWeave's hourly idle-node check and Modal's boot-time verification both
+# describe: cheap enough to run constantly, so a node that goes bad between
+# acceptance and today is caught before a job lands on it, not after.
+#
+# APPLY node-acceptance.yaml FIRST. This file reuses three of its tests by
+# testRef (fingerprint-probe.yaml too) rather than redefining them, and adds
+# two new ones sized for a five-minute budget rather than node-acceptance's
+# fuller acceptance windows — sustained-clock (300s) and memory-bandwidth
+# (180s) are individually most of this profile's whole budget, so smoke gets
+# its own shorter clock and bandwidth checks instead.
+#
+# What this profile does NOT claim: it is a liveness gate, not an acceptance
+# sweep. compute-smoke proves the arithmetic is right at this instant;
+# clock-smoke and memory-bw-smoke sample thirty seconds, not the sustained
+# multi-minute window sustained-clock and memory-bandwidth hold. A part that
+# fails smoke is definitely bad; a part that passes smoke has not yet been
+# asked the harder questions profile-standard.yaml asks.
+
+# THIRTY seconds — long enough for clockprobe's FMA chain to leave its warm-up
+# window (kMinDurationSeconds is 15s) and report a real sustained figure, short
+# enough that this profile stays a liveness check. The floor is DELIBERATELY
+# LOOSER than sustained-clock's 70%: thirty seconds is mostly warm-up on a part
+# that started cold, and a gate calibrated for a 300-second window would fail a
+# healthy node here for having less time to settle, not for being unhealthy.
+# Retune 55 against your own fleet's thirty-second numbers before trusting it —
+# it is derived from sustained-clock's own measured curve (83.22% at 25s
+# decaying to 69.90% at 600s; see that test's comment), read at the near end of
+# the curve and given headroom, not measured at 30s on real hardware.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: clock-smoke
+spec:
+  kind: clockprobe
+  scope: Node
+  durationSeconds: 30
+  thresholds:
+    - metric: sustainedClockPct
+      comparison: GreaterThanOrEqual
+      value: "55"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+# Sixty seconds, not memory-bandwidth's 180 — long enough for nvbandwidth's
+# copy loops to report a stable figure, short enough to fit the budget. The
+# gates below are THE SAME NUMBERS memory-bandwidth uses (90% of this fleet's
+# measured median): a short window changes how much time the test spends
+# measuring, not the bandwidth a healthy link should sustain, so there is no
+# separate derivation to redo here. Re-measure for your own SKU before reusing
+# either test's numbers on different hardware — see memory-bandwidth's comment
+# in node-acceptance.yaml for the full fleet data this was pinned from.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: memory-bw-smoke
+spec:
+  kind: memory-bw
+  scope: Node
+  durationSeconds: 60
+  thresholds:
+    - metric: hostToDeviceBandwidthGBs
+      comparison: GreaterThanOrEqual
+      value: "53"
+    - metric: deviceToHostBandwidthGBs
+      comparison: GreaterThanOrEqual
+      value: "53"
+    - metric: deviceToDeviceBandwidthGBs
+      comparison: GreaterThanOrEqual
+      value: "109"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: smoke
+spec:
+  failFast: false
+  tests:
+    # Reads sysfs; near-instant. First, so a node whose device plugin never
+    # came up says so before anything asks a pod to schedule on it.
+    - testRef: fingerprint-probe
+    # 30s. Passive — no load, cheapest real signal available.
+    - testRef: host-fault-counters
+    - testRef: clock-smoke
+    - testRef: memory-bw-smoke
+    # A burst: milliseconds, not a window. Proves the arithmetic is right at
+    # this instant, on the real instruction path.
+    - testRef: fp4-compute-smoke
+  sinks: []
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: smoke-example
+spec:
+  profileRef: smoke
+  target:
+    nodeNames:
+      - node-a
+  maxConcurrentNodes: 1
+  ttlSecondsAfterFinished: 86400

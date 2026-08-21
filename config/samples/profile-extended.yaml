@@ -1,0 +1,139 @@
+# The extended suite: two to eight hours, the shape a maintenance-window
+# acceptance sweep takes once liveness (smoke) and a real sweep (standard)
+# have already passed — long enough to reach thermal steady state and to hold
+# the fabric under sustained load, which neither of the shorter suites can do.
+#
+# APPLY THE WHOLE config/samples DIRECTORY FIRST — reuses tests from
+# node-acceptance.yaml and pair-network-acceptance.yaml by testRef, and adds
+# the tests that need a genuinely long window: thermal-soak/gpu-burn and an
+# hour of fabric-soak (this file's own, distinct from fabric-soak.yaml's
+# four-hour version — see the note on that test below).
+#
+# NOT INCLUDED: a power-cycling test ("power-swing"). It is on the roadmap
+# (docs/vendors/nvidia.md: "Planned, not written") and has no TestKind, no
+# runner and no image in this repository — there is nothing to reference.
+# When it ships, it belongs here.
+
+# One to two hours of the same correctness-and-thermal engine node-acceptance
+# never holds long enough to reach steady state — see thermal-soak's own
+# README for the measured curve this is built on (69.9% asymptotic sustained
+# clock at 600s on a healthy GB10; nothing shorter than several minutes proves
+# anything about steady state at all). 5400s = ninety minutes: comfortably
+# inside this profile's 2-8h budget alongside everything else below, and long
+# enough that the asymptote in that curve is actually reached rather than
+# merely approached.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: thermal-soak-extended
+spec:
+  kind: thermal-soak
+  scope: Node
+  durationSeconds: 5400
+  thresholds:
+    - metric: throttleEvents
+      comparison: Equal
+      value: "0"
+    # PLACEHOLDER — retune against your own fleet's ninety-minute figure
+    # before trusting it. The 70% floor in node-acceptance.yaml's
+    # sustained-clock test was measured at 300s; this window is 5400s, well
+    # past that curve's own 600s data point (69.90%), so 70 is very likely
+    # too tight here and would fail hardware that thermal-soak's own
+    # documented curve says is healthy. Left at 70 rather than guessed lower,
+    # because a guessed number is not better than an honest placeholder — see
+    # docs/vendors/README.md, "Thresholds do not port".
+    - metric: sustainedClockPct
+      comparison: GreaterThanOrEqual
+      value: "70"
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+# The same load, judged on correctness instead of clock/thermal — see
+# gpu-burn's README for why running both kinds over the same engine is the
+# point rather than a redundancy.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: gpu-burn-extended
+spec:
+  kind: gpu-burn
+  scope: Node
+  durationSeconds: 5400
+  thresholds:
+    - metric: miscompares
+      comparison: Equal
+      value: "0"
+    - metric: eccErrors
+      comparison: Equal
+      value: "0"
+      applicability: RequiredIfMeasurable
+  resources:
+    limits:
+      nvidia.com/gpu: "1"
+---
+# One hour, not fabric-soak.yaml's four — this profile's own budget is 2-8h
+# TOTAL across every test below, and the thermal/burn tests above already
+# claim three of those hours between them. Everything else about this test —
+# the thresholds, the host access, the Pair-scope reasoning — is identical to
+# fabric-soak.yaml's; see that file for the full derivation. A site running
+# extended and periodic-reverification-style fabric soaks separately should
+# prefer fabric-soak.yaml's own four-hour test for the deeper soak and use
+# this one only inside this profile's shorter budget.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: fabric-soak-extended
+spec:
+  kind: fabric-soak
+  scope: Pair
+  durationSeconds: 3600
+  hostNetwork: true
+  runner:
+    image: ghcr.io/baldwinspc/glimmer-burnin-fabric-soak:REPLACE-ME
+    hostPaths:
+      - path: /dev/infiniband
+        mountPath: /dev/infiniband
+        type: Directory
+  thresholds:
+    - metric: bandwidthGbps
+      comparison: GreaterThanOrEqual
+      value: "80" # PLACEHOLDER — see fabric-soak.yaml for the full derivation
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: extended
+spec:
+  failFast: false
+  tests:
+    - testRef: fingerprint-probe
+    - testRef: host-fault-counters
+    - testRef: sustained-clock
+    - testRef: fp4-compute-smoke
+    - testRef: memory-bandwidth
+    - testRef: dcgm-diagnostics
+    - testRef: host-memory-stress
+    - testRef: thermal-soak-extended
+    - testRef: gpu-burn-extended
+    - testRef: fabric-soak-extended
+    - testRef: nccl-allreduce-pair
+    - testRef: disk-io
+  sinks: []
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInRun
+metadata:
+  name: extended-example
+spec:
+  profileRef: extended
+  target:
+    nodeNames:
+      - node-a
+      - node-b
+  maxConcurrentNodes: 2
+  # Room for the two long tests (roughly three hours) plus the rest, plus
+  # margin: see docs/soaks.md's capacity arithmetic before applying this to a
+  # real fleet.
+  deadlineSeconds: 28800 # eight hours
+  ttlSecondsAfterFinished: 86400
