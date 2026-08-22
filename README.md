@@ -374,9 +374,30 @@ the SIGKILL pattern #280 investigated. **This is still a single-device
 qualification** — the fleet has one GPU per node, so the N-device fold itself
 (N > 1) remains unverified on real hardware, tracked by #402 the same as before.
 First run and verified from locally-built images matching this exact source
-tree; `clockprobe`, `compute-smoke`, `gpu-burn`, `thermal-soak` and
-`gemm-sweep` are now published at `v0.7.0` from that same source and pinned in
-`pkg/runnerimages/images.go`.
+tree; `clockprobe`, `compute-smoke` and `gemm-sweep` are published at `v0.7.0`
+and `thermal-soak`/`gpu-burn` at `v0.7.1` from that same source lineage, all
+pinned in `pkg/runnerimages/images.go`.
+
+Deploying the real published `v0.7.0` operator against the real published
+`v0.7.0` runner tags surfaced two more issues that only showed up this way —
+neither visible from locally-built images matching the source tree, because
+both are about what got PUBLISHED, not what the source says. First
+(#438): the `v0.7.0` operator tag was built and published before the
+multi-device pin bump merged, so it shipped stale `v0.6.x` runner defaults —
+every `deviceCount` gate failed closed on real hardware despite the runner
+itself passing cleanly. Fixed by cutting `v0.7.1` (later `v0.7.2`) of the
+operator from a source tree where the pins had already merged. Second
+(#441): `thermal-soak`/`gpu-burn`'s Xid watch (the "zero Xid errors during
+load" gate the flagship `segmented-soak.yaml` example gates on) was tracked
+correctly internally but never reached the printed report, for the whole
+life of the multi-device conversion — every node failed that gate regardless
+of health, silently, with no diagnostic. Fixed and hardware-verified
+(`xidSource` went from `none` with no reason to `kmsg` with a correct count)
+in the `v0.7.1` runner tags. Both are the kind of gap that only a real
+deploy-and-run of the actual published artifacts finds — the lesson this
+session took from it: qualify the source, then separately qualify what
+actually got published, because they can drift from each other in ways
+neither a unit test nor a locally-built image will ever see.
 
 That exercise is also where most of this design's sharp edges came from. **Every
 acceptance threshold that had been derived from a spec sheet rather than
