@@ -63,10 +63,21 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// One image is v0.6.0, one is v0.6.2, one is v0.6.3, four are v0.6.4 and five
-// are v0.7.0, all published to GHCR, public, and anonymously pullable. The
-// spread is not drift: see the numbered reasons on the table below, which is
-// where it is decided.
+// One image is v0.6.0, one is v0.6.2, one is v0.6.3, four are v0.6.4, three
+// are v0.7.0 and two are v0.7.1, all published to GHCR, public, and
+// anonymously pullable. The spread is not drift: see the numbered reasons on
+// the table below, which is where it is decided.
+//
+// thermal-soak and gpu-burn moved again to v0.7.1 for #441: the Xid watch
+// (docs/dev/multi-device.md's soak family, wired up in an earlier release)
+// was tracked correctly but never reached the printed report — every
+// xidEvents/xidWindowsWatched gate, including the flagship
+// config/samples/segmented-soak.yaml worked example, Failed on every node
+// regardless of hardware health. Hardware-verified on this fleet: xidSource
+// went from "none" with no diagnostic to "kmsg" with a correct count. The
+// -rocm siblings carry the identical source fix but are NOT republished here
+// — no AMD hardware in this project's fleet to verify them on, consistent
+// with their own "not yet verified on real hardware" status.
 //
 // EVERY ONE OF THESE HAS NOW RUN ON REAL SILICON. That sentence was not true
 // until 2026-08-17, and the list of exceptions this comment used to carry is
@@ -194,10 +205,12 @@ var defaults = map[contract.TestKind]image{
 	// advisories were fixed on, measuring 29 reachable vulnerabilities (#309) —
 	// which is why every Go runner here has moved off it.
 	//
-	// (4) clockprobe, thermal-soak and gpu-burn are at v0.7.0 with the rest of
-	// the multi-device batch (see the header comment above) even though they
-	// too contain no Go binary — they moved because their SOURCE changed
-	// (device iteration, docs/dev/multi-device.md), not for a stdlib patch.
+	// (4) clockprobe is at v0.7.0 with the rest of the multi-device batch (see
+	// the header comment above) even though it too contains no Go binary — it
+	// moved because its SOURCE changed (device iteration,
+	// docs/dev/multi-device.md), not for a stdlib patch. thermal-soak and
+	// gpu-burn moved AGAIN, to v0.7.1, for the same class of reason: #441's
+	// Xid-watch fix, also a source change with no Go binary involved.
 	//
 	// A pin equal to the newest tag is NOT the same claim as a pin whose image
 	// was built from the source in this tree, and only the second means anything
@@ -209,8 +222,8 @@ var defaults = map[contract.TestKind]image{
 	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.4", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
-	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.0", Vendor: VendorNVIDIA},
-	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.0", Vendor: VendorNVIDIA},
+	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.1", Vendor: VendorNVIDIA},
+	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
 	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.4", Vendor: VendorNVIDIA},
 	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
