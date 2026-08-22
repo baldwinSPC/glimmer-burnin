@@ -176,7 +176,6 @@ spec:
   resources:
     limits:
       nvidia.com/gpu: "1"
-      rdma/rdma_shared_device_a: "1"
   runner:
     privileged: true
     # Same mount, same reason: NCCL's net_ib plugin goes through the verbs
