@@ -18,7 +18,7 @@ access to a registry".
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/baldwinSPC/glimmer-burnin/\.github/workflows/publish-.*\.yml@refs/' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  ghcr.io/baldwinspc/glimmer-burnin:v0.6.4
+  ghcr.io/baldwinspc/glimmer-burnin:v0.7.0
 ```
 
 The same command works for a runner image:
@@ -87,7 +87,7 @@ Alongside the signature, both workflows publish **SLSA provenance** and an
 **SBOM**, attached to the image and inspectable with:
 
 ```sh
-cosign download attestation ghcr.io/baldwinspc/glimmer-burnin:v0.6.4
+cosign download attestation ghcr.io/baldwinspc/glimmer-burnin:v0.7.0
 ```
 
 Attestations answer "how was this built". The signature answers "did this come
