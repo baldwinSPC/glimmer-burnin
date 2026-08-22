@@ -185,6 +185,18 @@ spec:
   # its diagnostic plugins under an ABSOLUTE /usr/libexec/datacenter-gpu-manager-4,
   # so mounting only the first gives a dcgmi that starts and then finds no
   # plugins to run.
+  #
+  # DCGM ALSO GATES SUBTESTS PER SKU, on top of the mount above. Measured on a
+  # GB10 (#435): with no override at all, DCGM's own allowlist skips BOTH
+  # `memory` and `pcie`, running only `targeted_stress` — this test then
+  # ERRORS ("2 of 3 DCGM subtests were SKIPPED") rather than silently passing
+  # a partial check. The error message names the fix
+  # (BURNIN_DCGM_ALLOW=<plugin>,...), left as a runner.env entry for you to add
+  # rather than baked in here: which subtests your SKU actually supports is a
+  # fleet fact this sample cannot know, and `memory` genuinely works on
+  # hardware with a discrete GPU memory bank, which GB10's unified LPDDR5X
+  # does not have — forcing it off here would quietly weaken the check on every
+  # OTHER SKU that copies this file.
   runner:
     hostPaths:
       - path: /opt/dcgm-runtime
