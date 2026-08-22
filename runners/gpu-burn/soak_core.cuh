@@ -1131,7 +1131,8 @@ inline void emitDeviceMeasurementImpl(const Keys &k, const std::vector<DeviceCtx
                                       const std::vector<devices::FoldRule> &foldRules,
                                       const nvmlrt::Library &nvml, long *seq, double elapsedS,
                                       int visible, long windowS, devices::Concurrency mode,
-                                      bool underMig, bool final) {
+                                      bool underMig, bool final, kmsg::Watch &xidWatch,
+                                      kmsg::Tally &xidTally) {
   std::vector<devices::DeviceReport> reports;
   reports.reserve(reportable.size());
   for (DeviceCtx *d : reportable) {
@@ -1143,6 +1144,22 @@ inline void emitDeviceMeasurementImpl(const Keys &k, const std::vector<DeviceCtx
   Measurement m;
   fillMeasurementFromFold(&m, folded);
   m.elapsedS = elapsedS;
+  // The Xid watch is process-wide, not per device (see the Measurement comment
+  // and kmsg/kmsg_watch.h), so it is never part of the device fold above —
+  // fillMeasurementFromFold has no key for it. Without this, every report this
+  // function ever prints (periodic AND final) carries the zero-value default
+  // (xid_source=none, no reason), regardless of what the watch actually saw:
+  // a `Measurement m;` freshly declared on the line above starts from scratch
+  // every single call, and only THIS struct is what emitMeasurement below
+  // actually prints — run()'s own output parameter is a separate Measurement,
+  // fed from xidWatch/xidTally for the caller's OWN assertions only, never
+  // read by anything that reaches stdout.
+  m.xidAvailable = xidWatch.Available();
+  m.xidDropped = xidWatch.Dropped();
+  m.xidUnavailableReason = xidWatch.Why();
+  m.xidCount = xidTally.xidCount;
+  m.haveLastXidCode = xidTally.haveLastXidCode;
+  m.lastXidCode = xidTally.lastXidCode;
   // iterations/sdcDetections/mean* fields are evidence about one representative
   // device (the first that reported), not folded — see Measurement's comments.
   if (!reportable.empty()) {
@@ -1284,7 +1301,7 @@ inline void runActiveDevices(std::vector<DeviceCtx *> &active, std::vector<Devic
       // The watch is process-wide, not per device.
       xidWatch.Collect([&](const std::string &line) { xidTally.ObserveNvidia(line); });
       emitDeviceMeasurementImpl(k, reportable, foldRules, nvml, seq, nowSeconds() - runStart, visible,
-                               windowS, mode, /*underMig=*/false, /*final=*/false);
+                               windowS, mode, /*underMig=*/false, /*final=*/false, xidWatch, xidTally);
       lastProgress = now;
     }
     sleepMillis(kPollMillis);
@@ -1471,7 +1488,7 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
     if (d.exitCode == kExitSkip) underMig = true;
   }
   emitDeviceMeasurementImpl(k, allPtrs, foldRules, nvml, &seq, finished - runStart, visible, windowS, conc.mode,
-                           underMig, /*final=*/true);
+                           underMig, /*final=*/true, xidWatch, xidTally);
 
   // Re-fold once more into *m for the caller's own assertions, from exactly
   // the same reports the final emission just printed.

@@ -775,7 +775,7 @@ inline int errored(const Keys &k, const std::string &w) {
 // engine reports once, at the end, exactly as it always has.
 inline void report(const Keys &k, const std::vector<DeviceCtx *> &reportable,
                    const std::vector<devices::FoldRule> &foldRules, double elapsedS, int visible,
-                   devices::Concurrency mode) {
+                   devices::Concurrency mode, kmsg::Watch &xidWatch, kmsg::Tally &xidTally) {
 	std::vector<devices::DeviceReport> reports;
 	for (DeviceCtx *d : reportable) {
 		if (d->iterations == 0 && d->exitCode != kExitPass) continue;
@@ -822,6 +822,32 @@ inline void report(const Keys &k, const std::vector<DeviceCtx *> &reportable,
 	// gfx1151's LPDDR5X has no ECC. The hardware positively declares the
 	// absence, which is exactly what RequiredIfMeasurable is for.
 	std::printf("ecc_errors=n/a\n");
+
+	// xid_source is printed unconditionally, mirroring the NVIDIA engine
+	// (soak_core.cuh) and host-health: it is the label a reader checks FIRST
+	// when xid_count is absent, to tell "nothing happened" from "nothing was
+	// watched". Found on real hardware alongside the NVIDIA engine's own
+	// disconnection: this function previously had no access to xidWatch/
+	// xidTally at all, so xid_source/xid_count/xid_windows_watched were never
+	// printed here — the fields existed and were fully populated on run()'s
+	// own Measurement, but nothing read them into what report() actually
+	// prints. No last_xid_code here: Tally::ObserveGeneric never extracts one
+	// for AMD (see kmsg/kmsg_watch.h) — amdgpu's kernel messages carry no
+	// single canonical numeric field the way NVIDIA's "Xid: NN" does.
+	m.xidAvailable = xidWatch.Available();
+	m.xidDropped = xidWatch.Dropped();
+	m.xidUnavailableReason = xidWatch.Why();
+	m.xidCount = xidTally.xidCount;
+	std::printf("xid_source=%s\n", m.xidAvailable ? "kmsg" : "none");
+	const bool xidClean = m.xidAvailable && !m.xidDropped;
+	std::printf("xid_windows_watched=%d\n", xidClean ? 1 : 0);
+	if (xidClean) {
+		std::printf("xid_count=%ld\n", m.xidCount);
+	} else if (m.xidAvailable) {
+		std::printf("xid_log_dropped=1\n");
+	} else if (!m.xidUnavailableReason.empty()) {
+		std::printf("xid_source_detail=%s\n", m.xidUnavailableReason.c_str());
+	}
 
 	const std::vector<devices::SpreadSpec> spreads = {
 	    {"sustainedClockSpreadPct", "sustained_clock_pct", /*absoluteFigure=*/false},
@@ -1002,7 +1028,7 @@ inline Measurement run(const Keys &k, const std::vector<devices::FoldRule> &fold
 
 	std::vector<DeviceCtx *> allPtrs;
 	for (auto &d : ctxs) allPtrs.push_back(&d);
-	report(k, allPtrs, foldRules, finished - runStart, visible, conc.mode);
+	report(k, allPtrs, foldRules, finished - runStart, visible, conc.mode, xidWatch, xidTally);
 
 	std::vector<devices::DeviceReport> finalReports;
 	for (auto &d : ctxs) {
