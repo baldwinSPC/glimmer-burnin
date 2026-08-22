@@ -360,6 +360,23 @@ peer-memory provider).
 > GPU available says so there in as many words. Do not read this section as a
 > claim about whichever tag is newest.
 
+**The multi-device conversion (`docs/dev/multi-device.md`) was verified on the
+same two-node fleet.** `clockprobe`, `compute-smoke`, `gpu-burn`, `thermal-soak`
+and `gemm-sweep` — every kind converted to iterate every allocated device rather
+than device 0 alone — passed cleanly measuring their one real device each:
+`deviceCount`/`devicesVisible` correctly report `1`, the soak family defaults to
+`deviceConcurrency=all` and the measurement kinds default to `sequential`
+exactly as designed, and `gemm-sweep` passed all five precision cells (fp4, fp8,
+bf16, tf32, fp64) on both nodes. `fingerprint-probe`'s #380 fix was confirmed
+too: `acceleratorCount=1` on a GB10, where it previously reported `0`. A longer
+(5-minute) `thermal-soak`/`gpu-burn` pass on both nodes found no recurrence of
+the SIGKILL pattern #280 investigated. **This is still a single-device
+qualification** — the fleet has one GPU per node, so the N-device fold itself
+(N > 1) remains unverified on real hardware, tracked by #402 the same as before.
+Built and run from locally-built images matching this exact source tree; whether
+new runner tags get published from it is a separate decision from the pins in
+`pkg/runnerimages/images.go`.
+
 That exercise is also where most of this design's sharp edges came from. **Every
 acceptance threshold that had been derived from a spec sheet rather than
 measured was wrong**, and most of them would have failed healthy hardware — a
