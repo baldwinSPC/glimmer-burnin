@@ -9,8 +9,8 @@ type: application
 # The chart version and the app version move together on purpose. A runner image
 # is executed by a node's readiness gate and published tags are immutable, so
 # "which chart" and "which operator" must not be two questions.
-version: 0.7.1
-appVersion: "0.7.1"
+version: 0.7.2
+appVersion: "0.7.2"
 
 home: https://github.com/baldwinSPC/glimmer-burnin
 sources:
