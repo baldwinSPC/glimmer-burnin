@@ -101,6 +101,15 @@ spec:
       value: "0"
   resources:
     limits:
+      # "2" is the FLOOR this test needs to mean anything (a collective needs
+      # at least two ranks) — not this SKU's real board size. Raise it to
+      # match the target node's actual count (fingerprint-probe's
+      # acceleratorCount says what that is) so the rendezvous covers every
+      # accelerator rather than an arbitrary two of them. No deviceCount gate
+      # here: Node-scope nccl is EXEMPT from device_fold.h's iteration
+      # (runners/devicefold_test.go) — it already runs over every visible
+      # device by its own design, distinct from the multi-device conversion
+      # node-acceptance.yaml's header describes.
       nvidia.com/gpu: "2"
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1

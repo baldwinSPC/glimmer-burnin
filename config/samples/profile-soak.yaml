@@ -62,6 +62,15 @@ spec:
     - metric: sustainedClockPct
       comparison: GreaterThanOrEqual
       value: "70"
+    # See node-acceptance.yaml's MULTI-DEVICE COVERAGE header: thermal-soak
+    # measures every device it was allocated, and "1" is GB10's real board
+    # size — raise both this and resources.limits together on a multi-GPU
+    # SKU. Worth it specifically for a soak this long: a board where one
+    # device silently went unmeasured for 48 hours is the expensive way to
+    # find out.
+    - metric: deviceCount
+      comparison: Equal
+      value: "1"
   resources:
     limits:
       nvidia.com/gpu: "1"

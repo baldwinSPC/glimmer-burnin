@@ -87,8 +87,8 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		// and does not claim deviceCount. memory-bw-rocm is a hand-written HIP
 		// loop on device 0 — no wrapped tool iterates for it — and needs the
 		// full conversion.
-		"memory-bw":      "#400 — delivery step 3 (budget check around nvbandwidth; reports devices_visible until then)",
-		"memory-bw-rocm": "#400 — delivery step 3 (a HIP loop on device 0; the full conversion)",
+		"memory-bw":      "#431 — budget check around nvbandwidth; reports devices_visible until then",
+		"memory-bw-rocm": "#431 — a HIP loop on device 0; the full conversion",
 	}
 
 	for _, d := range runnerDirs(t) {

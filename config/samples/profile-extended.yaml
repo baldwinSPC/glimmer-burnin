@@ -45,6 +45,12 @@ spec:
     - metric: sustainedClockPct
       comparison: GreaterThanOrEqual
       value: "70"
+    # See node-acceptance.yaml's MULTI-DEVICE COVERAGE header: thermal-soak
+    # measures every device it was allocated, and "1" is GB10's real board
+    # size — raise both this and resources.limits together on a multi-GPU SKU.
+    - metric: deviceCount
+      comparison: Equal
+      value: "1"
   resources:
     limits:
       nvidia.com/gpu: "1"
@@ -68,6 +74,10 @@ spec:
       comparison: Equal
       value: "0"
       applicability: RequiredIfMeasurable
+    # See node-acceptance.yaml's MULTI-DEVICE COVERAGE header.
+    - metric: deviceCount
+      comparison: Equal
+      value: "1"
   resources:
     limits:
       nvidia.com/gpu: "1"

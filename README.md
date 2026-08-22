@@ -398,6 +398,22 @@ gate is made of.
 - **`thermal-soak`'s power-delivery-wedge detection is inferred from source, not
   observed** — no wedged part was available to test against. Tracked in
   [#61](https://github.com/baldwinSPC/glimmer-burnin/issues/61).
+- **A runner image published before the multi-device conversion measured one
+  device on a multi-GPU node, even when asked for the whole board.** The
+  in-cluster operator still gives an accelerator runner exactly what
+  `resources.limits` requests, so this never applied there — it is a `burnin
+  run` (bare-metal) story specifically. `pkg/localrun` already passes `--gpus
+  all` / `--device nvidia.com/gpu=all` unconditionally (there is no flag to
+  request fewer), so on a multi-GPU box every device was always VISIBLE inside
+  the container; a device-0-only runner silently measured one of them and
+  certified the board on that reading. `gpu-burn`, `thermal-soak`, `clockprobe`
+  and `compute-smoke` (plus their ROCm siblings) and `gemm-sweep` now iterate
+  every allocated device instead
+  (`docs/dev/multi-device.md`), which is exactly why the absent-
+  `BURNIN_RESOURCE_LIMITS` case in `device_fold.h`'s budget check means "iterate
+  every visible device": bare metal never sets that variable, and on bare metal
+  `all` genuinely IS the allocation. Published tags from before the conversion
+  landed keep the old, one-device behaviour forever; repin to get the fix.
 
 ## Where this is going
 

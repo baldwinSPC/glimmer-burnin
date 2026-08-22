@@ -64,6 +64,17 @@ VARIANTS
   one execution per cell, each with the cell's own name, thresholds and
   BURNIN_VARIANT_<AXIS> variables. --dry-run lists the cells and their axes.
 
+ACCELERATOR VISIBILITY
+
+  There is no flag to request fewer accelerators than the machine has: an
+  accelerator runner always gets --gpus all / --device nvidia.com/gpu=all
+  (whichever the detected runtime prefers), so every device on the box is
+  visible inside the container. A multi-device runner (gpu-burn, thermal-soak,
+  clockprobe, compute-smoke, gemm-sweep — docs/dev/multi-device.md) measures
+  every one of them and gates on the worst; a partial-allocation refusal
+  (device_fold.h's budget check) never fires here, because "all" genuinely IS
+  the allocation on bare metal.
+
 PROGRESS
 
   A test that sets checkpointIntervalSeconds publishes the metrics it has
