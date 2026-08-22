@@ -27,7 +27,7 @@ The same command works for a runner image:
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/baldwinSPC/glimmer-burnin/\.github/workflows/publish-.*\.yml@refs/' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0
+  ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.7.0
 ```
 
 Success prints the certificate subject and the claims. Failure exits non-zero —

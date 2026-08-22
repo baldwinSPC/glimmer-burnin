@@ -63,9 +63,10 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// Five images are v0.6.0, one is v0.6.2, one is v0.6.3 and four are v0.6.4, all
-// published to GHCR, public, and anonymously pullable. The spread is not drift:
-// see the numbered reasons on the table below, which is where it is decided.
+// One image is v0.6.0, one is v0.6.2, one is v0.6.3, four are v0.6.4 and five
+// are v0.7.0, all published to GHCR, public, and anonymously pullable. The
+// spread is not drift: see the numbered reasons on the table below, which is
+// where it is decided.
 //
 // EVERY ONE OF THESE HAS NOW RUN ON REAL SILICON. That sentence was not true
 // until 2026-08-17, and the list of exceptions this comment used to carry is
@@ -119,6 +120,19 @@ const (
 // of the image or the duration. A long soak scheduled through the operator on a
 // GB10 still will not reliably complete.
 //
+// FIVE MORE MOVED TO v0.7.0 for the multi-device conversion
+// (docs/dev/multi-device.md): clockprobe, compute-smoke, gpu-burn,
+// thermal-soak and gemm-sweep now iterate every device the pod was allocated
+// instead of device 0 alone, rather than measuring device 0 and calling it
+// the node. Verified on the same two-node GB10 fleet: deviceCount and
+// devicesVisible correctly report 1, the soak family's deviceConcurrency=all
+// default and the measurement kinds' sequential default both behaved as
+// designed, fingerprint-probe's #380 fix held, and gemm-sweep passed all five
+// precision cells on both nodes. Still single-device qualification only — the
+// fleet has one GPU per node, so N>1 device folding itself remains unverified
+// on real hardware (#402). See README's "Qualified on hardware" section for
+// the fuller writeup.
+//
 // The v0.3.0 tags remain published and immutable, and the measurements behind
 // THEM were taken on a two-node DGX Spark cluster with the v0.2.0 build of the
 // same sources: the Node-scope suite passed 10/10 across both nodes, and the
@@ -158,8 +172,9 @@ var defaults = map[contract.TestKind]image{
 	// a hardware FAILURE verdict against the node. v0.2.0 was the first build
 	// where those are exit 3, Error, hardware unjudged. Anyone still pinning
 	// v0.1.0 keeps the old behaviour, which is why those are new tags and not
-	// repushed ones.
-	contract.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.6.0", Vendor: VendorNVIDIA},
+	// repushed ones. Moved again to v0.7.0 with the rest of the multi-device
+	// batch — see the header comment above.
+	contract.KindComputeSmoke: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-compute-smoke:v0.7.0", Vendor: VendorNVIDIA},
 
 	// This table is deliberately MIXED, and the reasons are different.
 	//
@@ -173,34 +188,39 @@ var defaults = map[contract.TestKind]image{
 	// sources have not moved since those images were built. Republishing an
 	// unchanged runner spends fleet-wide risk to change nothing.
 	//
-	// (3) The C++/CUDA runners stay at v0.6.0 because they contain NO Go binary
-	// at all. There is no stdlib in them to patch. Every published v0.6.0 GO
-	// image was built on go1.24.13, an end-of-life branch none of the advisories
-	// were fixed on, measuring 29 reachable vulnerabilities (#309) — which is
-	// why every Go runner here has moved off it.
+	// (3) The C++/CUDA runners at v0.6.x stay there because they contain NO Go
+	// binary at all. There is no stdlib in them to patch. Every published v0.6.0
+	// GO image was built on go1.24.13, an end-of-life branch none of the
+	// advisories were fixed on, measuring 29 reachable vulnerabilities (#309) —
+	// which is why every Go runner here has moved off it.
+	//
+	// (4) clockprobe, thermal-soak and gpu-burn are at v0.7.0 with the rest of
+	// the multi-device batch (see the header comment above) even though they
+	// too contain no Go binary — they moved because their SOURCE changed
+	// (device iteration, docs/dev/multi-device.md), not for a stdlib patch.
 	//
 	// A pin equal to the newest tag is NOT the same claim as a pin whose image
 	// was built from the source in this tree, and only the second means anything
 	// to a node that pulls it. Both drifted within one day (#374, and again
 	// here), each caught by hand while doing something else. #379 is the guard
 	// that should be doing the catching.
-	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.0", Vendor: VendorNVIDIA},
 	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.3", Vendor: VendorNVIDIA},
 	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.4", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
-	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.6.0", Vendor: VendorNVIDIA},
-	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.0", Vendor: VendorNVIDIA},
+	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.0", Vendor: VendorNVIDIA},
 	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
 	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.4", Vendor: VendorNVIDIA},
 	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
-	// gemm-sweep joins the table because its gate is met twice over: the five
-	// captures #265 took, and a run through the OPERATOR on 2026-08-17 where all
-	// five precisions passed on both nodes as variant cells. Until now the
-	// flagship demonstration of the variants feature — variant-sweep.yaml —
-	// pointed at REPLACE-ME.
-	contract.KindGemmSweep: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gemm-sweep:v0.6.4", Vendor: VendorNVIDIA},
+	// gemm-sweep joined the table at v0.6.4 because its gate was met twice over:
+	// the five captures #265 took, and a run through the OPERATOR on 2026-08-17
+	// where all five precisions passed on both nodes as variant cells. Moved to
+	// v0.7.0 with the rest of the multi-device batch — see the header comment
+	// above.
+	contract.KindGemmSweep: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gemm-sweep:v0.7.0", Vendor: VendorNVIDIA},
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.

@@ -373,8 +373,9 @@ too: `acceleratorCount=1` on a GB10, where it previously reported `0`. A longer
 the SIGKILL pattern #280 investigated. **This is still a single-device
 qualification** — the fleet has one GPU per node, so the N-device fold itself
 (N > 1) remains unverified on real hardware, tracked by #402 the same as before.
-Built and run from locally-built images matching this exact source tree; whether
-new runner tags get published from it is a separate decision from the pins in
+First run and verified from locally-built images matching this exact source
+tree; `clockprobe`, `compute-smoke`, `gpu-burn`, `thermal-soak` and
+`gemm-sweep` are now published at `v0.7.0` from that same source and pinned in
 `pkg/runnerimages/images.go`.
 
 That exercise is also where most of this design's sharp edges came from. **Every
