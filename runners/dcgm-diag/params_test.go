@@ -291,6 +291,7 @@ func TestLoadConfigReadsTheParameterSurfaces(t *testing.T) {
 	t.Setenv("BURNIN_DCGM_PARAMS", "diagnostic.test_duration=60")
 	t.Setenv("BURNIN_DCGM_TESTS", "memory,pcie")
 	t.Setenv("BURNIN_DCGM_TIMEOUT_SECONDS", "90")
+	t.Setenv("BURNIN_DURATION_SECONDS", "600")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -307,6 +308,53 @@ func TestLoadConfigReadsTheParameterSurfaces(t *testing.T) {
 	}
 }
 
+// #370: a profile that enables a gated plugin and leaves the level-derived
+// budget in place gets cut off long before the plugin finishes — measured on
+// GB10, the memory plugin alone ran 282-301s against the 105s a 2-minute
+// duration derives. loadConfig refuses instead of silently deriving a budget
+// already known to be wrong.
+func TestLoadConfigRefusesAGatedPluginWithNoExplicitLongDuration(t *testing.T) {
+	t.Setenv("BURNIN_DCGM_ALLOW", "memory")
+	// Deliberately unset: this is the case the issue measured, where the level
+	// (and so the derived -t) comes from BURNIN_DURATION_SECONDS alone.
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("loadConfig accepted BURNIN_DCGM_ALLOW with no BURNIN_DURATION_SECONDS at all")
+	}
+
+	t.Setenv("BURNIN_DURATION_SECONDS", "120")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("loadConfig accepted BURNIN_DCGM_ALLOW with a 2-minute duration, " +
+			"the exact case #370 measured cutting the memory plugin off")
+	}
+}
+
+// The same guard fires for the raw BURNIN_DCGM_PARAMS surface, not just the
+// ergonomic BURNIN_DCGM_ALLOW one — is_allowed=true has the same runtime
+// impact however it was spelled.
+func TestLoadConfigRefusesAGatedPluginNamedViaRawParams(t *testing.T) {
+	t.Setenv("BURNIN_DCGM_PARAMS", "memory.is_allowed=true")
+	t.Setenv("BURNIN_DURATION_SECONDS", "120")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("loadConfig accepted memory.is_allowed=true via BURNIN_DCGM_PARAMS with only a 2-minute duration")
+	}
+}
+
+// A duration at or beyond the floor is accepted, and a run naming no gated
+// plugin at all is never subject to the floor.
+func TestLoadConfigAcceptsAGatedPluginWithALongEnoughDuration(t *testing.T) {
+	t.Setenv("BURNIN_DCGM_ALLOW", "memory")
+	t.Setenv("BURNIN_DURATION_SECONDS", "600")
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig rejected a 600s duration, at the documented floor: %v", err)
+	}
+
+	t.Setenv("BURNIN_DCGM_ALLOW", "")
+	t.Setenv("BURNIN_DURATION_SECONDS", "120")
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig rejected a short duration with no gated plugin named: %v", err)
+	}
+}
+
 // The acceptance criterion of #307: the runner REPORTS the exact parameter
 // string it passed. Asserted end to end through run(), because the value being
 // reported and the value reaching dcgmi are set in different places, and a
@@ -319,7 +367,7 @@ func TestRunReportsWhatItWasAskedToPass(t *testing.T) {
 	t.Setenv("BURNIN_DCGM_ALLOW", "memory,pcie")
 	t.Setenv("BURNIN_DCGM_TESTS", "memory,pcie")
 	t.Setenv("BURNIN_DCGM_BIN", "/nonexistent/dcgmi-for-this-test")
-	t.Setenv("BURNIN_DURATION_SECONDS", "300")
+	t.Setenv("BURNIN_DURATION_SECONDS", "600")
 
 	stdout, code := captureRun(t)
 
@@ -338,10 +386,10 @@ func TestRunReportsWhatItWasAskedToPass(t *testing.T) {
 	if got := res.Metrics["diagLevelSource"]; got != "named" {
 		t.Errorf("diagLevelSource = %q, want named", got)
 	}
-	// 300s budget less the 15s headroom. Reported so a run that ended at
+	// 600s budget less the 15s headroom. Reported so a run that ended at
 	// DCGM's own timeout can be told from one that ended at the runner's.
-	if got := res.Metrics["diagTimeoutS"]; got != "285" {
-		t.Errorf("diagTimeoutS = %q, want 285", got)
+	if got := res.Metrics["diagTimeoutS"]; got != "585" {
+		t.Errorf("diagTimeoutS = %q, want 585", got)
 	}
 	// No level ran, so none is claimed.
 	if got, present := res.Metrics["diagLevel"]; present {

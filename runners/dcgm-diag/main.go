@@ -54,6 +54,11 @@ const (
 // the Dockerfile. An absent file means nothing was pruned.
 const prunedManifestPath = "/usr/share/glimmer-burnin/dcgm-pruned.txt"
 
+// minDurationForGatedPlugins is the floor loadConfig enforces once at least
+// one DCGM plugin is enabled past its default allowlist. See the #370 comment
+// at its use site; this mirrors the README's "600s or more" advice.
+const minDurationForGatedPlugins = 10 * time.Minute
+
 func main() {
 	// The Dockerfile runs this against the DCGM headers it just built, and
 	// fails the build if a field id here disagrees with dcgm_fields.h.
@@ -115,6 +120,26 @@ func loadConfig() (config, error) {
 		}
 		c.duration = time.Duration(n) * time.Second
 	}
+
+	// #370: levelBudgets' figures describe a level with these plugins gated
+	// OFF, which is the default. Measured on GB10 (DCGM 4.5.2), the memory
+	// plugin alone ran 282s, 285s, 286s and 301s across four runs reporting the
+	// SAME work each time — the spread tracks neither run order nor thermal
+	// drift, so a level-derived -t (105s, from a 2-minute duration) cuts it off
+	// every time. The runner cannot compute a safe budget from a figure that
+	// moves 15x for reasons nobody has established, so once any plugin is
+	// enabled past its default allowlist it requires the operator to say the
+	// duration explicitly rather than deriving one from a budget already known
+	// to be wrong. This enforces the README's own documented advice instead of
+	// merely stating it.
+	if strings.Contains(c.params, ".is_allowed=true") && c.duration < minDurationForGatedPlugins {
+		return c, fmt.Errorf(
+			"BURNIN_DCGM_ALLOW or BURNIN_DCGM_PARAMS enables at least one plugin past its "+
+				"default allowlist (-p %s), which invalidates the level-derived timeout budget "+
+				"(#370): set BURNIN_DURATION_SECONDS explicitly to %s or more",
+			c.params, minDurationForGatedPlugins)
+	}
+
 	if v := os.Getenv("BURNIN_DCGM_SAMPLE_INTERVAL_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {

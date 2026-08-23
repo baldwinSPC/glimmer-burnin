@@ -272,9 +272,12 @@ That last point has a direct consequence for the budget. `levelBudgets[2]` is
 2 minutes, which is DCGM's nominal figure for a supported SKU with these plugins
 gated OFF. Enabling them invalidates it: a profile that lets the level be
 derived from a 2-minute duration gets a derived `-t` of 105s, and a `memory`
-plugin that wanted 300s is cut short. **Set `BURNIN_DURATION_SECONDS` explicitly
-and generously — 600s or more — whenever `BURNIN_DCGM_ALLOW` is set.** The
-failure is at least honest: a cut-short run reports `Error`, not a pass.
+plugin that wanted 300s is cut short. **`BURNIN_DURATION_SECONDS` must be set
+explicitly to 600s or more whenever a plugin is enabled past its default
+allowlist** — via `BURNIN_DCGM_ALLOW` or a raw `<plugin>.is_allowed=true` in
+`BURNIN_DCGM_PARAMS` — and the runner refuses to start otherwise (#370), rather
+than deriving a budget already known to be wrong from an unexplained 15x
+spread. This was a prose-only workaround until #370; it is enforced now.
 
 Temperature is not a concern for these runs. The part started at 45–47 °C and
 peaked at 61 °C, nowhere near the 81 °C seen under the soak runner. It does not
