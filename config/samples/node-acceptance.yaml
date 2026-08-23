@@ -134,7 +134,25 @@ spec:
     # throttleEvents below is the real thermal verdict and this gate is a
     # WEDGE BACKSTOP, not a performance gate.
     #
-    # 70 is set by the healthy-hardware measurement above and by nothing else.
+    # 70 was set by the healthy-hardware measurement above and by nothing
+    # else — which turned out to BE the bug (#455). Six qual-pass
+    # measurements on both Sparks (2026-08-23), spanning a mid-campaign run,
+    # an immediate repeat and a genuine cold start (idle 48-49C beforehand),
+    # all read EXACTLY 69.70% — zero variance, throttleEvents=0 and
+    # throttleReasonsMask=0 on every one, so this is the real, deterministic
+    # steady state at 300s and not noise or a thermal artifact. 70 was
+    # therefore already inside the healthy minimum's own noise floor before
+    # that data existed, and every node in the fleet failed this gate,
+    # forever, regardless of health.
+    #
+    # 65 leaves ~4.7pp of real margin below the measured 69.70% — enough to
+    # tolerate normal cross-fleet variance and, per #456's memory-bandwidth
+    # finding on this SAME hardware the SAME night (~13% drift attributed to
+    # a driver/firmware change over 20 days), enough to not assume today's
+    # reading is permanently exact either. It is still a large margin above
+    # the wedge estimate below, so a genuinely wedged part is in no danger of
+    # passing.
+    #
     # Where a wedged part actually sits is NOT measured: this project ESTIMATES
     # near 20% of rated boost, from a researched pin point of ~611 MHz over the
     # measured 3003 MHz rated boost (611/3003 = 20.3%), which agrees in order of
@@ -145,7 +163,7 @@ spec:
     # you are trading healthy nodes for a number nobody took.
     - metric: sustainedClockPct
       comparison: GreaterThanOrEqual
-      value: "70"
+      value: "65"
     # Transitions into a capped state, not a sample count. An idle GPU is
     # excluded from this by the runner — unloaded is not throttled.
     - metric: throttleEvents
