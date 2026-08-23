@@ -86,9 +86,9 @@ func TestAnUnknownKindHasNoDefault(t *testing.T) {
 // Same discipline as pkg/contract refusing an Unspecified Aggregation: the
 // answer lives beside the name, so "can this image measure this node?" is a
 // lookup and never a guess. Without it, "fall through to the kind's default" is
-// an assumption — and since every image this project ships but two is an NVIDIA
-// image, that assumption is wrong on exactly the fleets imagesByVendor exists
-// for.
+// an assumption — and since every image this project ships but three is an
+// NVIDIA image, that assumption is wrong on exactly the fleets imagesByVendor
+// exists for.
 func TestEveryDefaultDeclaresItsVendor(t *testing.T) {
 	for kind := range All() {
 		v, ok := VendorOf(kind)
@@ -97,7 +97,7 @@ func TestEveryDefaultDeclaresItsVendor(t *testing.T) {
 				"whether it may run on an AMD node", kind)
 		}
 	}
-	// And the vendor-neutral pair is exactly the two runners that touch no
+	// And the vendor-neutral trio is exactly the runners that touch no
 	// accelerator, which runners/pins_test.go already names with its reason —
 	// so this column is cross-checked against an existing list rather than being
 	// new unbacked state.
@@ -107,7 +107,7 @@ func TestEveryDefaultDeclaresItsVendor(t *testing.T) {
 			neutral[kind] = true
 		}
 	}
-	for _, want := range []contract.TestKind{contract.KindIBWriteBW, contract.KindMemoryStress} {
+	for _, want := range []contract.TestKind{contract.KindIBWriteBW, contract.KindMemoryStress, contract.KindTCPBaseline} {
 		if !neutral[want] {
 			t.Errorf("%q touches no accelerator and must be %s", want, VendorAny)
 		}

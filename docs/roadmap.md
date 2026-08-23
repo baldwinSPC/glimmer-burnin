@@ -116,7 +116,7 @@ scarce resource, which is time on silicon.
 | `gpudirect-rdma` | GPU↔NIC peer-memory path | Pair | shipped | — | — | shipped |
 | `nccl` | Collective bandwidth | Pair, Group | shipped | planned | later | shipped · [#118] · [#170] |
 | `fabric-soak` | Iterated RDMA writes over hours | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#283] |
-| `tcp-baseline` | Plain TCP throughput and retransmits | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#237] |
+| `tcp-baseline` | Plain TCP throughput and retransmits | Pair | shipped | shipped | shipped | shipped (vendor-free) · #237 partial (see issue) |
 | `disk-io` | Storage throughput and latency (direct I/O) | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#242] |
 | `fingerprint-probe` | What the hardware says about itself | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#354] |
 

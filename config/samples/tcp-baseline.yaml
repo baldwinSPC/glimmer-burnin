@@ -4,11 +4,13 @@
 # hardware, so it runs everywhere, and when a later ib-write-bw fails this is
 # what says whether the node can move packets at all.
 #
-# NOTE ON THE IMAGE. There is no published tcp-baseline image yet, so
-# spec.runner.image is REQUIRED here and this sample names a placeholder.
-# Publishing is manual and follows verification on real hardware. Without a
-# default, a run fails at plan time naming the problem, rather than
-# ImagePullBackOff-ing on every targeted node.
+# Published at v0.1.0 and verified through the operator on both Sparks (#237):
+# with no TCP_BASELINE_INTERFACE override, the client's route lookup correctly
+# picked the fabric interface over the management one (enP2p1s0f0np0, not the
+# wlP9s9 carrying the default route) — confirming ifaceForAddr reads a real
+# multi-interface routing table correctly, not just a single-NIC laptop. Naming
+# the management interface explicitly was refused with exit 3, as documented
+# below. A healthy pair measured 43.7 Gbps, 0 retransmits, 146us RTT.
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
 metadata:
@@ -22,11 +24,13 @@ spec:
   # measure a path it cannot classify.
   hostNetwork: true
   runner:
-    image: ghcr.io/baldwinspc/glimmer-burnin-tcp-baseline:REPLACE-ME
+    # No image on purpose — since v0.1.0 this kind resolves a default.
     env:
       # REQUIRED on the server end, which has no peer address to route towards
       # and therefore nothing for the management-path guard to compare. Set this
       # to the FABRIC interface — naming the default-route interface is refused.
+      # Illustrative name; this fleet's actual fabric interface is
+      # enP2p1s0f0np0 (see the header).
       - name: TCP_BASELINE_INTERFACE
         value: enp1s0f0
     # Without a probe, "Ready" only means the container started, and a client
@@ -39,7 +43,10 @@ spec:
   thresholds:
     # Deliberately no throughput floor. This project pins thresholds from
     # MEASURED baselines, never from a spec sheet — the fabric on this fleet
-    # sustains ~99.6 Gb/s against optics labelled 200. Measure first, then gate.
+    # sustains ~99.6 Gb/s against optics labelled 200 (ib_write_bw), and a
+    # single TCP measurement so far reads 43.7 Gbps, well below that as
+    # expected for stream overhead. One sample is not a baseline; measure more
+    # before gating on it.
     #
     # Retransmits are gateable from day one, because the target is not a rate:
     # a healthy path retransmits nothing, and Equal 0 on a dimensionless counter

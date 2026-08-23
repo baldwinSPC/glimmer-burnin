@@ -252,6 +252,15 @@ var defaults = map[contract.TestKind]image{
 	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.7.0", Vendor: VendorNVIDIA},
 	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
+	// tcp-baseline joined the table at v0.1.0 (#237), verified through the
+	// operator on both Sparks: the client-side route lookup correctly picked
+	// the fabric interface with no override (enP2p1s0f0np0, not the wlP9s9
+	// management interface), the explicit-management-interface guard refused
+	// with exit 3 as documented, and a healthy run measured 43.7 Gbps / 0
+	// retransmits / 146us RTT. Needs no accelerator, so VendorAny like
+	// ib-write-bw.
+	contract.KindTCPBaseline: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-tcp-baseline:v0.1.0", Vendor: VendorAny},
+
 	// gemm-sweep joined the table at v0.6.4 because its gate was met twice over:
 	// the five captures #265 took, and a run through the OPERATOR on 2026-08-17
 	// where all five precisions passed on both nodes as variant cells. Moved to
@@ -300,8 +309,8 @@ func All() map[contract.TestKind]string {
 // KindCustom exists so a user can point any image at the runner contract;
 // inventing a default for it would defeat the point.
 //
-// KindTCPBaseline, KindDiskIO, KindFingerprintProbe and KindFabricSoak have
-// runner source in this repo but NO PUBLISHED IMAGE yet.
+// KindDiskIO, KindFingerprintProbe and KindFabricSoak have runner source in
+// this repo but NO PUBLISHED IMAGE yet.
 // Publishing is manual and hardware-gated by policy, and a default pointing at
 // a tag that does not exist is worse than no default at all: it turns a
 // plan-time error that names the problem into an ImagePullBackOff on every
@@ -309,7 +318,7 @@ func All() map[contract.TestKind]string {
 // paragraph with it.
 func WithoutDefault() []contract.TestKind {
 	return []contract.TestKind{
-		contract.KindCustom, contract.KindTCPBaseline, contract.KindDiskIO, contract.KindFingerprintProbe,
+		contract.KindCustom, contract.KindDiskIO, contract.KindFingerprintProbe,
 		contract.KindFabricSoak,
 	}
 }
