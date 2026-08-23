@@ -269,7 +269,7 @@ var defaults = map[contract.TestKind]image{
 	// O_DIRECT never touched it) measured only 1.1 GB/s before a second
 	// buffered read jumped to 7.1 GB/s once the cache warmed — the textbook
 	// cache-bypass signature. Needs no accelerator, so VendorAny.
-	contract.KindDiskIO: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-disk-io:v0.1.1", Vendor: VendorAny},
+	contract.KindDiskIO: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-disk-io:v0.1.2", Vendor: VendorAny},
 
 	// gemm-sweep joined the table at v0.6.4 because its gate was met twice over:
 	// the five captures #265 took, and a run through the OPERATOR on 2026-08-17
