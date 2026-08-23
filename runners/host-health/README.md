@@ -237,11 +237,16 @@ rather than demanding root of every node.
 
 ```yaml
   runner:
-    # The mount supplies the device node; privileged supplies CAP_SYSLOG, which
-    # reading /dev/kmsg needs wherever kernel.dmesg_restrict=1 — the default on
-    # most distributions. On a host with dmesg_restrict=0 and a world-readable
+    # The mount supplies the device node; privileged supplies CAP_SYSLOG to the
+    # PROCESS; and runAsUser: 0 is what lets that capability survive into the
+    # effective set — privileged alone does NOT supply CAP_SYSLOG to a non-root
+    # process (Linux drops the effective capability set on switching away from
+    # root), and this image declares USER 65532:65532. Both fields are needed
+    # together; see "xid_source=none with the mount correct" below for the
+    # measurement. On a host with dmesg_restrict=0 and a world-readable
     # /dev/kmsg the mount alone is enough, even as uid 65532.
     privileged: true
+    runAsUser: 0
     hostPaths:
       - path: /dev/kmsg
         mountPath: /dev/kmsg
@@ -265,14 +270,17 @@ read either**, so mounting it changes nothing on its own.
 ### `xid_source=none` with the mount correct
 
 This image runs as uid **65532** by design (least privilege: the sysfs probes
-need nothing more). Two things follow, and together they are issue #134:
-
-- `/dev/kmsg` needs **`CAP_SYSLOG`** on any host with `kernel.dmesg_restrict=1`,
-  which is the default on Ubuntu and Debian.
-- **`privileged: true` does not supply it.** Linux drops a process's effective
-  capability set when it switches away from root, so a privileged container
-  running as a non-root uid holds no `CAP_SYSLOG` at all. The combination looks
-  sufficient and is not.
+need nothing more). Reading `/dev/kmsg` needs **`CAP_SYSLOG`** on any host with
+`kernel.dmesg_restrict=1`, which is the default on Ubuntu and Debian — that is
+issue #134. `runAsUser: 0` alone does not supply it: an unprivileged
+container's default capability set excludes `CAP_SYSLOG` regardless of which
+uid the process runs as (root inside a container is not the same as root on
+the host), so `spec.runner` needs to say so explicitly. `privileged: true`
+alone does not supply it either — Linux drops a process's effective capability
+set when it switches away from root, so a privileged container running as a
+non-root uid holds no `CAP_SYSLOG` at all. The combination that LOOKS
+sufficient rarely is; the two configurations below are the ones actually
+measured to work, on real GB10 hardware.
 
 The runner now says so rather than leaving you to guess — `xid_source=none` is
 accompanied by `xid_source_detail` naming each path it tried, whether the path
@@ -281,9 +289,15 @@ was absent or unreadable, and the remedy.
 Two configurations work:
 
 ```yaml
-# 1. Run as a uid that may read the ring buffer.
+# 1. Run as root: `privileged` supplies the capability to the process, and
+# `runAsUser: 0` is what lets it survive into the effective set — dropping
+# either one silently loses it. Measured on GB10: `runAsUser: 0` alone (no
+# `privileged`) still reads EPERM, because the operator's own hostPath mount
+# grants no device-cgroup rule either (#302) — this is the one combination
+# that clears BOTH gates at once.
 spec:
   runner:
+    privileged: true
     runAsUser: 0
     hostPaths:
       - path: /dev/kmsg
@@ -306,7 +320,10 @@ spec:
 
 Prefer the second where a site can arrange it: it needs no capability, no root,
 and no privileged container, and it is the configuration a hardened node will
-still permit.
+still permit. `spec.runner.capabilities` (`[SYSLOG]`) cannot substitute for
+either configuration above — measured, in #302: it clears the capability gate
+alone but not the device-cgroup one, so `/dev/kmsg` still reads EPERM without
+`privileged: true` too.
 
 One residual gap, unchanged by this field: if a node needs the reader to be
 **root** rather than merely to hold `CAP_SYSLOG`, the reconciler still cannot
