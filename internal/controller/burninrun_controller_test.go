@@ -4547,6 +4547,43 @@ func TestRun_UnsatisfiableThresholdIsRefusedAtStartAsAConfigError(t *testing.T) 
 	}
 }
 
+// #404: pkg/localrun already refused a profile that tries to set one of the
+// contract's own environment variables (silently, by dropping the override);
+// this operator did not refuse it at all, so a profile illegal on bare metal
+// was legal in-cluster. BURNIN_ROLE is the sharpest example: podForTest
+// appends spec.runner.env LAST, and the kubelet takes the last duplicate, so
+// an unrefused override could make a Pair server speak the client's half of
+// the rendezvous.
+func TestRun_ReservedEnvOverrideIsRefusedAtStartAsAConfigError(t *testing.T) {
+	for _, name := range []string{"BURNIN_ROLE", "BURNIN_RESOURCE_LIMITS", "BURNIN_DURATION_SECONDS"} {
+		t.Run(name, func(t *testing.T) {
+			bt := smokeTest("fp4")
+			bt.Spec.Runner = &burninv1alpha1.RunnerSpec{Env: []corev1.EnvVar{{Name: name, Value: "spoofed"}}}
+			h := newHarness(t,
+				gb10Node("spark-a"),
+				bt,
+				profile("acceptance", nil, false, testRef("fp4")),
+				newRun("run1", "acceptance", "spark-a"),
+			)
+			h.reconcileUntilSettled("run1")
+
+			run := h.run("run1")
+			if run.Status.Phase != burninv1alpha1.RunError {
+				t.Fatalf("phase = %q, want Error — a profile trying to override the contract's own "+
+					"variable is a broken profile, not a bad part", run.Status.Phase)
+			}
+			msg := run.Status.Results[0].Message
+			if !strings.Contains(msg, name) {
+				t.Errorf("message = %q, want it to name the offending variable %q", msg, name)
+			}
+			if len(h.allPods("run1")) != 0 {
+				t.Error("a pod was scheduled for a profile that tried to override a reserved variable")
+			}
+			h.assertNoStrandedCordons()
+		})
+	}
+}
+
 // Every unsatisfiable gate in the profile, in one message. The author is being
 // sent to fix a file; rediscovering the second typo on the next run costs
 // another cordon, another schedule, and another wait.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 	burninplan "github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/verdict"
 )
@@ -133,6 +134,9 @@ type plannedTest = burninplan.Test
 // can never launch, and a run that quietly waits out its deadline to say so is
 // a much worse report than one that refuses at start with the reason.
 func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []plannedTest, targets []string, nodeCap int, baseline bool) (*plan, error) {
+	if err := refuseReservedEnvOverride(tests); err != nil {
+		return nil, err
+	}
 	if err := refuseUnsatisfiableThresholds(tests); err != nil {
 		return nil, err
 	}
@@ -338,6 +342,54 @@ func validatePairTopology(t plannedTest, targets []string, nodeCap int) error {
 // the run retries the same rejection forever while holding a cordon. Refusing at
 // START instead turns that into one legible sentence at run start, which is the
 // same trade validatePairTopology makes.
+// refuseReservedEnvOverride rejects a profile whose spec.runner.env sets a
+// name the contract itself owns (#404).
+//
+// pkg/localrun already refused these — it silently drops the override,
+// letting the contract's own value win, so a bare-metal run behaves as if the
+// override were never written. This operator did not refuse them at all:
+// podForTest builds the injected variables first and appends spec.runner.env
+// last, and the kubelet takes the last duplicate, so a profile could set
+// BURNIN_ROLE on a Pair server and make it speak the client's half of the
+// rendezvous, or set BURNIN_RESOURCE_LIMITS and tell a multi-device runner it
+// owns a board it was never handed — exactly the spoof that variable exists
+// to prevent (docs/dev/multi-device.md). Refusing here, before a node is
+// cordoned, closes the two dispatchers' disagreement about which profiles are
+// legal — the class of divergence pkg/localrun's own "mirrors podForTest"
+// comment exists to prevent — the same way, and at the same severity, as an
+// unsatisfiable threshold.
+//
+// `tests` is already variant-expanded by the time buildPlan sees it, so this
+// covers a variant's own env (which REPLACES the parent's, per the variants
+// design) the same as a base test's.
+func refuseReservedEnvOverride(tests []plannedTest) error {
+	var bad []string
+	for _, t := range tests {
+		if t.Spec.Runner == nil {
+			continue
+		}
+		for _, e := range t.Spec.Runner.Env {
+			if _, reserved := contract.ReservedEnv[e.Name]; reserved {
+				bad = append(bad, fmt.Sprintf("test %q sets %s", t.Name, e.Name))
+			}
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	shown := bad
+	if len(shown) > maxAdvisedThresholds {
+		shown = append(append([]string{}, bad[:maxAdvisedThresholds]...),
+			fmt.Sprintf("and %d more", len(bad)-maxAdvisedThresholds))
+	}
+	return fmt.Errorf(
+		"this profile's spec.runner.env sets %d variable(s) this operator itself injects, so the run is refused "+
+			"before any node is touched — a profile that could override one of these could make a Pair server "+
+			"speak the client's half of the rendezvous, or tell a multi-device runner it owns a board it was "+
+			"never handed: %s",
+		len(bad), strings.Join(shown, "; "))
+}
+
 func validateHostPaths(t plannedTest) error {
 	if t.Spec.Runner == nil {
 		return nil
