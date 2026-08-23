@@ -490,7 +490,7 @@ func podForTest(
 		// and stays true of the rendezvous variables.
 		container.Env = append(container.Env, spec.Runner.Env...)
 		container.ReadinessProbe = spec.Runner.ReadinessProbe
-		if spec.Runner.Privileged || spec.Runner.RunAsUser != nil {
+		if spec.Runner.Privileged || spec.Runner.RunAsUser != nil || len(spec.Runner.Capabilities) > 0 {
 			container.SecurityContext = &corev1.SecurityContext{}
 			if spec.Runner.Privileged {
 				t := true
@@ -511,6 +511,19 @@ func podForTest(
 				// if a policy still refuses it.
 				nonRoot := uid != 0
 				container.SecurityContext.RunAsNonRoot = &nonRoot
+			}
+			// #302: the narrower alternative to Privileged for the one grant that
+			// keeps needing exactly one capability rather than the whole
+			// device-cgroup. refuseCapabilitiesWithoutRunAsUserZero (plan.go)
+			// already refused this at plan time if RunAsUser is not 0, so by the
+			// time a pod is built here the combination is known to mean
+			// something rather than silently doing nothing.
+			if len(spec.Runner.Capabilities) > 0 {
+				adds := make([]corev1.Capability, 0, len(spec.Runner.Capabilities))
+				for _, c := range spec.Runner.Capabilities {
+					adds = append(adds, corev1.Capability(c))
+				}
+				container.SecurityContext.Capabilities = &corev1.Capabilities{Add: adds}
 			}
 		}
 		// Host mounts. This runs for EVERY scope and, at Pair scope, for both

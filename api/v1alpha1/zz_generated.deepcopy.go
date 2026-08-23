@@ -980,6 +980,11 @@ func (in *RunnerSpec) DeepCopyInto(out *RunnerSpec) {
 		*out = new(int64)
 		**out = **in
 	}
+	if in.Capabilities != nil {
+		in, out := &in.Capabilities, &out.Capabilities
+		*out = make([]Capability, len(*in))
+		copy(*out, *in)
+	}
 	if in.HostPaths != nil {
 		in, out := &in.HostPaths, &out.HostPaths
 		*out = make([]HostPathMount, len(*in))

@@ -137,6 +137,9 @@ func buildPlan(profile *burninv1alpha1.BurnInProfile, tests []plannedTest, targe
 	if err := refuseReservedEnvOverride(tests); err != nil {
 		return nil, err
 	}
+	if err := refuseCapabilitiesWithoutRunAsUserZero(tests); err != nil {
+		return nil, err
+	}
 	if err := refuseUnsatisfiableThresholds(tests); err != nil {
 		return nil, err
 	}
@@ -388,6 +391,38 @@ func refuseReservedEnvOverride(tests []plannedTest) error {
 			"speak the client's half of the rendezvous, or tell a multi-device runner it owns a board it was "+
 			"never handed: %s",
 		len(bad), strings.Join(shown, "; "))
+}
+
+// refuseCapabilitiesWithoutRunAsUserZero rejects a profile that sets
+// spec.runner.capabilities without spec.runner.runAsUser: 0 (#302).
+//
+// A capability added to the bounding set does nothing for a non-root uid
+// without ambient capabilities — measured on real hardware while root-causing
+// #134, the same finding that showed `privileged: true` alone fails for a
+// container that stayed at its image's default uid. Left unrefused, that
+// combination produces a probe that silently reads nothing, which is
+// indistinguishable from hardware nobody granted the reading to see — refused
+// here, before a node is cordoned, at the same severity as an unsatisfiable
+// threshold.
+func refuseCapabilitiesWithoutRunAsUserZero(tests []plannedTest) error {
+	var bad []string
+	for _, t := range tests {
+		if t.Spec.Runner == nil || len(t.Spec.Runner.Capabilities) == 0 {
+			continue
+		}
+		if t.Spec.Runner.RunAsUser == nil || *t.Spec.Runner.RunAsUser != 0 {
+			bad = append(bad, fmt.Sprintf("test %q", t.Name))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%d test(s) set spec.runner.capabilities without spec.runner.runAsUser: 0, so the run is refused "+
+			"before any node is touched — a capability added to the bounding set does nothing for a "+
+			"non-root uid without ambient capabilities, and this would produce a probe that silently "+
+			"reads nothing rather than an error naming why: %s",
+		len(bad), strings.Join(bad, "; "))
 }
 
 func validateHostPaths(t plannedTest) error {
