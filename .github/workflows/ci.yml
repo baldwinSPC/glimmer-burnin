@@ -188,6 +188,35 @@ jobs:
         with:
           version: v2.12.2
 
+  # ── checkpins: does every pinned runner image still match its source? ─────────
+  #
+  # A pin equal to the newest tag is not the same claim as a pin whose image was
+  # built from the source in this tree, and only the second one means anything to
+  # a node that pulls it. That gap opened twice in one day (#379) and was caught
+  # only by a human diffing a runner directory against the commit its image was
+  # built from, while doing something else.
+  #
+  # Weekly and workflow_dispatch only, matching runner-plan's own "full sweep"
+  # cadence just above — never on a PR or push. This is about DRIFT ACCUMULATED
+  # SINCE THE LAST PUBLISH, which a single PR's diff cannot answer by itself, and
+  # making it a required PR check would turn every unrelated PR red the moment one
+  # runner's source outpaces its pin, for a fact the PR did nothing to cause.
+  checkpins:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # go run ./hack/checkpins diffs an arbitrarily old pinned commit
+          # against HEAD, which a shallow clone cannot resolve.
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Every pinned runner image matches its source
+        run: go run ./hack/checkpins
+
   # ── e2e: the shipped manifests on a real cluster ──────────────────────────────
   #
   # THE MOST VALUABLE STEP IN THIS JOB IS NOT A TEST. It is "Apply config/ to the
