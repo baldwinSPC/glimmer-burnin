@@ -552,3 +552,31 @@ func (in *Threshold) DeepCopy() *Threshold {
 //
 // Sorted, so a diff against any of the four sources is stable.
 var AcceleratorVendors = []string{"amd", "habana", "intel", "nvidia", "tenstorrent"}
+
+// ReservedEnv are the environment variables the contract itself owns. A
+// BurnInTest's spec.runner.env (and a variant's own env, which replaces it)
+// must never be able to set one of these — BURNIN_ROLE decides which end of a
+// link a runner is, and a profile that could set it could make both ends the
+// client; BURNIN_RESOURCE_LIMITS is what a multi-device runner trusts to tell
+// allocated devices from merely visible ones, and a profile that could set it
+// could tell a runner it owns a board it was never handed
+// (docs/dev/multi-device.md).
+//
+// Exported here, rather than kept as pkg/localrun's own private copy, because
+// both dispatchers must refuse the SAME profiles: pkg/localrun already
+// refused these (silently dropping the override, favouring the contract's own
+// value), but the operator did not, so a profile illegal on bare metal was
+// legal in-cluster (#404) — the exact divergence pkg/localrun's own
+// "mirrors podForTest" comment exists to prevent.
+var ReservedEnv = map[string]struct{}{
+	"BURNIN_DURATION_SECONDS": {},
+	"BURNIN_ATTEMPT":          {},
+	"BURNIN_ROLE":             {},
+	"BURNIN_PEER_HOST":        {},
+	"BURNIN_PEER_NODE":        {},
+	"BURNIN_RANK":             {},
+	"BURNIN_NRANKS":           {},
+	"BURNIN_ROOT_HOST":        {},
+	"BURNIN_ROOT_NODE":        {},
+	"BURNIN_RESOURCE_LIMITS":  {},
+}

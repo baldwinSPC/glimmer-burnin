@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	api "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/plan"
 	"github.com/baldwinSPC/glimmer-burnin/pkg/runnerimages"
 )
@@ -201,7 +202,7 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 		// win there. Kept identical here: a profile cannot override the
 		// contract's own variables in either dispatcher.
 		for _, e := range t.Spec.Runner.Env {
-			if _, reserved := reservedEnv[e.Name]; reserved {
+			if _, reserved := contract.ReservedEnv[e.Name]; reserved {
 				continue
 			}
 			v, ok, err := ResolveEnv(p, e)
@@ -392,11 +393,6 @@ func describeEnvSource(src *corev1.EnvVarSource) string {
 	return "valueFrom"
 }
 
-// reservedEnv are the variables the contract owns. A test cannot set them.
-//
-// Not a stylistic rule: BURNIN_ROLE decides which end of a link a runner is, and
-// a profile that could set it would be able to make both ends the client.
-
 // charDevicesIn lists the character devices directly inside a directory.
 //
 // Reads the host filesystem, which makes Translate environment-dependent — so it
@@ -420,24 +416,6 @@ func charDevicesIn(dir string) []string {
 		out = append(out, filepath.Join(dir, e.Name()))
 	}
 	return out
-}
-
-var reservedEnv = map[string]struct{}{
-	"BURNIN_DURATION_SECONDS": {},
-	"BURNIN_ATTEMPT":          {},
-	"BURNIN_ROLE":             {},
-	"BURNIN_PEER_HOST":        {},
-	"BURNIN_PEER_NODE":        {},
-	"BURNIN_RANK":             {},
-	"BURNIN_NRANKS":           {},
-	"BURNIN_ROOT_HOST":        {},
-	"BURNIN_ROOT_NODE":        {},
-	// The pod's own limits, which a runner reads to tell allocated devices from
-	// visible ones. A profile that could set it would tell a runner it owns a
-	// board it was never handed — the spoof the variable exists to prevent.
-	// The CLI does not inject it (on bare metal `--gpus all` IS the
-	// allocation, and absent is the safe reading there); it only refuses it.
-	"BURNIN_RESOURCE_LIMITS": {},
 }
 
 // deadlineGraceSeconds matches the operator's own grace beyond the declared
