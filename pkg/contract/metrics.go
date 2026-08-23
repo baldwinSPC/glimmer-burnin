@@ -1275,6 +1275,55 @@ var registry = map[string]Metric{
 		ThresholdUse: ThresholdUseEvidence,
 	},
 
+	// --- Duty cycle (power-swing) -------------------------------------------
+	//
+	// power-swing shares thermal-soak's and gpu-burn's engine but alternates
+	// the load on a period instead of holding it, and reports what happened in
+	// the seconds right after each ramp — a VRM or PSU that cannot keep up with
+	// a fast load step shows up here, not in a sustained soak's own sampling.
+	// Every metric below is EVIDENCE, not Acceptance: nobody has yet watched a
+	// real power-delivery transient on this project's own fleet, so there is no
+	// calibrated floor or ceiling to gate on. See
+	// runners/power-swing/power_swing.cu's header comment.
+	"swingTransitions": {
+		Name: "swingTransitions", Unit: UnitNone,
+		Description:  "count of OFF->ON duty-cycle transitions (ramps) completed during the test — context for the other swing_* figures: two throttle events in ten ramps is a different finding from two in a thousand. A WINDOWED count, like iterationsCompleted: a segmented soak's segments each contribute the transitions THEY saw, and the total is their sum — which is also why the device fold beneath it is Once rather than Sum, since every device on one node follows the identical wall-clock schedule and would otherwise be double-counted",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"swingWorstPostRampClockPct": {
+		Name: "swingWorstPostRampClockPct", Unit: UnitPercent,
+		Description:  "the LOWEST instantaneous SM clock, as a percentage of rated boost, seen inside ANY post-ramp window across the whole run — the figure a VRM that cannot slew fast enough shows up in. Omitted when no ramp sample was taken or the rated clock could not be read",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"swingPeakRampPowerW": {
+		Name: "swingPeakRampPowerW", Unit: UnitWatts,
+		Description:  "the HIGHEST instantaneous board power seen inside ANY post-ramp window across the whole run — the figure a PSU that sags rather than surges under a fast load step would instead show as a DIP; published alongside swingWorstPostRampClockPct so a reader can tell the two apart. Omitted when no ramp sample with a working power read was taken",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"swingNewThrottleEvents": {
+		Name: "swingNewThrottleEvents", Unit: UnitNone,
+		Description:  "count of post-ramp windows during which a throttle-reason bit appeared that was NOT already latched during the steady OFF phase immediately before it — a reason that shows up specifically at the moment of the ramp, rather than one already present beforehand. Omitted on a device whose throttle reasons could never be read at all, exactly as throttleEvents is",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// A LABEL, registered under the same duty as pdWedgeSuspected and
+	// throttleReasons just above it: the comma-joined human-readable names of
+	// the bits swingNewThrottleEvents counts, from the SAME kReasonBits table
+	// throttleReasons already renders — reused, not reinvented. Unregistered it
+	// would still parse the authoring-time lint (valid grammar, no unit
+	// suffix), and then fail closed on every node forever the moment somebody
+	// gated on it, reading as a hardware verdict on healthy hardware — the
+	// exact trap the "first-party label metric" rule exists to prevent.
+	"swingNewThrottleReasons": {
+		Name: "swingNewThrottleReasons", Unit: UnitNone,
+		Description:  "comma-separated names of the throttle reasons that appeared during a ramp and were not already latched beforehand (\"none\" when none did) — the human-readable form of what swingNewThrottleEvents counts. A list of labels; gate on swingNewThrottleEvents for \"did a new reason appear at all\", not that this project recommends gating on either — see the section header",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+
 	// host-health's labels. Same class and same duty as the block above: each of
 	// these is a WORD, host-health is a kind this project owns the runner for,
 	// and an unregistered name is assumed thresholdable — so a gate on any of

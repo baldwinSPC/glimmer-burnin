@@ -25,6 +25,7 @@ on:
           - memory-stress
           - thermal-soak
           - gpu-burn
+          - power-swing
           - ib-write-bw
           - nccl
           - gpudirect-rdma
@@ -60,8 +61,8 @@ on:
           full of GB10 code that no x86 host can run. Ignored by the CPU-only
           runners (host-health, memory-stress, ib-write-bw, tcp-baseline), by
           dcgm-diag, and
-          by the soak family (clockprobe, thermal-soak, gpu-burn), whose
-          Dockerfiles compile a fixed multi-gencode list instead.
+          by the soak family (clockprobe, thermal-soak, gpu-burn, power-swing),
+          whose Dockerfiles compile a fixed multi-gencode list instead.
         required: true
         default: default
         type: choice

@@ -36,6 +36,7 @@ const (
 	KindComputeSmoke     = contract.KindComputeSmoke
 	KindDCGMDiag         = contract.KindDCGMDiag
 	KindThermalSoak      = contract.KindThermalSoak
+	KindPowerSwing       = contract.KindPowerSwing
 	KindNCCL             = contract.KindNCCL
 	KindIBWriteBW        = contract.KindIBWriteBW
 	KindGPUDirect        = contract.KindGPUDirect

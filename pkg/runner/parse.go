@@ -303,6 +303,24 @@ var aliases = map[string]map[string]string{
 		"xid_count": "xidEvents",
 	},
 
+	// power-swing shares thermal-soak's and gpu-burn's engine (soak_core.cuh)
+	// and prints the SAME raw spellings for the measurands the three kinds
+	// share, so this table is identical to "thermal-soak"'s — kept as its own
+	// entry rather than reused, because the alias table is keyed by TestKind
+	// and parsing is scoped per kind. The swing_* keys this kind adds
+	// (swing_transitions, swing_worst_post_ramp_clock_pct,
+	// swing_peak_ramp_power_w, swing_new_throttle_events,
+	// swing_new_throttle_reasons) need no entry here: generic
+	// snake_case -> lowerCamelCase already lands on exactly their registered
+	// spellings.
+	"power-swing": {
+		"peak_temp_c":    "gpuTempC",
+		"peak_power_w":   "powerDrawW",
+		"throttle_count": "throttleEvents",
+		"soak_seconds":   "elapsedS",
+		"xid_count":      "xidEvents",
+	},
+
 	"nccl": {
 		// nccl-tests' own column names. Both are GB/s there; the unit is
 		// implicit in the tool's output and explicit in ours.
