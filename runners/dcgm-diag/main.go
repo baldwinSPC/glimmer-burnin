@@ -425,13 +425,31 @@ func verdict(
 		if len(c.ExcusedNames) > 0 {
 			// Distinguished from an ordinary partial run because the remedy is
 			// completely different: this node needs configuring, not replacing.
+			reason := fmt.Sprintf(
+				"%d of %d DCGM subtests are UNJUDGED — every finding against them was a node setting "+
+					"or an unreadable field, not a hardware fault",
+				c.NotRun, c.Total)
+			// COMPOSED, not reordered (#371), and placed BEFORE the (unbounded)
+			// findings detail below rather than after it — sanitize truncates the
+			// displayed message at 300 bytes, and on a real GB10 this branch wins
+			// EVERY TIME (persistence mode is off on these machines, so the
+			// software subtest always excuses first). That used to mean a reader
+			// never learned that DCGM's per-SKU allowlist separately skipped
+			// whole subtests outright: the message said "fix persistence mode"
+			// and, once the config findings ran long, never even reached a
+			// mention of memory/PCIe having not run at all — on exactly the
+			// hardware this runner exists to qualify. The primary verdict above
+			// (excused, not a Fail) still comes first; this is the second fact,
+			// not a replacement for it.
+			if c.Skipped > 0 {
+				reason += fmt.Sprintf(". Also, %d SKIPPED outright (%s) — if DCGM's allowlist gated "+
+					"them off, set BURNIN_DCGM_ALLOW=<plugin>,...",
+					c.Skipped, strings.Join(c.SkippedNames, ","))
+			}
 			detail := strings.Join(append(append([]string{}, c.ConfigFindings...), c.UnreadableFindings...), "; ")
-			return finish(out, rep, exitError, markerError, fmt.Sprintf(
-				"%d of %d DCGM subtests are UNJUDGED because every finding against them was a node "+
-					"setting or a field DCGM could not read, not a fault in the part — %s. Fix the "+
-					"configuration and re-run; this is deliberately not a Fail, which would condemn "+
-					"the hardware for something a command fixes (issue #304)",
-				c.NotRun, c.Total, detail))
+			reason += fmt.Sprintf(" — %s. Fix the configuration and re-run; this is deliberately not "+
+				"a Fail, which would condemn the hardware for something a command fixes (issue #304)", detail)
+			return finish(out, rep, exitError, markerError, reason)
 		}
 		return finish(out, rep, exitError, markerError, fmt.Sprintf(
 			"%d of %d DCGM subtests did not run, so this node is only partly checked; "+
