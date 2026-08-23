@@ -496,8 +496,12 @@ struct DeviceResult {
   double maxSmClockPct = 0.0;
   double memClockMHz = 0.0;
   bool memClockKnown = false;
+  double memClockPct = 0.0;
+  bool memClockPctKnown = false;
   unsigned int ratedBoostMHz = 0;
   bool ratedKnown = false;
+  unsigned int ratedMemMHz = 0;
+  bool ratedMemKnown = false;
   double sustainedTflops = 0.0;
   double peakTflops = 0.0;
   bool tflopsKnown = false;
@@ -600,6 +604,19 @@ void runOneDevice(int index, long windowSecondsTotal, double clockFloorPct,
   }
   out->ratedKnown = true;
   out->ratedBoostMHz = ratedBoostMHz;
+
+  // The memory-domain denominator (issue #301). Unlike the SM rated clock
+  // above, a missing rated memory clock does not Skip the device: memClockPct
+  // is Evidence, not a gate, so the honest degradation is to omit it — never
+  // fabricate it — and keep measuring everything else.
+  unsigned int ratedMemMHz = 0;
+  if (nvml.deviceGetMaxClockInfo(nvdev, nvmlrt::kClockMem, &ratedMemMHz) == nvmlrt::kSuccess &&
+      ratedMemMHz > 0) {
+    out->ratedMemKnown = true;
+    out->ratedMemMHz = ratedMemMHz;
+  } else {
+    out->unsupportedReads += (out->unsupportedReads.empty() ? "" : ",") + std::string("ratedMemClock");
+  }
 
   double enforcedLimitW = 0.0, defaultLimitW = 0.0;
   bool haveEnforced = false, haveDefault = false;
@@ -771,6 +788,14 @@ void runOneDevice(int index, long windowSecondsTotal, double clockFloorPct,
   if (s.memN > 0) {
     out->memClockKnown = true;
     out->memClockMHz = s.memSum / s.memN;
+    // memClockPct is n/a — omitted, not fabricated — whenever either half of
+    // the ratio could not be read: an achieved clock with no rated
+    // denominator is not a percentage of anything, and a rated clock with no
+    // achieved sample never got here at all.
+    if (out->ratedMemKnown) {
+      out->memClockPctKnown = true;
+      out->memClockPct = 100.0 * out->memClockMHz / out->ratedMemMHz;
+    }
   }
 
   out->tempKnown = s.tempN > 0;
@@ -1000,6 +1025,7 @@ int main() {
     std::printf("compute_cap=%s\n", d0.computeCap.c_str());
     if (!d0.busId.empty()) std::printf("pci_bus_id=%s\n", d0.busId.c_str());
     if (d0.ratedKnown) std::printf("rated_boost_clock_mhz=%u\n", d0.ratedBoostMHz);
+    if (d0.ratedMemKnown) std::printf("rated_mem_clock_mhz=%u\n", d0.ratedMemMHz);
   }
 
   // ── fold and report ──────────────────────────────────────────────────────
@@ -1049,6 +1075,7 @@ int main() {
       std::printf("max_sm_clock_pct=%.2f\n", d0.maxSmClockPct);
     }
     if (d0.memClockKnown) std::printf("mem_clock_mhz=%.0f\n", d0.memClockMHz);
+    if (d0.memClockPctKnown) std::printf("mem_clock_pct=%.2f\n", d0.memClockPct);
     if (d0.tempKnown) {
       std::printf("mean_temp_under_load_c=%.1f\n", d0.meanTemp);
       if (d0.tempAtMinSmKnown) std::printf("temp_at_min_clock_c=%.1f\n", d0.tempAtMinSm);
