@@ -19,6 +19,18 @@
 // every NVIDIA name, so the image's "no NVIDIA redistributable" build assertion
 // has only nvbandwidth's own dependencies to reason about, and it means a node
 // with no driver injected reports a clean Skip instead of failing to start.
+//
+// ALLOCATION BUDGET (docs/dev/multi-device.md). nvbandwidth already iterates
+// every device the runtime SHOWS it — that is the whole point of wrapping it —
+// so this runner's multi-device conversion is not per-device iteration, it is
+// checking that what the runtime showed matches what the pod was ALLOCATED.
+// device_fold.h's parseBudget/planIteration do that from BURNIN_RESOURCE_LIMITS
+// against device.count; budget != visible is refused (exit 3) before nvbandwidth
+// ever runs, for exactly the reasons planIteration's own comment gives. No fold
+// table follows: there is nothing here for device_fold.h to fold, because no
+// device is measured individually — the metrics above are already nvbandwidth's
+// own iterated result. This runner does not claim `deviceCount` for that reason;
+// see the Metrics section of README.md.
 
 #include <algorithm>
 #include <cctype>
@@ -37,6 +49,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "device_fold.h"
+
 // Both are set by the Dockerfile so the image records exactly which nvbandwidth
 // it shipped. The defaults exist only so this file compiles on its own.
 #ifndef NVBANDWIDTH_BIN
@@ -47,6 +61,8 @@
 #endif
 
 namespace {
+
+namespace devices = burnin::devices;
 
 using Clock = std::chrono::steady_clock;
 
@@ -501,6 +517,20 @@ int main() {
 
   std::printf("gpu_name=%s\ndevices_visible=%d\ncuda_driver_version=%d\n", device.name.c_str(),
               device.count, device.driverVersion);
+
+  // The allocation budget check (docs/dev/multi-device.md). nvbandwidth is
+  // about to iterate every one of the device.count devices the runtime just
+  // showed us; before it does, confirm that is actually what this pod was
+  // ALLOCATED. budget != visible means either a leaked device (allocated
+  // fewer than the runtime shows) or a plugin/runtime mismatch (allocated
+  // more than the runtime shows) — either way, iterating past what this pod
+  // owns is not a verdict this runner can stand behind, so it refuses before
+  // spending a single nvbandwidth invocation.
+  const devices::Budget budget =
+      devices::parseBudget(std::getenv("BURNIN_RESOURCE_LIMITS"), devices::nvidiaResources());
+  const devices::Plan plan = devices::planIteration(device.count, budget);
+  if (plan.outcome == devices::Plan::Skip) return skip(plan.message);
+  if (plan.outcome == devices::Plan::Error) return error(plan.message);
 
   const long bufferMiB = clampLong(envLong("BURNIN_MEMORY_BW_BUFFER_MIB", kDefaultBufferMiB), 1, 65536);
   const long samples = clampLong(envLong("BURNIN_MEMORY_BW_SAMPLES", kDefaultSamples), 1, 1000);

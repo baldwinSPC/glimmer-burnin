@@ -47,7 +47,7 @@ RUN set -eu; \
       exit 1; \
     }
 
-COPY memory_bw_rocm.cc bw_stats.h /src/
+COPY memory_bw_rocm.cc bw_stats.h device_fold.h /src/
 RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \
       -std=c++17 -O3 \
       $(for t in ${GPU_TARGETS}; do printf -- '--offload-arch=%s ' "$t"; done) \

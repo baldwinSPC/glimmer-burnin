@@ -61,6 +61,12 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		"compute-smoke":      true,
 		"compute-smoke-rocm": true,
 		"gemm-sweep":         true,
+		// memory-bw's conversion is the allocation budget check around
+		// nvbandwidth (#431) — see noFoldTable below for why it carries no
+		// kDeviceFold table despite being CONVERTED. memory-bw-rocm's HIP loop
+		// got the full per-device conversion, mirroring clockprobe-rocm.
+		"memory-bw":      true,
+		"memory-bw-rocm": true,
 	}
 
 	exempt := map[string]string{
@@ -80,16 +86,7 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 	// PENDING: every CUDA/HIP kernel that today takes device 0. Each names the
 	// delivery step in docs/dev/multi-device.md that converts it; the issue
 	// number is the issue that converts it.
-	pending := map[string]string{
-		// memory-bw's nvbandwidth iterates every VISIBLE device, so its
-		// conversion is the allocation budget check (budget ≠ visible is exit
-		// 3), not per-device iteration; until then it reports devices_visible
-		// and does not claim deviceCount. memory-bw-rocm is a hand-written HIP
-		// loop on device 0 — no wrapped tool iterates for it — and needs the
-		// full conversion.
-		"memory-bw":      "#431 — budget check around nvbandwidth; reports devices_visible until then",
-		"memory-bw-rocm": "#431 — a HIP loop on device 0; the full conversion",
-	}
+	pending := map[string]string{}
 
 	for _, d := range runnerDirs(t) {
 		uses := sourceMentions(t, d, helper)
@@ -228,6 +225,18 @@ func TestDeviceFoldAllowSetsAgreeWithTheCLI(t *testing.T) {
 // private.
 func TestDeviceFoldTablesAgreeWithTheRegistry(t *testing.T) {
 	entry := regexp.MustCompile(`\{"([a-z0-9_]+)",\s*(?:burnin::)?(?:devices::)?Fold::(Min|Max|Sum|Once)\}`)
+
+	// noFoldTable holds the one CONVERTED runner that carries device_fold.h and
+	// calls it purely for the allocation BUDGET CHECK, never for a per-device
+	// fold: nvbandwidth already iterates every visible device on its own, so
+	// memory-bw's conversion is parseBudget/planIteration around the
+	// invocation, and there is nothing here for kDeviceFold to declare
+	// (docs/dev/multi-device.md, #431). Every other CONVERTED runner must still
+	// declare a checkable table.
+	noFoldTable := map[string]bool{
+		"memory-bw": true,
+	}
+
 	found := 0
 	for _, d := range runnerDirs(t) {
 		if _, err := os.Stat(filepath.Join(d, "device_fold.h")); err != nil {
@@ -290,7 +299,7 @@ func TestDeviceFoldTablesAgreeWithTheRegistry(t *testing.T) {
 				}
 			}
 		}
-		if includes && perDir == 0 {
+		if includes && perDir == 0 && !noFoldTable[d] {
 			t.Errorf("%s includes device_fold.h but declares no kDeviceFold table this guard can read "+
 				"(`{\"raw_key\", Fold::Min}` entries); a converted runner's fold direction must be checkable here, "+
 				"or a floor can be declared a ceiling in private", d)

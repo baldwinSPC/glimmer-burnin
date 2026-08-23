@@ -61,9 +61,9 @@ node is slow" from "one device on this node is slow".
 
 Also emitted, as context rather than as gates: `nvbandwidth_ref`, `gpu_name`,
 `devices_visible` (registered as `devicesVisible`: how many devices the runtime
-showed the pod — nvbandwidth iterates them all, but this runner does not yet
-read its allocation budget, so it does not claim `deviceCount`; it was
-`gpu_count` before v0.7 — see docs/dev/multi-device.md), `cuda_driver_version`, `transfer_size_bytes`, `test_samples`, `elapsed_s`.
+showed the pod — it was `gpu_count` before v0.7 — see
+docs/dev/multi-device.md), `cuda_driver_version`, `transfer_size_bytes`,
+`test_samples`, `elapsed_s`.
 
 > The two spellings on stdout are deliberate. The three acceptance keys use the
 > snake spelling the operator's alias table in
@@ -72,6 +72,19 @@ read its allocation budget, so it does not claim `deviceCount`; it was
 > to `…Gbs`, which is *not* the registered `GBs` suffix — the metric would be
 > stored as a dimensionless number and a bandwidth would quietly stop being a
 > bandwidth. The parser accepts either spelling.
+
+## Multi-device
+
+nvbandwidth already iterates every device the runtime shows it, so this
+runner's multi-device conversion is not per-device iteration — it is the
+**allocation budget check** `device_fold.h`'s `parseBudget`/`planIteration`
+perform (docs/dev/multi-device.md): what `BURNIN_RESOURCE_LIMITS` says this
+pod was allocated must equal `devices_visible`, or the runner refuses (exit 3)
+before nvbandwidth ever runs, rather than measuring devices it cannot
+establish this pod owns. This runner still does **not** claim `deviceCount` —
+only a runner that folds devices individually does, and nvbandwidth's own
+peer-matrix output already covers every visible device, so there is no
+per-device fold for `device_fold.h` to perform here.
 
 ### Why `device_local_copy` backs `deviceToDeviceBandwidthGBs`
 
