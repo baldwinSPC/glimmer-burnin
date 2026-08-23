@@ -590,6 +590,12 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	"ratedMemClockMHz": {
+		Name: "ratedMemClockMHz", Unit: UnitMegahertz,
+		Description:  "the part's nameplate memory clock, read back from the driver (nvmlDeviceGetMaxClockInfo, NVML_CLOCK_MEM) so memClockPct can be audited against its denominator — the same role ratedBoostClockMHz plays for sustainedClockPct; a nameplate constant identifies the SKU rather than its health, so gating on it fails a heterogeneous fleet for no hardware reason. Omitted, never fabricated, on a device whose driver does not answer the call",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"minSmClockPct": {
 		Name: "minSmClockPct", Unit: UnitPercent,
 		Description:  "the LOWEST single SM-clock sample of the load window, as a percentage of rated boost; a floor on it asserts the part never dropped out, which sustainedClockPct's average can hide. It is a single sample, so it moves on one transient dip — calibrate it against measured fleet behaviour rather than against a spec sheet",
@@ -600,6 +606,12 @@ var registry = map[string]Metric{
 		Name: "maxSmClockPct", Unit: UnitPercent,
 		Description:  "the HIGHEST single SM-clock sample of the load window, as a percentage of rated boost, recorded so the spread around sustainedClockPct is visible; it is not an acceptance figure, because a wedged part that boosts for one sample and collapses satisfies a floor on it while failing the sustained behaviour this measurement exists to judge",
 		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"memClockPct": {
+		Name: "memClockPct", Unit: UnitPercent,
+		Description:  "device memory clock sustained under load, as a percentage of the part's rated memory clock — the memory-domain analog of sustainedClockPct, added to measure rather than assume the clockprobe README's claim that a power-delivery wedge caps only the compute clock and leaves the memory path alone (issue #301). Deliberately Evidence, not Acceptance: nobody has yet watched a wedged part's memory clock and confirmed whether it moves, so there is no floor to gate on. n/a when either the achieved or the rated memory clock could not be read from this device",
+		Aggregation:  AggMin,
 		ThresholdUse: ThresholdUseEvidence,
 	},
 	"clockFloorPct": {

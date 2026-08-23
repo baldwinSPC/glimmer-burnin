@@ -339,6 +339,10 @@ var aliases = map[string]map[string]string{
 		"sm_clock_mhz":          "smClockMHz",
 		"mem_clock_mhz":         "memClockMHz",
 		"rated_boost_clock_mhz": "ratedBoostClockMHz",
+		"rated_mem_clock_mhz":   "ratedMemClockMHz",
+		// mem_clock_pct needs no entry: "pct" already normalises to the
+		// registered "Pct" suffix, so generic snake_to_lowerCamel already lands
+		// on memClockPct.
 	},
 
 	"memory-stress": {

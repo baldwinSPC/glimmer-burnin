@@ -229,6 +229,8 @@ written against.
 | `sm_clock_mhz` | `smClockMHz` | mean SM clock, absolute; SKU-specific, so a fleet gate belongs on the percentage |
 | `mem_clock_mhz` | `memClockMHz` | mean memory clock |
 | `rated_boost_clock_mhz` | `ratedBoostClockMHz` | the denominator, read back from the driver so the ratio can be audited |
+| `mem_clock_pct` | `memClockPct` | mean memory clock as a percentage of rated memory clock, the memory-domain analog of `sustainedClockPct` (#301). **Evidence, not a gate**: nobody has yet watched a wedged part's memory clock and confirmed whether it moves, so there is no floor to gate on — this exists to measure the "the memory path is not what was capped" line above instead of assuming it. Omitted, not fabricated, when either clock could not be read |
+| `rated_mem_clock_mhz` | `ratedMemClockMHz` | the denominator for `memClockPct`, read back from the driver (`nvmlDeviceGetMaxClockInfo`, `NVML_CLOCK_MEM`) the same way `ratedBoostClockMHz` is |
 | `min_sm_clock_pct`, `max_sm_clock_pct` | `minSmClockPct`, `maxSmClockPct` | the spread; a part that dips and recovers is different from one pinned flat |
 | `sustained_fma_throughput_tflops` | `sustainedFmaThroughputTflops` | FP32 FMA, whole window. Deliberately **not** `sustainedThroughputTflops` — see below |
 | `peak_fma_throughput_tflops` | `peakFmaThroughputTflops` | best single window |
@@ -324,9 +326,14 @@ Everything else is `Evidence` — recorded, delivered and chartable, but refused
 by `pkg/verdict.ValidateThresholds` as a basis for acceptance. Three groups:
 
 - **Denominators and nameplate constants** — `ratedBoostClockMHz`,
-  `defaultPowerLimitW`, `peakFmaThroughputTflops`, `maxSmClockPct`. Each is
-  published so the ratio computed from it can be audited; gating on one gates on
-  the SKU, or on the single best sample, rather than on the part's health.
+  `ratedMemClockMHz`, `defaultPowerLimitW`, `peakFmaThroughputTflops`,
+  `maxSmClockPct`. Each is published so the ratio computed from it can be
+  audited; gating on one gates on the SKU, or on the single best sample, rather
+  than on the part's health.
+- **`memClockPct` itself** — the memory-domain analog of `sustainedClockPct`,
+  landed thresholdless on purpose (#301): it measures whether a wedge's clock
+  shortfall extends to the memory domain, which nobody has observed yet, rather
+  than assuming the answer either way.
 - **Configuration echoed back** — `durationRequestedS`, `warmupS`,
   `sampleWindowS`, `clockFloorPct`, `thermalClockFloorPct`,
   `thermalTempThresholdC`, `clockFloorAppliedPct`, `loadThreads`,
@@ -366,8 +373,9 @@ a run.
 
 ### A note for anyone adding a metric here
 
-Only three `*_mhz` keys are aliased in `pkg/runner`'s `clockprobe` table
-(`sm_clock_mhz`, `mem_clock_mhz`, `rated_boost_clock_mhz`). Generic
+Only four `*_mhz` keys are aliased in `pkg/runner`'s `clockprobe` table
+(`sm_clock_mhz`, `mem_clock_mhz`, `rated_boost_clock_mhz`,
+`rated_mem_clock_mhz`). Generic
 snake_case→lowerCamelCase folds `mhz` to `Mhz`, which is **not** the registered
 `MHz` suffix, so any new unaliased `*_mhz` key lands as a name that declares no
 unit — a clock recorded as a bare number that charts happily and compares

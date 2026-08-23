@@ -915,6 +915,7 @@ func TestParse_UnitCasingTrapsAreAliased(t *testing.T) {
 		{"clockprobe", "sm_clock_mhz"},
 		{"clockprobe", "mem_clock_mhz"},
 		{"clockprobe", "rated_boost_clock_mhz"},
+		{"clockprobe", "rated_mem_clock_mhz"},
 		{"thermal-soak", "soak_seconds"},
 		{"gpudirect-rdma", "t_avg_usec"},
 	}
