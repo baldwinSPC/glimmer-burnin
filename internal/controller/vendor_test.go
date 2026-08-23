@@ -80,15 +80,15 @@ func TestAVendorWithNoImageAndNoDefaultFailsAtPlanTimeNamingBoth(t *testing.T) {
 	// An ERROR, never a skip. A node silently not being tested is how a fleet
 	// gets certified without being measured.
 	spec := burninv1alpha1.BurnInTestSpec{
-		Kind:   burninv1alpha1.KindTCPBaseline, // deliberately has no built-in default
-		Runner: &burninv1alpha1.RunnerSpec{ImagesByVendor: []burninv1alpha1.VendorImage{{Vendor: "nvidia", Image: "ghcr.io/x/tcp:v1"}}},
+		Kind:   burninv1alpha1.KindDiskIO, // deliberately has no built-in default
+		Runner: &burninv1alpha1.RunnerSpec{ImagesByVendor: []burninv1alpha1.VendorImage{{Vendor: "nvidia", Image: "ghcr.io/x/disk:v1"}}},
 	}
 
 	_, err := runnerImage(&spec, "amd")
 	if err == nil {
 		t.Fatal("an unresolvable vendor was accepted")
 	}
-	for _, want := range []string{"amd", "tcp-baseline", "imagesByVendor", "nvidia"} {
+	for _, want := range []string{"amd", "disk-io", "imagesByVendor", "nvidia"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error should name %q so it can be acted on: %v", want, err)
 		}
@@ -99,8 +99,8 @@ func TestAnUnknownVendorSaysSoRatherThanPrintingAnEmptyString(t *testing.T) {
 	// "no image for vendor \"\"" sends the reader looking for a typo in their
 	// YAML. The real problem is that the node has no fingerprint.
 	spec := burninv1alpha1.BurnInTestSpec{
-		Kind:   burninv1alpha1.KindTCPBaseline,
-		Runner: &burninv1alpha1.RunnerSpec{ImagesByVendor: []burninv1alpha1.VendorImage{{Vendor: "nvidia", Image: "ghcr.io/x/tcp:v1"}}},
+		Kind:   burninv1alpha1.KindDiskIO,
+		Runner: &burninv1alpha1.RunnerSpec{ImagesByVendor: []burninv1alpha1.VendorImage{{Vendor: "nvidia", Image: "ghcr.io/x/disk:v1"}}},
 	}
 	_, err := runnerImage(&spec, "")
 	if err == nil {

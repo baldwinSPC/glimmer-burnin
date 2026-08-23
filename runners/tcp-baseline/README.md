@@ -144,7 +144,17 @@ No accelerator, no vendor stack, no NVIDIA driver injection —
 
 ## Status
 
-**Not published.** There is no `tcp-baseline` entry in `pkg/runnerimages`, so a
-BurnInTest of this kind fails at plan time asking for an explicit
-`spec.runner.image` rather than pull-failing on every targeted node. Publishing
-is manual and follows verification on real hardware, per repository policy.
+**Published at v0.1.0**, verified through the operator on two real GB10 Sparks
+with separate fabric and management interfaces (#237). With no
+`TCP_BASELINE_INTERFACE` override, the client's route lookup correctly picked
+the fabric interface over the management one — `ifaceForAddr` reads a real
+multi-interface routing table, not just a single-NIC laptop. Explicitly naming
+the management interface was refused with exit 3, as documented above. A
+healthy pair measured 43.7 Gbps, 0 retransmits, 146us RTT.
+
+Not yet verified on real hardware: a peer reachable only through the
+management interface producing a Skip (this fleet's fabric route always
+exists, so the Skip path needs a topology this pair doesn't have); the
+client-starts-before-server retry behavior; the server outliving a settled
+client without stranding a retrying one; and the CLI dispatcher
+(`burnin run --role server|client`) path. See #237 for the full checklist.
