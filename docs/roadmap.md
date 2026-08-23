@@ -117,7 +117,7 @@ scarce resource, which is time on silicon.
 | `nccl` | Collective bandwidth | Pair, Group | shipped | planned | later | shipped · [#118] · [#170] |
 | `fabric-soak` | Iterated RDMA writes over hours | Pair | in tree | in tree | in tree | in tree (vendor-free) · verify [#283] |
 | `tcp-baseline` | Plain TCP throughput and retransmits | Pair | shipped | shipped | shipped | shipped (vendor-free) · #237 partial (see issue) |
-| `disk-io` | Storage throughput and latency (direct I/O) | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#242] |
+| `disk-io` | Storage throughput and latency (direct I/O) | Node | shipped | shipped | shipped | shipped (vendor-free) · #242 partial (see issue) |
 | `fingerprint-probe` | What the hardware says about itself | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#354] |
 
 Beyond the kinds themselves, the matrix has axes: **variants** ([#155]) express

@@ -259,7 +259,17 @@ var defaults = map[contract.TestKind]image{
 	// with exit 3 as documented, and a healthy run measured 43.7 Gbps / 0
 	// retransmits / 146us RTT. Needs no accelerator, so VendorAny like
 	// ib-write-bw.
-	contract.KindTCPBaseline: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-tcp-baseline:v0.1.0", Vendor: VendorAny},
+	contract.KindTCPBaseline: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-tcp-baseline:v0.1.1", Vendor: VendorAny},
+
+	// disk-io joined the table at v0.1.0 (#242), verified on a real Samsung
+	// MZALC4T0HBL1 NVMe over ext4. The check that matters — does O_DIRECT
+	// actually bypass the page cache — was proven definitively: two O_DIRECT
+	// reads stayed in the 7.1-8.7 GB/s range, then an immediately-following
+	// BUFFERED read of the SAME file (page cache genuinely cold, since
+	// O_DIRECT never touched it) measured only 1.1 GB/s before a second
+	// buffered read jumped to 7.1 GB/s once the cache warmed — the textbook
+	// cache-bypass signature. Needs no accelerator, so VendorAny.
+	contract.KindDiskIO: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-disk-io:v0.1.1", Vendor: VendorAny},
 
 	// gemm-sweep joined the table at v0.6.4 because its gate was met twice over:
 	// the five captures #265 took, and a run through the OPERATOR on 2026-08-17
@@ -309,8 +319,8 @@ func All() map[contract.TestKind]string {
 // KindCustom exists so a user can point any image at the runner contract;
 // inventing a default for it would defeat the point.
 //
-// KindDiskIO, KindFingerprintProbe and KindFabricSoak have runner source in
-// this repo but NO PUBLISHED IMAGE yet.
+// KindFingerprintProbe and KindFabricSoak have runner source in this repo but
+// NO PUBLISHED IMAGE yet.
 // Publishing is manual and hardware-gated by policy, and a default pointing at
 // a tag that does not exist is worse than no default at all: it turns a
 // plan-time error that names the problem into an ImagePullBackOff on every
@@ -318,7 +328,7 @@ func All() map[contract.TestKind]string {
 // paragraph with it.
 func WithoutDefault() []contract.TestKind {
 	return []contract.TestKind{
-		contract.KindCustom, contract.KindDiskIO, contract.KindFingerprintProbe,
+		contract.KindCustom, contract.KindFingerprintProbe,
 		contract.KindFabricSoak,
 	}
 }
