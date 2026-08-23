@@ -34,8 +34,10 @@ on:
           - fingerprint-probe
           - gemm-sweep
           # amd64-only (ROCm toolchain and every AMD accelerator host are
-          # amd64); the publish job's two-platform assertion fails on it today
-          # and must learn per-runner platforms before this is ever published.
+          # amd64). The prepare job's "Determine which platforms this runner
+          # builds" step reads this same fact from a hardcoded list that
+          # mirrors ci.yml's runner-images matrix `exclude:` — keep both in
+          # step (#319).
           - clockprobe-rocm
           - compute-smoke-rocm
           - memory-bw-rocm
@@ -86,6 +88,20 @@ permissions:
 # form pushed the tag as part of the build, so a partial failure could burn an
 # immutable version number that nothing can reuse. Publishing is now
 # all-or-nothing by construction.
+#
+# "ONE JOB PER PLATFORM" assumed two platforms for every runner, and that broke
+# the moment a ROCm runner needed publishing: the ROCm toolchain and every AMD
+# accelerator host this fleet could measure with it are amd64-only, so an
+# arm64 leg would build an image for a machine that does not exist — and the
+# merge job's own both-platforms assertion would then refuse to tag a correct,
+# complete amd64-only publish. The prepare job now resolves a PER-RUNNER
+# platform list (`platform_matrix`, `want_platforms`, `platform_count`), the
+# build job's matrix is generated from it instead of hardcoded, and the merge
+# job's assertions check against it instead of a literal two. Which runners are
+# amd64-only is the SAME hardcoded list ci.yml's runner-images matrix already
+# excludes arm64 for — see "Determine which platforms this runner builds" below
+# — kept as one list, not two, because a second copy is a second place to drift
+# (#319).
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -94,6 +110,9 @@ jobs:
       image: ${{ steps.ref.outputs.image }}
       ref: ${{ steps.ref.outputs.ref }}
       arch: ${{ steps.arch.outputs.value }}
+      platform_matrix: ${{ steps.platforms.outputs.matrix }}
+      want_platforms: ${{ steps.platforms.outputs.want }}
+      platform_count: ${{ steps.platforms.outputs.count }}
     steps:
       - name: Resolve image reference
         # github.repository_owner preserves the account's mixed case
@@ -167,6 +186,50 @@ jobs:
             echo "::warning::cuda_arch=${IN} is applied to BOTH linux/amd64 and linux/arm64. Check it is a gencode that exists on both, or publish one platform at a time."
           fi
 
+      - name: Determine which platforms this runner builds
+        # Every runner here is two-platform EXCEPT the ROCm ones: AMD publishes
+        # the ROCm apt toolchain for linux/amd64 only, and every AMD accelerator
+        # host this fleet could measure with it (Strix Halo APUs, Instinct) is
+        # amd64 too — an arm64 leg would build an image for a machine that does
+        # not exist, exactly as ci.yml's runner-images job already reasons for
+        # its own matrix.
+        #
+        # This is that SAME list, copied verbatim rather than derived some other
+        # way, because ci.yml's own `exclude:` is itself a hardcoded list, not a
+        # marker file or a naming-convention check — reusing its shape here
+        # means one list to update when a future amd64-only runner is added,
+        # instead of two that can silently disagree about which runners those
+        # are. If this drifts from ci.yml, the drift is between two hardcoded
+        # lists in two files; nothing enforces that today, so keep them beside
+        # each other under review (#319).
+        #
+        # The three outputs are what the rest of this workflow needed to stop
+        # assuming two platforms: `matrix` is the build job's `strategy.matrix
+        # .include` (one entry for amd64-only, two otherwise); `want` is the
+        # space-separated platform list the merge job's final assertion must
+        # see served, in full, and nothing else; `count` is the exact number of
+        # per-platform digests the merge job requires before it will create a
+        # manifest list at all.
+        id: platforms
+        env:
+          KIND: ${{ inputs.runner }}
+        run: |
+          set -euo pipefail
+          case "${KIND}" in
+            clockprobe-rocm|compute-smoke-rocm|memory-bw-rocm|nccl-rocm|thermal-soak-rocm|gpu-burn-rocm)
+              echo "::notice::${KIND} is amd64-only (ROCm); publishing linux/amd64 alone, no arm64 leg"
+              echo 'matrix=[{"platform":"linux/amd64","host":"ubuntu-latest","arch":"amd64"}]' >> "$GITHUB_OUTPUT"
+              echo "want=linux/amd64" >> "$GITHUB_OUTPUT"
+              echo "count=1" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "${KIND} builds both platforms"
+              echo 'matrix=[{"platform":"linux/amd64","host":"ubuntu-latest","arch":"amd64"},{"platform":"linux/arm64","host":"ubuntu-24.04-arm","arch":"arm64"}]' >> "$GITHUB_OUTPUT"
+              echo "want=linux/amd64 linux/arm64" >> "$GITHUB_OUTPUT"
+              echo "count=2" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
   build:
     needs: prepare
     runs-on: ${{ matrix.host }}
@@ -174,17 +237,16 @@ jobs:
     # backstop against a hung build, not a target.
     timeout-minutes: 120
     strategy:
-      # Both platforms are attempted even if one fails, so a publish reports
-      # which half is broken rather than only that something is.
+      # Both platforms are attempted even if one fails (for a runner that
+      # builds both at all), so a publish reports which half is broken rather
+      # than only that something is.
       fail-fast: false
+      # Generated by the prepare job's "Determine which platforms this runner
+      # builds" step rather than hardcoded here, so an amd64-only runner (see
+      # that step) gets a single-entry matrix instead of an arm64 leg that
+      # would build an image for a host that cannot run it.
       matrix:
-        include:
-          - platform: linux/amd64
-            host: ubuntu-latest
-            arch: amd64
-          - platform: linux/arm64
-            host: ubuntu-24.04-arm
-            arch: arm64
+        include: ${{ fromJSON(needs.prepare.outputs.platform_matrix) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -291,29 +353,43 @@ jobs:
         env:
           IMAGE: ${{ needs.prepare.outputs.image }}
           REF: ${{ needs.prepare.outputs.ref }}
+          # From the prepare job's "Determine which platforms this runner
+          # builds": 1 for an amd64-only ROCm runner, 2 for everything else.
+          EXPECTED_COUNT: ${{ needs.prepare.outputs.platform_count }}
         run: |
           set -euo pipefail
           cd /tmp/digests
           count=$(ls -1 | wc -l)
-          if [ "${count}" -ne 2 ]; then
-            echo "::error::expected 2 per-platform digests, found ${count}. Refusing to tag a partial manifest list."
+          if [ "${count}" -ne "${EXPECTED_COUNT}" ]; then
+            echo "::error::expected ${EXPECTED_COUNT} per-platform digest(s) for this runner, found ${count}. Refusing to tag a partial manifest list."
             ls -la; exit 1
           fi
+          # --prefer-index=true is buildx's own current default for a
+          # single-source create, but pinned explicitly rather than relied on:
+          # with ONE digest (an amd64-only runner) the alternative is a carbon
+          # copy of that source manifest rather than an index wrapping it, and
+          # the platform assertion below can only read a manifest LIST. A future
+          # default flip would silently turn a correct amd64-only publish into a
+          # bare manifest, and the assertion would then report "not a manifest
+          # list" — which reads as a broken image, not as this flag having moved
+          # under us.
           # shellcheck disable=SC2046
-          docker buildx imagetools create -t "${REF}" \
+          docker buildx imagetools create --prefer-index=true -t "${REF}" \
             $(printf "${IMAGE}@sha256:%s " *)
 
       - uses: sigstore/cosign-installer@v3
 
-      - name: Sign the manifest list and both per-architecture images
-        # THREE signatures, and each is separately pullable.
+      - name: Sign the manifest list and every per-architecture image
+        # The manifest list plus one signature per platform child — three for a
+        # two-platform runner, two for an amd64-only ROCm one (see the prepare
+        # job) — and each is separately pullable.
         #
         # The manifest list is what a node's readiness gate references. But the
         # per-architecture children are pullable by digest in their own right —
         # a mirror, a registry proxy, or anything resolving a platform before it
         # pulls will reference a child directly — and a signature on the list
-        # alone says nothing about those. Signing all three means the thing that
-        # is actually pulled is signed whichever way it was reached.
+        # alone says nothing about those. Signing every one of them means the
+        # thing that is actually pulled is signed whichever way it was reached.
         #
         # Digests throughout. A signature over a tag would still verify after
         # the tag moved, which is exactly the situation it exists to detect.
@@ -336,12 +412,13 @@ jobs:
           cosign sign --yes "${IMAGE}@${LIST_DIGEST}"
 
           # The children, from the digest files the build jobs left behind. The
-          # count was already asserted to be 2 above, before the tag was created.
+          # count was already asserted above, before the tag was created, to
+          # match this runner's declared platform count.
           for f in /tmp/digests/*; do
             cosign sign --yes "${IMAGE}@sha256:$(basename "${f}")"
           done
 
-      - name: Assert the tag really serves both platforms
+      - name: Assert the tag serves exactly its declared platforms
         # The point of the whole rewrite is a tag an x86 node and a Grace node can
         # both pull. A manifest list that silently lost a platform would publish
         # an immutable tag that half the fleet cannot run, and the failure would
@@ -351,7 +428,22 @@ jobs:
         # `imagetools create`, because there is no tag to inspect before that, so
         # a failure here means a bad tag already exists. The step that actually
         # prevents one is the digest count above, which refuses to create anything
-        # unless both platforms pushed.
+        # unless every platform this runner is DECLARED to build actually pushed.
+        #
+        # DECLARED, not hardcoded to two: an amd64-only ROCm runner (see the
+        # prepare job's "Determine which platforms this runner builds") is
+        # correct with exactly linux/amd64 and no arm64 leg at all, so this step
+        # checks WANT — the space-separated platform list that step resolved —
+        # rather than the literal pair every runner used to be held to. Two
+        # directions both matter and neither is new: a platform the runner is
+        # supposed to serve and does not is a lost platform, exactly as before;
+        # a platform present that the runner was NOT supposed to build at all
+        # (arm64 riding along on an amd64-only publish) is a wasted, incorrect
+        # build that must not be allowed to pass just because "extra" sounds
+        # harmless — it means the exclude this runner is supposed to have did
+        # not take effect. Every non-ROCm runner still wants exactly
+        # linux/amd64 and linux/arm64, so this is not a weaker check for them —
+        # it is the same check, parameterised.
         #
         # The registry pretty-prints its JSON — `"architecture": "amd64"`, with a
         # space — and the first version of this matched `"architecture":"amd64"`
@@ -365,11 +457,15 @@ jobs:
         # that served it — and the obvious response to that message is to re-cut a
         # release which was in fact correct. So the manifest is parsed structurally
         # now, and the two situations are kept apart on every branch below: a
-        # platform genuinely absent is a verdict about the image, and ANY failure
-        # to read says outright that it is not one. It is the same distinction the
-        # operator draws between Fail and Error, for the same reason.
+        # platform genuinely absent (or genuinely extra) is a verdict about the
+        # image, and ANY failure to read says outright that it is not one. It is
+        # the same distinction the operator draws between Fail and Error, for the
+        # same reason.
         env:
           REF: ${{ needs.prepare.outputs.ref }}
+          # From the prepare job: "linux/amd64" for an amd64-only ROCm runner,
+          # "linux/amd64 linux/arm64" for everything else.
+          WANT: ${{ needs.prepare.outputs.want_platforms }}
         run: |
           set -euo pipefail
 
@@ -426,12 +522,13 @@ jobs:
 
           echo "platforms in ${REF}:"
           sed 's/^/  /' <<<"${got}"
+          echo "declared platforms for this runner: ${WANT}"
 
           # Every missing platform is named, not just the first: fixing one and
           # rediscovering the next is two publish cycles for one fault, and a
           # publish cycle burns a version number that cannot be reused.
           missing=""
-          for want in linux/amd64 linux/arm64; do
+          for want in ${WANT}; do
             grep -qxF "${want}" <<<"${got}" || missing="${missing} ${want}"
           done
           if [ -n "${missing}" ]; then
@@ -439,7 +536,29 @@ jobs:
             docker buildx imagetools inspect "${REF}" || true
             exit 1
           fi
-          echo "both platforms present in ${REF}"
+
+          # The other direction: a platform present that WANT never asked for.
+          # This is what catches arm64 riding along on an amd64-only ROCm
+          # publish — a build that ran anyway, on a host that image cannot use,
+          # and that the exclude this runner is supposed to have evidently did
+          # not take effect for. A two-platform runner's WANT is both
+          # platforms, so this branch is inert for it; it only bites when the
+          # image serves more than it was declared to.
+          unexpected=""
+          for p in ${got}; do
+            found=false
+            for want in ${WANT}; do
+              [ "${p}" = "${want}" ] && { found=true; break; }
+            done
+            [ "${found}" = false ] && unexpected="${unexpected} ${p}"
+          done
+          if [ -n "${unexpected}" ]; then
+            echo "::error::${REF} serves platform(s) it was not declared to build:${unexpected}. This is a wasted, incorrect build — the amd64-only exclude for this runner did not take effect. Supersede the tag rather than trust it; do not repush."
+            docker buildx imagetools inspect "${REF}" || true
+            exit 1
+          fi
+
+          echo "exactly the declared platforms are present in ${REF}: ${WANT}"
 
       - name: Assert the published image carries a patched standard library
         # WHY THIS EXISTS. Every published v0.6.0 image was measured after the
