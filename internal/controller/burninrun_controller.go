@@ -2087,6 +2087,25 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 		return ctrl.Result{}, err
 	}
 
+	// THE ENVELOPE IS OWED FROM THIS POINT, so say so BEFORE risking the two
+	// calls below — deleteLivePods and releaseCordons can each fail and
+	// return early, and until #461 that meant terminate() could exit with the
+	// verdict durably terminal but pendingDeliveryAnnotation never set, so
+	// reconcileTerminal's retry loop (gated on that annotation, below) never
+	// knew a delivery was owed. The run stayed durably terminal, correct, and
+	// silently undelivered forever — the exact loss the annotation exists to
+	// prevent, reached by the one route that skipped setting it. Cleared once
+	// delivery actually succeeds, further down; a stray "pending" left behind
+	// after a real success would resend the same terminal envelope on a later
+	// pass.
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[pendingDeliveryAnnotation] = string(phase)
+	if err := r.updateKeepingStatus(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// THE VERDICT IS DURABLE. Only now is it safe to stop the hardware being
 	// burned: fail-fast, a resolution error and an immediate cancel can all
 	// leave pods in flight, and a terminal run must not keep loading a node.
@@ -2149,14 +2168,14 @@ func (r *BurnInRunReconciler) terminate(ctx context.Context, run *burninv1alpha1
 
 	// Delivery LAST of the three, because it is network I/O to somebody else's
 	// endpoint and nothing about the fleet's safety may wait on it.
+	//
+	// pendingDeliveryAnnotation is ALREADY SET, from before the two calls
+	// above — this only clears it on success. reconcileTerminal's retry loop
+	// is what handles the not-delivered case from here; nothing further to
+	// write for it now that the annotation was persisted up front.
 	delivered := r.deliverPhase(ctx, run, sinks, phase)
-	if !delivered {
-		// The terminal envelope is the one delivery with no later transition
-		// to carry it; mark it pending so the terminal loop keeps retrying.
-		if run.Annotations == nil {
-			run.Annotations = map[string]string{}
-		}
-		run.Annotations[pendingDeliveryAnnotation] = string(phase)
+	if delivered {
+		delete(run.Annotations, pendingDeliveryAnnotation)
 		if err := r.updateKeepingStatus(ctx, run); err != nil {
 			return ctrl.Result{}, err
 		}
