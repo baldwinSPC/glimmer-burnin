@@ -188,6 +188,35 @@ func TestVerdict_GB10PersistenceModeIsUnjudgedRatherThanAHardwareFail(t *testing
 	}
 }
 
+// #371: on a real GB10 the excused-NotRun branch above wins EVERY TIME
+// (persistence mode is off on these machines), which used to mean a reader
+// never learned that DCGM's per-SKU allowlist separately skipped the memory
+// and PCIe plugins outright — the message said "fix persistence mode" and
+// stayed silent about two subtests never having run at all. This is the exact
+// document (testdata/gb10-level2-plugins-gated.json, DCGM 4.5.2, spark-043a)
+// the issue was filed against: composed, not reordered, so the persistence
+// finding is still the primary reason and the skipped subtests are named
+// alongside it rather than replacing it.
+func TestVerdict_ExcusedNotRunAlsoNamesOutrightSkips(t *testing.T) {
+	doc := testdataDoc(t, gb10PluginsGated)
+	code, out := runVerdict(t, doc, 226, nil, doc)
+	if code != exitError {
+		t.Fatalf("exit = %d, want %d\n%s", code, exitError, out)
+	}
+	if !strings.Contains(out, "Persistence mode") {
+		t.Errorf("the excused finding — still the primary reason — was dropped from the message:\n%s", out)
+	}
+	if !strings.Contains(out, "UNJUDGED") {
+		t.Errorf("the message must say the hardware was not judged:\n%s", out)
+	}
+	for _, want := range []string{"SKIPPED", "memory", "pcie", "BURNIN_DCGM_ALLOW"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("message does not mention %q — a reader would not learn that DCGM's per-SKU "+
+				"allowlist skipped subtests outright, only that persistence mode needs fixing:\n%s", want, out)
+		}
+	}
+}
+
 // dcgmi parses argv[1] as the subsystem name. Putting --host first is rejected
 // with "ERROR: Invalid subsystem" and exit 255 — no JSON, no results, and an
 // Error verdict on every node the runner is ever scheduled on. Verified against
