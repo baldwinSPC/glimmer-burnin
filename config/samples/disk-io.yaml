@@ -1,10 +1,23 @@
 # disk-io: the subsystem the rest of the suite never touches.
 #
-# NOTE ON THE IMAGE. There is no published disk-io image yet, so
-# spec.runner.image is REQUIRED here and this sample names a placeholder.
-# Publishing is manual and follows verification on real hardware. Without a
-# default, a run fails at plan time naming the problem, rather than
-# ImagePullBackOff-ing on every targeted node.
+# Published at v0.1.0 and verified on a real Samsung NVMe (ext4), #242. The
+# check that matters — does O_DIRECT actually bypass the page cache — was
+# proven definitively rather than by inspection: two O_DIRECT reads of a file
+# stayed in the 7.1-8.7 GB/s range, then an immediately-following BUFFERED
+# read of the SAME file (page cache genuinely cold, since O_DIRECT never
+# touched it) measured only 1.1 GB/s — 6-7x slower — before a second buffered
+# read jumped back to 7.1 GB/s once the cache warmed. That is the textbook
+# cache-bypass signature, and it means the runner's own reported numbers are
+# real device throughput, not a memcpy a healthy-looking figure could be
+# hiding. Also verified: no DISK_IO_PATH produces a declared Skip (exit 2), a
+# leftover file refuses rather than overwrites (exit 3, contents intact
+# byte-for-byte), ioErrors stays 0, and p99LatencyUs reads meaningfully above
+# ioLatencyUs (500us vs 167us) rather than the two being identical.
+#
+# Not yet verified on real hardware: the free-space refusal against an
+# actually-near-full volume, cleanup after a SIGKILL mid-write, a non-4KiB-
+# multiple block size being refused, and a Skip on a filesystem that itself
+# refuses O_DIRECT (tmpfs/overlay) — this fleet's disks all take it. See #242.
 #
 # READ runners/disk-io/README.md BEFORE POINTING THIS ANYWHERE. This is the one
 # runner in the suite that writes, and what it writes and where is a decision
@@ -17,7 +30,7 @@ spec:
   kind: disk-io
   durationSeconds: 120
   runner:
-    image: ghcr.io/baldwinspc/glimmer-burnin-disk-io:REPLACE-ME
+    # No image on purpose — since v0.1.0 this kind resolves a default.
     # The ONLY way this pod reaches the node's filesystem. A test that declares
     # nothing here gets a pod with no volumes at all, and the runner skips.
     #
@@ -44,6 +57,10 @@ spec:
     # never from a datasheet — a drive's sequential number depends on the
     # filesystem, the block size and how full it is, and a figure copied from a
     # spec sheet fails every healthy node in the fleet.
+    #
+    # One node measured so far (a Samsung MZALC4T0HBL1 on ext4, #242):
+    # ~6.0 GB/s write / ~6.5 GB/s read. One sample from one drive model is not
+    # a fleet baseline — do not derive a threshold from it.
     #
     # Run it thresholdless first, look at what the fleet reports, then gate.
     - metric: ioErrors

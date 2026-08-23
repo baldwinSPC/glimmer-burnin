@@ -116,7 +116,20 @@ follows: report what was positively established, omit what could not be read.
 
 ## Status
 
-**Not published.** There is no `disk-io` entry in `pkg/runnerimages`, so a
-BurnInTest of this kind fails at plan time asking for an explicit
-`spec.runner.image` rather than pull-failing on every targeted node. Publishing
-is manual and follows verification on real hardware.
+**Published at v0.1.0**, verified on a real Samsung MZALC4T0HBL1 NVMe over
+ext4 (#242). The check that matters — does O_DIRECT actually bypass the page
+cache — was proven definitively: two O_DIRECT reads of a file stayed in the
+7.1-8.7 GB/s range, then an immediately-following BUFFERED read of the SAME
+file (page cache genuinely cold, since O_DIRECT never touched it) measured
+only 1.1 GB/s before a second buffered read jumped to 7.1 GB/s once the cache
+warmed — the textbook cache-bypass signature, and independent confirmation
+that the runner's own reported numbers (~6.0 GB/s write, ~6.5 GB/s read) are
+real device throughput. Also confirmed: no `DISK_IO_PATH` produces a declared
+Skip (exit 2); a leftover file refuses rather than overwrites (exit 3,
+contents intact byte-for-byte); `ioErrors` stays 0; `p99LatencyUs` reads
+meaningfully above `ioLatencyUs` (500us vs 167us).
+
+Not yet verified on real hardware: the free-space refusal against an
+actually-near-full volume, cleanup after a SIGKILL mid-write, a non-4KiB-
+multiple block size being refused, and a Skip on a filesystem that refuses
+O_DIRECT outright (tmpfs/overlay) — this fleet's disks all take it. See #242.
