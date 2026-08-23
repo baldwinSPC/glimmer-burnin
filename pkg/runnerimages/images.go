@@ -63,12 +63,12 @@ const (
 //
 // PUBLICATION STATUS — every entry below is published, public, and immutable.
 //
-// One image is v0.6.0, one is v0.6.2, one is v0.6.3, four are v0.6.4, three
-// are v0.7.0 and two are v0.7.1, all published to GHCR, public, and
-// anonymously pullable. The spread is not drift: see the numbered reasons on
-// the table below, which is where it is decided.
+// One image is v0.6.2, three are v0.6.4, three are v0.7.0 and five are
+// v0.7.1, all published to GHCR, public, and anonymously pullable. The spread
+// is not drift: see the numbered reasons on the table below, which is where
+// it is decided.
 //
-// thermal-soak and gpu-burn moved again to v0.7.1 for #441: the Xid watch
+// thermal-soak and gpu-burn moved to v0.7.1 for #441: the Xid watch
 // (docs/dev/multi-device.md's soak family, wired up in an earlier release)
 // was tracked correctly but never reached the printed report — every
 // xidEvents/xidWindowsWatched gate, including the flagship
@@ -78,6 +78,16 @@ const (
 // -rocm siblings carry the identical source fix but are NOT republished here
 // — no AMD hardware in this project's fleet to verify them on, consistent
 // with their own "not yet verified on real hardware" status.
+//
+// dcgm-diag, host-health and memory-bw joined them at v0.7.1 for a different
+// reason, found by #379's own guard (hack/checkpins) the moment it existed:
+// all three were pinned to an image built before a metric rename
+// (gpu_count -> devices_visible, part of the multi-device conversion's naming
+// migration) that had already landed in their source. Hardware-verified on
+// this fleet: devicesVisible=1, all three pass. #447 tracked the finding;
+// this closes three of its four rows — nccl's drift is a real added
+// capability (Node-scope collective support), not a rename, and needs its
+// own verification pass rather than a same-batch republish.
 //
 // EVERY ONE OF THESE HAS NOW RUN ON REAL SILICON. That sentence was not true
 // until 2026-08-17, and the list of exceptions this comment used to carry is
@@ -189,15 +199,17 @@ var defaults = map[contract.TestKind]image{
 
 	// This table is deliberately MIXED, and the reasons are different.
 	//
-	// (1) FOUR runners are at v0.6.4 because their source moved AND tonight's
-	// full-fleet pass cleared their hardware gate: host-health (#377's nicCount
-	// fix) and the fabric three, which had been held at v0.6.0 since #363 with
-	// nothing having watched them carry traffic. They have now — 99.63 Gbps,
-	// 11.63 GB/s Pair, 11.97 GB/s Group, and a correct Skip respectively.
+	// (1) THREE runners are at v0.6.4 because their source has not moved since
+	// tonight's full-fleet pass cleared their hardware gate: the fabric three
+	// (ib-write-bw, nccl, gpudirect-rdma), which had been held at v0.6.0 since
+	// #363 with nothing having watched them carry traffic. They have now —
+	// 99.63 Gbps, 11.63 GB/s Pair, 11.97 GB/s Group, and a correct Skip
+	// respectively. nccl's source HAS since moved (#447) but is not republished
+	// here — see the header comment.
 	//
-	// (2) dcgm-diag is at v0.6.3 and memory-stress at v0.6.2 because their
-	// sources have not moved since those images were built. Republishing an
-	// unchanged runner spends fleet-wide risk to change nothing.
+	// (2) memory-stress is at v0.6.2 because its source has not moved since that
+	// image was built. Republishing an unchanged runner spends fleet-wide risk
+	// to change nothing.
 	//
 	// (3) The C++/CUDA runners at v0.6.x stay there because they contain NO Go
 	// binary at all. There is no stdlib in them to patch. Every published v0.6.0
@@ -208,19 +220,21 @@ var defaults = map[contract.TestKind]image{
 	// (4) clockprobe is at v0.7.0 with the rest of the multi-device batch (see
 	// the header comment above) even though it too contains no Go binary — it
 	// moved because its SOURCE changed (device iteration,
-	// docs/dev/multi-device.md), not for a stdlib patch. thermal-soak and
-	// gpu-burn moved AGAIN, to v0.7.1, for the same class of reason: #441's
-	// Xid-watch fix, also a source change with no Go binary involved.
+	// docs/dev/multi-device.md), not for a stdlib patch. thermal-soak, gpu-burn,
+	// dcgm-diag, host-health and memory-bw moved AGAIN, to v0.7.1, for the same
+	// class of reason: #441's Xid-watch fix and #447's devicesVisible rename,
+	// both source changes with no Go binary involved for the C++/CUDA ones
+	// among them.
 	//
 	// A pin equal to the newest tag is NOT the same claim as a pin whose image
 	// was built from the source in this tree, and only the second means anything
 	// to a node that pulls it. Both drifted within one day (#374, and again
 	// here), each caught by hand while doing something else. #379 is the guard
-	// that should be doing the catching.
+	// that should be doing the catching, and now does.
 	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.0", Vendor: VendorNVIDIA},
-	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.6.3", Vendor: VendorNVIDIA},
-	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.6.4", Vendor: VendorNVIDIA},
-	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0", Vendor: VendorNVIDIA},
+	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.1", Vendor: VendorNVIDIA},
+	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.1", Vendor: VendorNVIDIA},
+	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.1", Vendor: VendorNVIDIA},
