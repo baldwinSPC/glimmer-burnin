@@ -5,6 +5,42 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Capability is a Linux capability RunnerSpec.Capabilities may add.
+//
+// Enumerated rather than a free string (#302), matching VendorImage's own
+// reasoning: a typo'd capability name is accepted by the apiserver either
+// way, but an enum turns it into a validation error instead of a silently
+// ineffective grant that looks like broken hardware at run time. Widen this
+// the moment a runner legitimately needs another one.
+//
+// CapabilitySYSLOG does NOT make /dev/kmsg readable in-cluster by itself —
+// see its own doc comment.
+// +kubebuilder:validation:Enum=SYSLOG
+type Capability string
+
+const (
+	// CapabilitySYSLOG is CAP_SYSLOG. #134 measured that reading /dev/kmsg
+	// under the Ubuntu/Debian default kernel.dmesg_restrict=1 needs CAP_SYSLOG
+	// AND a device-cgroup grant AND uid 0, all three at once.
+	//
+	// This field can only ever supply the CAP_SYSLOG third. #302 measured
+	// (in-cluster, on real GB10 hardware) that the device-cgroup grant does
+	// NOT follow from a HostPaths CharDevice mount the way it does under
+	// pkg/localrun's `docker run --device`: internal/controller/pods.go maps a
+	// HostPathMount to a plain corev1.HostPathVolumeSource, which the kubelet
+	// mounts without adding a device-cgroup rule — runc's default allowlist
+	// does not cover /dev/kmsg (major:minor 1:11). So `runAsUser: 0` +
+	// `capabilities: [SYSLOG]` + a HostPaths CharDevice mount for /dev/kmsg
+	// still reads xidSource=none in-cluster; only `privileged: true` grants
+	// the device cgroup this path needs, and CapabilitySYSLOG buys nothing
+	// over that until the operator has some other way to grant a single
+	// device (a device plugin, or CDI, both open ended in #302).
+	//
+	// Use this field for a capability whose need does NOT route through a
+	// missing device-cgroup grant.
+	CapabilitySYSLOG Capability = "SYSLOG"
+)
+
 // TestScope is the topology a test exercises.
 //
 // Acceptance of an interconnect — NCCL over RoCE/IB, ib_write_bw, GPUDirect —
@@ -319,6 +355,42 @@ type RunnerSpec struct {
 	// it could not read is reported as unread, never as clean.
 	// +optional
 	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
+	// Capabilities are Linux capabilities ADDED to the runner container,
+	// narrower than Privileged for a capability need that does not also
+	// require a device-cgroup grant.
+	//
+	// IT DOES NOT, BY ITSELF, MAKE /dev/kmsg READABLE IN-CLUSTER, even
+	// combined with a HostPaths CharDevice mount and RunAsUser: 0 — see
+	// CapabilitySYSLOG's own doc comment and #302. This field exists because
+	// #134's truth table names CAP_SYSLOG as one of three grants /dev/kmsg
+	// needs at once, and until this field existed there was no way to request
+	// it without asking for Privileged: true's much larger blast radius too —
+	// but #302 then measured that the operator's own device-cgroup grant is
+	// missing regardless, so requesting CAP_SYSLOG here still leaves
+	// /dev/kmsg at EPERM. host-health's kmsg recipe still needs
+	// Privileged: true in-cluster today; this field is for whatever capability
+	// need arrives next that is not gated on a missing device-cgroup rule.
+	//
+	// Add-only, deliberately: a Drop list is a hardening feature and a
+	// different conversation from the narrower-grant one this field answers.
+	//
+	// Enumerated rather than a free string, matching ImagesByVendor's own
+	// reasoning (#274/#257): a typo'd capability name is accepted by the
+	// apiserver either way, but an enum makes it a validation error instead of
+	// a silently ineffective grant that looks like broken hardware. Widen the
+	// enum the moment a runner legitimately needs another one.
+	//
+	// ONLY MEANINGFUL WITH RunAsUser: 0. A capability added to the bounding
+	// set does nothing for a non-root uid without ambient capabilities — the
+	// same measurement that showed Privileged alone fails for this image's
+	// default uid 65532. Setting Capabilities without RunAsUser: 0 is refused
+	// at plan time (buildPlan) rather than producing a probe that silently
+	// reads nothing and reads as broken hardware.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=4
+	Capabilities []Capability `json:"capabilities,omitempty"`
 
 	// PriorityClassName points this test's pods at a PriorityClass the SITE
 	// manages.

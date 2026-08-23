@@ -4584,6 +4584,74 @@ func TestRun_ReservedEnvOverrideIsRefusedAtStartAsAConfigError(t *testing.T) {
 	}
 }
 
+// #302: a capability added to the bounding set does nothing for a non-root
+// uid without ambient capabilities, so spec.runner.capabilities without
+// spec.runner.runAsUser: 0 is refused at plan time rather than producing a
+// probe that silently reads nothing.
+func TestRun_CapabilitiesWithoutRunAsUserZeroIsRefusedAtStartAsAConfigError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		runAsUser *int64
+	}{
+		{"runAsUser unset", nil},
+		{"runAsUser non-zero", int64p(65532)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bt := smokeTest("fp4")
+			bt.Spec.Runner = &burninv1alpha1.RunnerSpec{
+				Capabilities: []burninv1alpha1.Capability{burninv1alpha1.CapabilitySYSLOG},
+				RunAsUser:    tc.runAsUser,
+			}
+			h := newHarness(t,
+				gb10Node("spark-a"),
+				bt,
+				profile("acceptance", nil, false, testRef("fp4")),
+				newRun("run1", "acceptance", "spark-a"),
+			)
+			h.reconcileUntilSettled("run1")
+
+			run := h.run("run1")
+			if run.Status.Phase != burninv1alpha1.RunError {
+				t.Fatalf("phase = %q, want Error — capabilities without runAsUser: 0 is a broken "+
+					"profile, not a bad part", run.Status.Phase)
+			}
+			msg := run.Status.Results[0].Message
+			if !strings.Contains(msg, "capabilities") || !strings.Contains(msg, "runAsUser") {
+				t.Errorf("message = %q, want it to name both fields", msg)
+			}
+			if len(h.allPods("run1")) != 0 {
+				t.Error("a pod was scheduled for a profile that would silently grant nothing")
+			}
+			h.assertNoStrandedCordons()
+		})
+	}
+
+	// The combination the field exists for: clean at plan time. Not run to
+	// completion — this only checks that refuseCapabilitiesWithoutRunAsUserZero
+	// does not itself reject it, the same way TestRun_SoundThresholdsRecords...
+	// checks a plan-time property without needing a full pod lifecycle.
+	t.Run("with runAsUser: 0, clean", func(t *testing.T) {
+		bt := smokeTest("fp4")
+		bt.Spec.Runner = &burninv1alpha1.RunnerSpec{
+			Capabilities: []burninv1alpha1.Capability{burninv1alpha1.CapabilitySYSLOG},
+			RunAsUser:    int64p(0),
+		}
+		h := newHarness(t,
+			gb10Node("spark-a"),
+			bt,
+			profile("acceptance", nil, false, testRef("fp4")),
+			newRun("run1", "acceptance", "spark-a"),
+		)
+		h.reconcile("run1")
+		h.reconcile("run1")
+		run := h.run("run1")
+		if run.Status.Phase == burninv1alpha1.RunError {
+			t.Errorf("phase = Error with runAsUser: 0 set — the one combination this field exists "+
+				"for was refused: %s", run.Status.Results[0].Message)
+		}
+	})
+}
+
 // Every unsatisfiable gate in the profile, in one message. The author is being
 // sent to fix a file; rediscovering the second typo on the next run costs
 // another cordon, another schedule, and another wait.
@@ -5199,6 +5267,26 @@ func TestRunAsUserIsSeparateFromPrivileged(t *testing.T) {
 		})
 		if sc.Privileged == nil || !*sc.Privileged || sc.RunAsUser == nil || *sc.RunAsUser != 0 {
 			t.Errorf("both grants must reach the container: %+v", sc)
+		}
+	})
+
+	// #302: Capabilities alone must reach the container's SecurityContext,
+	// without silently pulling in Privileged too — the whole point of the
+	// field is a narrower grant than Privileged.
+	t.Run("capabilities alone builds a SecurityContext without privileged", func(t *testing.T) {
+		sc := uidFor(func(r *burninv1alpha1.RunnerSpec) {
+			r.RunAsUser = int64p(0)
+			r.Capabilities = []burninv1alpha1.Capability{burninv1alpha1.CapabilitySYSLOG}
+		})
+		if sc == nil || sc.Capabilities == nil {
+			t.Fatalf("capabilities did not reach the container: %+v", sc)
+		}
+		if len(sc.Capabilities.Add) != 1 || sc.Capabilities.Add[0] != corev1.Capability("SYSLOG") {
+			t.Errorf("SecurityContext.Capabilities.Add = %v, want exactly [SYSLOG]", sc.Capabilities.Add)
+		}
+		if sc.Privileged != nil && *sc.Privileged {
+			t.Error("capabilities silently granted privileged as well — the field exists specifically " +
+				"to avoid that blast radius")
 		}
 	})
 }
