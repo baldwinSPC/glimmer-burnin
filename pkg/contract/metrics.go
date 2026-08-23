@@ -210,6 +210,24 @@ type Metric struct {
 	// zero value is the SAFE answer rather than a silent guess: an unclassified
 	// metric is not merged at all, and a threshold on it fails closed.
 	Combination Combination
+	// MayBeUnmeasurable marks a metric that is legitimately `n/a` — a POSITIVE
+	// claim, never an omission — on EVERY single-device node: the cross-device
+	// spreads (nothing to spread across) and the peer-bandwidth matrices (no
+	// peer path with one accelerator). The default applicability, Required,
+	// fails closed on n/a — so a `Required` gate on one of these fails every
+	// single-device node forever, on the one phase never retried, and the
+	// failure reads as a hardware verdict. verdict.ValidateThresholdsForKind
+	// reads this to advise RequiredIfMeasurable at authoring time; it changes
+	// nothing about evaluation, which still fails closed exactly as before.
+	//
+	// Deliberately NARROWER than "may be n/a on SOME hardware" — eccErrors and
+	// remappedRows are also n/a on some SKUs (a part with no ECC subsystem),
+	// but only some, and a fleet whose parts all have ECC legitimately writes
+	// `eccErrors Equal 0` with the default Required applicability. Flagging
+	// every gate on those two would be noise on the common case rather than
+	// advice about a real trap (#405) — they stay false here on purpose; see
+	// their own registry comments.
+	MayBeUnmeasurable bool
 }
 
 // Combination says how a metric combines across the reporters of a single
@@ -366,9 +384,10 @@ var registry = map[string]Metric{
 	},
 	"peerReadBandwidthGBs": {
 		Name: "peerReadBandwidthGBs", Unit: UnitGigabytesPerSecond,
-		Description:  "worst cell of the all-pairs GPU-to-GPU READ bandwidth matrix, over NVLink, xGMI or a PCIe switch. The MINIMUM rather than the mean because a fabric is as good as its worst link, and a mean over the matrix hides the single degraded lane this measurement exists to find. Unmeasurable (n/a) on a node with one accelerator, or with no peer path between them",
-		Aggregation:  AggMin,
-		ThresholdUse: ThresholdUseAcceptance,
+		Description:       "worst cell of the all-pairs GPU-to-GPU READ bandwidth matrix, over NVLink, xGMI or a PCIe switch. The MINIMUM rather than the mean because a fabric is as good as its worst link, and a mean over the matrix hides the single degraded lane this measurement exists to find. Unmeasurable (n/a) on a node with one accelerator, or with no peer path between them",
+		Aggregation:       AggMin,
+		ThresholdUse:      ThresholdUseAcceptance,
+		MayBeUnmeasurable: true,
 	},
 	"peerReadBandwidthMaxGBs": {
 		Name: "peerReadBandwidthMaxGBs", Unit: UnitGigabytesPerSecond,
@@ -378,9 +397,10 @@ var registry = map[string]Metric{
 	},
 	"peerWriteBandwidthGBs": {
 		Name: "peerWriteBandwidthGBs", Unit: UnitGigabytesPerSecond,
-		Description:  "worst cell of the all-pairs GPU-to-GPU WRITE bandwidth matrix. Reported separately from the read direction because a link can degrade asymmetrically and averaging the two would hide it",
-		Aggregation:  AggMin,
-		ThresholdUse: ThresholdUseAcceptance,
+		Description:       "worst cell of the all-pairs GPU-to-GPU WRITE bandwidth matrix. Reported separately from the read direction because a link can degrade asymmetrically and averaging the two would hide it",
+		Aggregation:       AggMin,
+		ThresholdUse:      ThresholdUseAcceptance,
+		MayBeUnmeasurable: true,
 	},
 	"peerWriteBandwidthMaxGBs": {
 		Name: "peerWriteBandwidthMaxGBs", Unit: UnitGigabytesPerSecond,
@@ -744,6 +764,13 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
+		// NOT MayBeUnmeasurable, deliberately: unlike the spreads and the peer
+		// bandwidths, this is n/a only on SOME SKUs (GB10's unified LPDDR5X has
+		// no ECC subsystem at all — see the runner's n/a sentinel), not on
+		// every single-device node. A fleet whose parts all have ECC legitimately
+		// writes `eccErrors Equal 0` with the default Required applicability,
+		// and that gate is exactly right for them — flagging it here would be
+		// noise on the common case rather than advice about a real trap (#405).
 	},
 	"memoryErrors": {
 		Name: "memoryErrors", Unit: UnitNone,
@@ -820,6 +847,9 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
+		// NOT MayBeUnmeasurable — same reasoning as eccErrors just above: n/a
+		// only on the specific SKUs that have no ECC subsystem, not on every
+		// single-device node. See that comment.
 	},
 	"pcieReplayErrors": {
 		Name: "pcieReplayErrors", Unit: UnitNone,
@@ -996,27 +1026,31 @@ var registry = map[string]Metric{
 	// reports a Required gate as Unsound. SpreadMetrics is the set.
 	"sustainedClockSpreadPct": {
 		Name: "sustainedClockSpreadPct", Unit: UnitPercent,
-		Description:  "spread of sustainedClockPct across the node's devices in one window: (best − worst) / best × 100. One part holding 60% of rated clock beside seven holding 95% is a board with a fault that the worst-device floor may still clear. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
-		Aggregation:  AggMax,
-		ThresholdUse: ThresholdUseAcceptance,
+		Description:       "spread of sustainedClockPct across the node's devices in one window: (best − worst) / best × 100. One part holding 60% of rated clock beside seven holding 95% is a board with a fault that the worst-device floor may still clear. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:       AggMax,
+		ThresholdUse:      ThresholdUseAcceptance,
+		MayBeUnmeasurable: true,
 	},
 	"gemmThroughputSpreadPct": {
 		Name: "gemmThroughputSpreadPct", Unit: UnitPercent,
-		Description:  "spread of achievedTflops across the node's devices in one window of the same GEMM at the same precision: (best − worst) / best × 100. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
-		Aggregation:  AggMax,
-		ThresholdUse: ThresholdUseAcceptance,
+		Description:       "spread of achievedTflops across the node's devices in one window of the same GEMM at the same precision: (best − worst) / best × 100. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:       AggMax,
+		ThresholdUse:      ThresholdUseAcceptance,
+		MayBeUnmeasurable: true,
 	},
 	"fmaThroughputSpreadPct": {
 		Name: "fmaThroughputSpreadPct", Unit: UnitPercent,
-		Description:  "spread of sustainedFmaThroughputTflops across the node's devices in one window of the same soak: (best − worst) / best × 100. Its own name rather than a shared throughput spread for the reason sustainedFmaThroughputTflops is not sustainedThroughputTflops. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
-		Aggregation:  AggMax,
-		ThresholdUse: ThresholdUseAcceptance,
+		Description:       "spread of sustainedFmaThroughputTflops across the node's devices in one window of the same soak: (best − worst) / best × 100. Its own name rather than a shared throughput spread for the reason sustainedFmaThroughputTflops is not sustainedThroughputTflops. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:       AggMax,
+		ThresholdUse:      ThresholdUseAcceptance,
+		MayBeUnmeasurable: true,
 	},
 	"hostToDeviceBandwidthSpreadPct": {
 		Name: "hostToDeviceBandwidthSpreadPct", Unit: UnitPercent,
-		Description:  "spread of hostToDeviceBandwidthGBs across the node's devices in one window: (best − worst) / best × 100. A device on a PCIe link that trained narrow reads low here while the worst-device floor may still clear. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
-		Aggregation:  AggMax,
-		ThresholdUse: ThresholdUseAcceptance,
+		Description:       "spread of hostToDeviceBandwidthGBs across the node's devices in one window: (best − worst) / best × 100. A device on a PCIe link that trained narrow reads low here while the worst-device floor may still clear. n/a on a single-device node, under MIG, and on a heterogeneous board — gate it RequiredIfMeasurable",
+		Aggregation:       AggMax,
+		ThresholdUse:      ThresholdUseAcceptance,
+		MayBeUnmeasurable: true,
 	},
 
 	// --- Test-execution counters --------------------------------------------
@@ -1396,6 +1430,23 @@ func SafeToThresholdOn(name string) bool {
 		return true
 	}
 	return m.SafeToThresholdOn()
+}
+
+// MayBeUnmeasurable reports whether name is registered with
+// Metric.MayBeUnmeasurable — legitimately n/a, as a positive claim, on EVERY
+// single-device node. An unregistered name answers false, the same
+// fail-closed default SafeToThresholdOn uses: this package can only vouch for
+// a trait it has actually classified.
+//
+// This is the property verdict.ValidateThresholdsForKind reads to advise
+// RequiredIfMeasurable at authoring time (#405) — SpreadMetrics below is one
+// NAMING-shaped subset of it (used by TestSpreadMetricsAreRegisteredCeilings
+// to hold every spread to the same registered shape), not the whole trait:
+// peerReadBandwidthGBs and peerWriteBandwidthGBs carry the same
+// MayBeUnmeasurable=true without being spreads at all.
+func MayBeUnmeasurable(name string) bool {
+	m, ok := registry[name]
+	return ok && m.MayBeUnmeasurable
 }
 
 // SpreadMetrics are the cross-device homogeneity spreads: (best − worst) /

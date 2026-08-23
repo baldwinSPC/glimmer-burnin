@@ -558,3 +558,53 @@ func TestValidateThresholds_FlagsARequiredGateOnASpread(t *testing.T) {
 		t.Errorf("a Required floor on sustainedClockPct reported %v, want nothing", ps)
 	}
 }
+
+// #405: the same trap exists for the peer-bandwidth matrices, which are n/a
+// on every single-device node for the same reason a spread is — no peer path
+// with one accelerator — even though neither is named "spread". The linter
+// reads Metric.MayBeUnmeasurable rather than IsSpreadMetric specifically so
+// this is not a special case.
+func TestValidateThresholds_FlagsARequiredGateOnAPeerBandwidthMatrix(t *testing.T) {
+	for _, metric := range []string{"peerReadBandwidthGBs", "peerWriteBandwidthGBs"} {
+		t.Run(metric, func(t *testing.T) {
+			ps := problemFor(t, th(metric, contract.GTE, "100"))
+			if len(ps) != 1 {
+				t.Fatalf("got %d problems, want 1: %v", len(ps), ps)
+			}
+			if ps[0].Severity != SeverityUnsound {
+				t.Errorf("severity = %q, want %q", ps[0].Severity, SeverityUnsound)
+			}
+			if !strings.Contains(ps[0].Reason, "RequiredIfMeasurable") || !strings.Contains(ps[0].Reason, "single-device") {
+				t.Errorf("reason = %q, want it to name RequiredIfMeasurable and the single-device node it would fail", ps[0].Reason)
+			}
+			ok := th(metric, contract.GTE, "100")
+			ok.Applicability = contract.RequiredIfMeasurable
+			if ps := problemFor(t, ok); len(ps) != 0 {
+				t.Errorf("RequiredIfMeasurable gate on %s reported %v, want nothing", metric, ps)
+			}
+		})
+	}
+}
+
+// #405's own caution, made concrete: eccErrors and remappedRows are ALSO n/a
+// on some hardware (a part with no ECC subsystem, e.g. GB10's unified
+// LPDDR5X), but not on every single-device node the way a spread or a peer
+// bandwidth is — a fleet whose parts all have ECC legitimately writes
+// `eccErrors Equal 0` with the default Required applicability, and that gate
+// is exactly right for them. Flagging it here would be noise on the common
+// case rather than advice about a real trap, so these two must NOT gain
+// MayBeUnmeasurable even though they share the "sometimes n/a" shape.
+func TestValidateThresholds_DoesNotFlagECCOrRemappedRowsAsUnmeasurable(t *testing.T) {
+	for _, metric := range []string{"eccErrors", "remappedRows"} {
+		t.Run(metric, func(t *testing.T) {
+			if contract.MayBeUnmeasurable(metric) {
+				t.Errorf("%s.MayBeUnmeasurable = true, want false — it is n/a only on some SKUs, "+
+					"not on every single-device node", metric)
+			}
+			if ps := problemFor(t, th(metric, contract.EQ, "0")); len(ps) != 0 {
+				t.Errorf("a Required gate on %s reported %v, want nothing — a fleet with real ECC "+
+					"legitimately writes this gate", metric, ps)
+			}
+		})
+	}
+}

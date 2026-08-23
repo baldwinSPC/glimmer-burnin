@@ -175,17 +175,24 @@ func ValidateThresholdsForKind(kind contract.TestKind, thresholds []contract.Thr
 				th.Metric, kind, contract.KindCustom)
 		}
 
-		// A cross-device spread is n/a on every single-device node — a positive
-		// claim, "nothing to spread across" — and the default applicability is
-		// Required, which fails closed on n/a. A fleet profile that gates a
-		// spread and forgets RequiredIfMeasurable therefore fails every healthy
-		// single-GPU node forever, on the one phase that is never retried, and
-		// the failure reads as a hardware verdict. Advice, not a refusal: on an
-		// eight-GPU node the same gate is exactly right. See
+		// A metric the registry marks MayBeUnmeasurable is n/a — a positive
+		// claim, never an omission — on EVERY single-device node: a
+		// cross-device spread ("nothing to spread across") or a peer-bandwidth
+		// matrix (no peer path with one accelerator). The default applicability
+		// is Required, which fails closed on n/a. A profile that gates one of
+		// these and forgets RequiredIfMeasurable therefore fails every healthy
+		// single-device node forever, on the one phase that is never retried,
+		// and the failure reads as a hardware verdict. Advice, not a refusal:
+		// on a multi-GPU node the same gate is exactly right (#405). See
 		// docs/dev/multi-device.md.
-		if contract.IsSpreadMetric(th.Metric) && applicabilityOf(th) != contract.RequiredIfMeasurable {
+		//
+		// Deliberately does NOT cover eccErrors/remappedRows, which are n/a
+		// only on SOME SKUs (a part with no ECC subsystem) rather than on
+		// every single-device node — see Metric.MayBeUnmeasurable's own
+		// comment for why flagging those would be noise on the common case.
+		if contract.MayBeUnmeasurable(th.Metric) && applicabilityOf(th) != contract.RequiredIfMeasurable {
 			add(SeverityUnsound,
-				"%q is a cross-device spread and is n/a on every single-device node (and under MIG, and on a heterogeneous board); its applicability is %s, which fails closed on n/a, so this gate fails every healthy single-device node forever and the failure reads as a hardware verdict. Set applicability: %s, under which an n/a is reported as not evaluated",
+				"%q is n/a on every single-device node (a positive claim, not an omission); its applicability is %s, which fails closed on n/a, so this gate fails every healthy single-device node forever and the failure reads as a hardware verdict. Set applicability: %s, under which an n/a is reported as not evaluated",
 				th.Metric, applicabilityOf(th), contract.RequiredIfMeasurable)
 		}
 
