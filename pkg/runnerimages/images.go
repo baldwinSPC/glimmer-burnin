@@ -199,13 +199,14 @@ var defaults = map[contract.TestKind]image{
 
 	// This table is deliberately MIXED, and the reasons are different.
 	//
-	// (1) THREE runners are at v0.6.4 because their source has not moved since
-	// tonight's full-fleet pass cleared their hardware gate: the fabric three
-	// (ib-write-bw, nccl, gpudirect-rdma), which had been held at v0.6.0 since
-	// #363 with nothing having watched them carry traffic. They have now —
-	// 99.63 Gbps, 11.63 GB/s Pair, 11.97 GB/s Group, and a correct Skip
-	// respectively. nccl's source HAS since moved (#447) but is not republished
-	// here — see the header comment.
+	// (1) TWO runners are at v0.6.4 because their source has not moved since
+	// tonight's full-fleet pass cleared their hardware gate: ib-write-bw and
+	// gpudirect-rdma, which had been held at v0.6.0 since #363 with nothing
+	// having watched them carry traffic. They have now — 99.63 Gbps and a
+	// correct Skip respectively. nccl was a third member of that pass (11.63
+	// GB/s Pair, 11.97 GB/s Group) but its SOURCE has since moved twice over
+	// (Node-scope collective support, then Group rendezvous) and it is pinned
+	// separately below, at v0.7.0, once a fresh build was verified (#447).
 	//
 	// (2) memory-stress is at v0.6.2 because its source has not moved since that
 	// image was built. Republishing an unchanged runner spends fleet-wide risk
@@ -221,25 +222,34 @@ var defaults = map[contract.TestKind]image{
 	// the header comment above) even though it too contains no Go binary — it
 	// moved because its SOURCE changed (device iteration,
 	// docs/dev/multi-device.md), not for a stdlib patch. thermal-soak, gpu-burn,
-	// dcgm-diag, host-health and memory-bw moved AGAIN, to v0.7.1, for the same
-	// class of reason: #441's Xid-watch fix and #447's devicesVisible rename,
-	// both source changes with no Go binary involved for the C++/CUDA ones
-	// among them.
+	// host-health and memory-bw moved AGAIN, to v0.7.1, for the same class of
+	// reason: #441's Xid-watch fix and #447's devicesVisible rename, both source
+	// changes with no Go binary involved for the C++/CUDA ones among them.
+	// dcgm-diag moved a further step, to v0.7.2, once #371's excused-NotRun fix
+	// (the OUTRIGHT-SKIPPED-subtests message) landed after v0.7.1 was already
+	// cut — verified against real gated plugins on spark-85a9 before publishing.
 	//
 	// A pin equal to the newest tag is NOT the same claim as a pin whose image
 	// was built from the source in this tree, and only the second means anything
 	// to a node that pulls it. Both drifted within one day (#374, and again
 	// here), each caught by hand while doing something else. #379 is the guard
 	// that should be doing the catching, and now does.
+	//
+	// nccl's own drift (#447) is the largest yet caught by that guard: ~1400
+	// lines across collective.h, main.go, nccl_pair.cu and its tests, published
+	// as v0.7.0 and re-verified fresh (Node-scope single-GPU skip path, exit 2
+	// with the NCCL_SKIP marker) before pinning, since a locally-built image
+	// having been verified once before is not the same claim as the tag a node
+	// actually pulls having been.
 	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.0", Vendor: VendorNVIDIA},
-	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.1", Vendor: VendorNVIDIA},
+	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.2", Vendor: VendorNVIDIA},
 	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
-	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.6.4", Vendor: VendorNVIDIA},
+	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.7.0", Vendor: VendorNVIDIA},
 	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
 	// gemm-sweep joined the table at v0.6.4 because its gate was met twice over:

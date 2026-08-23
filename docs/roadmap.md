@@ -100,7 +100,7 @@ scarce resource, which is time on silicon.
 | TestKind | Measures | Scope | NVIDIA | AMD | Intel | Status |
 |---|---|---|---|---|---|---|
 | `compute-smoke` | FP4 block-scaled GEMM, exact instruction path | Node | shipped | — | — | shipped (burst-only) |
-| `gemm-sweep` | GEMM across FP64→FP4/INT8 | Node | verified | later | — | verified on GB10, five precisions; publish [#350] |
+| `gemm-sweep` | GEMM across FP64→FP4/INT8 | Node | shipped | later | — | shipped (image published, #350) |
 | `gpu-burn` | Sustained compute, SDC detection | Node | shipped | later | — | shipped |
 | `thermal-soak` | Power and thermal behaviour, throttling | Node | shipped | later | — | shipped |
 | `clockprobe` | Sustained clock under load | Node | shipped | later | — | shipped |
