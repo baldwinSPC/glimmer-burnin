@@ -156,7 +156,7 @@ RUN set -eu; \
 
 RUN mkdir -p /out && install -m 0755 /nvbandwidth/build/nvbandwidth /out/nvbandwidth
 
-COPY memory_bw.cc /src/memory_bw.cc
+COPY memory_bw.cc device_fold.h /src/
 
 # The wrapper's two build-time constants are generated into a header rather than
 # passed as quoted -D arguments: the value has to survive the Dockerfile parser

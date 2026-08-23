@@ -54,9 +54,10 @@
 # device they were allocated, and their tests below gate `deviceCount Equal
 # 1` for exactly that reason: a partial allocation is a config error, and
 # the gate turns it into a visible FAILURE instead of a quiet undercount.
-# dcgm-diag, memory-bw and host-health do not yet claim `deviceCount` (some
-# by design, some pending #431) and carry no such gate — see each test's own
-# resources.limits comment for which applies.
+# dcgm-diag, the NVIDIA memory-bw image and host-health do not claim
+# `deviceCount`, by design in every case, and carry no such gate — see each
+# test's own resources.limits comment for why. (memory-bw-rocm, which this
+# sample does not use, folds devices itself and DOES claim it.)
 
 # compute-smoke is a BURST, and there is deliberately no durationSeconds here.
 #
@@ -323,10 +324,16 @@ spec:
     limits:
       # "1" is GB10's own board size — see fp4-compute-smoke above; on a
       # multi-GPU SKU use fingerprint-probe's acceleratorCount instead. No
-      # deviceCount gate here: memory-bw's nvbandwidth iterates every VISIBLE
-      # device already, but the runner itself does not yet claim deviceCount
-      # (runners/devicefold_test.go's PENDING list, tracked by #431) — a
-      # deviceCount threshold would fail closed on every run until then.
+      # deviceCount gate here, by design and permanently: nvbandwidth already
+      # iterates every visible device on its own, so memory-bw's multi-device
+      # conversion is the allocation BUDGET CHECK (device_fold.h's
+      # parseBudget/planIteration — a mismatch between what this pod was
+      # allocated and what the runtime shows is refused as an Error before
+      # nvbandwidth ever runs), not a per-device fold — this runner never
+      # folds devices itself, so it never claims `deviceCount`
+      # (runners/devicefold_test.go's EXEMPT-shaped entry; see
+      # docs/dev/multi-device.md). A deviceCount threshold here would fail
+      # closed on every run.
       nvidia.com/gpu: "1"
 ---
 # Host DIMM faults present as accelerator flakiness: a corrupted staging buffer
