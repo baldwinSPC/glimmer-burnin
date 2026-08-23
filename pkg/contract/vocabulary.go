@@ -220,6 +220,28 @@ const (
 	// hardware paths, and a single floor across them would be meaningless.
 	KindGemmSweep TestKind = "gemm-sweep"
 
+	// KindPowerSwing is a Node-scope power-delivery TRANSIENT probe: it shares
+	// thermal-soak's and gpu-burn's engine (soak_core.cuh) but, instead of
+	// holding the load, alternates it on a period and watches the seconds
+	// right after each ramp for a clock dip or a fresh throttle reason.
+	//
+	// thermal-soak catches a cooling fault — the die, the heatsink and the
+	// chassis all reach steady state, and a part that cannot hold clock or
+	// stay out of protective throttling once they have is unwell. It says
+	// nothing about a TRANSIENT: a VRM that cannot slew fast enough to keep up
+	// with a sudden load step, or a PSU that sags for a few hundred
+	// milliseconds when several GPUs ramp together. Neither shows up in a
+	// figure averaged, or even sampled at its worst, over a multi-minute
+	// sustained hold — both show up only in the instant right after the load
+	// changes, which a sustained soak's own sampling cadence is not aimed at.
+	//
+	// It is deliberately THRESHOLDLESS on everything but correctness
+	// (miscompares, nonfinite): nobody has yet watched a real VRM/PSU
+	// transient on this project's own fleet, so there is no calibrated floor
+	// for the worst post-ramp clock or ceiling for the peak post-ramp power to
+	// gate on. See runners/power-swing/power_swing.cu's header comment.
+	KindPowerSwing TestKind = "power-swing"
+
 	KindCustom TestKind = "custom" // any image; no built-in parsing
 )
 
@@ -246,6 +268,7 @@ var BuiltInKinds = []TestKind{
 	KindGemmSweep,
 	KindDCGMDiag,
 	KindThermalSoak,
+	KindPowerSwing,
 	KindNCCL,
 	KindIBWriteBW,
 	KindGPUDirect,
@@ -322,6 +345,14 @@ var sustainedLoadKinds = map[TestKind]bool{
 	// The shared duration-honouring load wrapper (runners/*/soak_core.cuh).
 	KindThermalSoak: true,
 	KindGPUBurn:     true,
+
+	// Shares the SAME load wrapper and therefore the same real GEMM heat
+	// during every ON phase, even though the load itself alternates rather
+	// than holding. A node-local thermal watchdog seeing the resulting
+	// repeated heat spikes must read them as this test working, not as a
+	// cooling fault — the same reason KindThermalSoak is here, applied to a
+	// duty cycle instead of a continuous hold.
+	KindPowerSwing: true,
 
 	// Holds a known, steady, clock-bound load for its whole window — that is
 	// how it judges sustained clocks at all. Short, but short is not cool: on a

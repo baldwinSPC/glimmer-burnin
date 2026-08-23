@@ -54,6 +54,7 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 	converted := map[string]bool{
 		"gpu-burn":           true,
 		"thermal-soak":       true,
+		"power-swing":        true,
 		"gpu-burn-rocm":      true,
 		"thermal-soak-rocm":  true,
 		"clockprobe":         true,

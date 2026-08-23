@@ -480,6 +480,19 @@ struct Samples {
   bool prevProtected = false;
   bool prevPowerCapped = false;
 
+  // The INSTANTANEOUS last-read value from the most recent successful sample,
+  // as distinct from every field above, which is a running statistic over the
+  // WHOLE run. Consumed by power-swing's duty-cycle bookkeeping, which needs
+  // "what did this one sample say" rather than a cumulative mean/min/max —
+  // these fields are additive and read by nobody else; every existing kind's
+  // assertions are unaffected. Set unconditionally in takeSample(), in the
+  // same already-guarded blocks where the running statistics are updated, so
+  // they inherit the identical honest-degradation behaviour (never updated
+  // from a failed read).
+  unsigned int lastSm = 0;
+  double lastPowerW = 0.0;
+  unsigned long long lastReasonMask = 0;
+
   double mean(double sum, long count) const { return count > 0 ? sum / count : 0.0; }
 };
 
@@ -503,6 +516,7 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
   s->smSum += sm;
   s->smMax = std::max(s->smMax, sm);
   s->smMin = std::min(s->smMin, sm);
+  s->lastSm = sm;
 
   if (ok->temp && nvml.deviceGetTemperature != nullptr) {
     unsigned int t = 0;
@@ -534,6 +548,7 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
       s->powerN++;
       s->powerSum += w;
       s->powerMax = std::max(s->powerMax, w);
+      s->lastPowerW = w;
     } else {
       ok->power = false;
       noteUnsupported("powerDraw");
@@ -557,6 +572,7 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
     if (nvml.deviceGetCurrentClocksThrottleReasons(dev, &mask) == nvmlrt::kSuccess) {
       s->reasonsN++;
       s->reasonMask |= mask;
+      s->lastReasonMask = mask;
       for (int i = 0; i < kNumReasonBits; ++i) {
         if ((mask & kReasonBits[i].bit) != 0) s->reasonCount[i]++;
       }
@@ -574,6 +590,22 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
     }
   }
 }
+
+// ── the duty cycle (power-swing only) ───────────────────────────────────────
+//
+// DutyCycle is ADDITIVE: `run()` and `runActiveDevices()` both take it as a
+// trailing pointer defaulting to nullptr, so thermal-soak and gpu-burn — whose
+// call sites never pass one — are provably unaffected. It exists to answer a
+// question thermal-soak cannot: thermal-soak holds a SUSTAINED load and catches
+// a cooling fault; it says nothing about a fast load STEP, which is what finds
+// a VRM that cannot keep up or a PSU that sags when the board ramps. power-swing
+// alternates the load on a period and watches what happens in the seconds right
+// after each ramp.
+struct DutyCycle {
+  long onSeconds = 10;
+  long offSeconds = 10;
+  long rampWindowSeconds = 3; // how long after a ramp starts counts as "post-ramp"
+};
 
 // ── what the engine hands back ──────────────────────────────────────────────
 //
@@ -634,6 +666,17 @@ struct Measurement {
   bool haveLastXidCode = false;
   long lastXidCode = 0;
   std::string xidUnavailableReason;
+
+  // Duty-cycle evidence (power-swing only). ALL of it stays at its zero value
+  // for thermal-soak and gpu-burn, whose runs never pass a DutyCycle — that is
+  // what keeps this block additive rather than merely unused.
+  bool dutyCycleKnown = false; // true only when duty != nullptr was actually used
+  long swingTransitions = 0;  // Fold::Once — identical across devices by construction (same wall clock)
+  bool swingRampClockKnown = false;
+  double swingWorstPostRampClockPct = 0.0; // Fold::Min
+  bool swingRampPowerKnown = false;
+  double swingPeakRampPowerW = 0.0; // Fold::Max
+  long swingNewThrottleEvents = 0;  // Fold::Sum
 };
 
 // ── terminal output ─────────────────────────────────────────────────────────
@@ -749,6 +792,21 @@ inline void emitMeasurement(const Keys &k, const Measurement &m, long seq) {
   } else if (!m.xidUnavailableReason.empty()) {
     std::printf("xid_source_detail=%s\n", m.xidUnavailableReason.c_str());
   }
+  // Duty-cycle evidence (power-swing only). thermal-soak and gpu-burn never
+  // set dutyCycleKnown, so none of this block ever prints for them.
+  if (m.dutyCycleKnown) {
+    std::printf("swing_transitions=%ld\n", m.swingTransitions);
+    if (m.swingRampClockKnown) {
+      std::printf("swing_worst_post_ramp_clock_pct=%.2f\n", m.swingWorstPostRampClockPct);
+    }
+    if (m.swingRampPowerKnown) std::printf("swing_peak_ramp_power_w=%.2f\n", m.swingPeakRampPowerW);
+    // Reuses throttleKnown rather than inventing a duplicate flag: it is
+    // already exactly "throttle reasons were read on at least one device",
+    // which is the same condition swing_new_throttle_events was folded under
+    // in buildDeviceReport. A driver that never answered a throttle-reason
+    // read must not report a fabricated "0 new reasons" during a ramp.
+    if (m.throttleKnown) std::printf("swing_new_throttle_events=%ld\n", m.swingNewThrottleEvents);
+  }
   std::fflush(stdout);
 }
 
@@ -823,6 +881,22 @@ struct DeviceCtx {
   double started = 0, warmupUntil = 0, deadline = 0, lastSampleAt = 0;
   bool launched = false;        // a kernel is currently in flight for this device
   bool measuringThisLaunch = false;
+
+  // Duty-cycle state (power-swing only). Untouched — and therefore inert — for
+  // every call site that passes no DutyCycle: dutyOn stays true, dutyPhaseUntil
+  // stays 0 and is never consulted because runActiveDevices only reads it when
+  // its own `duty` parameter is non-null.
+  bool dutyOn = true;
+  double dutyPhaseUntil = 0.0;
+  long dutyTransitions = 0;
+  double dutyRampWindowUntil = 0.0;              // 0 = not currently inside a ramp window
+  unsigned int dutyRampWorstSmMHz = 0xFFFFFFFFu; // running worst (lowest) instantaneous SM clock seen inside ANY ramp window this run
+  bool dutyRampSampleSeen = false;
+  double dutyRampPeakPowerW = 0.0; // running worst (highest) instantaneous power seen inside ANY ramp window
+  unsigned long long dutySteadyReasonMask = 0;  // throttle-reason bits observed just before the most recent on->off transition
+  unsigned long long dutySwingReasonMask = 0;   // reason bits seen during a ramp that were not in dutySteadyReasonMask, OR'd across every transition
+  long dutySwingReasonEvents = 0;               // count of ramp windows during which at least one new reason bit appeared
+  bool dutyRampReasonCounted = false;           // guards against double-counting within one ramp window
 };
 
 // releaseDevice frees whatever setupDevice allocated, tolerating partial setup
@@ -1053,7 +1127,12 @@ inline void setupDevice(DeviceCtx *d, int matrixNStart, long injectMiscompares, 
 // Keys field carries, so what is folded is exactly what emitDeviceMeasurement
 // prints for that device — the same discipline the single-device engine
 // always had, now applied per device instead of once.
-inline devices::DeviceReport buildDeviceReport(DeviceCtx &d, const Keys &k, const nvmlrt::Library &nvml) {
+//
+// `duty` is additive and defaults to nullptr: thermal-soak and gpu-burn never
+// pass one, so the swing_* keys below are never added to their reports and
+// their emitted vocabulary is unchanged.
+inline devices::DeviceReport buildDeviceReport(DeviceCtx &d, const Keys &k, const nvmlrt::Library &nvml,
+                                               const DutyCycle *duty = nullptr) {
   devices::DeviceReport r;
   r.index = d.index;
   r.busId = d.busId;
@@ -1082,6 +1161,32 @@ inline devices::DeviceReport buildDeviceReport(DeviceCtx &d, const Keys &k, cons
       r.values["ecc_errors"] = static_cast<double>(now > d.eccStart ? now - d.eccStart : 0);
     }
   }
+
+  // Duty-cycle evidence. swing_transitions is driven purely by wall clock and
+  // CUDA event completion — no NVML involved — so it is always a genuine
+  // measurement once duty cycling ran at all, and is reported unconditionally
+  // (0 transitions in a short run is a real count, not a fabricated one). The
+  // other three keep the "never emit a 0 you did not measure" discipline the
+  // rest of this function already follows: each is gated on the specific
+  // per-device state that says it was actually observed.
+  if (duty != nullptr) {
+    r.values["swing_transitions"] = static_cast<double>(d.dutyTransitions);
+    if (d.dutyRampSampleSeen && d.ratedKnown) {
+      r.values["swing_worst_post_ramp_clock_pct"] =
+          100.0 * static_cast<double>(d.dutyRampWorstSmMHz) / d.ratedBoostMHz;
+    }
+    if (d.dutyRampSampleSeen && d.s.powerN > 0) {
+      r.values["swing_peak_ramp_power_w"] = d.dutyRampPeakPowerW;
+    }
+    // Gated on d.s.reasonsN > 0, the same condition throttle_count above
+    // uses: a driver that never answered a throttle-reason read must not
+    // report a fabricated "0 new reasons" any more than it may report a
+    // fabricated throttle_count.
+    if (d.s.reasonsN > 0) {
+      r.values["swing_new_throttle_events"] = static_cast<double>(d.dutySwingReasonEvents);
+    }
+  }
+
   return r;
 }
 
@@ -1113,6 +1218,17 @@ inline void fillMeasurementFromFold(Measurement *m, const devices::Folded &f) {
     m->eccKnown = true;
     m->eccErrors = static_cast<unsigned long long>(v);
   }
+  // Duty-cycle evidence (power-swing only). These keys are simply absent from
+  // the fold for thermal-soak and gpu-burn — buildDeviceReport never adds them
+  // without a DutyCycle — so dutyCycleKnown stays false and every field below
+  // it keeps its zero value for those two kinds.
+  m->dutyCycleKnown = get("swing_transitions", &v);
+  if (m->dutyCycleKnown) m->swingTransitions = static_cast<long>(v);
+  m->swingRampClockKnown = get("swing_worst_post_ramp_clock_pct", &v);
+  if (m->swingRampClockKnown) m->swingWorstPostRampClockPct = v;
+  m->swingRampPowerKnown = get("swing_peak_ramp_power_w", &v);
+  if (m->swingRampPowerKnown) m->swingPeakRampPowerW = v;
+  if (get("swing_new_throttle_events", &v)) m->swingNewThrottleEvents = static_cast<long>(v);
 }
 
 // emitDeviceMeasurementImpl folds `reportable` and prints the same
@@ -1132,12 +1248,12 @@ inline void emitDeviceMeasurementImpl(const Keys &k, const std::vector<DeviceCtx
                                       const nvmlrt::Library &nvml, long *seq, double elapsedS,
                                       int visible, long windowS, devices::Concurrency mode,
                                       bool underMig, bool final, kmsg::Watch &xidWatch,
-                                      kmsg::Tally &xidTally) {
+                                      kmsg::Tally &xidTally, const DutyCycle *duty = nullptr) {
   std::vector<devices::DeviceReport> reports;
   reports.reserve(reportable.size());
   for (DeviceCtx *d : reportable) {
     if (d->iterations == 0 && d->exitCode != kExitPass) continue;
-    reports.push_back(buildDeviceReport(*d, k, nvml));
+    reports.push_back(buildDeviceReport(*d, k, nvml, duty));
   }
   const devices::Folded folded = devices::fold(reports, foldRules, foldRules.empty() ? nullptr : foldRules.front().key);
 
@@ -1213,7 +1329,8 @@ inline void runActiveDevices(std::vector<DeviceCtx *> &active, std::vector<Devic
                              const nvmlrt::Library &nvml, long sampleIntervalMs, long progressIntervalS,
                              const Keys &k, const std::vector<devices::FoldRule> &foldRules,
                              kmsg::Watch &xidWatch, kmsg::Tally &xidTally, long *seq, int visible,
-                             long windowS, devices::Concurrency mode, double runStart) {
+                             long windowS, devices::Concurrency mode, double runStart,
+                             const DutyCycle *duty = nullptr) {
   const double sampleIntervalS = static_cast<double>(sampleIntervalMs) / 1000.0;
   double lastProgress = nowSeconds();
 
@@ -1251,6 +1368,35 @@ inline void runActiveDevices(std::vector<DeviceCtx *> &active, std::vector<Devic
       if (!d->active) continue;
       anyActive = true;
       cudaSetDevice(d->index);
+
+      // Duty cycle (power-swing only): flip the phase purely on wall clock,
+      // independent of whether a kernel happens to be in flight. Guarded on
+      // duty != nullptr so thermal-soak and gpu-burn, which never pass one,
+      // never touch d->dutyOn/d->dutyPhaseUntil at all.
+      if (duty != nullptr && nowSeconds() >= d->dutyPhaseUntil) {
+        d->dutyOn = !d->dutyOn;
+        if (d->dutyOn) {
+          // OFF -> ON: entering a ramp.
+          d->dutyPhaseUntil = nowSeconds() + duty->onSeconds;
+          d->dutyTransitions++;
+          d->dutyRampWindowUntil = nowSeconds() + duty->rampWindowSeconds;
+          d->dutyRampReasonCounted = false;
+        } else {
+          // ON -> OFF: seed the baseline reasons the next ramp will be
+          // compared against, from whatever was last sampled under load —
+          // still the tail of the ON phase, not the steady OFF state itself.
+          // The sampling block below keeps refining this every tick for as
+          // long as the device stays idle, so by the time the next OFF->ON
+          // flip happens it reflects the actual steady state right before
+          // the ramp; this seed only matters if the OFF phase ends before any
+          // sample lands in it at all. Left untouched when reasons are not
+          // currently readable — an unsupported read must never silently
+          // become "no reasons".
+          d->dutyPhaseUntil = nowSeconds() + duty->offSeconds;
+          if (d->samplerOk.reasons) d->dutySteadyReasonMask = d->s.lastReasonMask;
+        }
+      }
+
       if (d->launched) {
         const cudaError_t q = cudaStreamQuery(d->stream);
         if (q == cudaSuccess) {
@@ -1274,21 +1420,87 @@ inline void runActiveDevices(std::vector<DeviceCtx *> &active, std::vector<Devic
             d->sdcDetections++;
             d->prevMiscompares = d->hostCounters[kCounterMiscompares];
           }
-          if (nowSeconds() < d->deadline) {
-            launchOne(d);
-          } else {
+          if (nowSeconds() >= d->deadline) {
             d->active = false; // this device's window is done
+          } else if (duty == nullptr || d->dutyOn) {
+            launchOne(d);
           }
+          // else: duty cycling and this device is in its OFF phase — stay
+          // genuinely idle (no kernel in flight) until the next ON flip.
         } else if (q != cudaErrorNotReady) {
           d->exitCode = kExitError;
           d->detail = std::string("soak kernel failed: ") + cudaGetErrorString(q);
           d->active = false;
         }
+      } else if (duty != nullptr) {
+        // Idle (off-phase) device. This is the ONLY place that can end its
+        // window: unlike every other kind, a duty-cycled device can sit here
+        // (launched == false) for a whole off-phase without ever re-entering
+        // the branch above, which is where the deadline is normally checked
+        // right after a kernel completes. Without this, a device whose
+        // deadline passed while idle would never be marked inactive — it
+        // would keep oscillating phases with nothing to launch, and
+        // runActiveDevices would never see anyActive go false, hanging the
+        // whole call (and so the whole node's run) indefinitely past its
+        // self-imposed deadline.
+        if (nowSeconds() >= d->deadline) {
+          d->active = false; // this device's window is done
+        } else if (d->dutyOn) {
+          // Just flipped back ON: kick off a fresh launch. Every non-duty
+          // kind never reaches this branch at all, because `launched` stays
+          // true for them from the first launchOne() call above until the
+          // device's own deadline.
+          launchOne(d);
+        }
       }
+
       const double now = nowSeconds();
       if (now - d->lastSampleAt >= sampleIntervalS) {
+        // takeSample() bails out before touching *anything* — including
+        // s->n — the instant its own SM-clock read fails (the one read it
+        // makes with no SamplerState gate). A transient failure on that
+        // single call must not be read as "a sample landed here": without
+        // this check, the ramp-window bookkeeping below would fold in
+        // whatever lastSm/lastPowerW/lastReasonMask happened to hold from a
+        // PREVIOUS tick (or their zero default, on a device's very first
+        // sample ever) as though it were current — silently understating a
+        // real clock dip, or fabricating a false one, exactly during the
+        // event this kind exists to catch.
+        const long nBefore = d->s.n;
         takeSample(nvml, d->nvdev, &d->s, &d->samplerOk);
         d->lastSampleAt = now;
+        const bool sampleLanded = d->s.n > nBefore;
+
+        // While genuinely idle (OFF phase), keep the "steady" throttle-reason
+        // baseline current with the latest reading — not just the one frozen
+        // at the ON->OFF flip, which would still describe the tail of the
+        // load rather than the steady state the next ramp is actually
+        // compared against. Continuously refreshed here, so by the time the
+        // OFF->ON flip happens the baseline is whatever was ACTUALLY true
+        // right before the ramp, matching what swing_new_throttle_events'
+        // own registered description promises.
+        if (duty != nullptr && !d->dutyOn && sampleLanded && d->samplerOk.reasons) {
+          d->dutySteadyReasonMask = d->s.lastReasonMask;
+        }
+
+        // Ramp-window bookkeeping, right after a fresh sample — see the
+        // Samples.last* fields' comment for why the INSTANTANEOUS reading is
+        // what this needs rather than the cumulative statistics above.
+        if (duty != nullptr && sampleLanded && d->dutyRampWindowUntil > 0 && now <= d->dutyRampWindowUntil) {
+          d->dutyRampSampleSeen = true;
+          d->dutyRampWorstSmMHz = std::min(d->dutyRampWorstSmMHz, d->s.lastSm);
+          if (d->samplerOk.power) {
+            d->dutyRampPeakPowerW = std::max(d->dutyRampPeakPowerW, d->s.lastPowerW);
+          }
+          if (d->samplerOk.reasons && !d->dutyRampReasonCounted) {
+            const unsigned long long newBits = d->s.lastReasonMask & ~d->dutySteadyReasonMask;
+            if (newBits != 0) {
+              d->dutySwingReasonMask |= newBits;
+              d->dutySwingReasonEvents++;
+              d->dutyRampReasonCounted = true;
+            }
+          }
+        }
       }
     }
     if (!anyActive) break;
@@ -1301,7 +1513,8 @@ inline void runActiveDevices(std::vector<DeviceCtx *> &active, std::vector<Devic
       // The watch is process-wide, not per device.
       xidWatch.Collect([&](const std::string &line) { xidTally.ObserveNvidia(line); });
       emitDeviceMeasurementImpl(k, reportable, foldRules, nvml, seq, nowSeconds() - runStart, visible,
-                               windowS, mode, /*underMig=*/false, /*final=*/false, xidWatch, xidTally);
+                               windowS, mode, /*underMig=*/false, /*final=*/false, xidWatch, xidTally,
+                               duty);
       lastProgress = now;
     }
     sleepMillis(kPollMillis);
@@ -1315,7 +1528,8 @@ inline void runActiveDevices(std::vector<DeviceCtx *> &active, std::vector<Devic
 // cleanly and the caller may now judge the hardware from the folded
 // Measurement; any other return is a process exit code and the marker has
 // ALREADY been printed.
-inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, Measurement *m) {
+inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, Measurement *m,
+               const DutyCycle *duty = nullptr) {
   // ── /dev/kmsg, opened before anything else in this function ────────────────
   //
   // One watch for the whole pod, not per device — see the Measurement comment.
@@ -1375,6 +1589,17 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
   if (!conc.recognised) {
     warn(std::string("BURNIN_DEVICE_CONCURRENCY=\"") + concEnv +
          "\" is neither \"all\" nor \"sequential\"; using this kind's default (all)");
+  }
+  // Duty-cycling under Sequential concurrency runs one device's whole window
+  // before the next device even starts, so no two devices are ever ramping at
+  // the same wall-clock moment — which is the specific board-wide event
+  // power-swing exists to catch (a PSU sagging when SEVERAL GPUs ramp
+  // together). It still measures something real per device, just not that.
+  if (duty != nullptr && conc.recognised && conc.mode == devices::Concurrency::Sequential) {
+    warn("BURNIN_DEVICE_CONCURRENCY=sequential duty-cycles each device on its "
+         "own schedule, one at a time — no two devices ever ramp together, so "
+         "this run cannot observe a board-wide power-delivery transient. Use "
+         "the default (all) for that.");
   }
   const long windowS = devices::deviceWindowSeconds(durationSeconds, planCount, conc.mode);
   // Mirrors the single-device engine's own warm-up derivation exactly, applied
@@ -1446,11 +1671,17 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
       d.started = nowSeconds();
       d.warmupUntil = d.started + effectiveWarmup;
       d.deadline = d.started + windowS;
+      // Every device starts in the ON phase (DeviceCtx::dutyOn defaults true),
+      // so its first dutyPhaseUntil is one onSeconds out from its own start —
+      // set here, beside warmupUntil/deadline, rather than left at DeviceCtx's
+      // compile-time default of 0.0, which would make the very first poll
+      // pass see nowSeconds() >= dutyPhaseUntil and flip immediately.
+      if (duty != nullptr) d.dutyPhaseUntil = d.started + duty->onSeconds;
       active.push_back(&d);
     }
     if (!active.empty()) {
       runActiveDevices(active, active, nvml, sampleIntervalMs, progressIntervalS, k, foldRules, xidWatch,
-                       xidTally, &seq, visible, windowS, conc.mode, runStart);
+                       xidTally, &seq, visible, windowS, conc.mode, runStart, duty);
     }
   } else {
     // One device at a time. `reportable` for device i's call is every earlier
@@ -1467,8 +1698,9 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
       d.started = nowSeconds();
       d.warmupUntil = d.started + effectiveWarmup;
       d.deadline = d.started + windowS;
+      if (duty != nullptr) d.dutyPhaseUntil = d.started + duty->onSeconds;
       runActiveDevices(one, reportable, nvml, sampleIntervalMs, progressIntervalS, k, foldRules, xidWatch,
-                       xidTally, &seq, visible, windowS, conc.mode, runStart);
+                       xidTally, &seq, visible, windowS, conc.mode, runStart, duty);
       finishedSoFar.push_back(&d);
     }
   }
@@ -1488,14 +1720,14 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
     if (d.exitCode == kExitSkip) underMig = true;
   }
   emitDeviceMeasurementImpl(k, allPtrs, foldRules, nvml, &seq, finished - runStart, visible, windowS, conc.mode,
-                           underMig, /*final=*/true, xidWatch, xidTally);
+                           underMig, /*final=*/true, xidWatch, xidTally, duty);
 
   // Re-fold once more into *m for the caller's own assertions, from exactly
   // the same reports the final emission just printed.
   std::vector<devices::DeviceReport> finalReports;
   for (auto &d : ctxs) {
     if (d.iterations == 0 && d.exitCode != kExitPass) continue;
-    finalReports.push_back(buildDeviceReport(d, k, nvml));
+    finalReports.push_back(buildDeviceReport(d, k, nvml, duty));
   }
   const devices::Folded finalFold =
       devices::fold(finalReports, foldRules, foldRules.empty() ? nullptr : foldRules.front().key);
@@ -1559,6 +1791,22 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
         std::printf("throttle_reasons=%s\n", labels.empty() ? "none" : labels.c_str());
         std::printf("thermal_throttle_latched=%s\n",
                     (d0.s.reasonMask & kThermalReasons) != 0 ? "true" : "false");
+        // Duty-cycle evidence (power-swing only): the same label rendering as
+        // throttle_reasons= above, over dutySwingReasonMask instead of the
+        // whole-run reasonMask — device 0 only, matching every other field in
+        // this block. Never printed for thermal-soak/gpu-burn, whose calls
+        // pass no DutyCycle and whose dutySwingReasonMask therefore stays 0
+        // for a reason unrelated to what actually happened on the part.
+        if (duty != nullptr) {
+          std::string swingLabels;
+          for (int i = 0; i < kNumReasonBits; ++i) {
+            if ((d0.dutySwingReasonMask & kReasonBits[i].bit) != 0) {
+              if (!swingLabels.empty()) swingLabels += ",";
+              swingLabels += kReasonBits[i].label;
+            }
+          }
+          std::printf("swing_new_throttle_reasons=%s\n", swingLabels.empty() ? "none" : swingLabels.c_str());
+        }
       }
     }
     if (d0.hostCounters[kCounterFirstBadIndex] != ~0ULL) {

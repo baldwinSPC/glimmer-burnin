@@ -112,11 +112,12 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
       standard library (BSD-3-Clause).
 
-  runners/thermal-soak, runners/gpu-burn
-    - no third-party component. Both images are built entirely from this
-      project's own Apache-2.0 source (thermal_soak.cu / gpu_burn.cu over a
-      shared soak_core.cuh), reaching NVML by dlopen against the driver's
-      libnvidia-ml.so.1 at runtime, with no NVIDIA header vendored.
+  runners/thermal-soak, runners/gpu-burn, runners/power-swing
+    - no third-party component. All three images are built entirely from this
+      project's own Apache-2.0 source (thermal_soak.cu / gpu_burn.cu /
+      power_swing.cu over a shared soak_core.cuh), reaching NVML by dlopen
+      against the driver's libnvidia-ml.so.1 at runtime, with no NVIDIA header
+      vendored.
 
       Stated explicitly rather than omitted, because "gpu-burn" is the name of
       an existing project and the absence of an entry here would otherwise look

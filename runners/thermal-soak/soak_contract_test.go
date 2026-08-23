@@ -36,6 +36,7 @@ import (
 const (
 	thermalSoakDir     = "."
 	gpuBurnDir         = "../gpu-burn"
+	powerSwingDir      = "../power-swing"
 	clockprobeDir      = "../clockprobe"
 	thermalSoakRocmDir = "../thermal-soak-rocm"
 	gpuBurnRocmDir     = "../gpu-burn-rocm"
@@ -47,35 +48,51 @@ const (
 // reach outside a build context.
 var sharedSources = []string{"soak_core.cuh", "nvml_dynamic.h", "kmsg/kmsg_watch.h"}
 
+// otherSoakDirs are every OTHER directory that carries a byte-identical copy
+// of sharedSources, checked against thermal-soak as the canonical copy.
+// power-swing joined gpu-burn here for the same reason gpu-burn was here
+// first: it shares thermal-soak's engine byte-for-byte (soak_core.cuh,
+// nvml_dynamic.h, kmsg/kmsg_watch.h) and differs only in its own main().
+var otherSoakDirs = map[string]string{
+	"gpu-burn":    gpuBurnDir,
+	"power-swing": powerSwingDir,
+}
+
 // TestSharedSoakSourcesAreIdentical is what makes "two kinds, one
-// implementation" a fact rather than an intention.
+// implementation" a fact rather than an intention — now three kinds sharing
+// it.
 //
-// The two runners are only comparable — same load, same sampler, so
-// sustainedThroughputTflops means the same thing in both — for as long as the
-// copies agree. A fix applied to one copy and not the other would leave two
-// tests silently measuring different things under one set of metric names,
-// which is precisely the failure pkg/contract's naming rules exist to prevent.
+// The runners are only comparable — same load, same sampler, so
+// sustainedThroughputTflops means the same thing across all of them — for as
+// long as the copies agree. A fix applied to one copy and not the others would
+// leave two tests silently measuring different things under one set of metric
+// names, which is precisely the failure pkg/contract's naming rules exist to
+// prevent.
 func TestSharedSoakSourcesAreIdentical(t *testing.T) {
 	for _, name := range sharedSources {
 		a, err := os.ReadFile(filepath.Join(thermalSoakDir, name))
 		if err != nil {
 			t.Fatalf("reading thermal-soak/%s: %v", name, err)
 		}
-		b, err := os.ReadFile(filepath.Join(gpuBurnDir, name))
-		if err != nil {
-			t.Fatalf("reading gpu-burn/%s: %v", name, err)
-		}
-		if string(a) != string(b) {
-			t.Errorf("%s has drifted between runners/thermal-soak and runners/gpu-burn (%d vs %d bytes); "+
-				"copy one over the other", name, len(a), len(b))
+		for _, other := range sortedDirNames(otherSoakDirs) {
+			dir := otherSoakDirs[other]
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatalf("reading %s/%s: %v", other, name, err)
+			}
+			if string(a) != string(b) {
+				t.Errorf("%s has drifted between runners/thermal-soak and runners/%s (%d vs %d bytes); "+
+					"copy one over the other", name, other, len(a), len(b))
+			}
 		}
 	}
 }
 
-// TestKmsgWatchIsIdenticalAcrossAllFourSoakRunners is the FOUR-WAY version of
-// the check above, for the one file kmsg/kmsg_watch.h's own header comment
-// promises is identical everywhere: thermal-soak, gpu-burn, and BOTH -rocm
-// counterparts.
+// TestKmsgWatchIsIdenticalAcrossEverySoakRunner is the N-WAY version of the
+// check above, for the one file kmsg/kmsg_watch.h's own header comment
+// promises is identical everywhere: thermal-soak, gpu-burn, power-swing, and
+// BOTH -rocm counterparts. Five today; the count is not the point, agreement
+// is.
 //
 // It lives here rather than in runners/sharedsource_test.go because that
 // guard's scan is deliberately top-level-only (os.ReadDir, no recursion), so a
@@ -85,15 +102,16 @@ func TestSharedSoakSourcesAreIdentical(t *testing.T) {
 // the NVIDIA ones, without this.
 //
 // The highest-risk code in kmsg/kmsg_watch.h is the OS-facing fd/lseek/EPIPE
-// mechanics, reused byte-for-byte by all four rather than hand-folded
+// mechanics, reused byte-for-byte by every one of them rather than hand-folded
 // separately into each engine — see that file's own header comment for why a
 // second, independently-maintained copy of exactly that logic is the drift this
 // project's "duplication that has to be checked" rule exists to catch.
-func TestKmsgWatchIsIdenticalAcrossAllFourSoakRunners(t *testing.T) {
+func TestKmsgWatchIsIdenticalAcrossEverySoakRunner(t *testing.T) {
 	const rel = "kmsg/kmsg_watch.h"
 	dirs := map[string]string{
 		"thermal-soak":      thermalSoakDir,
 		"gpu-burn":          gpuBurnDir,
+		"power-swing":       powerSwingDir,
 		"thermal-soak-rocm": thermalSoakRocmDir,
 		"gpu-burn-rocm":     gpuBurnRocmDir,
 	}
@@ -113,7 +131,7 @@ func TestKmsgWatchIsIdenticalAcrossAllFourSoakRunners(t *testing.T) {
 		if string(got) != string(want) {
 			t.Errorf("%s/%s has drifted from %s/%s (%d vs %d bytes); copy one over the other — "+
 				"the fd/lseek/EPIPE mechanics in this file are meant to be ONE implementation, "+
-				"not four independently-maintained copies of similar logic",
+				"not several independently-maintained copies of similar logic",
 				name, rel, canonical, rel, len(got), len(want))
 		}
 	}
@@ -267,6 +285,7 @@ func TestEmittedKeysObeyTheContract(t *testing.T) {
 	}{
 		{"thermal-soak", thermalSoakDir, []string{"thermal_soak.cu", "soak_core.cuh", "nvml_dynamic.h"}},
 		{"gpu-burn", gpuBurnDir, []string{"gpu_burn.cu", "soak_core.cuh", "nvml_dynamic.h"}},
+		{"power-swing", powerSwingDir, []string{"power_swing.cu", "soak_core.cuh", "nvml_dynamic.h"}},
 	}
 
 	for _, c := range cases {

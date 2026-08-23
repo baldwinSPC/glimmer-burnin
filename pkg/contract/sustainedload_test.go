@@ -25,6 +25,7 @@ func TestDrivesSustainedLoad(t *testing.T) {
 	}{
 		{contract.KindThermalSoak, true, "the shared duration-honouring load wrapper (soak_core.cuh); it exists to hold the part at temperature"},
 		{contract.KindGPUBurn, true, "the same wrapper: sustained FP compute for the whole window"},
+		{contract.KindPowerSwing, true, "the same wrapper, alternated on a duty cycle rather than held; the ON phases are real GEMM heat the watchdog must not read as a fault"},
 		{contract.KindClockProbe, true, "holds a known, steady, clock-bound load — that is how it judges sustained clocks at all"},
 		{contract.KindFabricSoak, true, "the ib-write-bw measurement iterated over hours, to find what fails once warm"},
 		{contract.KindMemoryStress, true, "stressapptest for the whole window; host RAM, which the watchdog also judges"},
@@ -56,6 +57,7 @@ func TestDrivesSustainedLoad(t *testing.T) {
 func TestEveryKindDeclaresWhetherItHoldsLoad(t *testing.T) {
 	classified := map[contract.TestKind]bool{
 		contract.KindThermalSoak: true, contract.KindGPUBurn: true,
+		contract.KindPowerSwing: true,
 		contract.KindClockProbe: true, contract.KindFabricSoak: true,
 		contract.KindMemoryStress: true, contract.KindDCGMDiag: true,
 		contract.KindComputeSmoke: true, contract.KindFingerprintProbe: true,

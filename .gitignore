@@ -45,6 +45,7 @@ cover.out
 /memory-stress
 /nccl
 /nccl-rocm
+/power-swing
 /tcp-baseline
 /thermal-soak
 /thermal-soak-rocm
