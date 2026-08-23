@@ -62,6 +62,19 @@ const (
 	// nothing at all.
 	emitEverySeconds = 60
 
+	// startSkewBudgetSeconds is how long the operator may take to get the
+	// client pod actually running after the server reports Ready.
+	//
+	// The Pair rendezvous does not create the client until the server is
+	// Ready (correctly — see runClient's contract), which means the server's
+	// clock always starts first. With identical durations, the server's
+	// deadline therefore always fires before the client's, by however many
+	// seconds that startup took — usually a couple, per #459's own
+	// measurement, but scheduling and image-pull delay under contention can
+	// take longer, and this has to cover the case it does not, not the case
+	// it usually is.
+	startSkewBudgetSeconds = 60
+
 	// The transfer perftest is asked for, before the memlock budget trims it.
 	// Matched to ib-write-bw's own defaults so a soak's windows are comparable
 	// with the one-shot measurement of the same link.
@@ -193,19 +206,39 @@ func run() int {
 		role, peerHost, peerNode, duration, windowSeconds, humanBytes(uint64(messageBytes)), qps)
 
 	if role == pairRoleServer {
-		return runServer(port, duration, messageBytes, qps)
+		return runServer(port, duration, windowSeconds, messageBytes, qps)
 	}
 	return runClient(port, peerHost, peerNode, duration, windowSeconds, messageBytes, qps, soft)
 }
 
-// runServer holds the far end open for the whole soak.
+// serverDeadline is when the server stops restarting ib_write_bw, computed
+// from its own start time rather than the client's — the server never learns
+// when the client actually started (#459).
+//
+// It runs past duration by however long the client's own last window can
+// still legitimately be running: the server and client each compute
+// start+duration independently, the client always starts later (the operator
+// waits for the server to be Ready before creating it), so with no grace the
+// server's earlier deadline can fire while the client is mid-window — and
+// that window then fails to connect because the server ran out of time
+// first, not because the link is bad. The grace has to cover both the
+// pod-start skew that put the client behind to begin with
+// (startSkewBudgetSeconds) and the client's own worst-case last window (one
+// full window plus its hang tolerance, windowGraceSeconds).
+func serverDeadline(start time.Time, durationSeconds, windowSeconds int) time.Time {
+	grace := startSkewBudgetSeconds + windowSeconds + windowGraceSeconds
+	return start.Add(time.Duration(durationSeconds+grace) * time.Second)
+}
+
+// runServer holds the far end open for the whole soak, plus a grace period —
+// see serverDeadline.
 //
 // The server never decides — the client is the deciding side at Pair scope, as
 // everywhere in this project. It restarts ib_write_bw for each window because
 // perftest's server exits when its client disconnects, and a soak is many
 // connections rather than one long one.
-func runServer(port rdmaPort, duration, messageBytes, qps int) int {
-	deadline := time.Now().Add(time.Duration(duration) * time.Second)
+func runServer(port rdmaPort, duration, windowSeconds, messageBytes, qps int) int {
+	deadline := serverDeadline(time.Now(), duration, windowSeconds)
 	restarts := 0
 
 	for time.Now().Before(deadline) {
