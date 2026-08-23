@@ -461,12 +461,31 @@ func TestAGroupScopeRunRendezvousEveryRankThroughOneService(t *testing.T) {
 	// accepting. `ib_write_bw` and the nccl-tests server accept a bounded count
 	// for exactly the same reason, so this is the shape a real fabric runner
 	// wants too.
+	// Each iteration below spawns a FRESH nc -l — busybox nc has no "keep
+	// accepting" flag, so a new listener per expected rank is the only way to
+	// accept more than one connection at all. That reopen is exactly where
+	// #414's flake lived: a listening socket's accept backlog can hold more
+	// than one pending connection, so if two workers connect while ONE nc -l
+	// is up, the KERNEL completes both TCP handshakes — both clients see their
+	// connect() succeed — but that nc instance calls accept() only once, and
+	// when it exits to let the next loop iteration reopen the port, whichever
+	// connection was still queued in its backlog is silently RESET, never
+	// serviced. The worker on the reset end had already returned success from
+	// connect() and moved on, so nothing retries, and the root hangs forever
+	// waiting for a rank that believes it already joined.
+	//
+	// The fix is not a bigger backlog or a shorter window — the race is
+	// inherent to "accept once, exit, reopen". It is making "joined" mean "the
+	// root actually handled me" rather than "my connect() returned success": a
+	// connection the kernel accepted into a backlog is not a connection the
+	// server accept()ed, and only the second one gets an "ok" written back
+	// before the root moves on to the next port bind.
 	rootSh := fmt.Sprintf(`
 ( while true; do nc -l -p %d >/dev/null 2>&1; done ) &
 echo root listening for $((BURNIN_NRANKS-1)) rank\(s\) on %d
 joined=0
 while [ $joined -lt $((BURNIN_NRANKS-1)) ]; do
-  nc -l -p %d >/dev/null 2>&1
+  echo ok | nc -l -p %d >/dev/null 2>&1
   joined=$((joined+1))
   echo rank joined "($joined of $((BURNIN_NRANKS-1)))"
 done
@@ -479,10 +498,20 @@ exit 0`, healthPort, collectivePort, collectivePort)
 	// subdomain. Exit 3 on failure and never 1: a rendezvous that did not happen
 	// is not a statement about the fabric, and exit 1 would permanently indict
 	// it with the retry budget unspent.
+	//
+	// The success check reads the root's "ok" rather than trusting nc's own
+	// exit code, which #414 found is true the instant connect() succeeds —
+	// including when the connection is sitting unhandled in a backlog that is
+	// about to be reset. A response only ever arrives once the root's nc -l
+	// has genuinely accept()ed this exact connection and written to it, so a
+	// worker that got reset here reads nothing, does not match "ok", and
+	// correctly loops back to retry instead of declaring victory on a
+	// connection nobody serviced.
 	workerSh := fmt.Sprintf(`
 i=0
 while [ $i -lt 60 ]; do
-  if nc -w 3 "$BURNIN_ROOT_HOST" %d </dev/null >/dev/null 2>&1; then
+  resp=$(nc -w 3 "$BURNIN_ROOT_HOST" %d </dev/null 2>/dev/null)
+  if [ "$resp" = "ok" ]; then
     echo rank "$BURNIN_RANK" of "$BURNIN_NRANKS" joined via "$BURNIN_ROOT_HOST"
     exit 0
   fi
