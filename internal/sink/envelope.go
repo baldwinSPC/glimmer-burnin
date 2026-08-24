@@ -98,6 +98,11 @@ func testResult(r burninv1alpha1.TestResult) contract.TestResult {
 			Index: v.Index, Metric: v.Metric, Cause: v.Cause, Kind: v.Kind, Reason: v.Reason,
 		})
 	}
+	for _, a := range r.Applied {
+		out.Applied = append(out.Applied, contract.AppliedGate{
+			Index: a.Index, Metric: a.Metric, Comparison: a.Comparison, Value: a.Value,
+		})
+	}
 	for _, a := range r.Artifacts {
 		// By reference, never by value. A consumer that only wants the verdict
 		// is not made to carry a megabyte of dcgmi JSON to get it; one that

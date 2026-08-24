@@ -290,6 +290,7 @@ type TestResult struct {
 
 	Violations   []api.Violation
 	NotEvaluated []api.NotEvaluated
+	Applied      []api.AppliedGate
 	Unmeasurable []string
 
 	RepeatsRequired  int32
@@ -451,6 +452,7 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 			// a retry that passes cannot keep its predecessor's evidence.
 			res.Violations = ev.violations
 			res.NotEvaluated = ev.notEvaluated
+			res.Applied = ev.applied
 			res.Unmeasurable = ev.unmeasurable
 			return res
 		}
@@ -601,6 +603,7 @@ func runCheckpointInterval(p Plan) time.Duration {
 type evidence struct {
 	violations   []api.Violation
 	notEvaluated []api.NotEvaluated
+	applied      []api.AppliedGate
 	unmeasurable []string
 }
 
@@ -661,6 +664,9 @@ func outcome(t PlannedTest, parsed runner.Result) (api.RunPhase, string, evidenc
 			if why := out.NotEvaluatedMessage(); why != "" {
 				message = strings.TrimSpace(message + " [" + why + "]")
 			}
+			// Unconditional like NotEvaluated above and unlike violations: a
+			// Failed attempt still cleared some OTHER gates (#262).
+			ev.applied = appliedFor(out)
 		}
 
 	case runner.VerdictFail:
@@ -729,6 +735,22 @@ func violationsFor(out verdict.Outcome) []api.Violation {
 		})
 	}
 	return vs
+}
+
+func appliedFor(out verdict.Outcome) []api.AppliedGate {
+	if len(out.Applied) == 0 {
+		return nil
+	}
+	ag := make([]api.AppliedGate, 0, len(out.Applied))
+	for _, a := range out.Applied {
+		ag = append(ag, api.AppliedGate{
+			Index:      int32(a.Index),
+			Metric:     a.Metric,
+			Comparison: string(a.Comparison),
+			Value:      a.Value,
+		})
+	}
+	return ag
 }
 
 // triggerFor records why an attempt happened, so the rule is auditable from a

@@ -162,6 +162,22 @@ type Violation struct {
 	Reason string
 }
 
+// AppliedGate is one threshold that was evaluated and satisfied — the
+// positive counterpart to Violation and NotEvaluated. Its shape carries the
+// threshold's own definition (Comparison, Value) rather than a Reason,
+// because there is nothing to explain: the gate ran and the measurement
+// cleared it.
+type AppliedGate struct {
+	// Index is the threshold's position in the slice it was found in.
+	Index int
+	// Metric is the threshold's metric name, as written.
+	Metric string
+	// Comparison is the threshold's own comparison operator.
+	Comparison contract.Comparison
+	// Value is the threshold's own comparison value, as written.
+	Value string
+}
+
 // Outcome is the result of evaluating a test's thresholds.
 type Outcome struct {
 	// Passed reports that no threshold was violated. Un-evaluated thresholds do
@@ -192,6 +208,19 @@ type Outcome struct {
 	// so an operator sees every gate a node missed in one run instead of
 	// rediscovering them one burn-in cycle at a time.
 	Violations []Violation
+	// Applied lists EVERY threshold that was evaluated and satisfied, in spec
+	// order — the positive counterpart to Violations and NotEvaluated, and the
+	// denominator a consumer otherwise has no way to ask for. Without it, a
+	// Passed result with one NotEvaluated gate reads as "nothing failed and one
+	// gate did not run", which lets a reader assume the rest were checked; this
+	// is what lets it say "N of M gates applied and satisfied" instead. Unlike
+	// NotEvaluated, this is never truncated — every threshold is evaluated
+	// regardless of where a violation falls, so Applied, Violations and
+	// NotEvaluated together are exhaustive over the input thresholds except for
+	// NotEvaluated's own documented truncation on a Failed result. See #262 /
+	// GEP-0561's "Reconsider if a consumer genuinely needs the satisfied set
+	// enumerated."
+	Applied []AppliedGate
 }
 
 // NotEvaluatedMessage renders the un-evaluated thresholds for a human-readable
@@ -374,6 +403,9 @@ func Evaluate(
 			fail(i, th, KindUnsatisfied, "%s: got %g, need %s %g", th.Metric, got, th.Comparison, want)
 			continue
 		}
+		out.Applied = append(out.Applied, AppliedGate{
+			Index: i, Metric: th.Metric, Comparison: th.Comparison, Value: th.Value,
+		})
 	}
 
 	if len(out.Violations) == 0 {

@@ -176,6 +176,14 @@ func toContractResult(r localrun.TestResult) contract.TestResult {
 	for _, n := range r.NotEvaluated {
 		out.NotEvaluated = append(out.NotEvaluated, contract.NotEvaluated{Metric: n.Metric, Reason: n.Reason})
 	}
+	for _, a := range r.Applied {
+		out.Applied = append(out.Applied, contract.AppliedGate{
+			Index:      a.Index,
+			Metric:     a.Metric,
+			Comparison: a.Comparison,
+			Value:      a.Value,
+		})
+	}
 	return out
 }
 
