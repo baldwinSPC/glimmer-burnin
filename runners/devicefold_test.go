@@ -88,7 +88,17 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 	// PENDING: every CUDA/HIP kernel that today takes device 0. Each names the
 	// delivery step in docs/dev/multi-device.md that converts it; the issue
 	// number is the issue that converts it.
-	pending := map[string]string{}
+	pending := map[string]string{
+		// xpu-diag is UNVERIFIED (#172): it targets one device_id per
+		// `xpu-smi diag` invocation (unlike dcgmi, which enumerates every
+		// device itself), so a real Node-scope conversion means discovering
+		// every device via `xpu-smi discovery -j` and looping — deferred
+		// because nobody has run this against real hardware to verify the
+		// discovery JSON shape against. Go wrappers cannot use device_fold.h
+		// (a C++ header) regardless; the eventual fix is a Go-side loop, not
+		// an #include.
+		"xpu-diag": "#474 — single device_id per xpu-smi diag invocation; needs a discovery+loop conversion once real hardware exists to verify the discovery JSON against",
+	}
 
 	for _, d := range runnerDirs(t) {
 		uses := sourceMentions(t, d, helper)

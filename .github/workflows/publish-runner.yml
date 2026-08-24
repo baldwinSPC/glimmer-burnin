@@ -46,6 +46,12 @@ on:
           - nccl-rocm
           - thermal-soak-rocm
           - gpu-burn-rocm
+          # UNVERIFIED (#172) — listed so the image CAN be built by this
+          # workflow, per new-testkind-playbook.md's "every runner directory
+          # can actually be published" rule. Do not actually run this
+          # workflow_dispatch for xpu-diag until docs/dev/spike-intel-xpu-manager.md's
+          # recommendation changes; see runners/xpu-diag/README.md.
+          - xpu-diag
       version:
         description: 'Image tag to publish (e.g. v0.1.0). Must not already exist.'
         required: true
@@ -220,6 +226,12 @@ jobs:
           case "${KIND}" in
             clockprobe-rocm|compute-smoke-rocm|memory-bw-rocm|nccl-rocm|thermal-soak-rocm|gpu-burn-rocm)
               echo "::notice::${KIND} is amd64-only (ROCm); publishing linux/amd64 alone, no arm64 leg"
+              echo 'matrix=[{"platform":"linux/amd64","host":"ubuntu-latest","arch":"amd64"}]' >> "$GITHUB_OUTPUT"
+              echo "want=linux/amd64" >> "$GITHUB_OUTPUT"
+              echo "count=1" >> "$GITHUB_OUTPUT"
+              ;;
+            xpu-diag)
+              echo "::notice::${KIND} is amd64-only (Intel Data Center GPU hosts, and this Dockerfile's Level Zero .deb URLs are amd64-specific); publishing linux/amd64 alone, no arm64 leg"
               echo 'matrix=[{"platform":"linux/amd64","host":"ubuntu-latest","arch":"amd64"}]' >> "$GITHUB_OUTPUT"
               echo "want=linux/amd64" >> "$GITHUB_OUTPUT"
               echo "count=1" >> "$GITHUB_OUTPUT"
