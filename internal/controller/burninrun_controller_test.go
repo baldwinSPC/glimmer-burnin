@@ -4325,6 +4325,88 @@ func TestPair_HostPathsReachBothEndsOfTheLink(t *testing.T) {
 	}
 }
 
+// A declared Prepare step (#375) becomes an initContainer that copies out of
+// the named image, an emptyDir volume, and a read-only mount of that volume
+// in the runner container — the initContainer route dcgm-diag's README names
+// as the one the CRD could not previously express.
+func TestRun_PrepareStepsReachTheRunnerPod(t *testing.T) {
+	bt := healthTest("host-health")
+	bt.Spec.Runner = &burninv1alpha1.RunnerSpec{Prepare: []burninv1alpha1.PrepareStep{{
+		Image:     "nvcr.io/nvidia/cloud-native/dcgm:4.5.2-1-ubuntu22.04",
+		CopyFrom:  "/usr",
+		MountPath: "/usr/local/dcgm",
+	}}}
+	h := newHarness(t,
+		gb10Node("spark-a"),
+		bt,
+		profile("acceptance", nil, false, testRef("host-health")),
+		newRun("run1", "acceptance", "spark-a"),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+
+	pod := h.pods("run1")["spark-a"]
+	if pod == nil {
+		t.Fatal("no pod was created")
+	}
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("initContainers = %d, want 1: %+v", len(pod.Spec.InitContainers), pod.Spec.InitContainers)
+	}
+	ic := pod.Spec.InitContainers[0]
+	if ic.Image != "nvcr.io/nvidia/cloud-native/dcgm:4.5.2-1-ubuntu22.04" {
+		t.Errorf("initContainer image = %q, want the site's DCGM image — a wrong image copies the wrong tool", ic.Image)
+	}
+	if len(ic.Args) != 2 || ic.Args[0] != "/usr" {
+		t.Errorf("initContainer args = %+v, want CopyFrom (/usr) as the first argument", ic.Args)
+	}
+
+	vm, vol := mountOf(t, pod, "/usr/local/dcgm")
+	if vol.EmptyDir == nil {
+		t.Fatalf("volume %q is not an emptyDir: %+v", vol.Name, vol.VolumeSource)
+	}
+	if !vm.ReadOnly {
+		t.Error("runner's mount of a Prepare volume is writable — the runner has no business writing to a tool it did not build")
+	}
+
+	// The initContainer must mount the SAME volume the runner reads, or the
+	// copy lands somewhere the runner never sees — the emptyDir would then be
+	// legitimately empty and the runner would fail against a missing tool
+	// with no indication the mount itself was ever the problem.
+	if len(ic.VolumeMounts) != 1 || ic.VolumeMounts[0].Name != vol.Name {
+		t.Errorf("initContainer volume mounts = %+v, want exactly one mount of %q — otherwise the copy and the read target different volumes",
+			ic.VolumeMounts, vol.Name)
+	}
+}
+
+// A pair is one measurement across two pods; a prepared tool that reached
+// only the server would leave the client — the deciding side for most fabric
+// runners — without it.
+func TestPair_PrepareStepsReachBothEndsOfTheLink(t *testing.T) {
+	bt := pairTest("ib")
+	bt.Spec.Runner.Prepare = []burninv1alpha1.PrepareStep{{
+		Image: "example.test/vendor-tool:v1", CopyFrom: "/opt/tool", MountPath: "/opt/tool",
+	}}
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		bt,
+		profile("fabric", nil, false, testRef("ib")),
+		pairRun("run1", "fabric", "spark-a", "spark-b"),
+	)
+	server, client := runPairToStart(h)
+
+	for _, pod := range []*corev1.Pod{server, client} {
+		role := pod.Labels[labelPairRole]
+		if len(pod.Spec.InitContainers) != 1 {
+			t.Errorf("%s end: initContainers = %d, want 1", role, len(pod.Spec.InitContainers))
+			continue
+		}
+		if _, vol := mountOf(t, pod, "/opt/tool"); vol.EmptyDir == nil {
+			t.Errorf("%s end: volume %+v is not an emptyDir", role, vol)
+		}
+	}
+}
+
 // readOnly defaults to TRUE, and a Go-built object must get that default too:
 // the reconciler cannot assume apiserver defaulting has happened, and a nil that
 // fell through as "false" would hand out write access to a host path because
@@ -4448,6 +4530,10 @@ func TestRun_NoHostPathsDeclaredGrantsNoHostAccess(t *testing.T) {
 			if len(pod.Spec.Containers[0].VolumeMounts) != 0 {
 				t.Errorf("pod has %d volume mounts without asking for any: %+v",
 					len(pod.Spec.Containers[0].VolumeMounts), pod.Spec.Containers[0].VolumeMounts)
+			}
+			if len(pod.Spec.InitContainers) != 0 {
+				t.Errorf("pod has %d initContainers without declaring any Prepare steps: %+v",
+					len(pod.Spec.InitContainers), pod.Spec.InitContainers)
 			}
 		})
 	}

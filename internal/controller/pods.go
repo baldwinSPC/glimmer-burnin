@@ -367,6 +367,69 @@ func hostPathVolumeName(index int, mountPath string) string {
 	return strings.Trim(name, "-")
 }
 
+// prepareStagingPath is where a prepare initContainer copies CopyFrom to,
+// inside ITS OWN filesystem, before the runner ever starts. It is fixed and
+// internal — never surfaced in the API — because the only thing that has to
+// agree with it is the cp command this function generates and the volume
+// mount it attaches to the same container; nothing else ever reads it.
+const prepareStagingPath = "/burnin-prepare-out"
+
+// prepareVolumesAndContainers builds the emptyDir volumes, the initContainers
+// that populate them, and the runner container's own read-only mounts for
+// RunnerSpec.Prepare.
+//
+// Mirrors hostPathVolumes's shape and its reasoning: nil in, nil out, so a
+// test that declares no Prepare steps gets a pod with no extra volumes or
+// initContainers at all — and everything here is built from the PINNED plan's
+// copy of the spec, the same as every other part of podForTest, so what an
+// in-flight attempt copies is fixed at run start.
+//
+// Each step gets its OWN volume rather than sharing one: MountPath is this
+// list's map key (the API already rejects duplicates), and one initContainer
+// per step keeps a failure legible — `kubectl describe pod` names exactly
+// which image failed to copy, rather than one shared step whose log
+// interleaves every source.
+func prepareVolumesAndContainers(steps []burninv1alpha1.PrepareStep) ([]corev1.Volume, []corev1.Container, []corev1.VolumeMount) {
+	var volumes []corev1.Volume
+	var initContainers []corev1.Container
+	var mounts []corev1.VolumeMount
+	for i, s := range steps {
+		name := fmt.Sprintf("prepare-%d", i)
+		volumes = append(volumes, corev1.Volume{
+			Name:         name,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		})
+		initContainers = append(initContainers, corev1.Container{
+			Name:  name,
+			Image: s.Image,
+			// The step's own entrypoint is never invoked — Command overrides
+			// it entirely. CopyFrom and the fixed staging path are passed as
+			// $1/$2 rather than interpolated into the script body: CopyFrom
+			// is schema-validated to start with "/" but is still
+			// operator-authored content, and passing it as an argv element
+			// rather than splicing it into the shell script is what keeps a
+			// path containing a shell metacharacter from being interpreted
+			// as one. "-a" preserves the copied tree's permissions and
+			// symlinks, which matters for a vendor binary's own internal
+			// layout.
+			Command: []string{"sh", "-c", `cp -a "$1"/. "$2"/`, "prepare"},
+			Args:    []string{s.CopyFrom, prepareStagingPath},
+			VolumeMounts: []corev1.VolumeMount{{
+				Name: name, MountPath: prepareStagingPath,
+			}},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      name,
+			MountPath: s.MountPath,
+			// The runner only ever needs to READ a vendor tool it did not
+			// build; a writable copy of somebody else's binary is a
+			// privilege this field has no reason to grant.
+			ReadOnly: true,
+		})
+	}
+	return volumes, initContainers, mounts
+}
+
 // runnerImage resolves the container image for a test on a node of a given
 // accelerator vendor.
 //
@@ -482,6 +545,7 @@ func podForTest(
 	}
 
 	var volumes []corev1.Volume
+	var initContainers []corev1.Container
 	if spec.Runner != nil {
 		container.Command = spec.Runner.Command
 		container.Args = spec.Runner.Args
@@ -536,6 +600,15 @@ func podForTest(
 		// mounts is fixed at run start: editing the BurnInTest mid-run cannot
 		// change which host paths an in-flight attempt is handed.
 		volumes, container.VolumeMounts = hostPathVolumes(spec.Runner.HostPaths)
+
+		// #375: the initContainer route. Same pinned-spec reasoning as
+		// HostPaths above, and the same both-ends-of-a-pair treatment — a
+		// Pair test's client needs the same prepared tool the server does.
+		var prepVolumes []corev1.Volume
+		var prepMounts []corev1.VolumeMount
+		prepVolumes, initContainers, prepMounts = prepareVolumesAndContainers(spec.Runner.Prepare)
+		volumes = append(volumes, prepVolumes...)
+		container.VolumeMounts = append(container.VolumeMounts, prepMounts...)
 	}
 
 	labels := map[string]string{
@@ -596,8 +669,12 @@ func podForTest(
 			PriorityClassName:     priorityClassOf(spec),
 			ActiveDeadlineSeconds: &deadline,
 			Containers:            []corev1.Container{container},
-			// Nil unless the test declared host mounts, so a test that asked for
-			// no host access gets a pod with no volumes whatsoever.
+			// Nil unless the test declared Prepare steps (#375), so a test
+			// that asked for none gets a pod with no initContainers at all —
+			// same reasoning as Volumes below.
+			InitContainers: initContainers,
+			// Nil unless the test declared host mounts or Prepare steps, so a
+			// test that asked for neither gets a pod with no volumes whatsoever.
 			Volumes: volumes,
 		},
 	}
