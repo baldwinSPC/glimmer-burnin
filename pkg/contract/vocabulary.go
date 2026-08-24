@@ -199,6 +199,25 @@ const (
 	// CLAUDE.md before substituting a tool here.
 	KindMemoryStress TestKind = "memory-stress"
 
+	// KindMemoryRetention is a Node-scope HOST memory RETENTION test: it
+	// writes a pattern into a region of host memory, holds it UNTOUCHED for
+	// the bulk of its duration, then reads it back — a memtest86+-shaped
+	// bit-fade test (not memtest86+ itself, which needs a reboot and cannot
+	// run inside either of this project's container dispatchers; see
+	// docs/vendors/nvidia.md).
+	//
+	// KindMemoryStress pounds a region with continuous read/write traffic and
+	// catches faults that show up UNDER ACCESS. A weak DRAM cell that loses
+	// its charge over time never gets the chance to fail that way: continuous
+	// access refreshes every cell as a side effect of testing it. This kind
+	// exists because that is a structural blind spot, not a tuning knob —
+	// holding a pattern untouched is the one thing continuous-access testing
+	// cannot do.
+	//
+	// Entirely vendor-neutral: no accelerator is touched, and the runner is a
+	// CGO-free Go binary with no external tool of any kind.
+	KindMemoryRetention TestKind = "memory-retention"
+
 	// KindGemmSweep is a Node-scope GEMM across PRECISIONS, one execution per
 	// precision, selected by the `precision` variant axis.
 	//
@@ -280,6 +299,7 @@ var BuiltInKinds = []TestKind{
 	KindHostHealth,
 	KindClockProbe,
 	KindMemoryStress,
+	KindMemoryRetention,
 }
 
 var builtInKinds = func() map[TestKind]bool {

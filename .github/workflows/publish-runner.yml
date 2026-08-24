@@ -23,6 +23,7 @@ on:
           - host-health
           - memory-bw
           - memory-stress
+          - memory-retention
           - thermal-soak
           - gpu-burn
           - power-swing

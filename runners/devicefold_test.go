@@ -80,6 +80,7 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		"ib-write-bw":       "no accelerator; RDMA verbs over the wire",
 		"fabric-soak":       "no accelerator; iterates ib_write_bw over the wire",
 		"memory-stress":     "no accelerator; host RAM",
+		"memory-retention":  "no accelerator; host RAM held untouched, not iterated",
 		"disk-io":           "no accelerator; storage",
 		"tcp-baseline":      "no accelerator; the kernel TCP stack",
 	}

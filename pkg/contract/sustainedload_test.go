@@ -41,6 +41,7 @@ func TestDrivesSustainedLoad(t *testing.T) {
 		{contract.KindIBWriteBW, false, "answers whether the link works right now; fabric-soak is the one that iterates"},
 		{contract.KindGPUDirect, false, "validates the GPUDirect RDMA path"},
 		{contract.KindTCPBaseline, false, "a plain-TCP throughput measurement, and one that refuses the management path"},
+		{contract.KindMemoryRetention, false, "the opposite of a load: it holds a pattern UNTOUCHED for the bulk of its window, deliberately generating no traffic and no heat"},
 	} {
 		t.Run(string(tc.kind), func(t *testing.T) {
 			if got := tc.kind.DrivesSustainedLoad(); got != tc.holds {
@@ -65,6 +66,7 @@ func TestEveryKindDeclaresWhetherItHoldsLoad(t *testing.T) {
 		contract.KindGemmSweep: true, contract.KindDiskIO: true,
 		contract.KindNCCL: true, contract.KindIBWriteBW: true,
 		contract.KindGPUDirect: true, contract.KindTCPBaseline: true,
+		contract.KindMemoryRetention: true,
 	}
 	for _, k := range contract.BuiltInKinds {
 		if !classified[k] {

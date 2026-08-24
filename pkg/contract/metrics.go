@@ -791,6 +791,61 @@ var registry = map[string]Metric{
 		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+
+	// --- memory-retention -----------------------------------------------------
+	//
+	// The runner wrote every byte of the tested region itself and held it
+	// untouched for the hold, so a byte reading back wrong IS memory
+	// corruption — no calibration needed, unlike a runner reporting evidence
+	// about a fault nobody has characterised yet. retentionBitFlips is
+	// therefore Acceptance, on the same footing as miscompares.
+	"retentionBitFlips": {
+		Name: "retentionBitFlips", Unit: UnitNone,
+		Description:  "count of bits that read back wrong after being held untouched in host memory — a byte with two wrong bits counts as two, not one",
+		Aggregation:  AggSum,
+		Combination:  CombineSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"retentionBytesFlipped": {
+		Name: "retentionBytesFlipped", Unit: UnitNone,
+		Description:  "count of BYTES that contained at least one wrong bit — a coarser companion to retentionBitFlips, the way miscompares and sdcDetections answer different questions elsewhere in this project",
+		Aggregation:  AggSum,
+		Combination:  CombineSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"retentionPatternsCompleted": {
+		Name: "retentionPatternsCompleted", Unit: UnitNone,
+		Description:  "count of fill/hold/verify pattern cycles that finished before the run ended or was interrupted — context for a Fail (found on a complete run or a real one cut short) and for an Error (interrupted with nothing found yet, which is unjudged, not clean)",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// A LABEL — an offset is a position, not a magnitude — registered under
+	// the same duty as every other first-party label metric in this file: an
+	// unregistered name is assumed thresholdable, and a gate on a byte offset
+	// would fail closed on every node whose offset happened to differ.
+	"retentionFirstFlipOffset": {
+		Name: "retentionFirstFlipOffset", Unit: UnitNone,
+		Description:  "byte offset of the first bit flip found, within the tested region — diagnostic only; omitted when retentionBitFlips is 0",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// Two more LABELS, same duty: a hex string ("0xFF") and a word
+	// ("true"/"false") would each parse as neither a sensible gate nor fail
+	// loudly at authoring time — a threshold against either compares as a
+	// float64 and fails closed on every node forever, reading as a hardware
+	// verdict on healthy hardware.
+	"retentionFirstFlipPattern": {
+		Name: "retentionFirstFlipPattern", Unit: UnitNone,
+		Description:  "the fill pattern (\"0xFF\" or \"0x00\") being verified when the first bit flip was found — omitted when retentionBitFlips is 0",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"retentionMemoryLocked": {
+		Name: "retentionMemoryLocked", Unit: UnitNone,
+		Description:  "\"true\" if the tested region was successfully mlocked for the whole hold (pinned in physical RAM, immune to swap and reclaim), \"false\" if the best-effort lock failed — most clusters do not grant CAP_IPC_LOCK to a burn-in pod by default, and a false value does not invalidate the result, it only means the OS was free to swap the region during the hold",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	// TWO SOURCES, BOTH READING /dev/kmsg, DIFFERENT WINDOWS — a deliberate
 	// decision, not the drift #311 fixed. runners/host-health counts Xid lines
 	// (and, on any vendor, the amdgpu reset/RAS lines its own broader
