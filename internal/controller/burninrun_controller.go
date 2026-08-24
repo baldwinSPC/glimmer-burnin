@@ -1282,6 +1282,7 @@ func (r *BurnInRunReconciler) completeAttempt(
 		res.Metrics = metrics
 		res.Violations = ev.violations
 		res.NotEvaluated = ev.notEvaluated
+		res.Applied = ev.applied
 		res.Unmeasurable = ev.unmeasurable
 		recount(run)
 		// One completion per execution unit: the nodes are part of the event
@@ -1577,6 +1578,7 @@ func attemptOutcome(t plannedTest, parsed runner.Result) (burninv1alpha1.RunPhas
 			phase, message, gateEv = gateOutcome(parsed.Metrics, parsed.Unmeasurable, gates, parsed.Message)
 			ev.violations = gateEv.violations
 			ev.notEvaluated = gateEv.notEvaluated
+			ev.applied = gateEv.applied
 		}
 
 	case runner.VerdictFail:
@@ -1687,6 +1689,10 @@ func gateOutcome(
 	if why := out.NotEvaluatedMessage(); why != "" {
 		message = strings.TrimSpace(message + " [" + why + "]")
 	}
+	// Unconditional, like NotEvaluated above and unlike Violations: a Failed
+	// test still cleared some OTHER gates, and those are as real a fact about
+	// this attempt as the gate that failed it (#262).
+	ev.applied = appliedFor(out)
 	return phase, message, ev
 }
 
@@ -1696,6 +1702,7 @@ func gateOutcome(
 type attemptEvidence struct {
 	violations   []burninv1alpha1.Violation
 	notEvaluated []burninv1alpha1.NotEvaluated
+	applied      []burninv1alpha1.AppliedGate
 	unmeasurable []string
 }
 
@@ -1720,6 +1727,25 @@ func violationsFor(out verdict.Outcome) []burninv1alpha1.Violation {
 		})
 	}
 	return violations
+}
+
+// appliedFor maps an evaluated outcome's satisfied thresholds onto the API's
+// own shape (#262), the same crossing violationsFor makes for Violations and
+// for the same reason: pkg/verdict cannot import this package back.
+func appliedFor(out verdict.Outcome) []burninv1alpha1.AppliedGate {
+	if len(out.Applied) == 0 {
+		return nil
+	}
+	applied := make([]burninv1alpha1.AppliedGate, 0, len(out.Applied))
+	for _, a := range out.Applied {
+		applied = append(applied, burninv1alpha1.AppliedGate{
+			Index:      int32(a.Index),
+			Metric:     a.Metric,
+			Comparison: string(a.Comparison),
+			Value:      a.Value,
+		})
+	}
+	return applied
 }
 
 // triggerFor says why the next execution of an already-open result is

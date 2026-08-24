@@ -216,6 +216,9 @@ func maximalRun() *api.BurnInRun {
 					Index: 0, Metric: "bandwidthGbps", Cause: "BelowFloor",
 					Kind: "ib-write-bw", Reason: "97.2 < 99",
 				}},
+				Applied: []api.AppliedGate{{
+					Index: 1, Metric: "tcpRetransmits", Comparison: "Equal", Value: "0",
+				}},
 				Artifacts: []api.ArtifactRef{{
 					Name: "raw", MediaType: "application/json", SizeBytes: 512,
 					Digest: "sha256:abc", ConfigMap: "run-artifacts", Key: "raw.json",
@@ -245,6 +248,9 @@ func maximalReport() localrun.Report {
 			Violations: []api.Violation{{
 				Index: 0, Metric: "bandwidthGbps", Cause: "BelowFloor",
 				Kind: "ib-write-bw", Reason: "97.2 < 99",
+			}},
+			Applied: []api.AppliedGate{{
+				Index: 1, Metric: "tcpRetransmits", Comparison: "Equal", Value: "0",
 			}},
 			NotEvaluated: []api.NotEvaluated{{Metric: "eccErrors", Reason: "unmeasurable"}},
 			Unmeasurable: []string{"eccErrors"},

@@ -462,6 +462,16 @@ type TestResult struct {
 	// ECC gate applied and was satisfied.
 	NotEvaluated []NotEvaluated `json:"notEvaluated,omitempty"`
 
+	// Applied are the thresholds that were evaluated and satisfied — the
+	// positive counterpart to Violations and NotEvaluated, recorded regardless
+	// of Phase (unlike Violations, which is empty unless Phase is Failed) so a
+	// Failed test still shows which OTHER gates it cleared. Without this field
+	// a Passed result could only be described by what did NOT happen — "nothing
+	// failed and one gate did not run" — which reads to a consumer as though the
+	// rest were checked; this is what lets it say "11 of 12 gates applied and
+	// satisfied" instead (#262).
+	Applied []AppliedGate `json:"applied,omitempty"`
+
 	// Unmeasurable are the metric names the runner POSITIVELY DECLARED it cannot
 	// measure on this hardware (the reserved `n/a` value).
 	//
@@ -680,6 +690,26 @@ type Violation struct {
 	// Reason is the full sentence explaining this violation. For the first
 	// violation it is exactly the leading text of Message.
 	Reason string `json:"reason,omitempty"`
+}
+
+// AppliedGate is one threshold that was evaluated and satisfied — the
+// positive counterpart to Violation and NotEvaluated (#262). There is no
+// Reason: the gate ran and the measurement cleared it, so its own Comparison
+// and Value are the only things worth recording.
+type AppliedGate struct {
+	// Index is the threshold's position in the test's spec.thresholds.
+	// +kubebuilder:validation:Minimum=0
+	Index int32 `json:"index"`
+
+	// Metric is the threshold's metric name, as written in the profile.
+	Metric string `json:"metric"`
+
+	// Comparison is the threshold's own comparison operator, as written in the
+	// profile.
+	Comparison string `json:"comparison"`
+
+	// Value is the threshold's own comparison value, as written in the profile.
+	Value string `json:"value"`
 }
 
 const (

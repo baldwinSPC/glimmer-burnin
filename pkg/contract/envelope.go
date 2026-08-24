@@ -108,6 +108,15 @@ type TestResult struct {
 	// a gate that did not run from a gate that passed without reading prose.
 	NotEvaluated []NotEvaluated `json:"notEvaluated,omitempty"`
 
+	// Applied are the thresholds that were evaluated and satisfied — the
+	// positive counterpart to Violations and NotEvaluated, and the denominator
+	// a consumer otherwise has no way to ask for. Without it, "nothing failed
+	// and one gate did not run" is the strongest statement a Passed result can
+	// make, and that reads to a reader as though the rest were checked. With
+	// it: "11 of 12 gates applied and satisfied; eccErrors was not applied
+	// because the part cannot measure it" (#262).
+	Applied []AppliedGate `json:"applied,omitempty"`
+
 	// Unmeasurable are the metric names the runner positively declared it cannot
 	// measure on this hardware. A claim about the PART: "this part has no ECC"
 	// and "this part reported zero ECC errors" are different statements, and a
@@ -167,6 +176,24 @@ type Violation struct {
 	Kind string `json:"kind"`
 	// Reason is the human-readable detail.
 	Reason string `json:"reason,omitempty"`
+}
+
+// AppliedGate is one threshold that was evaluated and satisfied.
+//
+// It mirrors api/v1alpha1.AppliedGate and pkg/verdict.AppliedGate; the three
+// are held in step by TestMirroredStructsAgree, for the same reason Violation
+// is duplicated rather than shared. Unlike Violation, there is no Reason: the
+// gate ran and the measurement cleared it, so its own Comparison and Value
+// are the only things worth saying.
+type AppliedGate struct {
+	// Index is the threshold's position in the test's spec.thresholds.
+	Index int32 `json:"index"`
+	// Metric is the threshold's metric name, as written in the profile.
+	Metric string `json:"metric"`
+	// Comparison is the threshold's own comparison operator.
+	Comparison string `json:"comparison"`
+	// Value is the threshold's own comparison value, as written in the profile.
+	Value string `json:"value"`
 }
 
 // ArtifactRef points at one piece of non-metric evidence a runner returned.

@@ -97,6 +97,10 @@ the block.
       "notEvaluated": [
         { "metric": "eccErrors", "reason": "unmeasurable on this hardware" }
       ],
+      "applied": [
+        { "index": 0, "metric": "xidEvents", "comparison": "Equal", "value": "0" },
+        { "index": 1, "metric": "pcieReplayErrors", "comparison": "Equal", "value": "0" }
+      ],
       "unmeasurable": ["eccErrors"]
     },
     {
@@ -144,7 +148,10 @@ What is worth reading closely:
   this part, so the profile's `RequiredIfMeasurable` gate on it appears in
   `notEvaluated` instead of being applied. That is *not* the same as a passing
   ECC gate, and a consumer that treats it as one will eventually certify a part
-  whose ECC nobody looked at.
+  whose ECC nobody looked at. `applied` is what tells the two apart without
+  reading prose: this result cleared 2 of the 3 gates its test declared —
+  `xidEvents` and `pcieReplayErrors` — and the third sits in `notEvaluated`, not
+  silently absent.
 - **The refused artifact is still delivered.** A ref with `dropped` set is a
   fact about the run: "the runner produced no evidence" and "the evidence was
   too large to keep" are different observations and only one sends somebody to a
@@ -210,6 +217,7 @@ until anybody aggregates, replays or archives envelopes.
 | `message` | Human-readable outcome. Names only the **first** violation, or the underlying error when `phase` is `Error`. Frozen. Do not parse it. |
 | `violations` | Every threshold this test failed, in spec order. Empty unless `phase` is `Failed`. |
 | `notEvaluated` | Thresholds that were never applied. **Not passes** — and [incomplete on a `Failed` result](#notevaluated--a-gate-that-did-not-run). |
+| `applied` | Thresholds that **were** applied and satisfied — the denominator `violations` and `notEvaluated` alone cannot give you. [Unlike `violations`, populated regardless of `phase`](#applied--the-denominator-the-other-two-lists-cannot-give-you). |
 | `unmeasurable` | Metric names the runner positively declared it cannot measure on this hardware. A claim about the **part**. |
 | `artifacts` | Non-metric evidence, **by reference**. The payload is not in the envelope. |
 | `variantAxes` | The matrix labels this cell came from — `{"precision": "fp4"}`. Group a sweep by these rather than by splitting test names on a hyphen, which works until a variant is called `fp8-dense` and then works wrongly and silently. |
@@ -301,6 +309,23 @@ there — so **switch on `cause`, and treat an unfamiliar `kind` as its stated
 
 `{"metric": …, "reason": …}`. Today the only reason is
 `unmeasurable on this hardware`.
+
+### `results[].applied[]`
+
+| Field | Meaning |
+|---|---|
+| `index` | Position in the test's `spec.thresholds`. |
+| `metric` | The metric name, as written in the profile. |
+| `comparison` | The threshold's own comparison operator, as written in the profile. |
+| `value` | The threshold's own comparison value, as written in the profile. |
+
+No `reason`: the gate ran and the measurement cleared it, so there is nothing
+to explain. **Populated regardless of `phase`, unlike `violations`** — a
+`Failed` result still cleared whatever *other* gates it had, and those are as
+real a fact about the attempt as the one that failed it. Together with
+`violations` and `notEvaluated`, `applied` makes the three lists exhaustive
+over `spec.thresholds` — modulo `notEvaluated`'s own documented truncation on a
+`Failed` result, which `applied` does not share.
 
 ### `results[].artifacts[]`
 
@@ -580,7 +605,7 @@ failing where the error is visible.
 
 ---
 
-## The five things consumers get wrong
+## The six things consumers get wrong
 
 ### `summary` — exhaustive, and not about tests
 
@@ -625,6 +650,26 @@ quietly widened, for the same reason `message` was — see
 [Versioning](#versioning-add-fields-never-repurpose-them). So: read it together
 with `violations`, and on a `Failed` result never treat a metric's absence from
 `notEvaluated` as proof that its gate ran.
+
+### `applied` — the denominator the other two lists cannot give you
+
+`violations` says what failed. `notEvaluated` says what did not run. Neither
+can answer "how many gates did this test actually have, and how many of them
+did it clear?" — a `Passed` result with one `notEvaluated` entry can only be
+described, without `applied`, as "nothing failed and one gate did not run",
+which reads to a consumer as though the rest were checked. `applied` is what
+lets you say "11 of 12 gates applied and satisfied; `eccErrors` was not applied
+because the part cannot measure it" instead.
+
+The second use is drift: a profile edited to drop a gate produces a `Passed`
+result that looks identical, in `violations` and `notEvaluated` alone, to one
+where the gate still existed and passed. Only `applied` distinguishes them —
+compare its length against the profile's `spec.thresholds` for the test.
+
+Unlike `notEvaluated`, `applied` is **never truncated**: every threshold is
+evaluated regardless of where a violation falls, so `applied` is complete on
+both a `Passed` and a `Failed` result. That asymmetry is deliberate, not an
+oversight — see `results[].applied[]` in the field-by-field table above.
 
 ### `unmeasurable` — a claim about the part
 
