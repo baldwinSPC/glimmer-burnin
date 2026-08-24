@@ -77,6 +77,24 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - p-ranav/argparse                MIT, header-only, compiled into nvbandwidth
     - JsonCpp                         MIT, vendored in nvbandwidth, compiled in
 
+  runners/xpu-diag — UNVERIFIED, see runners/xpu-diag/README.md and
+  docs/dev/spike-intel-xpu-manager.md (#172). Listed here on the same standard
+  as every shipped runner even though this one has never been published,
+  because the build genuinely compiles these sources in.
+    - Intel XPU Manager (xpu-smi) v1.3.8   MIT, built from source (DAEMONLESS),
+      binary shipped. Verified against LICENSE.md at the v1.3.8 tag and the
+      GitHub API's own licence classification, both independently of the
+      other. NOT the repository's default branch, which is a different,
+      daemon-only rearchitecture — see the spike report for why the v1.3.x
+      line is the one this project can actually use.
+    - Level Zero Loader v1.19.2       MIT (oneapi-src/level-zero), prebuilt
+      .deb from the upstream GitHub release, binary shipped.
+    - grpc v1.56.2, metee 4.0.0, igsc V1.2.0   Apache-2.0, built from source
+      as build-time dependencies of the xpumanager CMake project. Whether any
+      of the three is actually LINKED into the DAEMONLESS xpu-smi binary
+      specifically (as opposed to only the daemon this build excludes) is
+      unverified — see the Dockerfile's final-stage comment.
+
   runners/memory-stress
     - stressapptest v1.0.11           Apache-2.0, built from source and shipped
       with its COPYING and NOTICE at /licenses. The build asserts the COPYING

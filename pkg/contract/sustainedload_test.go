@@ -67,6 +67,7 @@ func TestEveryKindDeclaresWhetherItHoldsLoad(t *testing.T) {
 		contract.KindNCCL: true, contract.KindIBWriteBW: true,
 		contract.KindGPUDirect: true, contract.KindTCPBaseline: true,
 		contract.KindMemoryRetention: true,
+		contract.KindXPUDiag:         true,
 	}
 	for _, k := range contract.BuiltInKinds {
 		if !classified[k] {

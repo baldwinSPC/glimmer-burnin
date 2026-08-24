@@ -21,7 +21,7 @@
 #
 # KINDS THAT STILL NEED AN EXPLICIT spec.runner.image (generated — do not edit
 # by hand; the guard above compares this line against runnerimages.WithoutDefault):
-#   custom, fabric-soak, fingerprint-probe, memory-retention, power-swing
+#   custom, fabric-soak, fingerprint-probe, memory-retention, power-swing, xpu-diag
 #
 # ─── THRESHOLDS FAIL CLOSED ───────────────────────────────────────────────────
 #

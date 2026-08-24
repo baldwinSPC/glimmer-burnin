@@ -50,3 +50,4 @@ cover.out
 /tcp-baseline
 /thermal-soak
 /thermal-soak-rocm
+/xpu-diag

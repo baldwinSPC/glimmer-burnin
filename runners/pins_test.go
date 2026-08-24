@@ -939,6 +939,16 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 		"gpu-burn-rocm":      "holds a HIP SGEMM and checks it bitwise; same device-plugin path, no NVIDIA driver injection",
 	}
 
+	// Runners whose accelerator is Intel's. Same reasoning as amdAccelerator,
+	// for a third vendor: Intel's devices (/dev/dri render nodes) arrive from
+	// the device plugin's resource grant and through the Level Zero loader,
+	// with no NVIDIA_* declaration involved. UNVERIFIED (#172, see
+	// runners/xpu-diag/README.md) — this is the exemption a real device-plugin
+	// mount would need to confirm, not a claim tested on hardware.
+	intelAccelerator := map[string]string{
+		"xpu-diag": "wraps xpu-smi diag against an Intel Data Center GPU through Level Zero; /dev/dri arrives from the device plugin, not from NVIDIA driver injection (#172, unverified)",
+	}
+
 	for _, d := range runnerDirs(t) {
 		raw, err := os.ReadFile(filepath.Join(d, "Dockerfile"))
 		if err != nil {
@@ -959,6 +969,14 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 		if why, exempt := amdAccelerator[d]; exempt {
 			if visible || caps {
 				t.Errorf("%s is listed as an AMD-accelerator runner (%s) but its Dockerfile declares "+
+					"NVIDIA driver injection — either the exemption is stale or the image is asking "+
+					"for access it cannot use", d, why)
+			}
+			continue
+		}
+		if why, exempt := intelAccelerator[d]; exempt {
+			if visible || caps {
+				t.Errorf("%s is listed as an Intel-accelerator runner (%s) but its Dockerfile declares "+
 					"NVIDIA driver injection — either the exemption is stale or the image is asking "+
 					"for access it cannot use", d, why)
 			}

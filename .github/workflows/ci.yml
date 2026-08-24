@@ -582,6 +582,14 @@ jobs:
             platform: linux/arm64
           - runner: gpu-burn-rocm
             platform: linux/arm64
+          # xpu-diag (#172, UNVERIFIED): its Dockerfile hardcodes amd64 Level
+          # Zero .deb URLs and Intel Data Center GPUs pair with x86_64 hosts
+          # only, so an arm64 leg would build an image for a machine that
+          # does not exist — the same reasoning as the ROCm runners above,
+          # for a third vendor. publish-runner.yml's platform determination
+          # must carry the same exclusion (#319).
+          - runner: xpu-diag
+            platform: linux/arm64
     steps:
       # ── FIRST, before anything pulls a layer ──────────────────────────────────
       # A hosted ubuntu-latest runner has roughly 14 GB free and ships 20-30 GB of

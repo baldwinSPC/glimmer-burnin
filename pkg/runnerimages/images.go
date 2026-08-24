@@ -334,10 +334,18 @@ func All() map[contract.TestKind]string {
 // unverified — see its own README), and neither has run on real hardware
 // yet. A profile that wants either today must name spec.runner.image
 // explicitly.
+//
+// KindXPUDiag is different in kind from the rest of this list, not degree: it
+// is UNVERIFIED by design (#172, a deliberate spike, not a runner awaiting its
+// first publish window) and this project has no Intel Data Center GPU to ever
+// verify it on. Do not move it off this list on a schedule the way the others
+// will move — only once docs/dev/spike-intel-xpu-manager.md's recommendation
+// changes and a real device has run it.
 func WithoutDefault() []contract.TestKind {
 	return []contract.TestKind{
 		contract.KindCustom, contract.KindFingerprintProbe,
 		contract.KindFabricSoak, contract.KindPowerSwing, contract.KindMemoryRetention,
+		contract.KindXPUDiag,
 	}
 }
 

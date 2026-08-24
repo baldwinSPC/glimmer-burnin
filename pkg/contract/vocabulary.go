@@ -56,7 +56,24 @@ const (
 	// wants both — which is what config/samples/node-acceptance.yaml does.
 	KindComputeSmoke TestKind = "compute-smoke"
 
-	KindDCGMDiag    TestKind = "dcgm-diag"      // Node: NVIDIA DCGM diagnostics
+	KindDCGMDiag TestKind = "dcgm-diag" // Node: NVIDIA DCGM diagnostics
+
+	// KindXPUDiag wraps Intel XPU Manager's `xpu-smi diag` — the vendor's own
+	// deployment/hardware diagnostic suite, the same role dcgm-diag fills for
+	// NVIDIA. See docs/dev/spike-intel-xpu-manager.md (#172).
+	//
+	// UNVERIFIED: nobody on this project has Intel Data Center GPU hardware.
+	// The runner in runners/xpu-diag builds, and its pure exit-code/JSON
+	// decision logic is unit-tested against the vendor's documented schema —
+	// but it has never run against a real device, has no published image tag,
+	// and pkg/runnerimages carries no default for it deliberately. A
+	// BurnInTest naming this kind fails at plan time unless spec.runner.image
+	// is set explicitly, which is the existing behaviour for exactly this
+	// situation. Do not treat its existence here as a verified capability;
+	// treat it as construction completed ahead of verification, per the
+	// spike's own recommendation.
+	KindXPUDiag TestKind = "xpu-diag"
+
 	KindThermalSoak TestKind = "thermal-soak"   // Node: hold load, assert no throttle/trip
 	KindNCCL        TestKind = "nccl"           // Pair/Group: all-reduce bus-bandwidth over the fabric
 	KindIBWriteBW   TestKind = "ib-write-bw"    // Pair: perftest ib_write_bw across the RDMA link
@@ -286,6 +303,7 @@ var BuiltInKinds = []TestKind{
 	KindComputeSmoke,
 	KindGemmSweep,
 	KindDCGMDiag,
+	KindXPUDiag,
 	KindThermalSoak,
 	KindPowerSwing,
 	KindNCCL,
@@ -394,6 +412,18 @@ var sustainedLoadKinds = map[TestKind]bool{
 	// by its worst case, because the operator must not read a runner's
 	// environment to decide what a kind is.
 	KindDCGMDiag: true,
+
+	// UNVERIFIED (#172), declared true by the SAME reasoning as KindDCGMDiag
+	// rather than by measurement: xpu-smi diag's higher levels run
+	// compute/memory-bandwidth-shaped subtests, escalating with level, the
+	// same documented shape as DCGM's stress plugins — and this project has
+	// no Intel Data Center GPU to confirm how much heat that actually puts
+	// into the part. Declared by the worst-case reading on purpose: the risk
+	// of wrongly saying true is a soak drained too gently around a real load;
+	// the risk of wrongly saying false is a thermal watchdog misreading this
+	// runner's own heat as a cooling fault. Revisit once real hardware exists
+	// to measure instead of infer.
+	KindXPUDiag: true,
 }
 
 // DrivesSustainedLoad reports whether this kind's runner holds the part under
