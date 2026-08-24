@@ -917,6 +917,7 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 		"fabric-soak":       "iterates ib_write_bw over the wire through RDMA verbs; no accelerator, same as ib-write-bw",
 		"ib-write-bw":       "measures the wire through RDMA verbs; the CUDA variant is gpudirect-rdma",
 		"memory-stress":     "exercises HOST memory through stressapptest",
+		"memory-retention":  "holds a pattern in HOST memory untouched; no accelerator involved at all, unlike any other runner in this repository",
 		"fingerprint-probe": "READS ABOUT accelerators over a read-only sysfs mount and never opens one; it must work on a node whose device plugin never came up",
 		"disk-io":           "measures storage through direct I/O against a declared path; no accelerator is involved",
 		"tcp-baseline":      "measures the kernel TCP stack through iperf3; it is the accelerator-free half of the fabric story and runs on nodes with no GPU at all",

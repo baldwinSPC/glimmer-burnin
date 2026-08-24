@@ -42,6 +42,7 @@ cover.out
 /ib-write-bw
 /memory-bw
 /memory-bw-rocm
+/memory-retention
 /memory-stress
 /nccl
 /nccl-rocm

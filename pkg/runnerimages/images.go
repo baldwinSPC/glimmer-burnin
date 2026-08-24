@@ -319,22 +319,25 @@ func All() map[contract.TestKind]string {
 // KindCustom exists so a user can point any image at the runner contract;
 // inventing a default for it would defeat the point.
 //
-// KindFingerprintProbe, KindFabricSoak and KindPowerSwing have runner source
-// in this repo but NO PUBLISHED IMAGE yet.
+// KindFingerprintProbe, KindFabricSoak, KindPowerSwing and
+// KindMemoryRetention have runner source in this repo but NO PUBLISHED IMAGE
+// yet.
 // Publishing is manual and hardware-gated by policy, and a default pointing at
 // a tag that does not exist is worse than no default at all: it turns a
 // plan-time error that names the problem into an ImagePullBackOff on every
 // targeted node. Add it here the moment the tag is published, and delete this
 // paragraph with it.
 //
-// power-swing joined this list at the same stage tcp-baseline and disk-io once
-// occupied it: source exists, its Dockerfile builds (unverified — see its own
-// README), and nothing has run on real hardware yet. A profile that wants it
-// today must name spec.runner.image explicitly.
+// power-swing and memory-retention joined this list at the same stage
+// tcp-baseline and disk-io once occupied it: source exists, each Dockerfile
+// builds (memory-retention's confirmed by a real local build; power-swing's
+// unverified — see its own README), and neither has run on real hardware
+// yet. A profile that wants either today must name spec.runner.image
+// explicitly.
 func WithoutDefault() []contract.TestKind {
 	return []contract.TestKind{
 		contract.KindCustom, contract.KindFingerprintProbe,
-		contract.KindFabricSoak, contract.KindPowerSwing,
+		contract.KindFabricSoak, contract.KindPowerSwing, contract.KindMemoryRetention,
 	}
 }
 

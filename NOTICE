@@ -112,6 +112,13 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
       standard library (BSD-3-Clause).
 
+  runners/memory-retention
+    - no third-party component and no external tool of any kind: a CGO-free
+      Apache-2.0 Go binary over the Go standard library (BSD-3-Clause). Unlike
+      every other runner in this repository, it touches no vendor library at
+      all — the test is entirely in host memory, reachable identically on any
+      accelerator vendor's node.
+
   runners/thermal-soak, runners/gpu-burn, runners/power-swing
     - no third-party component. All three images are built entirely from this
       project's own Apache-2.0 source (thermal_soak.cu / gpu_burn.cu /

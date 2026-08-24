@@ -38,7 +38,8 @@ import (
 // happens to share a name. Every runner has a main.go and no two are alike;
 // treating that as drift would bury the real signal under nine entries.
 var perRunner = map[string]bool{
-	"main.go": true,
+	"main.go":   true,
+	"config.go": true, // each runner's own settings struct, not shared logic that happened to share a name
 }
 
 // divergent are filenames whose copies deliberately differ, with why.
