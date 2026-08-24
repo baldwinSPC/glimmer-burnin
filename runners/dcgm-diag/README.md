@@ -319,8 +319,26 @@ docker run --rm --gpus all \
   ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:<tag>
 ```
 
-In Kubernetes this is a `hostPath` or an `initContainer` that populates an
-`emptyDir` from the site's own DCGM image.
+In Kubernetes this is a `hostPath` — which means preparing DCGM on every node
+in the fleet by hand before the operator can measure it — **or**
+`spec.runner.prepare` (#375), which needs no per-node preparation at all: it
+copies `/usr` out of the site's own DCGM image (the GPU Operator's DaemonSet
+image is almost always already entitled to run in the cluster) into an
+`emptyDir`, before the runner starts:
+
+```yaml
+spec:
+  runner:
+    prepare:
+      - image: nvcr.io/nvidia/cloud-native/dcgm:4.5.2-1-ubuntu22.04
+        copyFrom: /usr
+        mountPath: /usr/local/dcgm
+```
+
+That alone is not quite enough on its own: DCGM 4's plugins live under
+`/usr/libexec/datacenter-gpu-manager-4`, a second absolute path, so a fleet
+using this route needs a second `prepare` entry for it — `spec.runner.prepare`
+is a list for exactly this reason — with a matching `copyFrom` and `mountPath`.
 
 **2. Point at a host engine that is already running.** On a node with the GPU
 operator's `dcgm-exporter`, set `BURNIN_DCGM_HOSTENGINE_ADDRESS` so a second

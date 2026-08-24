@@ -583,6 +583,76 @@ spec:
                     x-kubernetes-list-map-keys:
                     - vendor
                     x-kubernetes-list-type: map
+                  prepare:
+                    description: "Prepare seeds a scratch volume from an IMAGE before
+                      the runner starts —\nan initContainer, in effect, for the one
+                      case a burn-in runner\ngenuinely needs one: a vendor tool the
+                      runner image may not\nredistribute (dcgm-diag's DCGM; AMD's
+                      RVS would be the same case) but\nthat the SITE is entitled to
+                      pull, most often because the identical\nimage is already running
+                      as a DaemonSet on every GPU node in the\ncluster (#375).\n\nBefore
+                      this field, the only route to that binary was HostPaths — which\nmeans
+                      preparing every node in the fleet by hand before the operator
+                      can\nmeasure it, exactly the gap dcgm-diag's own README documents
+                      as its\nunsatisfying option. An initContainer using the site's
+                      own DCGM image\nneeds no host mount and no per-node preparation
+                      at all: the vendor\nbinary the runner needs is copied out of
+                      a container the site is\nalready entitled to run, immediately
+                      before the runner that needs it\nstarts.\n\n\trunner:\n\t  prepare:\n\t
+                      \   - image: nvcr.io/nvidia/cloud-native/dcgm:4.5.2-1-ubuntu22.04\n\t
+                      \     copyFrom: /usr\n\t      mountPath: /usr/local/dcgm\n\nThis
+                      is NOT a general initContainer field, on purpose, for the same\nreason
+                      HostPaths is a curated shape rather than []corev1.Volume +\n[]corev1.VolumeMount:
+                      every case this field exists for is \"copy a path\nout of an
+                      image\", and a curated field states that intent where a\ngeneral
+                      initContainer list would let a BurnInTest run arbitrary\npre-runner
+                      logic — a much larger surface than seeding a volume.\n\nEach
+                      step gets its own emptyDir, populated by copying CopyFrom out
+                      of\nImage, then mounted READ-ONLY into the runner container
+                      at MountPath —\nthe runner only ever needs to READ a vendor
+                      tool it did not build, and\na scratch volume it could write
+                      to is a privilege the runner does not\nneed and this field does
+                      not grant. The copy happens once, in the\ninitContainer, before
+                      the runner container is created at all; the\nrunner never sees
+                      Image or CopyFrom, only the result at MountPath."
+                    items:
+                      description: |-
+                        PrepareStep copies ONE path out of an image into the runner container,
+                        before the runner starts. See RunnerSpec.Prepare for what this is for and
+                        why it is not a general initContainer.
+                      properties:
+                        copyFrom:
+                          description: |-
+                            CopyFrom is the path INSIDE Image to copy — recursively, contents and
+                            all — into MountPath.
+                          minLength: 1
+                          pattern: ^/
+                          type: string
+                        image:
+                          description: |-
+                            Image is pulled and run as an initContainer purely to be copied from —
+                            its own entrypoint is never invoked; the step overrides it with a copy
+                            command instead.
+                          minLength: 1
+                          type: string
+                        mountPath:
+                          description: |-
+                            MountPath is where the copied contents appear INSIDE THE RUNNER
+                            container, read-only. This list's identity: two entries may not share
+                            a MountPath, the same rule and the same reason as HostPathMount's.
+                          minLength: 1
+                          pattern: ^/
+                          type: string
+                      required:
+                      - copyFrom
+                      - image
+                      - mountPath
+                      type: object
+                    maxItems: 4
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - mountPath
+                    x-kubernetes-list-type: map
                   priorityClassName:
                     description: |-
                       PriorityClassName points this test's pods at a PriorityClass the SITE

@@ -446,6 +446,50 @@ type RunnerSpec struct {
 	// +listMapKey=mountPath
 	HostPaths []HostPathMount `json:"hostPaths,omitempty"`
 
+	// Prepare seeds a scratch volume from an IMAGE before the runner starts —
+	// an initContainer, in effect, for the one case a burn-in runner
+	// genuinely needs one: a vendor tool the runner image may not
+	// redistribute (dcgm-diag's DCGM; AMD's RVS would be the same case) but
+	// that the SITE is entitled to pull, most often because the identical
+	// image is already running as a DaemonSet on every GPU node in the
+	// cluster (#375).
+	//
+	// Before this field, the only route to that binary was HostPaths — which
+	// means preparing every node in the fleet by hand before the operator can
+	// measure it, exactly the gap dcgm-diag's own README documents as its
+	// unsatisfying option. An initContainer using the site's own DCGM image
+	// needs no host mount and no per-node preparation at all: the vendor
+	// binary the runner needs is copied out of a container the site is
+	// already entitled to run, immediately before the runner that needs it
+	// starts.
+	//
+	//	runner:
+	//	  prepare:
+	//	    - image: nvcr.io/nvidia/cloud-native/dcgm:4.5.2-1-ubuntu22.04
+	//	      copyFrom: /usr
+	//	      mountPath: /usr/local/dcgm
+	//
+	// This is NOT a general initContainer field, on purpose, for the same
+	// reason HostPaths is a curated shape rather than []corev1.Volume +
+	// []corev1.VolumeMount: every case this field exists for is "copy a path
+	// out of an image", and a curated field states that intent where a
+	// general initContainer list would let a BurnInTest run arbitrary
+	// pre-runner logic — a much larger surface than seeding a volume.
+	//
+	// Each step gets its own emptyDir, populated by copying CopyFrom out of
+	// Image, then mounted READ-ONLY into the runner container at MountPath —
+	// the runner only ever needs to READ a vendor tool it did not build, and
+	// a scratch volume it could write to is a privilege the runner does not
+	// need and this field does not grant. The copy happens once, in the
+	// initContainer, before the runner container is created at all; the
+	// runner never sees Image or CopyFrom, only the result at MountPath.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=mountPath
+	// +kubebuilder:validation:MaxItems=4
+	Prepare []PrepareStep `json:"prepare,omitempty"`
+
 	// ReadinessProbe is what a Pair-scope SERVER runner uses to say it is
 	// actually able to accept a connection.
 	//
@@ -552,6 +596,33 @@ type HostPathMount struct {
 	// +kubebuilder:validation:Enum=Directory;File;Socket;CharDevice;BlockDevice
 	// +optional
 	Type *corev1.HostPathType `json:"type,omitempty"`
+}
+
+// PrepareStep copies ONE path out of an image into the runner container,
+// before the runner starts. See RunnerSpec.Prepare for what this is for and
+// why it is not a general initContainer.
+type PrepareStep struct {
+	// Image is pulled and run as an initContainer purely to be copied from —
+	// its own entrypoint is never invoked; the step overrides it with a copy
+	// command instead.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// CopyFrom is the path INSIDE Image to copy — recursively, contents and
+	// all — into MountPath.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^/`
+	CopyFrom string `json:"copyFrom"`
+
+	// MountPath is where the copied contents appear INSIDE THE RUNNER
+	// container, read-only. This list's identity: two entries may not share
+	// a MountPath, the same rule and the same reason as HostPathMount's.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^/`
+	MountPath string `json:"mountPath"`
 }
 
 // BurnInTestStatus is intentionally minimal — BurnInTest is a reusable
