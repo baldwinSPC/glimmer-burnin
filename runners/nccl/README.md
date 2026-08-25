@@ -123,17 +123,40 @@ in either file becomes visible instead of silently rescaling a fleet metric.
 
 **This runner ships no default threshold, and the obvious one is impossible.**
 
-A 2-rank all-reduce cannot exceed the link. On the DGX Spark pair this was
-developed against, `ib_write_bw` plateaus at **99.61 Gb/s** because the
-ConnectX-7 attaches at PCIe Gen5 x4 — the wire is 200G and the host can only feed
-half of it. 99.61 Gb/s is **12.45 GB/s**, so:
+**Correction (#489): the measurement below is SINGLE-RAIL, not the link's real
+ceiling.** It was taken while `selectPort` (`rdma.go`) picked exactly one RDMA
+port per node — this fleet actually has TWO usable collective rails, and
+`selectPort`'s route-to-peer fallback was silently landing on one of them (in
+one observed case, the cluster/etcd-peer cable, not a collective rail at all).
+The table and the "cannot exceed the link" framing below describe that
+single-rail path honestly, and the arithmetic in this section is still correct
+**for one rail** — but treating 12.45 GB/s as the hard ceiling for a 2-rank
+all-reduce on this hardware is exactly the assumption #489 disproved: two rails
+measured together reach ~22.6-22.9 GB/s. `config/samples/pair-network-acceptance.yaml`
+now gates on that dual-rail figure (`busBandwidthGBs >= 19.913`, derived and
+hardware-verified as documented there) rather than the 10.8 this README used to
+recommend — until #489's selector fix lands, expect a run against current
+`main` to measure the single-rail number below and FAIL that gate, which is the
+deliberate, corrected behavior: a single-rail measurement should not pass as
+the fleet's collective bandwidth.
 
-> `busBandwidthGBs >= 20` is **arithmetically unreachable** on this hardware.
-> 20 GB/s is 160 Gb/s. Such a threshold would not be strict; it would condemn
-> every node in the fleet for a property of the part.
+A 2-rank all-reduce cannot exceed **the rail(s) NCCL is actually using**. On the
+DGX Spark pair this was developed against, `ib_write_bw` plateaus at **99.61
+Gb/s per rail** because each ConnectX-7 attaches at PCIe Gen5 x4 — the wire is
+200G and one rail's host attachment can only feed half of it. 99.61 Gb/s is
+**12.45 GB/s per rail**, so:
 
-Set the gate from the measurement your fleet actually produces. **Measured on
-that pair** (rank 0 `spark-85a9`, rank 1 `spark-043a`, RoCE v2, two runs):
+> `busBandwidthGBs >= 20` is **arithmetically unreachable on a single rail**.
+> 20 GB/s is 160 Gb/s, and one rail's host attachment tops out around 99.6 Gb/s.
+> A threshold this high would not be strict against a single-rail measurement;
+> it would condemn every node in the fleet for a property of the part — but see
+> the correction above: it is NOT unreachable for this fleet's actual collective,
+> which uses two rails and clears it.
+
+Set the gate from the measurement your fleet actually produces — across EVERY
+rail your topology gives the collective, not just the one `selectPort` happens
+to land on; see the correction above. **Measured on that pair, single-rail**
+(rank 0 `spark-85a9`, rank 1 `spark-043a`, RoCE v2, two runs):
 
 | Message | time | alg = bus bandwidth |
 |---|---|---|
@@ -144,15 +167,20 @@ that pair** (rank 0 `spark-85a9`, rank 1 `spark-043a`, RoCE v2, two runs):
 | 256 MiB | 22.36–22.37 ms | **12.00–12.01 GB/s** |
 
 `busBandwidthGBs = 12.0 GB/s` is 96 Gb/s — **96% of the 99.61 Gb/s that
-`ib_write_bw` measures on the same link**, which is what a healthy collective
-over a saturated link looks like. So a defensible gate for this fleet is roughly
-90% of the measured figure:
+`ib_write_bw` measures on the same single rail**, which is what a healthy
+collective over a saturated rail looks like. A gate at ~90% of a single-rail
+measurement is exactly what let a single-rail fallback pass silently on a
+dual-rail fleet (#489) — do not reuse that shortcut once more than one rail is
+in play. The formula this project now uses once a collective's real rail count
+is known is `threshold_basis pcie-budget-collective`: 0.80 x the collective's
+summed per-rail PCIe budgets, each bounded by line rate — see
+`config/samples/pair-network-acceptance.yaml` for this fleet's derived value:
 
 ```yaml
 thresholds:
   - metric: busBandwidthGBs
     operator: GreaterThanOrEqual
-    value: "10.8"        # ~90% of the measured 12.0
+    value: "19.913"       # 0.80 x two rails' summed PCIe budget — see #489
   - metric: miscompares
     operator: Equal
     value: "0"
