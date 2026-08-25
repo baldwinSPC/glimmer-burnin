@@ -86,9 +86,29 @@ tuning knobs:
 | `FABRIC_SOAK_WINDOW_SECONDS` | 20 | one iteration's traffic |
 | `FABRIC_SOAK_SYSFS` | `/sys` | where the host's sysfs is mounted |
 | `BURNIN_HEALTH_PORT` | 18510 | this runner's own control/readiness listener — see "Port selection" below |
+| `FABRIC_SOAK_DEBUG_NEVER_EXIT` | *(unset)* | **test/debug only** — the server blocks forever instead of exiting once its normal loop finishes. See "Debug: reproducing the condemned-while-live path" below. **Never set this on a real fleet.** |
 
 A window must be shorter than the soak, and the runner refuses otherwise: a soak
 of one window is an `ib-write-bw` run with a longer name and reports no spread.
+
+## Debug: reproducing the condemned-while-live path
+
+`FABRIC_SOAK_DEBUG_NEVER_EXIT` exists for #498: testing the operator's
+handling of a Pair server that never reaches a terminal pod phase
+(`internal/controller/pair.go`'s `harvestPair`, the condemned-while-live
+branch #490 added log capture for) is otherwise a matter of luck. The
+server's deadline already outlives the client's by design — see
+`serverDeadline` — which gives that path a real but narrow window on every
+run; measured on hardware, hitting it took two attempts out of two tries.
+
+Set this on the SERVER pod only, and the server runs its complete, honest
+loop exactly as it would otherwise — `soakServerRestarts` and everything
+else are real — and then blocks forever instead of returning. The pod stays
+`Running` long after the client finishes, on every run, not just some. It
+announces itself twice: a log line naming the exit code it would have
+returned, and `debugNeverExit=true` in the metric stream, so a run that
+somehow carried this into a stored result says so rather than just never
+completing.
 
 ## Port selection and the memlock limit
 

@@ -257,9 +257,39 @@ func run() int {
 		// kubelet's readinessProbe for the rest of this pod's life without
 		// blocking the soak loop below.
 		go tolerateProbes(probeListener)
-		return runServer(deadline, port, messageBytes, qps)
+		result := runServer(deadline, port, messageBytes, qps)
+		debugNeverExit(result)
+		return result
 	}
 	return runClient(port, peerHost, peerNode, duration, windowSeconds, messageBytes, qps, soft)
+}
+
+// debugNeverExit is a TEST-ONLY knob, never meant to reach a real fleet's
+// acceptance run — see #498. It exists so the condemned-while-live path
+// (#490's harvestPair branch) can be reproduced on demand: ordinarily the
+// server's deadline outlives the client's by design (serverDeadline's grace
+// budget), which gives a condemned-while-live server a real but narrow and
+// INTERMITTENT window to be caught in — measured on hardware taking two
+// attempts to hit once. Setting FABRIC_SOAK_DEBUG_NEVER_EXIT makes the
+// server block forever instead of returning once runServer's own loop is
+// done, turning that narrow window into a certainty: the pod stays Running
+// long after the client finishes, on every run, not just some of them.
+//
+// It changes nothing about a normal run. runServer already ran its complete,
+// honest loop by the time this is called — soakServerRestarts is already
+// what it would have been — this only withholds the exit. And it never
+// hides itself: the marker rides into the stored metrics before blocking, so
+// a run that somehow carried this env var into a real fleet would say so in
+// its own envelope rather than just mysteriously never completing.
+func debugNeverExit(result int) {
+	if os.Getenv("FABRIC_SOAK_DEBUG_NEVER_EXIT") == "" {
+		return
+	}
+	metric("debugNeverExit", "true")
+	logf("fabric-soak: FABRIC_SOAK_DEBUG_NEVER_EXIT is set — the server already finished its loop "+
+		"(would have exited %d) but is now blocking forever instead of returning. Debug/test only; "+
+		"never set this on a real fleet.", result)
+	select {}
 }
 
 // serverDeadline is when the server stops restarting ib_write_bw, computed
