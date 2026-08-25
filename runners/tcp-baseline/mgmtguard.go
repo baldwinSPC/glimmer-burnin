@@ -265,25 +265,33 @@ func defaultRouteIface(procNetRoute string) string {
 }
 
 // ifaceForAddr reports which interface owns the local address the kernel would
-// use to reach a peer.
+// use to reach a peer, and — when it cannot — WHY, so a Pair-scope server's
+// failure to resolve its peer (structural: the client pod, and its DNS record,
+// do not exist yet when the server starts — see main.go's guardPath) is
+// distinguishable in the logs from a genuine routing failure, an unresolvable
+// address, or an address this node's own interfaces do not carry.
 //
 // The UDP "connection" sends nothing — it only asks the kernel to run its route
 // lookup and bind a source address — so this is a routing question answered by
 // the routing table, not a probe of the peer. That matters: the peer may not be
 // up yet, and a guard that needed it to be would refuse to protect the cluster
 // exactly when the run is starting.
-func ifaceForAddr(peer string, ifaces []hostIface) string {
+func ifaceForAddr(peer string, ifaces []hostIface) (string, string) {
 	conn, err := net.Dial("udp", net.JoinHostPort(peer, "9"))
 	if err != nil {
-		return ""
+		return "", fmt.Sprintf("could not resolve or route to %q: %v", peer, err)
 	}
 	defer conn.Close()
 
 	local, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok || local.IP == nil {
-		return ""
+		return "", fmt.Sprintf("routing to %q produced no usable local address", peer)
 	}
-	return ifaceOwning(local.IP, ifaces)
+	if name := ifaceOwning(local.IP, ifaces); name != "" {
+		return name, ""
+	}
+	return "", fmt.Sprintf("the route to %q leaves from %s, which no known local interface carries",
+		peer, local.IP)
 }
 
 // hostIface is an interface reduced to what the guard needs.
