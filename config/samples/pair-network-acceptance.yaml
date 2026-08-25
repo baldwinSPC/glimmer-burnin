@@ -188,21 +188,40 @@ spec:
         mountPath: /dev/infiniband
         readOnly: false
         type: Directory
-  # MEASURED between these two Sparks, 2026-08-03. A 2-rank all-reduce sweep
-  # peaked at 12.00 GB/s at 256 MiB (12.00 and 12.01 across two runs); 10.8 is
-  # ~90% of that. Sanity check on the number: 12.00 GB/s is 96 Gb/s, which is
-  # 96% of the 99.61 Gb/s ib_write_bw measures on the same link — a healthy
-  # collective over a saturated fabric, not a suspiciously round figure.
+  # RAISED FROM 10.8 — issue #489. The reasoning below that set 10.8 was wrong,
+  # not just imprecise: it treated ~12.45 GB/s (the SINGLE-rail ib_write_bw
+  # ceiling on this link) as the hard upper bound for a 2-rank all-reduce. This
+  # fleet has TWO usable collective rails, not one, and #489 found that
+  # selectPort's route-to-peer fallback was silently picking exactly one of
+  # them — the cluster/etcd-peer cable, not either collective rail — so every
+  # run to date measured a real but WRONG-TOPOLOGY number, and 10.8 (~90% of
+  # that same single-rail figure) was satisfied by the wrong measurement just
+  # as readily as by a correct one. Nothing here caught it.
   #
-  # The previous value here was busBandwidthGBs >= 20, justified as a "CX-7
-  # 200G RoCE expectation". That is arithmetically impossible: 20 GB/s is
-  # 160 Gb/s over a link whose measured ceiling is ~99.6 Gb/s. For a 2-rank
-  # all-reduce busBandwidth == algBandwidth, so ~12.45 GB/s is the hard upper
-  # bound and no healthy Spark pair could ever have passed it.
+  # 19.913 is threshold_basis pcie-budget-collective: 0.80 x the collective's
+  # summed per-rail PCIe budgets, each bounded by line rate — the same formula
+  # already shipped and hardware-verified on this exact fleet (measured
+  # 22.652 GB/s against this floor) in the sibling system that found and fixed
+  # the identical single-rail-fallback defect first (rail_netdevs(), cited in
+  # #489). Two rails at the ~12.45 GB/s single-rail PCIe ceiling measured above
+  # sum to ~24.9 GB/s before the 0.80 margin, which is the same arithmetic
+  # landing in the same place from this project's own numbers.
+  #
+  # THIS RAISES THE FLOOR ABOVE WHAT THE FLEET CAN CURRENTLY PASS. #489's
+  # selector defect is still open — selectPort still returns exactly one rail
+  # — so a run against current main will FAIL this threshold instead of
+  # passing it. That is the point: a single-rail measurement (~11.99-12.00
+  # GB/s) certifying as Passed was the bug, and a correct floor turning that
+  # same measurement into a Fail is strictly better than silently accepting
+  # it, even before the selector itself is fixed. Once #489's selector half
+  # lands and NCCL is pointed at both rails, a healthy pair should clear this
+  # floor comfortably at ~22.6+ GB/s. Re-measure this number if it is ever
+  # reused for a different rail count or a different SKU's PCIe attachment —
+  # see #489 and #489's prior-art citation for the derivation.
   thresholds:
     - metric: busBandwidthGBs
       comparison: GreaterThanOrEqual
-      value: "10.8"
+      value: "19.913"
 ---
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInProfile
