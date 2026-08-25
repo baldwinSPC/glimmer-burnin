@@ -141,15 +141,25 @@ func guardPath(peerHost, role string) (int, bool) {
 	// more harshly than one the routing table picked — see classifyRoute.
 	explicit := strings.TrimSpace(os.Getenv("TCP_BASELINE_INTERFACE"))
 	testIface := explicit
+	var whyUnresolved string
 	if testIface == "" && peerHost != "" {
-		testIface = ifaceForAddr(peerHost, hostIfaces())
+		testIface, whyUnresolved = ifaceForAddr(peerHost, hostIfaces())
 	}
 	if testIface == "" && role == roleServer && explicit == "" {
-		// A server has no peer address to route towards yet. It is told which
-		// interface to bind, or the guard cannot say anything about it.
+		// A server has no peer address to route towards yet, structurally: at
+		// Pair scope the operator does not create the client pod — and so its
+		// DNS record does not exist — until the server is Ready, so peerHost
+		// above is a name that cannot resolve at the point this guard runs.
+		// See #482. It is told which interface to bind, or the guard cannot
+		// say anything about it.
+		detail := whyUnresolved
+		if detail == "" {
+			detail = "BURNIN_PEER_HOST was empty"
+		}
 		return fin(exitError, "the server end needs TCP_BASELINE_INTERFACE naming the fabric interface to "+
-			"bind: with no peer address to route towards, there is nothing to compare against the "+
-			"management interface (%s), and the guard fails closed rather than binding everywhere", mgmt), false
+			"bind: with no peer address to route towards (%s), there is nothing to compare against the "+
+			"management interface (%s), and the guard fails closed rather than binding everywhere",
+			detail, mgmt), false
 	}
 
 	// Which network namespace this is, established positively where it can be.
