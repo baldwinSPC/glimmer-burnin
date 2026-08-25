@@ -68,26 +68,57 @@ func TestPair_ALingeringServersLogIsCapturedBeforeItIsDestroyed(t *testing.T) {
 	}
 }
 
-// TestClampCondemnedLog_KeepsOnlyTheTailAndBoundsItsLength guards the two
-// knobs #490's diagnostic capture depends on: a chatty server's account is cut
-// to its last lines rather than an arbitrary byte offset, and the result never
-// grows past maxCondemnedLog regardless of how much the server wrote.
-func TestClampCondemnedLog_KeepsOnlyTheTailAndBoundsItsLength(t *testing.T) {
+// TestClampCondemnedLog_KeepsBothEndsAndBoundsLength guards the knobs #490's
+// diagnostic capture depends on: a chatty server's account is cut to its
+// first and last lines rather than an arbitrary byte offset or the tail
+// alone, and the result never grows past maxCondemnedLog regardless of how
+// much the server wrote.
+//
+// Head AND tail, not tail alone, is the point being guarded — #490 shipped
+// tail-only, and hardware verification on fabric-soak (a runner that fails to
+// START, restarting a banner-printing subprocess every window) showed a
+// tail-only capture reliably grabbing the late-run banner noise while the one
+// line explaining WHY the server never listened sat at line 2, before any of
+// it. This test's "the first line" assertion is that regression, pinned.
+func TestClampCondemnedLog_KeepsBothEndsAndBoundsLength(t *testing.T) {
 	var lines []string
-	for i := 0; i < condemnedLogTailLines+10; i++ {
+	lines = append(lines, "the first line")
+	for i := 0; i < condemnedLogHeadLines+condemnedLogTailLines+10; i++ {
 		lines = append(lines, "line")
 	}
 	lines[len(lines)-1] = "the last line"
 	got := clampCondemnedLog(strings.Join(lines, "\n"))
+	if !strings.Contains(got, "the first line") {
+		t.Errorf("dropped the earliest line — this is the regression #490's tail-only capture had: %q", got)
+	}
 	if !strings.Contains(got, "the last line") {
 		t.Errorf("dropped the most recent line: %q", got)
 	}
 	if strings.Contains(got, "line line line line line line line line line line line line line line line line line line line line") {
-		t.Errorf("kept lines from earlier than the tail window: %q", got)
+		t.Errorf("kept a long unbroken run from the middle, meaning nothing was actually elided: %q", got)
+	}
+	if !strings.Contains(got, "omitted") {
+		t.Errorf("no elision marker for a log that overflowed both windows: %q", got)
 	}
 
 	huge := strings.Repeat("x", maxCondemnedLog*4)
 	if got := clampCondemnedLog(huge); len(got) > maxCondemnedLog+len("… (truncated)") {
 		t.Errorf("clampCondemnedLog did not bound its output: got %d bytes", len(got))
+	}
+}
+
+// TestClampCondemnedLog_ShortLogNeedsNoElision asserts the no-op case:
+// nothing is dropped, and no elision marker appears, when the whole log
+// already fits inside head+tail's combined budget.
+func TestClampCondemnedLog_ShortLogNeedsNoElision(t *testing.T) {
+	lines := []string{"first", "second", "third"}
+	got := clampCondemnedLog(strings.Join(lines, "\n"))
+	for _, l := range lines {
+		if !strings.Contains(got, l) {
+			t.Errorf("dropped %q from a log short enough to need no elision: %q", l, got)
+		}
+	}
+	if strings.Contains(got, "omitted") {
+		t.Errorf("elision marker present for a log that fit entirely within budget: %q", got)
 	}
 }

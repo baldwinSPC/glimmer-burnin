@@ -589,15 +589,34 @@ func pairVerdict(server, client pairSide) (runner.Verdict, int) {
 // tight would as often cut the useful line as keep it.
 const maxCondemnedLog = 2000
 
-// condemnedLogTailLines bounds how many of the log's OWN lines feed
-// clampCondemnedLog, so a chatty runner's tail is still whole lines rather
-// than an arbitrary byte cut through the middle of one.
-const condemnedLogTailLines = 20
+// condemnedLogHeadLines and condemnedLogTailLines bound how many of the log's
+// OWN lines feed clampCondemnedLog, so a chatty runner's excerpt is still
+// whole lines rather than an arbitrary byte cut through the middle of one.
+//
+// BOTH ends, not the tail alone — tail-only was the original shape, and
+// hardware verification of #490 (Sprint 2026-08-21, on fabric-soak) showed
+// it capturing exactly the wrong end for a runner that fails to START rather
+// than fails while RUNNING: fabric-soak restarts ib_write_bw every window and
+// prints its banner each time, so the last 20 lines are late-run banner
+// noise while the one line that explains a condemned-while-live server (a
+// peer that never resolved) sits at line 2, before any of it. A runner's
+// startup diagnostics and its failure mode live at opposite ends, and this
+// operator does not know in advance which end a given runner's next failure
+// will be at — so it keeps both.
+const (
+	condemnedLogHeadLines = 10
+	condemnedLogTailLines = 10
+)
 
 func clampCondemnedLog(s string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(lines) > condemnedLogTailLines {
-		lines = lines[len(lines)-condemnedLogTailLines:]
+	if len(lines) > condemnedLogHeadLines+condemnedLogTailLines {
+		elided := len(lines) - condemnedLogHeadLines - condemnedLogTailLines
+		combined := make([]string, 0, condemnedLogHeadLines+1+condemnedLogTailLines)
+		combined = append(combined, lines[:condemnedLogHeadLines]...)
+		combined = append(combined, fmt.Sprintf("… (%d lines omitted) …", elided))
+		combined = append(combined, lines[len(lines)-condemnedLogTailLines:]...)
+		lines = combined
 	}
 	return truncateAtRune(strings.Join(strings.Fields(strings.Join(lines, "\n")), " "), maxCondemnedLog, "… (truncated)")
 }
