@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright the Glimmer authors.
 
-// Drift guard for the scaffolding the three fabric runners share.
+// Drift guard for the scaffolding the four fabric runners share.
 //
-// runners/ib-write-bw, runners/gpudirect-rdma and runners/nccl are three
-// separate Docker build contexts. The publish workflow builds each with its OWN
-// directory as the context and COPY cannot reach outside a build context, so
-// every file they have in common is a COPY, not a symlink and not a shared
-// package. That is a deliberate trade — but a copy nobody compares is a copy
-// that drifts, and the drift is invisible in review because the two files are
-// never in the same diff.
+// runners/ib-write-bw, runners/gpudirect-rdma, runners/nccl and
+// runners/fabric-soak are four separate Docker build contexts. The publish
+// workflow builds each with its OWN directory as the context and COPY cannot
+// reach outside a build context, so every file they have in common is a COPY,
+// not a symlink and not a shared package. That is a deliberate trade — but a
+// copy nobody compares is a copy that drifts, and the drift is invisible in
+// review because the two files are never in the same diff.
+//
+// fabric-soak joined this guard in #494, after shipping for a while with its
+// own undeclared copies of rdma.go, memlock.go and (once #495 added it)
+// rendezvous.go — exactly the kind of drift this file exists to catch, caught
+// instead by a human reading #489's investigation closely enough to check by
+// hand. Nothing was actually wrong at the time; nothing was watching either.
 //
 // The stakes are not tidiness. memlock.go carries the containerd RLIMIT_MEMLOCK
 // finding: a container started by containerd inherits the runtime's
@@ -39,14 +45,15 @@ import (
 	"testing"
 )
 
-// The three fabric runner directories, relative to this package.
+// The four fabric runner directories, relative to this package.
 const (
-	ibWriteBWDir = "."
-	gpudirectDir = "../gpudirect-rdma"
-	ncclDir      = "../nccl"
+	ibWriteBWDir  = "."
+	gpudirectDir  = "../gpudirect-rdma"
+	ncclDir       = "../nccl"
+	fabricSoakDir = "../fabric-soak"
 )
 
-var fabricRunnerDirs = []string{ibWriteBWDir, gpudirectDir, ncclDir}
+var fabricRunnerDirs = []string{ibWriteBWDir, gpudirectDir, ncclDir, fabricSoakDir}
 
 // fabricFile is one filename that exists in more than one fabric runner.
 //
@@ -81,7 +88,7 @@ var fabricFiles = []fabricFile{
 	},
 	{
 		name:     "zz_runnerlib.go",
-		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir},
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir, fabricSoakDir},
 		reason: "the repo-wide runner helper stamp, generated from hack/runnerlib/runnerlib.go.src " +
 			"by `go run ./hack/runnerlib`. runners/runnerlib_test.go already holds every copy " +
 			"byte-identical to the source across ALL Go runners; this entry exists because this " +
@@ -90,23 +97,27 @@ var fabricFiles = []fabricFile{
 	},
 	{
 		name:     "rdma.go",
-		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir},
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir, fabricSoakDir},
 		reason: "device discovery, port selection and GID resolution are one implementation. " +
-			"All three runners answer the same question — which local RDMA port reaches this peer — " +
+			"All four runners answer the same question — which local RDMA port reaches this peer — " +
 			"and a fork would let one runner SKIP a node the others test, which reads as a healthy " +
-			"node with no fabric rather than as a runner that stopped looking.",
+			"node with no fabric rather than as a runner that stopped looking. This is also the " +
+			"file #489's wrong-rail-fallback defect lives in; a runner with its own undeclared copy " +
+			"could silently fail to receive whatever fixes it.",
 	},
 	{
 		name:     "perftest.go",
-		sharedBy: []string{ibWriteBWDir, gpudirectDir},
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, fabricSoakDir},
 		reason: "the perftest output parser. nccl does not run perftest at all — it has results.go " +
-			"for nccl_pair's own output — so there is no third copy to keep in step.",
+			"for nccl_pair's own output — so there is no fourth copy to keep in step. fabric-soak " +
+			"joined this table in #494; its copy was already byte-identical to ib-write-bw's, " +
+			"undeclared until then.",
 	},
 	{
 		name:     "assert-no-copyleft.sh",
-		sharedBy: []string{ibWriteBWDir, gpudirectDir},
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, fabricSoakDir},
 		reason: "the build-time assertion that the perftest tree carries no GPL-only dependency. " +
-			"Only the two perftest-based runners fetch that tree; nccl builds NCCL, which is " +
+			"The three perftest-based runners all fetch that tree; nccl builds NCCL, which is " +
 			"BSD-3-Clause and asserted separately in its own Dockerfile.",
 	},
 	{
@@ -116,17 +127,25 @@ var fabricFiles = []fabricFile{
 			"two phases over the link (bandwidth and latency) and nccl_pair runs exactly one " +
 			"(a collective sweep inside a single communicator, because rebuilding the communicator " +
 			"per message size would measure NCCL's initialisation as often as its bandwidth). " +
-			"The phase vocabulary is part of the wire protocol, so it cannot be shared.",
+			"The phase vocabulary is part of the wire protocol, so it cannot be shared. fabric-soak's " +
+			"copy (#495) is ALSO a deliberate fork, for a third reason: it needs none of the phase " +
+			"negotiation either kind above carries, because every window is its own independent " +
+			"ib_write_bw invocation the wrapper already orchestrates — the channel exists purely to " +
+			"let the server learn its peer's address from the accepted connection, one hello, nothing " +
+			"else. Three different reasons to diverge is not a coincidence to resolve; it is three " +
+			"runners with three different relationships to the link they measure.",
 	},
 	{
 		name:     "memlock.go",
-		sharedBy: []string{ibWriteBWDir, gpudirectDir},
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, fabricSoakDir},
 		reason: "RLIMIT_MEMLOCK handling. nccl's copy is a DELIBERATE fork, and the divergence is a " +
 			"measured fact rather than a style choice: the perftest runners own every byte they " +
 			"register, so they SIZE THEMSELVES TO FIT the limit and still measure the link; NCCL's " +
 			"registration is internal and no NCCL_BUFFSIZE or NCCL_MAX_NCHANNELS setting makes it " +
-			"fit, so its copy REFUSES with an Error naming the two cluster-side remedies. Both copies " +
-			"must still carry the containerd lesson — see TestEveryFabricMemlockKeepsTheContainerdLesson.",
+			"fit, so its copy REFUSES with an Error naming the two cluster-side remedies. fabric-soak " +
+			"sizes itself to fit exactly like the perftest runners it shares this copy with. Every " +
+			"copy must still carry the containerd lesson — see " +
+			"TestEveryFabricMemlockKeepsTheContainerdLesson.",
 	},
 	{
 		name:     "memlock_test.go",
