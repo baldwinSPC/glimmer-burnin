@@ -480,8 +480,12 @@ func runClient(ports []rdmaPort, peerHost string, cfg plan) int {
 	if runErr != nil && !strings.Contains(out, "RESULT ") {
 		_ = ch.send(message{Kind: kindAbort, Reason: runErr.Error()})
 		if looksLikeMemlockExhaustion(out) {
+			// cfg.memlock is THIS end's own soft limit, already confirmed
+			// sufficient by main()'s pre-flight gate before runClient could
+			// ever be reached — so it cannot be why THIS failed. See #478
+			// and memlockRuledOut's own comment.
 			return fin(exitError, "the rank-1 harness could not register its NCCL transport buffers against %s. %s",
-				peerIP, memlockAdvice(cfg.memlock))
+				peerIP, memlockRuledOut(cfg.memlock))
 		}
 		return fin(exitError, "the rank-1 harness failed against %s: %v", peerIP, runErr)
 	}
@@ -912,8 +916,12 @@ func runGroupRank(rank, nranks int, rootHost string, duration int) int {
 
 	if runErr != nil && !strings.Contains(out, "RESULT ") {
 		if looksLikeMemlockExhaustion(out) {
+			// Same reasoning as runClient's call site: cfg.memlock is this
+			// rank's own soft limit, already confirmed sufficient by the
+			// pre-flight gate above before runGroupRank could be reached.
+			// See #478.
 			return fin(exitError, "rank %d could not register its NCCL transport buffers. %s",
-				rank, memlockAdvice(cfg.memlock))
+				rank, memlockRuledOut(cfg.memlock))
 		}
 		return fin(exitError, "rank %d of %d failed: %v — the collective did not complete",
 			rank, nranks, runErr)

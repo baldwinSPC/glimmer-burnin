@@ -180,3 +180,26 @@ func memlockAdvice(soft uint64) string {
 			"runners/ib-write-bw needs none of this: it sizes its own registrations to fit and measures the same link",
 		humanLimit(soft))
 }
+
+// memlockRuledOut is printed instead of memlockAdvice at a call site where
+// looksLikeMemlockExhaustion matched the harness output but soft is a value
+// THIS RUNNER ALREADY CONFIRMED SUFFICIENT before the harness ever started —
+// main's pre-flight gate (memlockSufficient(soft)) refuses to reach either
+// runClient or runGroupRank at all otherwise, so soft cannot be the cause of a
+// failure surfacing here.
+//
+// Calling memlockAdvice in that situation would have this runner blame a
+// value it already established was fine (#478) — the same "declare what you
+// have not positively established" mistake this project refuses everywhere
+// else, reached here by trusting a string-pattern match over what the runner
+// itself already measured. This keeps the useful half of the match (the
+// error SHAPE is a known one) without the false half (that THIS end's
+// memlock explains it).
+func memlockRuledOut(soft uint64) string {
+	return fmt.Sprintf(
+		"the error resembles RLIMIT_MEMLOCK exhaustion (a common verbs registration failure shape), but "+
+			"this end's own limit (%s) was already confirmed sufficient before the harness started, so "+
+			"that is not the cause here. Treating this as a genuine, unexplained failure rather than an "+
+			"excused environment fault — the raw harness output is the only evidence available",
+		humanLimit(soft))
+}

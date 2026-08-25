@@ -47,6 +47,33 @@ func TestMemlockAdviceIsActionable(t *testing.T) {
 	}
 }
 
+// The whole point of #478: this message must NOT repeat memlockAdvice's
+// "ENVIRONMENT fault" framing or its remedies, because at both call sites that
+// use it (runClient, runGroupRank) the value it is handed was already
+// confirmed sufficient before the harness ran — repeating memlockAdvice's
+// claim here would have this runner contradict what it already established.
+func TestMemlockRuledOutDoesNotRepeatMemlockAdvicesClaim(t *testing.T) {
+	got := memlockRuledOut(1 << 30)
+	for _, want := range []string{
+		"already confirmed sufficient", // the actual fact
+		"not the cause",                // the correction
+		"genuine, unexplained failure", // what it is instead
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("memlockRuledOut should mention %q; got:\n%s", want, got)
+		}
+	}
+	for _, mustNotContain := range []string{
+		"ENVIRONMENT fault", // memlockAdvice's claim, which would be false here
+		"LimitMEMLOCK",      // a remedy for a limit that was never the problem
+	} {
+		if strings.Contains(got, mustNotContain) {
+			t.Errorf("memlockRuledOut must not repeat memlockAdvice's environment-fault framing; "+
+				"found %q in:\n%s", mustNotContain, got)
+		}
+	}
+}
+
 // It must be an Error, never a Fail. The link was never measured, so there is no
 // hardware verdict — and Error is the retryable phase, which is right for an
 // environment somebody is about to fix. A Fail would permanently indict a link
