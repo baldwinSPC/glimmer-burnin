@@ -344,9 +344,12 @@ func appendTo(t *testing.T, path, content string) {
 // error — unrecoverable, and it exits 2, the undeclared skip code, on the one
 // runner in this repository that claims never to skip.
 //
-// The bound is deliberately loose (a fifth of the log). It is not a memory
+// The bound is deliberately loose (a third of the log). It is not a memory
 // budget; it is the difference between "retains nothing" and "retains all of
-// it", and only a change back to accumulating can cross it.
+// it", and only a change back to accumulating can cross it. It was a fifth
+// until #488: CI-runner GC/scheduling variance pushed one green build's peak
+// to 20.58% against a 20% ceiling, which a margin this loose has no business
+// failing on — the test exists to catch retention, not to measure GC noise.
 func TestFileSourceScanRetainsNothing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates a multi-megabyte log")
@@ -404,7 +407,7 @@ func TestFileSourceScanRetainsNothing(t *testing.T) {
 		t.Fatalf("visited %d records, want %d — the scan is not reading the whole log", seen, records)
 	}
 
-	limit := logBytes / 5
+	limit := logBytes / 3
 	if peak > limit {
 		t.Errorf("peak heap grew %d bytes while streaming a %d byte log (limit %d) — the scan is retaining records",
 			peak, logBytes, limit)
