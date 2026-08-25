@@ -207,17 +207,21 @@ spec:
   # sum to ~24.9 GB/s before the 0.80 margin, which is the same arithmetic
   # landing in the same place from this project's own numbers.
   #
-  # THIS RAISES THE FLOOR ABOVE WHAT THE FLEET CAN CURRENTLY PASS. #489's
-  # selector defect is still open — selectPort still returns exactly one rail
-  # — so a run against current main will FAIL this threshold instead of
-  # passing it. That is the point: a single-rail measurement (~11.99-12.00
-  # GB/s) certifying as Passed was the bug, and a correct floor turning that
-  # same measurement into a Fail is strictly better than silently accepting
-  # it, even before the selector itself is fixed. Once #489's selector half
-  # lands and NCCL is pointed at both rails, a healthy pair should clear this
-  # floor comfortably at ~22.6+ GB/s. Re-measure this number if it is ever
-  # reused for a different rail count or a different SKU's PCIe attachment —
-  # see #489 and #489's prior-art citation for the derivation.
+  # #489's OTHER HALF — nccl's own rdma.go now tries multi-rail selection
+  # first (classifyRails: pin every RDMA port sharing a local subnet with
+  # >= 1 other, the collective rail) and falls back to the original
+  # single-device selectPort only when no such subnet exists or the
+  # candidate rails' GID indices disagree. A healthy pair on this fleet
+  # should now clear this floor comfortably at ~22.6+ GB/s. If a run instead
+  # measures the old single-rail figure (~11.99-12.00 GB/s) and fails this
+  # gate, that is EITHER the fallback path firing for a real reason (worth
+  # reading the run's log for classifyRails' own explanation) OR a genuine
+  # single-rail regression — either way the floor is doing its job: a
+  # single-rail measurement must not certify as this fleet's collective
+  # bandwidth, which is the whole point of raising it in the first place.
+  # Re-measure this number if it is ever reused for a different rail count
+  # or a different SKU's PCIe attachment — see #489 and its prior-art
+  # citation for the derivation.
   thresholds:
     - metric: busBandwidthGBs
       comparison: GreaterThanOrEqual

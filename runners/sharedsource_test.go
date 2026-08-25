@@ -52,6 +52,14 @@ var divergent = map[string]string{
 	"rendezvous.go": "nccl speaks the GROUP contract (BURNIN_RANK/NRANKS/ROOT_HOST); " +
 		"ib-write-bw and gpudirect-rdma speak the PAIR contract (BURNIN_ROLE/PEER_HOST). " +
 		"Different rendezvous, so different code — not drift.",
+	"rdma.go": "nccl's copy is a DELIBERATE fork as of #489: it answers 'which rail(s)' " +
+		"rather than 'which single port', because NCCL's transport natively stripes a " +
+		"communicator across every HCA named in NCCL_IB_HCA — a question ib-write-bw, " +
+		"gpudirect-rdma and fabric-soak never need to ask, since each measures ONE " +
+		"connection at a time. nccl's fork ADDS selectRailPorts/classifyRails/" +
+		"agreeingGIDIndex alongside the same discoverPorts/selectPort/resolveGID the " +
+		"other three still carry unchanged, and falls back to that identical " +
+		"single-device answer on any node with no qualifying multi-rail subnet.",
 	"memlock.go": "nccl REFUSES when RLIMIT_MEMLOCK is too small; ib-write-bw and " +
 		"gpudirect-rdma SIZE THEMSELVES to fit it. Two defensible policies for the " +
 		"same limit, and the runners chose differently on purpose.",
