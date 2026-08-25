@@ -40,9 +40,22 @@ spec:
         value: /sys
     # The server must be listening before the client connects, or the client
     # dies with a connection error that reads as a fabric fault.
+    #
+    # PORT 18510, NOT 18515 — this was wrong until #484/#492's follow-up.
+    # 18515 is ib_write_bw's OWN out-of-band port, and perftest accepts a
+    # BOUNDED number of connections on it: a tcpSocket probe firing every 2s
+    # against 18515 can consume the slot the real client needed, exactly the
+    # mistake this project's own e2e suite made once against a plain `nc -l`
+    # server (see CLAUDE.md). 18510 is this runner's OWN control/readiness
+    # listener (rendezvous.go) — bound before the first ib_write_bw
+    # invocation, and built to tolerate a probe connection that sends nothing.
+    # It is also how the server learns its peer's real address (accept, not
+    # DNS — see rendezvous.go's package comment for why the server cannot
+    # resolve BURNIN_PEER_HOST itself), so this probe is a precondition for
+    # the soak measuring the right link, not only a liveness convenience.
     readinessProbe:
       tcpSocket:
-        port: 18515
+        port: 18510
       periodSeconds: 2
   thresholds:
     # A counter: a healthy soak fails no windows, so Equal 0 is safe on day one.

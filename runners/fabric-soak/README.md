@@ -78,13 +78,14 @@ exit 2  FABRIC_SOAK_SKIP: <reason>  no RDMA device, or not half of a Pair
 exit 3  FABRIC_SOAK_ERROR: <reason> machinery; the link is UNJUDGED
 ```
 
-Ordinary Pair rendezvous — `BURNIN_ROLE`, `BURNIN_PEER_HOST` — and no new
-environment beyond two tuning knobs:
+Ordinary Pair rendezvous — `BURNIN_ROLE`, `BURNIN_PEER_HOST` — plus its own
+tuning knobs:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `FABRIC_SOAK_WINDOW_SECONDS` | 20 | one iteration's traffic |
 | `FABRIC_SOAK_SYSFS` | `/sys` | where the host's sysfs is mounted |
+| `BURNIN_HEALTH_PORT` | 18510 | this runner's own control/readiness listener — see "Port selection" below |
 
 A window must be shorter than the soak, and the runner refuses otherwise: a soak
 of one window is an `ib-write-bw` run with a longer name and reports no spread.
@@ -96,7 +97,29 @@ not simply the first one enumerated. On a single-HCA node those are the same; on
 a multi-HCA node they are not, and each end picking its own first device would
 have the two soaking different fabrics, or one talking to a device with no route
 to the other at all, which perftest reports as a connection failure that reads
-as a dead link.
+as a dead link (#484, #489).
+
+**The two ends learn their peer differently, and that asymmetry is deliberate.**
+The CLIENT resolves `BURNIN_PEER_HOST` directly — the server (its peer) already
+exists and answers DNS by the time the client starts. The SERVER cannot do the
+same: it starts first, and in-cluster its own peer's DNS name (the client's)
+does not resolve until the operator creates the client pod, which does not
+happen until the server reports Ready. Resolving it anyway used to silently
+degrade to a DIFFERENT selection rule ("first ACTIVE port") than the client's,
+so on a multi-rail node the two ends could pick different links entirely — real
+traffic, a real number, and the wrong topology. The server now learns its
+peer's address from the connection its own control channel accepts
+(`rendezvous.go`), the same fix `runners/ib-write-bw/rendezvous.go` already
+had.
+
+That control channel is **also the readinessProbe target** —
+`BURNIN_HEALTH_PORT` (default 18510), not ib_write_bw's own port (18515).
+Probing 18515 directly is the wrong choice for any Pair server in this
+project: perftest accepts a bounded number of connections, so a `tcpSocket`
+probe firing every couple of seconds can consume the slot the real client
+needed. `config/samples/fabric-soak.yaml` gets this right; a hand-written
+`BurnInTest` copying an older version of it should double-check its probe
+port.
 
 `RLIMIT_MEMLOCK` is read **before the first window** and the transfer is sized to
 fit it. Every RDMA buffer is pinned memory, so `ibv_create_cq` fails with ENOMEM
