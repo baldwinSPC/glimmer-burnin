@@ -80,6 +80,11 @@ const (
 	// with the one-shot measurement of the same link.
 	defaultMessageBytes = 1 << 20
 	defaultQPs          = 1
+
+	// defaultHealthPort is the runner's own control/readiness listener — see
+	// rendezvous.go. Matches ib-write-bw's own defaultHealthPort so the two
+	// fabric runners keep the same convention on a fleet that runs both.
+	defaultHealthPort = 18510
 )
 
 func main() { os.Exit(run()) }
@@ -168,23 +173,65 @@ func run() int {
 		logf("fabric-soak: raised the RLIMIT_MEMLOCK soft limit to the hard limit (%s)", humanBytes(soft))
 	}
 	logf("fabric-soak: RLIMIT_MEMLOCK = %s", humanBytes(soft))
+
+	healthPort := envInt("BURNIN_HEALTH_PORT", defaultHealthPort)
+	// deadline bounds BOTH the rendezvous handshake below and the server's
+	// whole soak — see serverDeadline. Computed once, from one start time, and
+	// threaded through rather than each stage calling time.Now() again: the
+	// handshake consuming part of the pod-start-skew grace this budget already
+	// carries is correct (a slow rendezvous IS a slow start), but recomputing
+	// "duration + grace from now" AFTER the handshake would silently extend
+	// the server's total lifetime by however long the handshake took.
+	deadline := serverDeadline(time.Now(), duration, windowSeconds)
+
 	// The port that can REACH THE PEER, not simply the first one enumerated.
 	//
 	// On a node with one HCA the two are the same. On a node with several they
-	// are not, and picking ports[0] on each end independently would have the two
-	// ends soaking different fabrics — or one end talking to a device with no
-	// route to the other at all, which perftest reports as a connection failure
-	// that reads as a dead link.
-	//
-	// A peer that does not resolve is not fatal here: selectPort falls back to
-	// its own preference order, and the reason is logged either way.
+	// are not, and picking ports[0] on each end independently would have the
+	// two ends soaking different fabrics — or one end talking to a device with
+	// no route to the other at all, which perftest reports as a connection
+	// failure that reads as a dead link.
 	var peerIP net.IP
-	if addrs, rerr := net.LookupIP(peerHost); rerr == nil && len(addrs) > 0 {
-		peerIP = addrs[0]
-	} else {
-		logf("fabric-soak: could not resolve %s (%v); selecting a port without a route hint",
-			peerHost, rerr)
+	var probeListener *net.TCPListener
+	switch role {
+	case pairRoleServer:
+		// The SERVER cannot resolve peerHost — see rendezvous.go's package
+		// comment for why that is not a race but a name that cannot exist yet.
+		// It learns its peer from the accepted connection instead.
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", healthPort))
+		if err != nil {
+			return fin(exitError, "binding the rendezvous/readiness port %d: %v", healthPort, err)
+		}
+		probeListener = ln.(*net.TCPListener)
+		// From this moment a tcpSocket readinessProbe on healthPort succeeds,
+		// and it means what it says: this end is listening and will accept
+		// its peer.
+		logf("fabric-soak: listening on :%d for the %s endpoint (this is the readinessProbe port)",
+			healthPort, pairRoleClient)
+		peerIP, err = awaitPeer(probeListener, time.Until(deadline), logf)
+		if err != nil {
+			_ = probeListener.Close()
+			return fin(exitError, "%v — the link was never exercised", err)
+		}
+		logf("fabric-soak: %s endpoint connected from %s", pairRoleClient, peerIP)
+	case pairRoleClient:
+		// A peer that does not resolve is not fatal here for PORT SELECTION:
+		// selectPort falls back to its own preference order, and the reason is
+		// logged either way. It IS fatal below for the handshake itself — the
+		// server is waiting on this connection to learn who its peer is, and a
+		// client that cannot reach it at all means the link was never
+		// exercised from either end.
+		if addrs, rerr := net.LookupIP(peerHost); rerr == nil && len(addrs) > 0 {
+			peerIP = addrs[0]
+		} else {
+			logf("fabric-soak: could not resolve %s (%v); selecting a port without a route hint",
+				peerHost, rerr)
+		}
+		if err := dialPeer(peerHost, healthPort, time.Until(deadline), logf); err != nil {
+			return fin(exitError, "%v", err)
+		}
 	}
+
 	port, why, perr := selectPort(ports, peerIP)
 	if perr != nil {
 		return fin(exitError, "choosing an RDMA port: %v", perr)
@@ -206,7 +253,11 @@ func run() int {
 		role, peerHost, peerNode, duration, windowSeconds, humanBytes(uint64(messageBytes)), qps)
 
 	if role == pairRoleServer {
-		return runServer(port, duration, windowSeconds, messageBytes, qps)
+		// The one real handshake is done; keep the listener answering the
+		// kubelet's readinessProbe for the rest of this pod's life without
+		// blocking the soak loop below.
+		go tolerateProbes(probeListener)
+		return runServer(deadline, port, messageBytes, qps)
 	}
 	return runClient(port, peerHost, peerNode, duration, windowSeconds, messageBytes, qps, soft)
 }
@@ -231,14 +282,15 @@ func serverDeadline(start time.Time, durationSeconds, windowSeconds int) time.Ti
 }
 
 // runServer holds the far end open for the whole soak, plus a grace period —
-// see serverDeadline.
+// see serverDeadline. deadline is computed by the caller, from ONE start time
+// that also bounds the rendezvous handshake preceding this call — see run()'s
+// own comment on why it is not recomputed here.
 //
 // The server never decides — the client is the deciding side at Pair scope, as
 // everywhere in this project. It restarts ib_write_bw for each window because
 // perftest's server exits when its client disconnects, and a soak is many
 // connections rather than one long one.
-func runServer(port rdmaPort, duration, windowSeconds, messageBytes, qps int) int {
-	deadline := serverDeadline(time.Now(), duration, windowSeconds)
+func runServer(deadline time.Time, port rdmaPort, messageBytes, qps int) int {
 	restarts := 0
 
 	for time.Now().Before(deadline) {
