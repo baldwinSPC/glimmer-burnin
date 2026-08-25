@@ -102,10 +102,23 @@ type pairSide struct {
 	node   string
 	pod    string
 	result *runner.Result
+
+	// condemnedLog is a best-effort raw log tail captured from a pod that was
+	// condemned while still LIVE — never a parsed runner.Result, and never set
+	// alongside one. It exists purely to be read by a human: see #490. Keeping
+	// it out of result is deliberate — pairVerdict branches on result == nil to
+	// tell "still running when its peer decided" apart from "reported", and
+	// populating result here would silently move a condemned-while-live server
+	// into the both-reported precedence path it was never part of.
+	condemnedLog string
 }
 
 func (s pairSide) summary() string {
 	if s.result == nil {
+		if log := strings.TrimSpace(s.condemnedLog); log != "" {
+			return fmt.Sprintf("%s %s did not report (log before it was condemned: %s)",
+				s.role, s.node, clampCondemnedLog(log))
+		}
 		return fmt.Sprintf("%s %s did not report", s.role, s.node)
 	}
 	out := fmt.Sprintf("%s %s %s (exit %d)", s.role, s.node, strings.ToLower(string(s.result.Verdict)), s.result.ExitCode)
@@ -433,6 +446,14 @@ func (r *BurnInRunReconciler) harvestPair(
 		}
 	} else {
 		condemned = append(condemned, serverPod)
+		// Best-effort only, and diagnostic only — see #490. killPods deletes a
+		// live pod outright, so this is the last chance to read anything the
+		// server ever wrote; a fetch failure here is silently dropped rather
+		// than surfacing as logErr, because it was never the log this attempt
+		// is judged on (that's clientLogErr, already captured above).
+		if stdout, err := r.fetchLogs(ctx, serverPod); err == nil {
+			server.condemnedLog = stdout
+		}
 	}
 
 	combined := combinePair(server, client, logErr, &t.Spec)
@@ -559,6 +580,26 @@ func pairVerdict(server, client pairSide) (runner.Verdict, int) {
 		}
 	}
 	return runner.VerdictPass, client.result.ExitCode
+}
+
+// maxCondemnedLog bounds the diagnostic tail summary() embeds for a server
+// condemned while still live (#490). Looser than maxPodDetail (512): that
+// constant bounds one kubelet sentence, while this is the runner's own
+// account of what it was doing right up to being killed, and a bound that
+// tight would as often cut the useful line as keep it.
+const maxCondemnedLog = 2000
+
+// condemnedLogTailLines bounds how many of the log's OWN lines feed
+// clampCondemnedLog, so a chatty runner's tail is still whole lines rather
+// than an arbitrary byte cut through the middle of one.
+const condemnedLogTailLines = 20
+
+func clampCondemnedLog(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > condemnedLogTailLines {
+		lines = lines[len(lines)-condemnedLogTailLines:]
+	}
+	return truncateAtRune(strings.Join(strings.Fields(strings.Join(lines, "\n")), " "), maxCondemnedLog, "… (truncated)")
 }
 
 // pairMessage states the verdict's subject before it states the evidence.
