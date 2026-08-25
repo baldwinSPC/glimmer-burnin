@@ -85,6 +85,7 @@ environment beyond two tuning knobs:
 |---|---|---|
 | `FABRIC_SOAK_WINDOW_SECONDS` | 20 | one iteration's traffic |
 | `FABRIC_SOAK_SYSFS` | `/sys` | where the host's sysfs is mounted |
+| `FABRIC_SOAK_RESTART_DELAY_MS` | 500 | **EXPERIMENTAL (#480)** — server-only; see below |
 
 A window must be shorter than the soak, and the runner refuses otherwise: a soak
 of one window is an `ib-write-bw` run with a longer name and reports no spread.
@@ -110,8 +111,29 @@ report a link that carried no traffic, with the real cause named nowhere. A
 window that fails that way is reported as an Error naming `RLIMIT_MEMLOCK`, not
 as a fabric verdict.
 
+## `FABRIC_SOAK_RESTART_DELAY_MS` — experimental, #480
+
+The server's restart loop between one `ib_write_bw` exiting and the next being
+started had no delay at all until this knob existed. On this project's own
+two-node fleet, the FIRST real run of this kind respawned it ~830 times/second
+and **every single window failed** with `Couldn't get context for the device`
+(`ibv_open_device` inside perftest) — while `ib-write-bw`, whose device
+selection is byte-identical (`rdma.go` is shared source), passed with the same
+mounts and security context. The working hypothesis is that RDMA device state
+released by a process's exit is not instantly reclaimable, and a respawn that
+fast self-contends with its own immediately-prior iteration — something
+`ib-write-bw`'s one-shot invocation cannot hit.
+
+This knob exists to test that hypothesis on real hardware without a rebuild
+per value tried. **Its presence, and its nonzero default, are not a confirmed
+fix** — #480 stays open until a real run completes at least one window with it
+in place. The value used is carried in `soakServerRestartDelayMs` so a
+captured result self-documents which experiment produced it.
+
 ## Status
 
-**Not published**, and no measurement it produces has come from real hardware —
-it needs two nodes with an RDMA link. Ship it thresholdless and gather baselines
-before pinning anything except `soakFailedIterations Equal 0`.
+**Not published.** The first real-hardware run (#480) found every window
+failing at device open before any traffic crossed the link — see above. Ship
+it thresholdless and gather baselines before pinning anything except
+`soakFailedIterations Equal 0`, and do not trust `soakFailedIterations Equal 0`
+itself until #480 is resolved and at least one real window has completed.

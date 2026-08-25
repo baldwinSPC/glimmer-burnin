@@ -233,6 +233,7 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"linkErrorEvents":            {UnitNone, ThresholdUseAcceptance},
 		"soakIterations":             {UnitNone, ThresholdUseEvidence},
 		"soakServerRestarts":         {UnitNone, ThresholdUseEvidence},
+		"soakServerRestartDelayMs":   {UnitMilliseconds, ThresholdUseEvidence},
 		"acceleratorCount":           {UnitNone, ThresholdUseAcceptance},
 		// Multi-device iteration (docs/dev/multi-device.md). deviceCount is
 		// the one a fleet gates; the spreads are ceilings gated

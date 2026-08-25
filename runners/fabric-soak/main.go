@@ -62,6 +62,24 @@ const (
 	// nothing at all.
 	emitEverySeconds = 60
 
+	// defaultServerRestartDelayMS is EXPERIMENTAL (#480) and defaults to a
+	// nonzero value deliberately, so pointing a BurnInTest at this build
+	// exercises the experiment without any extra configuration.
+	//
+	// The server's restart loop between one ib_write_bw exiting and the next
+	// being exec'd had no delay at all, which on this fleet's first fabric-soak
+	// run respawned ~830 times/second — every one of the ~1.2ms gaps failing
+	// "Couldn't get context for the device" (ibv_open_device). The hypothesis
+	// #480 records: RDMA device/QP/CQ/PD resources released by a process's
+	// exit may not be instantly reclaimable, and a respawn faster than that
+	// reclaim window self-contends with its own immediately-prior iteration —
+	// something ib-write-bw's one-shot invocation structurally cannot hit.
+	// This knob exists to let that hypothesis be tested on real hardware
+	// without a rebuild per value tried; DO NOT treat its presence, or its
+	// default, as a confirmed fix. #480 stays open until a real run completes
+	// at least one window with it in place.
+	defaultServerRestartDelayMS = 500
+
 	// startSkewBudgetSeconds is how long the operator may take to get the
 	// client pod actually running after the server reports Ready.
 	//
@@ -133,6 +151,10 @@ func run() int {
 
 	duration := envInt("BURNIN_DURATION_SECONDS", 3600)
 	windowSeconds := envInt("FABRIC_SOAK_WINDOW_SECONDS", defaultWindowSeconds)
+	// EXPERIMENTAL (#480) — see defaultServerRestartDelayMS. Only the server
+	// reads this; the client's failure mode (no window completed) is what
+	// decides the run either way.
+	restartDelay := time.Duration(envInt("FABRIC_SOAK_RESTART_DELAY_MS", defaultServerRestartDelayMS)) * time.Millisecond
 	if windowSeconds >= duration {
 		return fin(exitError, "FABRIC_SOAK_WINDOW_SECONDS=%d is not shorter than the %ds soak — "+
 			"a soak of one window is an ib-write-bw run with a longer name, and reports no spread",
@@ -206,7 +228,7 @@ func run() int {
 		role, peerHost, peerNode, duration, windowSeconds, humanBytes(uint64(messageBytes)), qps)
 
 	if role == pairRoleServer {
-		return runServer(port, duration, windowSeconds, messageBytes, qps)
+		return runServer(port, duration, windowSeconds, messageBytes, qps, restartDelay)
 	}
 	return runClient(port, peerHost, peerNode, duration, windowSeconds, messageBytes, qps, soft)
 }
@@ -237,9 +259,19 @@ func serverDeadline(start time.Time, durationSeconds, windowSeconds int) time.Ti
 // everywhere in this project. It restarts ib_write_bw for each window because
 // perftest's server exits when its client disconnects, and a soak is many
 // connections rather than one long one.
-func runServer(port rdmaPort, duration, windowSeconds, messageBytes, qps int) int {
+//
+// restartDelay is EXPERIMENTAL (#480, see defaultServerRestartDelayMS) — a
+// pause between one ib_write_bw exiting and the next being exec'd, to test
+// whether the restart loop was self-contending with its own prior iteration's
+// not-yet-released RDMA device state. It changes nothing about the verdict:
+// the server still never decides, and a delay that turns out not to help
+// still ends in the same always-exitPass return below.
+func runServer(port rdmaPort, duration, windowSeconds, messageBytes, qps int, restartDelay time.Duration) int {
 	deadline := serverDeadline(time.Now(), duration, windowSeconds)
 	restarts := 0
+	if restartDelay > 0 {
+		logf("fabric-soak: EXPERIMENTAL — pausing %s between server restarts (#480)", restartDelay)
+	}
 
 	for time.Now().Before(deadline) {
 		cmd := exec.Command("ib_write_bw", serverArgs(port, messageBytes, qps)...)
@@ -249,9 +281,13 @@ func runServer(port rdmaPort, duration, windowSeconds, messageBytes, qps int) in
 		}
 		_ = cmd.Wait() // a client disconnect ends it; that is the normal case
 		restarts++
+		if restartDelay > 0 && time.Now().Before(deadline) {
+			time.Sleep(restartDelay)
+		}
 	}
 
 	metric("soakServerRestarts", strconv.Itoa(restarts))
+	metric("soakServerRestartDelayMs", strconv.FormatInt(restartDelay.Milliseconds(), 10))
 	// "restart(s)", never "window(s)": restarts is how many times THIS LOOP
 	// re-invoked ib_write_bw, not how many windows actually completed — the
 	// server has no client-side view of that and never decides the verdict

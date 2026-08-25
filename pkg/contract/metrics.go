@@ -971,6 +971,12 @@ var registry = map[string]Metric{
 		Aggregation:  AggSum,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	"soakServerRestartDelayMs": {
+		Name: "soakServerRestartDelayMs", Unit: UnitMilliseconds,
+		Description:  "EXPERIMENTAL (#480): the pause, in milliseconds, fabric-soak's server was configured to wait between one ib_write_bw exiting and the next being started. A fixed configuration value, not a measurement — carried so a captured result self-documents which experiment produced it, since this knob may be removed once #480 is resolved one way or the other",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"linkErrorEvents": {
 		Name: "linkErrorEvents", Unit: UnitNone,
 		Description:  "sum of the port error counters that MOVED during the soak — symbol errors, link recoveries, link-downs, receive errors. A DELTA, never a lifetime total: a NIC up for two hundred days carries a large count that says nothing about the last four hours. Unmeasurable (n/a) when no sysfs counter could be read, or when a counter went backwards because the port was reset mid-soak",
