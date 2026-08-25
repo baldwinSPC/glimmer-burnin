@@ -13,6 +13,15 @@ spec:
   hostNetwork: true
   runner:
     image: ghcr.io/baldwinspc/glimmer-burnin-fabric-soak:REPLACE-ME
+    # Required to OPEN the uverbs character devices; the hostPaths mount below
+    # only makes them visible. Measured directly on this fleet (#480): a pod
+    # with the mount but not this fails every window with "Couldn't get
+    # context for the device" — a Kubernetes hostPath volume grants
+    # visibility, never a device-cgroup rule, the same finding as #302 for
+    # /dev/kmsg. `capabilities: [IPC_LOCK]` is not a substitute — see
+    # pair-network-acceptance.yaml's header for the full measurement this
+    # sample was missing until #480.
+    privileged: true
     hostPaths:
       # The verbs devices. Without them the runner fails loudly at
       # `Couldn't create CQ` rather than reporting a number.
