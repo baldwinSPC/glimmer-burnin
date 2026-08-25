@@ -252,7 +252,16 @@ func runServer(port rdmaPort, duration, windowSeconds, messageBytes, qps int) in
 	}
 
 	metric("soakServerRestarts", strconv.Itoa(restarts))
-	logf("fabric-soak: server finished after %d window(s)", restarts)
+	// "restart(s)", never "window(s)": restarts is how many times THIS LOOP
+	// re-invoked ib_write_bw, not how many windows actually completed — the
+	// server has no client-side view of that and never decides the verdict
+	// (see above). Printed as a completed-work count, this line read as a
+	// productive soak on a run where every single window failed and the
+	// server was in a sub-second crash loop the whole time (#480) — the exact
+	// "declare only what was positively established" mistake this project
+	// exists to catch elsewhere, reached here because nobody wrote a test
+	// against the WORDING of a message this metric already named honestly.
+	logf("fabric-soak: server finished after %d restart(s)", restarts)
 	fmt.Println("\nThis is the SERVER end. The client's result is the link's verdict.")
 	return exitPass
 }
