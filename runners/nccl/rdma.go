@@ -319,3 +319,166 @@ func readTrimmed(path string) string {
 	}
 	return s
 }
+
+// railPort is one candidate member of a collective rail: the port itself,
+// plus the local address and subnet mask that put it in its subnet group.
+// Carrying the mask alongside the address (rather than re-deriving a subnet
+// key from a net.Interfaces() call inside the classifier) is what makes
+// classifyRails a pure function over data selectRailPorts already resolved —
+// see rdma_test.go, which exercises the classification directly with
+// fabricated candidates instead of the host's real network stack.
+type railPort struct {
+	port rdmaPort
+	addr net.IP
+	mask net.IPMask
+}
+
+// selectRailPorts is nccl's OWN answer to "which RDMA port(s)", and the
+// reason this file is a fork rather than the shared copy — see #489.
+//
+// selectPort answers a question that has exactly one right answer for a
+// point-to-point measurement: which SINGLE device reaches this peer. NCCL is
+// not point-to-point — its transport natively stripes a communicator's
+// traffic across every HCA named in NCCL_IB_HCA — so on a node wired with
+// more than one usable fabric rail, asking "which one" is the wrong question:
+// selectPort's route-to-peer lookup answers it anyway, correctly for THAT
+// question, and the result is a measurement of one rail reported as though it
+// were the collective's whole bandwidth (measured on this fleet: ~12 GB/s
+// selected, ~22.6 GB/s available across both).
+//
+// The classification is LOCAL topology, not a peer lookup, matching the
+// sibling "glimmer" project's rail_netdevs() (cited in #489): a subnet shared
+// by TWO OR MORE of this node's own active RDMA netdevs is the collective;
+// every port in it is a rail. A node with no such subnet — every active
+// port's own address sits alone on its subnet, the ordinary shape of a
+// single-rail SKU — returns (nil, "", nil), not an error, so the caller falls
+// back to selectPort's existing single-device answer exactly as it always
+// has. This function changes nothing for a single-rail node.
+//
+// One thing it refuses to guess at: NCCL_IB_GID_INDEX is ONE global value,
+// not a per-HCA list the way NCCL_IB_HCA is — there is no environment-variable
+// syntax to tell NCCL "use index 3 on this HCA and index 5 on that one". If
+// the rails in a collective group resolve to DIFFERENT GID indices, no single
+// value is correct for both, and pinning one anyway would silently misconfigure
+// whichever rail disagrees — the exact "confident but wrong" failure #489
+// exists to stop. So a GID-index disagreement refuses the whole multi-rail
+// pin (nil, "", nil, same as no multi-rail topology at all) rather than
+// picking one and hoping; the caller falls back to selectPort. On the
+// two-Spark fleet this is not expected to fire — both rails are the same
+// driver-assigned RoCE v2 IPv4 GID convention — but it is checked rather than
+// assumed, because assuming it wrong here reproduces the bug this function
+// exists to fix, one layer down.
+func selectRailPorts(ports []rdmaPort) ([]rdmaPort, string, error) {
+	var candidates []railPort
+	for _, p := range ports {
+		if !p.active() || p.LinkLayer != linkLayerEthernet || p.NetDev == "" {
+			continue // true InfiniBand has no IP subnet to group by.
+		}
+		ifc, err := net.InterfaceByName(p.NetDev)
+		if err != nil {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.To4() == nil {
+				continue
+			}
+			candidates = append(candidates, railPort{port: p, addr: ipnet.IP, mask: ipnet.Mask})
+		}
+	}
+	return classifyRails(candidates)
+}
+
+// classifyRails is selectRailPorts' pure core: given every candidate
+// (port, local address, subnet mask) — already resolved by the caller from
+// the real network stack — it groups by subnet, picks the largest
+// multi-member group, resolves each member's GID, and refuses (nil, "", nil)
+// on either no qualifying group or a GID-index disagreement within the one
+// chosen. Split out so this decision is testable directly, without a real
+// network stack to fabricate interfaces on.
+func classifyRails(candidates []railPort) ([]rdmaPort, string, error) {
+	bySubnet := map[string][]railPort{}
+	for _, c := range candidates {
+		key := (&net.IPNet{IP: c.addr.Mask(c.mask), Mask: c.mask}).String()
+		bySubnet[key] = append(bySubnet[key], c)
+	}
+
+	subnets := make([]string, 0, len(bySubnet))
+	for k := range bySubnet {
+		subnets = append(subnets, k)
+	}
+	sort.Strings(subnets) // deterministic: map iteration order is not.
+
+	var chosenSubnet string
+	var chosen []railPort
+	for _, subnet := range subnets {
+		members := bySubnet[subnet]
+		if len(members) < 2 {
+			continue // not a collective — a rail by itself, or a lone management NIC.
+		}
+		if len(members) > len(chosen) {
+			chosenSubnet, chosen = subnet, members
+		}
+	}
+	if chosen == nil {
+		return nil, "", nil
+	}
+
+	out := make([]rdmaPort, 0, len(chosen))
+	for i := range chosen {
+		resolveGID(&chosen[i].port, chosen[i].addr)
+		out = append(out, chosen[i].port)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Device < out[j].Device })
+
+	if _, ok := agreeingGIDIndex(out); !ok {
+		return nil, "", nil
+	}
+	names := make([]string, 0, len(out))
+	for _, p := range out {
+		names = append(names, fmt.Sprintf("%s (%s)", p.Device, p.GIDAddr))
+	}
+	why := fmt.Sprintf("selected %d rails sharing subnet %s: %s", len(out), chosenSubnet, strings.Join(names, ", "))
+	return out, why, nil
+}
+
+// agreeingGIDIndex reports whether a candidate rail group can be described by
+// ONE NCCL_IB_GID_INDEX value — the one thing that env var cannot express
+// per-HCA. Three shapes, and only the first two are safe to pin:
+//
+//   - every port resolved NO RoCE v2 GID: fine, (-1, true) — nothing to pin,
+//     same as the single-device path leaving NCCL_IB_GID_INDEX unset.
+//   - every port resolved the SAME index: fine, (index, true).
+//   - anything else — some resolved and some did not, or two resolved
+//     indices differ: refused, (-1, false). A MIXED result is refused for
+//     the same reason a DIFFERING one is: whichever port has no confirmed
+//     index is an unknown, and pinning the group at the other's value is a
+//     guess about hardware this function has no evidence for either way.
+func agreeingGIDIndex(ports []rdmaPort) (int, bool) {
+	resolved, unresolved := 0, 0
+	idx := -1
+	for _, p := range ports {
+		if p.GIDIndex < 0 {
+			unresolved++
+			continue
+		}
+		if resolved == 0 {
+			idx = p.GIDIndex
+		} else if p.GIDIndex != idx {
+			return -1, false
+		}
+		resolved++
+	}
+	switch {
+	case resolved == 0:
+		return -1, true
+	case unresolved == 0:
+		return idx, true
+	default:
+		return -1, false
+	}
+}

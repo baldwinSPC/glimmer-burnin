@@ -97,13 +97,21 @@ var fabricFiles = []fabricFile{
 	},
 	{
 		name:     "rdma.go",
-		sharedBy: []string{ibWriteBWDir, gpudirectDir, ncclDir, fabricSoakDir},
-		reason: "device discovery, port selection and GID resolution are one implementation. " +
-			"All four runners answer the same question — which local RDMA port reaches this peer — " +
-			"and a fork would let one runner SKIP a node the others test, which reads as a healthy " +
-			"node with no fabric rather than as a runner that stopped looking. This is also the " +
-			"file #489's wrong-rail-fallback defect lives in; a runner with its own undeclared copy " +
-			"could silently fail to receive whatever fixes it.",
+		sharedBy: []string{ibWriteBWDir, gpudirectDir, fabricSoakDir},
+		reason: "device discovery, single-port selection and GID resolution are one implementation, " +
+			"shared because ib-write-bw, gpudirect-rdma and fabric-soak all answer the same " +
+			"single-link question — which ONE local RDMA port reaches this peer — and a fork would " +
+			"let one runner SKIP a node the others test, which reads as a healthy node with no " +
+			"fabric rather than as a runner that stopped looking. nccl's copy is a DELIBERATE fork " +
+			"as of #489: NCCL is not point-to-point, its transport natively stripes a communicator " +
+			"across every HCA named in NCCL_IB_HCA, so 'which ONE port' is the wrong question for it " +
+			"on a node wired with more than one usable rail — measured on this fleet as a single " +
+			"rail's ~12 GB/s reported in place of the ~22.6 GB/s both rails together sustain. nccl's " +
+			"fork ADDS selectRailPorts/classifyRails/agreeingGIDIndex (local-topology rail " +
+			"classification with no per-HCA GID-index syntax to lean on) alongside the same " +
+			"discoverPorts/selectPort/resolveGID the other three runners still use unchanged — a " +
+			"node with no qualifying multi-rail subnet falls straight through to the identical " +
+			"single-device answer this file has always given.",
 	},
 	{
 		name:     "perftest.go",
@@ -151,6 +159,14 @@ var fabricFiles = []fabricFile{
 		name:     "memlock_test.go",
 		sharedBy: []string{ibWriteBWDir, gpudirectDir},
 		reason:   "the tests for the above, and forked with it.",
+	},
+	{
+		name: "rdma_test.go",
+		reason: "ib-write-bw's copy tests the shared discoverPorts/selectPort/resolveGID " +
+			"functions rdma.go's other entry still covers across three runners. nccl's copy " +
+			"(#489) tests only what its own fork adds — classifyRails, agreeingGIDIndex — and " +
+			"does not duplicate the shared-function coverage, so the two files test disjoint " +
+			"code and were never going to be identical.",
 	},
 	{
 		name: "main.go",

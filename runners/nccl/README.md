@@ -135,10 +135,14 @@ all-reduce on this hardware is exactly the assumption #489 disproved: two rails
 measured together reach ~22.6-22.9 GB/s. `config/samples/pair-network-acceptance.yaml`
 now gates on that dual-rail figure (`busBandwidthGBs >= 19.913`, derived and
 hardware-verified as documented there) rather than the 10.8 this README used to
-recommend — until #489's selector fix lands, expect a run against current
-`main` to measure the single-rail number below and FAIL that gate, which is the
-deliberate, corrected behavior: a single-rail measurement should not pass as
-the fleet's collective bandwidth.
+recommend. **The selector half also landed (#489)**: `rdma.go` now tries
+`classifyRails` first — pin every RDMA port sharing a local subnet with
+another, the collective — and only falls back to the single-device path
+below when no such subnet exists. A healthy pair should measure the dual-rail
+figure and clear the raised floor; if a run instead measures the single-rail
+number below and fails the gate, that is the fallback path firing (worth
+reading the run's own log for `classifyRails`' explanation) rather than a
+silent regression — which is the entire point of having raised the floor.
 
 A 2-rank all-reduce cannot exceed **the rail(s) NCCL is actually using**. On the
 DGX Spark pair this was developed against, `ib_write_bw` plateaus at **99.61
@@ -289,15 +293,28 @@ ranking. On a burn-in node that set includes the **wireless** interface, a CNI
 overlay and `docker0` — and NCCL choosing one produces a number that is real,
 reproducible, and about the wrong link entirely.
 
-So the wrapper sets, from the **same route-based discovery `ib-write-bw` uses**
-(so the two tests measure the same physical path and their numbers are
-comparable):
+So the wrapper sets it, in one of two ways depending on the node's own
+topology (`classifyRails` in `rdma.go`, #489):
+
+- **Multi-rail, when the node has one**: every RDMA port whose own address
+  shares a local subnet with another RDMA port's — the collective — pinned
+  together. `NCCL_IB_HCA` takes all of them as a comma-separated list, which
+  is what tells NCCL's transport to stripe a communicator's traffic across
+  every named HCA rather than picking one.
+- **Single-rail, the fallback**: the **same route-based discovery
+  `ib-write-bw` uses** — the one device that routes to the peer — exactly as
+  this wrapper always worked before #489. This is what a genuine single-rail
+  node gets, unconditionally; it is also what a multi-rail node falls back to
+  if its candidate rails' GID indices disagree (see `agreeingGIDIndex`'s own
+  comment for why that specific disagreement is refused rather than guessed
+  at) — `NCCL_IB_GID_INDEX` is one global value with no per-HCA syntax, so a
+  group that cannot honestly share one is not pinned as a group at all.
 
 | Variable | Set to |
 |---|---|
-| `NCCL_IB_HCA` | `<device>:<port>` of the HCA that routes to the peer |
-| `NCCL_IB_GID_INDEX` | the RoCE v2 GID whose IPv4 address is the local route address |
-| `NCCL_SOCKET_IFNAME` | the netdev that HCA fronts, so NCCL's own bootstrap ring does not go over Wi-Fi |
+| `NCCL_IB_HCA` | `<device>:<port>` of every selected rail, comma-joined |
+| `NCCL_IB_GID_INDEX` | the RoCE v2 GID index every selected rail agrees on, when any resolved one at all |
+| `NCCL_SOCKET_IFNAME` | the netdev the FIRST selected rail fronts — the bootstrap ring is a small control connection, not the striped data path, so it names one interface even when the data path uses several |
 
 These are appended to the environment the operator already populated from
 `spec.runner.env`, so an operator's explicit setting wins.

@@ -600,26 +600,51 @@ func harnessArgs(rank int, peer string, cfg plan) []string {
 // An operator's own env wins: these are appended to os.Environ(), which the
 // operator has already populated from spec.runner.env.
 func ncclEnv(ports []rdmaPort, peerIP net.IP) []string {
+	// MULTI-RAIL FIRST — see rdma.go's selectRailPorts for the full reasoning
+	// (#489). A node with no multi-member local subnet gets (nil, "", nil)
+	// back, not an error, and falls straight through to the single-device
+	// path exactly as it always has; this changes nothing for a single-rail
+	// node.
+	if rails, why, err := selectRailPorts(ports); err == nil && len(rails) > 0 {
+		logf("pinning NCCL to %d rails; %s", len(rails), why)
+		return railEnv(rails)
+	}
+
 	port, why, err := selectPort(ports, peerIP)
 	if err != nil {
 		logf("no RDMA port selected (%v); leaving NCCL to choose its own transport", err)
 		return nil
 	}
 	logf("pinning NCCL to %s; %s", port, why)
+	return railEnv([]rdmaPort{port})
+}
 
-	env := []string{
-		// <device>:<port> is the form NCCL_IB_HCA takes; naming the port matters
-		// on a dual-port HCA where only one side is cabled.
-		fmt.Sprintf("NCCL_IB_HCA=%s:%d", port.Device, port.Port),
-		// NCCL's own bootstrap ring is a TCP connection, and it must not go over
-		// the wireless interface while the data goes over the fabric.
-		"NCCL_SOCKET_IFNAME=" + port.NetDev,
+// railEnv builds the NCCL environment for one or more HCAs. NCCL_IB_HCA is
+// the ONLY one of these that takes a list — NCCL_SOCKET_IFNAME names a single
+// interface for the bootstrap ring (which needs no multi-rail striping of its
+// own; it is a small control connection, not the data path), and
+// NCCL_IB_GID_INDEX is a single global value with no per-HCA syntax at all,
+// which is exactly why selectRailPorts refuses to return a group whose GID
+// indices disagree — by the time a group reaches here, every port in it
+// either shares one GID index or none has one.
+func railEnv(rails []rdmaPort) []string {
+	hcas := make([]string, 0, len(rails))
+	for _, p := range rails {
+		// <device>:<port> is the form NCCL_IB_HCA takes; naming the port
+		// matters on a dual-port HCA where only one side is cabled.
+		hcas = append(hcas, fmt.Sprintf("%s:%d", p.Device, p.Port))
 	}
-	if port.GIDIndex >= 0 {
+	env := []string{
+		"NCCL_IB_HCA=" + strings.Join(hcas, ","),
+		// NCCL's own bootstrap ring is a TCP connection, and it must not go
+		// over the wireless interface while the data goes over the fabric.
+		"NCCL_SOCKET_IFNAME=" + rails[0].NetDev,
+	}
+	if rails[0].GIDIndex >= 0 {
 		// On RoCE there is no safe default: the low GID indices are the
 		// link-local IPv6 ones, and picking one produces a connection failure
 		// that reads as a broken fabric.
-		env = append(env, "NCCL_IB_GID_INDEX="+strconv.Itoa(port.GIDIndex))
+		env = append(env, "NCCL_IB_GID_INDEX="+strconv.Itoa(rails[0].GIDIndex))
 	}
 	return env
 }
