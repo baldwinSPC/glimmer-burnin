@@ -434,3 +434,160 @@ func TestSampleProfileThresholdsLintCleanIncludingVariants(t *testing.T) {
 			"this test lost sight of them")
 	}
 }
+
+// nccl's sweep, and the metric whose value is a peak ACROSS that sweep. Both
+// are string literals here on purpose: this file must not import a runner.
+const (
+	ncclSizesEnv       = "BURNIN_NCCL_SIZES"
+	busBandwidthMetric = "busBandwidthGBs"
+)
+
+// TestNoSampleGatesACollectiveOnASweepItDoesNotDeclare refuses a sample that
+// puts a floor under busBandwidthGBs without saying what sizes were swept to
+// get it.
+//
+// busBandwidthGBs is the PEAK across nccl_pair's sweep, so a floor and a sweep
+// are ONE decision. #502 is what it costs to make them apart: the floor was
+// derived at 8 GiB — 0.80 x the collective's summed per-rail PCIe budgets,
+// confirmed on real hardware at 22.652 GB/s — while the runner's compiled-in
+// default sweep stops at 256 MiB and never reaches that size. Nothing was
+// wrong with either number. They simply described different measurements, and
+// the sample recorded only one of them, so a CORRECT dual-rail run reported a
+// peak from the middle of the ramp (18.89 +/- 0.776 at n=10) and Failed a gate
+// its hardware clears with 2.02 GB/s to spare when the sweep reaches the size
+// the floor is about.
+//
+// That failure is the expensive shape: it reads as a HARDWARE VERDICT on a
+// healthy link, and `Fail` is the one phase this operator never retries. It is
+// also invisible to every other check here — the threshold is well-formed, the
+// metric is registered, the comparison is sound, the units are right. The only
+// thing wrong is a size that is not written down anywhere.
+//
+// So the rule is not "use these sizes". It is: if you gate on the peak, DECLARE
+// THE SWEEP, in the same object, where the next person to re-derive the floor
+// will see it. A profile that wants the runner's default sweep is welcome to it
+// — it just may not also carry a floor whose provenance the sweep cannot
+// reproduce.
+//
+// Both places a threshold can live are checked, because the hole would
+// otherwise be in whichever one this test forgot: on the BurnInTest itself, and
+// on a profile entry (or one of its variants) that resolves to an nccl test.
+func TestNoSampleGatesACollectiveOnASweepItDoesNotDeclare(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := burninv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	decoder := json.NewSerializerWithOptions(
+		json.DefaultMetaFactory, scheme, scheme,
+		json.SerializerOptions{Yaml: true, Strict: true},
+	)
+
+	files, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob samples: %v", err)
+	}
+
+	specs := map[string]burninv1alpha1.BurnInTestSpec{}
+	type profileDoc struct {
+		file string
+		p    *burninv1alpha1.BurnInProfile
+	}
+	var profiles []profileDoc
+	type testDoc struct {
+		file string
+		name string
+		spec burninv1alpha1.BurnInTestSpec
+	}
+	var tests []testDoc
+
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, doc := range splitYAMLDocuments(string(raw)) {
+			obj, _, err := decoder.Decode([]byte(doc), nil, nil)
+			if err != nil {
+				continue // TestSamplesDecodeStrictly owns that failure.
+			}
+			switch o := obj.(type) {
+			case *burninv1alpha1.BurnInTest:
+				specs[o.Name] = o.Spec
+				tests = append(tests, testDoc{filepath.Base(file), o.Name, o.Spec})
+			case *burninv1alpha1.BurnInProfile:
+				profiles = append(profiles, profileDoc{filepath.Base(file), o})
+			}
+		}
+	}
+
+	checked := 0
+	// require reports the sample as broken unless spec declares the sweep.
+	require := func(where string, spec burninv1alpha1.BurnInTestSpec) {
+		if spec.Kind != burninv1alpha1.KindNCCL {
+			return
+		}
+		checked++
+		if spec.Runner != nil {
+			for _, e := range spec.Runner.Env {
+				if e.Name == ncclSizesEnv && strings.TrimSpace(e.Value) != "" {
+					return
+				}
+			}
+		}
+		t.Errorf("%s gates %s but never declares %s. That metric is the PEAK across the runner's "+
+			"sweep, so the floor and the sizes are one decision — a floor derived at a size the "+
+			"sweep does not reach fails healthy hardware forever, and reports it as a hardware "+
+			"verdict (#502). Set spec.runner.env %s to the sizes the floor was derived against, "+
+			"or drop the floor",
+			where, busBandwidthMetric, ncclSizesEnv, ncclSizesEnv)
+	}
+
+	gatesBandwidth := func(ts []burninv1alpha1.Threshold) bool {
+		for _, th := range ts {
+			if th.Metric == busBandwidthMetric {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, td := range tests {
+		if gatesBandwidth(td.spec.Thresholds) {
+			require(fmt.Sprintf("%s: BurnInTest %q", td.file, td.name), td.spec)
+		}
+	}
+
+	for _, pd := range profiles {
+		for i, pt := range pd.p.Spec.Tests {
+			where := fmt.Sprintf("%s: BurnInProfile %q test[%d]", pd.file, pd.p.Name, i)
+
+			spec, ok := burninv1alpha1.BurnInTestSpec{}, false
+			switch {
+			case pt.Inline != nil:
+				spec, ok = *pt.Inline, true
+			case pt.TestRef != "":
+				// A dangling testRef is TestSampleProfileThresholdsLintClean-
+				// IncludingVariants' error to report, not this one's.
+				spec, ok = specs[pt.TestRef]
+			}
+			if !ok {
+				continue
+			}
+			// A profile ENTRY carries no thresholds of its own — only a
+			// variant does, and only a variant can therefore introduce a floor
+			// that the referenced test's own sweep declaration has to cover.
+			for _, v := range pt.Variants {
+				if gatesBandwidth(v.Thresholds) {
+					require(fmt.Sprintf("%s variant %q", where, v.Name), spec)
+				}
+			}
+		}
+	}
+
+	// A guard that silently matched nothing would pass forever after a rename.
+	if checked == 0 {
+		t.Fatalf("no sample gates %s on an %s test — this guard matched nothing and would "+
+			"pass whatever the samples said. Point it at the right kind or delete it",
+			busBandwidthMetric, burninv1alpha1.KindNCCL)
+	}
+}
