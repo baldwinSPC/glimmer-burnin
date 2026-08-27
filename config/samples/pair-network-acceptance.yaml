@@ -183,6 +183,41 @@ spec:
     # ib_write_bw does — and an RDMA plugin that cannot initialise falls back to
     # TCP, which produces a plausible bandwidth number for a path nobody was
     # qualifying. An RDMA device request alone does not supply the device nodes.
+    env:
+      # THE SWEEP IS DECLARED HERE BECAUSE THE FLOOR BELOW IS DERIVED FROM IT.
+      # busBandwidthGBs is the PEAK across this sweep, so the floor and the
+      # sizes are ONE decision and belong in one place — #502 is what happens
+      # when they are made apart. The floor was derived at 8 GiB while the
+      # runner's compiled-in default sweep stops at 256 MiB, so a CORRECT
+      # dual-rail run reported a peak from the middle of the ramp and Failed.
+      #
+      # Measured on this fleet, n=10, every sample confirmed dual-rail
+      # ("pinning NCCL to 2 rails" in the client log):
+      #
+      #     8 MiB  18.89 +/- 0.776     1 GiB  19.05 +/- 0.423
+      #    64 MiB  14.91 +/- 0.205     2 GiB  20.95 +/- 0.481
+      #   256 MiB  15.94 +/- 0.269     4 GiB  21.95 +/- 0.281
+      #                                8 GiB  22.50 +/- 0.234
+      #
+      # Two facts decide the sizes. The curve is still CLIMBING at 256 MiB —
+      # it is a ramp, not a plateau — so a sweep that stops there measures the
+      # collective before it reaches the capability the floor describes. And
+      # the peak over the default range is three times NOISIER (0.776 vs
+      # 0.234), because it lands on a local bump at 8 MiB that wanders between
+      # runs, so it is the least reproducible point on the curve as well as
+      # the wrong one. Peak over this sweep is 22.50 +/- 0.234, which clears
+      # the floor in 10/10 runs with 2.02 GB/s to spare; peak over the default
+      # sweep cleared it in 0/10.
+      #
+      # Sizes are BYTES, parsed with atoll — no k/M/G suffix is understood.
+      # The largest entry decides the allocation: nccl_pair sizes send+recv
+      # ONCE at the maximum before it sweeps, so 8 GiB here costs 16 GiB of
+      # device memory whatever the smaller entries are. That is affordable on
+      # GB10's unified 128 GB and is the reason this is set per-profile rather
+      # than raised in the runner's own default, where it would land on every
+      # adopter's accelerator regardless of size. The whole sweep runs in ~29s.
+      - name: BURNIN_NCCL_SIZES
+        value: "8,1048576,8388608,67108864,268435456,1073741824,2147483648,4294967296,8589934592"
     hostPaths:
       - path: /dev/infiniband
         mountPath: /dev/infiniband
@@ -211,17 +246,25 @@ spec:
   # first (classifyRails: pin every RDMA port sharing a local subnet with
   # >= 1 other, the collective rail) and falls back to the original
   # single-device selectPort only when no such subnet exists or the
-  # candidate rails' GID indices disagree. A healthy pair on this fleet
-  # should now clear this floor comfortably at ~22.6+ GB/s. If a run instead
-  # measures the old single-rail figure (~11.99-12.00 GB/s) and fails this
-  # gate, that is EITHER the fallback path firing for a real reason (worth
-  # reading the run's log for classifyRails' own explanation) OR a genuine
-  # single-rail regression — either way the floor is doing its job: a
-  # single-rail measurement must not certify as this fleet's collective
-  # bandwidth, which is the whole point of raising it in the first place.
+  # candidate rails' GID indices disagree. MEASURED against the sweep
+  # declared above, n=10 on this fleet: 22.50 +/- 0.234 GB/s, passing
+  # 10/10. That is within 0.6 sigma of the 22.652 the derivation came from,
+  # which is the confirmation the number above had been asserted without.
+  #
+  # If a run instead measures the old single-rail figure (~11.99-12.12 GB/s)
+  # and fails this gate, that is EITHER the fallback path firing for a real
+  # reason (worth reading the run's log for classifyRails' own explanation)
+  # OR a genuine single-rail regression — either way the floor is doing its
+  # job: a single-rail measurement must not certify as this fleet's
+  # collective bandwidth, which is the whole point of raising it in the
+  # first place. Read the LOG LINE, not just the number: `pinning NCCL to 2
+  # rails` versus `pinning NCCL to <device>` is printed before any bandwidth
+  # exists and is what separates the two cases.
+  #
   # Re-measure this number if it is ever reused for a different rail count
-  # or a different SKU's PCIe attachment — see #489 and its prior-art
-  # citation for the derivation.
+  # or a different SKU's PCIe attachment — and re-derive it TOGETHER WITH
+  # the sweep above, never one without the other. See #489, #502 and the
+  # prior-art citation for the derivation.
   thresholds:
     - metric: busBandwidthGBs
       comparison: GreaterThanOrEqual
