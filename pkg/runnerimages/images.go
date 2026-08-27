@@ -241,6 +241,36 @@ var defaults = map[contract.TestKind]image{
 	// with the NCCL_SKIP marker) before pinning, since a locally-built image
 	// having been verified once before is not the same claim as the tag a node
 	// actually pulls having been.
+	// nccl moves to v0.9.0 (#507), and this one was not merely stale — it was
+	// WRONG in a way the others are not. v0.7.0 predates #501's multi-rail
+	// selector, so on a fleet with two collective rails it pins one and reports
+	// roughly half the bandwidth the hardware has. That is not a degraded
+	// measurement, it is a measurement of a different topology, and
+	// config/samples/pair-network-acceptance.yaml's 19.913 floor — derived from
+	// the collective's summed per-rail PCIe budgets — CANNOT be met by it. The
+	// shipped sample could not pass with the shipped default image.
+	//
+	// A minor bump rather than a patch, because the pin changes what the runner
+	// MEASURES: ~12 GB/s single-rail becomes 22.50 +/- 0.234 (n=10) on this
+	// fleet, so any threshold calibrated against v0.7.0 means something
+	// different against v0.9.0. Anyone carrying their own nccl floor has to
+	// re-derive it, and a patch version would not say so.
+	//
+	// Verified before publishing, per the rule above that a locally-built image
+	// verified once is not the same claim as the tag a node pulls: 10 Pair runs
+	// with the selector confirmed firing in the client log ("pinning NCCL to 2
+	// rails"), and a confirming run of the shipped sample settling Passed at
+	// 22.83 GB/s against its real floor.
+	//
+	// THE OTHER EIGHT PINS IN THIS TABLE ARE STALE TOO — hack/checkpins fails on
+	// tcp-baseline, host-health, ib-write-bw, clockprobe, dcgm-diag, memory-bw,
+	// gpu-burn and thermal-soak, none of it comment drift (memory-bw is 600
+	// lines). They are NOT republished here, because publishing a runner image
+	// without verifying its kernel on real hardware is the one thing this file's
+	// own history says never to do, and eight verifications is not one session's
+	// work. Tracked in #509, which also covers why checkpins — which is correct
+	// and found all nine on its first run — is asked only weekly, and so is
+	// never asked at the moment a release pins these defaults.
 	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.0", Vendor: VendorNVIDIA},
 	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.2", Vendor: VendorNVIDIA},
 	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.1", Vendor: VendorNVIDIA},
@@ -249,7 +279,7 @@ var defaults = map[contract.TestKind]image{
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
-	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.7.0", Vendor: VendorNVIDIA},
+	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.9.0", Vendor: VendorNVIDIA},
 	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
 	// tcp-baseline joined the table at v0.1.0 (#237), verified through the
