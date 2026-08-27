@@ -35,7 +35,36 @@ type window struct {
 // soak accumulates windows over the run.
 type soak struct {
 	windows []window
+
+	// connectRetries and connectFailures count the CONTROL-CONNECTION race,
+	// which is not a property of the fabric and is deliberately kept out of
+	// windows[] so it can never reach failures() and indict a link.
+	//
+	// perftest's server exits when its client disconnects — that is the normal
+	// end of every window — and runServer then re-execs it. Between the old
+	// process exiting and the new one binding the control port, the port is
+	// unbound, and a client starting its next window in that gap is refused
+	// (#496: 19 refusals in 359 windows, with the link moving data at 97.50
+	// Gb/s either side of every one of them and every port counter delta zero).
+	// A refusal happens BEFORE any traffic, so it is evidence about this
+	// runner's own restart timing and about nothing else.
+	connectRetries  int
+	connectFailures int
 }
+
+// recordConnectRetry counts one refused attempt that a later attempt recovered.
+func (s *soak) recordConnectRetries(n int) { s.connectRetries += n }
+
+// recordConnectFailure counts a window whose retries were all refused.
+//
+// It deliberately does NOT append to windows[]: a window that never opened its
+// control connection did not soak the link, so counting it as a failed window
+// would report "the link carried traffic and stopped carrying it" about a
+// window in which no traffic was ever attempted. Where EVERY window is refused,
+// windows[] stays empty and runClient's existing "no window completed" path
+// reports Error — unjudged — which is the correct verdict for a link nobody
+// measured.
+func (s *soak) recordConnectFailure() { s.connectFailures++ }
 
 func (s *soak) record(gbps float64, ok bool) {
 	s.windows = append(s.windows, window{gbps: gbps, ok: ok})

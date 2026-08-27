@@ -30,6 +30,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -365,16 +366,27 @@ func runClient(port rdmaPort, peerHost, peerNode string, duration, windowSeconds
 	lastEmit := time.Now()
 
 	for time.Now().Before(deadline) {
-		out, err := runWindow(port, peerHost, windowSeconds, messageBytes, qps)
-		if err != nil {
+		out, retries, err := runWindow(port, peerHost, windowSeconds, messageBytes, qps)
+		s.recordConnectRetries(retries)
+		if err != nil && looksLikeMemlockExhaustion(out) {
+			// Named rather than counted. Every window would fail the same
+			// way, and "the link is dead" is the wrong sentence for a
+			// limit this process could see from the start.
 			s.record(0, false)
-			if looksLikeMemlockExhaustion(out) {
-				// Named rather than counted. Every window would fail the same
-				// way, and "the link is dead" is the wrong sentence for a
-				// limit this process could see from the start.
-				return fin(exitError, "window %d failed at ibv_create_cq, which is RLIMIT_MEMLOCK "+
-					"exhaustion and not a fabric fault: %s", s.iterations(), memlockAdvice(memlockSoft, uint64(messageBytes)))
-			}
+			return fin(exitError, "window %d failed at ibv_create_cq, which is RLIMIT_MEMLOCK "+
+				"exhaustion and not a fabric fault: %s", s.iterations(), memlockAdvice(memlockSoft, uint64(messageBytes)))
+		} else if err != nil && connectRefused(out) {
+			// Same reasoning as memlock, one layer out: the client never
+			// reached the server's control port, so no traffic was attempted
+			// and there is nothing here to say about the fabric. Counted in
+			// its own bucket rather than as a failed window (see
+			// soak.recordConnectFailure).
+			s.recordConnectFailure()
+			logf("fabric-soak: window %d never opened its control connection to %s after %d attempts — "+
+				"counted as a control-connection refusal, not as a link failure",
+				s.iterations()+s.connectFailures, peerHost, windowConnectAttempts)
+		} else if err != nil {
+			s.record(0, false)
 			logf("fabric-soak: window %d failed: %v", s.iterations(), err)
 		} else if bw, perr := parseBandwidth(out); perr != nil {
 			// perftest completed and this runner could not read it. That is a
@@ -410,6 +422,16 @@ func runClient(port rdmaPort, peerHost, peerNode string, duration, windowSeconds
 
 	logf("fabric-soak: %d windows, min %.2f / mean %.2f / max %.2f Gb/s, sd %.2f",
 		st.count, st.min, st.mean, st.max, st.stddev)
+	if s.connectFailures > 0 || s.connectRetries > 0 {
+		// Said out loud on the PASSING path too. Every window that ran measured
+		// the link and the verdict is honest, but a soak that spent attempts
+		// racing its own server's restart is describing something real, and a
+		// fix that closed the race silently would leave the next person to hit
+		// it with exactly the evidence this one had: none.
+		logf("fabric-soak: control connection was refused %d time(s) and %d window(s) never opened one; "+
+			"this is the server's per-window restart, not the fabric — see soakConnectRetries/soakConnectFailures",
+			s.connectRetries, s.connectFailures)
+	}
 	return exitPass
 }
 
@@ -432,6 +454,8 @@ type counterReport struct {
 func emit(s *soak, c *counterReport, partial bool) {
 	metric("soakIterations", strconv.Itoa(s.iterations()))
 	metric("soakFailedIterations", strconv.Itoa(s.failures()))
+	metric("soakConnectRetries", strconv.Itoa(s.connectRetries))
+	metric("soakConnectFailures", strconv.Itoa(s.connectFailures))
 
 	if st, ok := s.stats(); ok {
 		metric("minBandwidthGbps", trim(st.min))
@@ -473,11 +497,68 @@ func emit(s *soak, c *counterReport, partial bool) {
 func trim(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
 
 // runWindow is one iteration of traffic.
-func runWindow(p rdmaPort, peerHost string, seconds, messageBytes, qps int) (string, error) {
+// windowConnectAttempts and windowConnectBackoff bound the retry that closes
+// the restart race described on soak.connectRetries.
+//
+// BOUNDED IS THE WHOLE POINT. The gap this covers is one exec of ib_write_bw —
+// milliseconds — so a handful of short attempts closes it, while a server that
+// is genuinely gone still exhausts them and still fails the window. An unbounded
+// retry would turn "the peer never came back" into a window that waits forever,
+// which is the failure this runner exists to catch, laundered into patience.
+// The whole budget is ~1.25s against a window measured in tens of seconds, and
+// it is only ever spent on an attempt that was refused immediately.
+const (
+	windowConnectAttempts = 6
+	windowConnectBackoff  = 250 * time.Millisecond
+)
+
+// runWindow runs one window, retrying only a REFUSED CONTROL CONNECTION.
+//
+// It returns how many attempts were retried so the caller can meter them: a
+// soak quietly retrying half its windows is a fact about the fleet, and a fix
+// that hid it would be the same mistake as the message it replaces. Any other
+// failure is returned on the first attempt, untouched — a window that opened
+// its connection and then failed is evidence about the link, and retrying it
+// would launder a fabric fault into a pass.
+func runWindow(p rdmaPort, peerHost string, seconds, messageBytes, qps int) (string, int, error) {
+	var (
+		out string
+		err error
+	)
+	for attempt := 0; attempt < windowConnectAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(windowConnectBackoff)
+		}
+		out, err = runWindowOnce(p, peerHost, seconds, messageBytes, qps)
+		if err == nil || !connectRefused(out) {
+			return out, attempt, err
+		}
+	}
+	return out, windowConnectAttempts - 1, err
+}
+
+// connectRefused reports whether ib_write_bw never reached the server's control
+// port, read from its own output.
+//
+// Both spellings are matched because perftest prints them together and either
+// alone has been observed leading: "Couldn't connect to <host>:<port>" names the
+// peer, and "Unable to init the socket connection" is the generic follow-on.
+func connectRefused(out string) bool {
+	return strings.Contains(out, "Couldn't connect to") ||
+		strings.Contains(out, "Unable to init the socket connection")
+}
+
+func runWindowOnce(p rdmaPort, peerHost string, seconds, messageBytes, qps int) (string, error) {
 	args := clientArgs(p, peerHost, seconds, messageBytes, qps)
 	cmd := exec.Command(args[0], args[1:]...)
 	var sb strings.Builder
-	cmd.Stdout, cmd.Stderr = &sb, os.Stderr
+	// stderr is CAPTURED AS WELL AS FORWARDED. perftest reports a refused
+	// control connection on stderr, and this runner has to read it to tell that
+	// case apart from a fabric fault; forwarding keeps it in the pod log, where
+	// it is what a human reads when a window fails for some reason nothing here
+	// anticipated.
+	cmd.Stdout = &sb
+	cmd.Stderr = io.MultiWriter(os.Stderr, &sb)
 
 	if err := cmd.Start(); err != nil {
 		return "", err
