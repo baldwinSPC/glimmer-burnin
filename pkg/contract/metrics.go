@@ -965,6 +965,19 @@ var registry = map[string]Metric{
 		Combination:  CombineSum,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	"soakConnectFailures": {
+		Name: "soakConnectFailures", Unit: UnitNone,
+		Description:  "windows refused at the server's control port, before any traffic was attempted. Deliberately NOT part of soakFailedIterations: a refusal happens before the fabric is touched, so it is evidence about the runner's own restart timing and never about the link (#496). A counter, so Equal 0 is safe from day one",
+		Aggregation:  AggSum,
+		Combination:  CombineSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"soakConnectRetries": {
+		Name: "soakConnectRetries", Unit: UnitNone,
+		Description:  "control-connection attempts that were refused and succeeded on a later try within the same window. Evidence, not acceptance: a retried window measured the link and passed honestly, but a soak retrying most of its windows is describing a restart race worth knowing about rather than a healthy fabric",
+		Aggregation:  AggSum,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"soakServerRestarts": {
 		Name: "soakServerRestarts", Unit: UnitNone,
 		Description:  "how many times the server end restarted its listener during a soak. Evidence from the non-deciding end: perftest's server exits when its client disconnects, so this should track the client's iteration count and a large gap means windows never reached it",
