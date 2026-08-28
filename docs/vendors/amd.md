@@ -42,7 +42,7 @@ spec:
   runner:
     imagesByVendor:
       - vendor: nvidia
-        image: ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.6.0
+        image: ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.7.1
       - vendor: amd
         image: registry.example.com/our-transferbench:v1
   resources:

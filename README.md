@@ -190,8 +190,9 @@ The GPU axis is per runner and is documented in each runner's README:
 
 > **The `v0.1.0` and `v0.2.x` runner tags are `linux/arm64` only.** Published
 > tags are immutable, so they stay that way; multi-arch begins at `v0.3.0`. The
-> operator pins `v0.6.0` for every runner — `pkg/runnerimages/images.go` is the
-> source of truth, not this table.
+> operator no longer pins one version for every runner — each kind moves
+> independently as its own source changes and is hardware-verified —
+> `pkg/runnerimages/images.go` is the source of truth, not this table.
 
 ## Documentation
 
@@ -425,6 +426,19 @@ gate is made of.
   — they read the unset `BURNIN_ROLE` as a Node-scope run and exit 2 with a
   declared `NCCL_SKIP`, so the run settles `Passed` around a collective that
   never happened. Published tags are immutable and will do that forever.
+- **A pre-`v0.9.0` `nccl` tag silently measures the wrong topology on a
+  multi-rail fleet.** Before `v0.9.0`'s multi-rail selector, `nccl` pinned a
+  single rail regardless of how many the host's collective actually has, so a
+  two-rail node reported roughly half its real bus bandwidth — not a degraded
+  measurement, a measurement of a different, single-rail topology
+  ([#501](https://github.com/baldwinSPC/glimmer-burnin/issues/501)). The
+  default pin moved to `v0.9.0` for exactly this reason: `v0.7.0` predates the
+  fix, so `config/samples/pair-network-acceptance.yaml`'s floor — derived from
+  the *multi*-rail measurement — could not pass against it
+  ([#507](https://github.com/baldwinSPC/glimmer-burnin/issues/507)). The same
+  rule as above applies: an explicit `spec.runner.image` naming a pre-`v0.9.0`
+  `nccl` tag does not get the fix, and any bus-bandwidth floor pinned against
+  an older tag's numbers must be re-derived, not reused.
 - **The `v0.1.0` and `v0.2.x` runner tags are `linux/arm64` only.** Published
   tags are immutable, so multi-arch begins at `v0.3.0`. An x86 fleet pinning an
   older tag must repin or build its own; from `v0.3.0` onward one tag serves both

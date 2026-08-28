@@ -135,6 +135,21 @@ standalone-import guard, the CRD drift check, and the supply-chain job (licence
 policy, `govulncheck`, `golangci-lint`). All of them are **blocking** — nothing
 there is informational.
 
+**`go run ./hack/checkpins` asks whether every default runner pin in
+`pkg/runnerimages/images.go` still matches its source.** In `ci.yml` it runs
+weekly and on `workflow_dispatch` only, never on a PR: drift accumulated since
+the last publish is not a fact any single PR caused, and gating PRs on it would
+turn unrelated work red the moment one runner's source outpaces its pin.
+`publish-operator.yml` runs the same check as a **blocking** job before every
+release, because a release is the one moment the question is load-bearing — its
+whole claim is "these pins are what you get" — with an `acknowledge_stale_pins`
+input for the deliberate case. v0.9.0 shipped with eight known-stale pins on
+purpose: republishing a runner image without re-verifying its kernel on real
+hardware is the one thing this project's history says never to do, and eight
+verifications is not one session's work (#509). **Never bulk-repin to silence
+this check** — each pin bump is a hardware-verification claim, not a version
+bump, and is spent one runner at a time.
+
 ### Three tiers of test, and what each one can see
 
 The unit suite runs against controller-runtime's **fake client**, which is a map
