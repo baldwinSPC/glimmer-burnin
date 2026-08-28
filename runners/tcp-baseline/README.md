@@ -48,6 +48,38 @@ The decision is recorded in the result — `tcpTestInterface` and
 `tcpMgmtInterface` — on every path including the refusals, because a guard whose
 decision is not in the output cannot be audited afterwards.
 
+### The server's half: accept, then classify
+
+The client can run this decision immediately — `BURNIN_PEER_HOST` resolves the
+moment it starts, so `classifyRoute` has a real route to compare. The server
+cannot: at Pair scope the operator does not create the client pod until the
+server is Ready, so the server's peer is a DNS name with nothing behind it at
+the point it would need to classify anything. Naming an interface by hand
+(`TCP_BASELINE_INTERFACE`) used to be the only way past that — required on the
+server, and refused with an Error otherwise.
+
+Since #482 the server instead waits for its real peer to arrive and reads
+which of its **own** interfaces that specific connection landed on — a fact
+the kernel can only hand over once a connection exists, and the same move
+`nccl`'s server makes for the identical structural problem. A small handshake
+on a dedicated port (`TCP_BASELINE_GUARD_PORT`, default 5202) does the
+waiting: the client says `HELLO`, the server classifies the connection's own
+local address exactly as `classifyRoute` would classify a route lookup, and
+answers `OK`, `SKIP:<reason>`, or `ERROR:<reason>` before either side has
+carried a single byte of load. A refusal here means iperf3 never starts, and a
+client reads its peer's own refusal rather than a listener that quietly never
+appeared.
+
+`TCP_BASELINE_INTERFACE` still works exactly as before, if set on the server —
+it is judged the same way (naming the management interface is still an Error,
+not a Skip) and simply skips learning the interface from the connection,
+without skipping the handshake itself.
+
+The guard port tolerates a Kubernetes `tcpSocket` readinessProbe landing on it
+repeatedly: only a connection that actually sends `HELLO` is treated as the
+real peer, so a bare probe connect-and-close is seen, ignored, and the
+listener goes back to waiting.
+
 ## Contract
 
 ```
@@ -94,7 +126,8 @@ Standard Pair rendezvous: `BURNIN_ROLE`, `BURNIN_PEER_HOST`, `BURNIN_PEER_NODE`,
 | Variable | Meaning |
 |---|---|
 | `TCP_BASELINE_PORT` | iperf3 port (default 5201) |
-| `TCP_BASELINE_INTERFACE` | fabric interface to test. **Required on the server**, which has no peer address to route towards and therefore nothing for the guard to compare |
+| `TCP_BASELINE_GUARD_PORT` | accept-then-classify handshake port (default 5202). Point the server's `readinessProbe` here, not at `TCP_BASELINE_PORT` — see below |
+| `TCP_BASELINE_INTERFACE` | override: skip discovery and classify this interface instead, on whichever end sets it. No longer required on the server — see "The server's half" above |
 
 ## Start ordering
 
@@ -106,10 +139,17 @@ elapses and iperf3 exits at once. Without the wait, a client that starts first
 dies instantly with "unable to connect" — which reads to an operator like a
 fabric fault, and is exactly what this runner exists to stop people misreading.
 
-Declare a `readinessProbe` on the server naming the same port as well. The
-operator will not start the client until the server pod is Ready, but without a
-probe "Ready" only means the container started. The probe narrows the window;
-the wait is what survives it.
+Declare a `readinessProbe` on the server naming `TCP_BASELINE_GUARD_PORT`
+(5202 by default) — **not** `TCP_BASELINE_PORT`. The operator will not create
+the client pod until the server is Ready, but iperf3's own port does not open
+until the accept-then-classify handshake has a verdict, and that handshake
+needs the client to exist. Probing 5201 would deadlock the pair against
+itself: Ready waits on iperf3, iperf3 waits on the client, and the client
+waits on Ready. The guard port is bound first, unconditionally, before any
+classification happens, which is what breaks the cycle. The client's own wait
+above still matters on top of the probe: the probe narrows the window between
+"Ready" and "actually listening", and the wait is what survives what is left
+of it.
 
 `hostNetwork: true` is required: the guard reads `/proc/net/route` and
 enumerates the host's interfaces, and a fabric test wants the host namespace
@@ -155,6 +195,27 @@ healthy pair measured 43.7 Gbps, 0 retransmits, 146us RTT.
 Not yet verified on real hardware: a peer reachable only through the
 management interface producing a Skip (this fleet's fabric route always
 exists, so the Skip path needs a topology this pair doesn't have); the
-client-starts-before-server retry behavior; the server outliving a settled
-client without stranding a retrying one; and the CLI dispatcher
-(`burnin run --role server|client`) path. See #237 for the full checklist.
+server outliving a settled client without stranding a retrying one; and the
+CLI dispatcher (`burnin run --role server|client`) path. See #237 for the full
+checklist.
+
+**The accept-then-classify handshake (#482)** replaces the server's old
+`TCP_BASELINE_INTERFACE`-required refusal with the design above. Covered by
+unit tests against real loopback sockets (`handshake_test.go`), and the
+classification itself — the part that changed — is confirmed against real
+data from **spark-043a**: with no `TCP_BASELINE_INTERFACE` set, a real
+connection landing via `enp1s0f1np1` (a real collective-rail address) was
+correctly accepted (`tcpTestInterface=enp1s0f1np1`), and a real connection
+landing via `wlP9s9` (the node's real default route) was correctly refused as
+`routeIsManagement`, with the same reason text a fleet operator would see.
+Both cases ran the real compiled binary against `/proc/net/route` and real
+host interfaces on GB10/Linux-arm64 — not synthetic input, and not something
+the macOS dev loop that wrote this can exercise directly.
+
+**Not yet run**: the full two-pod Pair path on Kubernetes — real
+`BURNIN_PEER_HOST` DNS resolution, the readinessProbe pointed at the new guard
+port, and the client on a genuinely separate node. `spark-85a9` was not
+reachable from the session that did the check above, so the verification ran
+both roles against real interfaces on `spark-043a` alone rather than a true
+cross-node pair. Treat the classification logic as hardware-confirmed and the
+Kubernetes orchestration around it as unit-tested but not yet run for real.
