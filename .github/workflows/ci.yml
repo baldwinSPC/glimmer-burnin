@@ -201,6 +201,21 @@ jobs:
   # SINCE THE LAST PUBLISH, which a single PR's diff cannot answer by itself, and
   # making it a required PR check would turn every unrelated PR red the moment one
   # runner's source outpaces its pin, for a fact the PR did nothing to cause.
+  #
+  # THIS COPY IS A SWEEP, NOT THE GATE, and that distinction is #509. A weekly
+  # answer is fine for noticing drift and useless for the moment drift decides
+  # something: cutting a release, which is the artifact whose whole claim is
+  # "these pins are what you get". At that moment this job's answer could be six
+  # days old. #507 — a pinned nccl image predating the multi-rail selector, so a
+  # shipped sample could not pass with the shipped default image — was found by
+  # hand instead, while doing something else, which is exactly how #379 describes
+  # the drift that motivated writing checkpins in the first place.
+  #
+  # publish-operator.yml now runs the same check as a BLOCKING job before it will
+  # publish, with an acknowledge_stale_pins input for the deliberate case. So the
+  # release path asks the question and this timer only has to notice between
+  # releases. Keep both: deleting this one would push detection out to whenever
+  # somebody next cuts a release, which on a quiet month is longer than a week.
   checkpins:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
