@@ -19,6 +19,15 @@ on:
         description: 'Image tag to publish (e.g. v0.3.0). Must not already exist, and must match the tag config/manager/manager.yaml pins.'
         required: true
         type: string
+      acknowledge_stale_pins:
+        description: >-
+          Publish even though a pinned runner image is older than its runner's
+          source. Leave FALSE unless you have read the list the pins job prints
+          and intend to ship it anyway — the release notes must then say which
+          images lag. This is an affirmation, not a convenience.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -33,7 +42,78 @@ permissions:
   id-token: write
 
 jobs:
+  # ── pins: are the runner images this release pins built from this source? ────
+  #
+  # A release is the artifact whose whole claim is "these pins are what you get",
+  # so it is the one moment that question is load-bearing — and until #509 it was
+  # the one moment nothing asked it. hack/checkpins ran weekly and on dispatch
+  # (see ci.yml, which explains why it is deliberately NOT a PR check: drift
+  # accumulated since the last publish is not a fact any single PR caused, and
+  # gating PRs on it would turn unrelated work red). Weekly is a fine cadence for
+  # a sweep and a useless one for a release: the answer could be six days stale
+  # at the moment it decided what a fleet pulls. #507 was found by hand instead,
+  # while doing something else, which is word for word how #379 describes the
+  # drift that motivated writing checkpins in the first place.
+  #
+  # IT BLOCKS, BUT IT CAN BE OVERRIDDEN OUT LOUD. A hard block would be wrong:
+  # v0.9.0 shipped with eight known-stale pins deliberately, because republishing
+  # a runner image without verifying its kernel on real hardware is the one thing
+  # this project's history says never to do, and eight verifications is not one
+  # session's work. So the escape hatch is an INPUT the publisher has to set,
+  # which means the drift list is printed, read, and affirmed — and the
+  # affirmation is recorded in the run's own inputs, where a later reader can
+  # find it. Silence is not consent; the default is false.
+  pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # checkpins diffs an arbitrarily old pinned commit against HEAD, which
+          # a shallow clone cannot resolve. Same reason as ci.yml's copy.
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Every pinned runner image matches its source
+        env:
+          ACK: ${{ inputs.acknowledge_stale_pins }}
+        run: |
+          set -uo pipefail
+          if go run ./hack/checkpins; then
+            echo "Every pinned runner image is built from the source in this tree." \
+              >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          if [ "${ACK}" = "true" ]; then
+            {
+              echo "### Publishing with STALE runner pins, acknowledged"
+              echo
+              echo "acknowledge_stale_pins was set, so this release ships pinned runner"
+              echo "images that are older than their source. The release notes must say"
+              echo "which ones — see the checkpins output in this job's log, and #509."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "::warning::publishing with stale runner pins because acknowledge_stale_pins=true"
+            exit 0
+          fi
+          {
+            echo "### Refusing to publish: pinned runner images lag their source"
+            echo
+            echo "The images above were built from a commit older than the runner"
+            echo "directory now in this tree, so a node pulling the default image would"
+            echo "not get the behaviour this release describes."
+            echo
+            echo "Republish the affected runners (publish-runner.yml) and bump their"
+            echo "pins, verifying each on real hardware first. If shipping the drift is"
+            echo "the deliberate choice, re-run with acknowledge_stale_pins and say so"
+            echo "in the release notes."
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "::error::pinned runner images lag their source; see the job summary"
+          exit 1
+
   publish:
+    needs: pins
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
