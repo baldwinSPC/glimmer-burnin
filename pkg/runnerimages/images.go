@@ -279,8 +279,28 @@ var defaults = map[contract.TestKind]image{
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
-	contract.KindNCCL:         {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.9.0", Vendor: VendorNVIDIA},
-	contract.KindGPUDirect:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
+	// nccl moves to v0.9.1 (#517, #518). A patch, not a minor bump: unlike
+	// v0.7.0 -> v0.9.0, this does not change what a healthy collective
+	// measures — every run tonight landed in the same ~19.5-19.7 GB/s band
+	// v0.9.0 already reported. It fixes two dispatcher-only defects with no
+	// Kubernetes exposure: bare-metal Group scope's root rank could not
+	// start a collective at all (groupRendezvous refused an empty
+	// BURNIN_ROOT_HOST for rank 0, which serves the bootstrap handle rather
+	// than fetching one — the operator never hits this, since it always
+	// hands rank 0 a self-referencing DNS name), and a stderr log line that
+	// leaked into Kubernetes-harvested envelopes as a stray, unregistered
+	// rlimitMemlock metric (bare-metal keeps stdout/stderr separate and
+	// never saw it).
+	//
+	// Verified before publishing: the naive form of the rank-0 fix (loosen
+	// the validation alone) reproduced a hang 2/2 times on real hardware —
+	// resolveHostWithin("", 2m) cannot tell a permanently-empty host from a
+	// Kubernetes DNS name not yet published, and burns its whole budget on
+	// either, leaving no deadline left to run the collective. The corrected
+	// fix (skip the resolve attempt when there is nothing to resolve) passed
+	// 2/2, fast, on both Sparks.
+	contract.KindNCCL:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.9.1", Vendor: VendorNVIDIA},
+	contract.KindGPUDirect: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
 	// tcp-baseline joined the table at v0.1.0 (#237), verified through the
 	// operator on both Sparks: the client-side route lookup correctly picked
