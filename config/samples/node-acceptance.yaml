@@ -212,10 +212,14 @@ spec:
   # a partial check. The error message names the fix
   # (BURNIN_DCGM_ALLOW=<plugin>,...), left as a runner.env entry for you to add
   # rather than baked in here: which subtests your SKU actually supports is a
-  # fleet fact this sample cannot know, and `memory` genuinely works on
-  # hardware with a discrete GPU memory bank, which GB10's unified LPDDR5X
-  # does not have — forcing it off here would quietly weaken the check on every
-  # OTHER SKU that copies this file.
+  # fleet fact this sample cannot know — and, per #435, a DCGM-VERSION fact as
+  # well as a SKU one. `memory.is_allowed=true` genuinely passes on GB10,
+  # allocating 87-90% of its unified LPDDR5X (runners/dcgm-diag/README.md,
+  # "Measured on GB10") — under DCGM 4.5.2. The identical override on the same
+  # node under DCGM 4.2.3 still skips it. That rules out "GB10's unified
+  # memory has nothing to stress" as the explanation; whatever gates `memory`
+  # for this SKU moved between those two DCGM releases. Confirm against the
+  # DCGM version your fleet actually runs rather than assuming either result.
   runner:
     hostPaths:
       - path: /opt/dcgm-runtime

@@ -285,6 +285,20 @@ return to its cold-start temperature between runs, though — it floors at 47 °
 after nine minutes idle, which is the chassis heat soak recorded in
 glimmer-burnin#280.
 
+**The `memory` result above is DCGM-4.5.2-specific, not GB10-specific — see
+#435.** The identical override (`memory.is_allowed=true`) on the same node
+(spark-043a), re-measured after this fleet's DCGM moved to **4.2.3**, skips
+`memory` again with no reason given, exactly as the unenabled case above. That
+rules out "GB10's unified memory has nothing for the plugin to stress" as the
+explanation — the 87–90%-allocated Pass documented above is real, on this
+same silicon, under 4.5.2. Whatever gates `memory` for this SKU is a fact
+about the DCGM release, not (only) about the part, and it moved between
+these two versions in a direction neither this project nor #435 has an
+upstream explanation for. Treat this table as "what DCGM 4.5.2 does on GB10,"
+not as "what GB10 supports" — re-verify against whichever DCGM version a
+fleet actually runs before relying on `memory.is_allowed=true` clearing the
+skip.
+
 ### Why `-t` is derived rather than left unset
 
 Without `-t`, **DCGM's own timeout is unlimited**, so the only thing bounding
