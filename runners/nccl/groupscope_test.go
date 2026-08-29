@@ -58,6 +58,34 @@ func TestGroupRendezvousAcceptsAWellFormedContract(t *testing.T) {
 	}
 }
 
+// Rank 0 is the one rank that SERVES the bootstrap handle rather than
+// fetching it, so it is the one rank an empty BURNIN_ROOT_HOST must not
+// refuse — see #517. Before that fix this was indistinguishable from a
+// non-root rank with nowhere to fetch from, and the bare-metal CLI's own
+// documented usage (no --root for the root rank, because the root does not
+// need one) could never start a Group collective at all.
+func TestGroupRendezvousAcceptsAnEmptyRootHostOnlyForRankZero(t *testing.T) {
+	t.Setenv("BURNIN_RANK", "0")
+	t.Setenv("BURNIN_NRANKS", "2")
+	t.Setenv("BURNIN_ROOT_HOST", "")
+
+	rank, nranks, root, isGroup, err := groupRendezvous()
+	if err != nil || !isGroup {
+		t.Fatalf("rejected rank 0 with no BURNIN_ROOT_HOST: isGroup=%v err=%v", isGroup, err)
+	}
+	if rank != 0 || nranks != 2 || root != "" {
+		t.Errorf("parsed rank=%d nranks=%d root=%q", rank, nranks, root)
+	}
+
+	// The exemption is rank 0's alone. A non-root rank with an empty
+	// BURNIN_ROOT_HOST is exactly the case #517 must keep refusing — it has
+	// no bootstrap handle to fetch from and no way to find one.
+	t.Setenv("BURNIN_RANK", "1")
+	if _, _, _, isGroup, err := groupRendezvous(); err == nil || !isGroup {
+		t.Errorf("rank 1 with no BURNIN_ROOT_HOST was accepted: isGroup=%v err=%v", isGroup, err)
+	}
+}
+
 // Node scope is unaffected: no rendezvous variables at all is not a Group run.
 func TestNoRendezvousVariablesIsNotAGroupRun(t *testing.T) {
 	os.Unsetenv("BURNIN_RANK")

@@ -157,7 +157,13 @@ func run() int {
 	if raised {
 		logf("raised the RLIMIT_MEMLOCK soft limit to the hard limit (%s)", humanLimit(soft))
 	}
-	logf("RLIMIT_MEMLOCK = %s (this runner needs at least %s)", humanLimit(soft), humanLimit(requiredMemlockBytes))
+	// Never "KEY = value": a container's stdout and stderr merge into one
+	// stream once Kubernetes has harvested the pod's log, and pkg/runner.Parse
+	// scans that merged stream for key=value lines. This is prose, not a
+	// metric — an "=" here would make it look like one on every dispatch
+	// through the operator, silently, since bare-metal keeps stdout and
+	// stderr separate and would never see it (#518).
+	logf("RLIMIT_MEMLOCK is %s (this runner needs at least %s)", humanLimit(soft), humanLimit(requiredMemlockBytes))
 	if !memlockSufficient(soft) {
 		return fin(exitError, "%s", memlockAdvice(soft))
 	}
@@ -789,7 +795,15 @@ func groupRendezvous() (rank, nranks int, rootHost string, isGroup bool, err err
 	case rank < 0 || rank >= nranks:
 		err = fmt.Errorf("BURNIN_RANK=%d is outside [0,%d) — the communicator has no room for it, and "+
 			"NCCL would report that as a hang rather than as the argument error it is", rank, nranks)
-	case rootHost == "":
+	// Rank 0 is exempt: it SERVES the bootstrap handle, it does not fetch one,
+	// and runGroupRank already tolerates an empty or unresolvable rootHost for
+	// exactly this rank ("continuing, because rank 0 serves the bootstrap
+	// handle rather than fetching it"). The Kubernetes operator always sends
+	// rank 0 a self-referencing BURNIN_ROOT_HOST anyway, so this exemption
+	// changes nothing there — it only stops refusing the bare-metal CLI's own
+	// documented, intended usage, where --root is never supplied for the root
+	// rank because the root does not need one (see #517).
+	case rootHost == "" && rank != groupRootRankIndex:
 		err = fmt.Errorf("BURNIN_ROOT_HOST is empty — rank %d has nowhere to fetch the bootstrap "+
 			"handle from", rank)
 	}
@@ -825,7 +839,13 @@ func runGroupRank(rank, nranks int, rootHost string, duration int) int {
 	if raised {
 		logf("raised the RLIMIT_MEMLOCK soft limit to the hard limit (%s)", humanLimit(soft))
 	}
-	logf("RLIMIT_MEMLOCK = %s (this runner needs at least %s)", humanLimit(soft), humanLimit(requiredMemlockBytes))
+	// Never "KEY = value": a container's stdout and stderr merge into one
+	// stream once Kubernetes has harvested the pod's log, and pkg/runner.Parse
+	// scans that merged stream for key=value lines. This is prose, not a
+	// metric — an "=" here would make it look like one on every dispatch
+	// through the operator, silently, since bare-metal keeps stdout and
+	// stderr separate and would never see it (#518).
+	logf("RLIMIT_MEMLOCK is %s (this runner needs at least %s)", humanLimit(soft), humanLimit(requiredMemlockBytes))
 	if !memlockSufficient(soft) {
 		return fin(exitError, "%s", memlockAdvice(soft))
 	}
@@ -895,22 +915,37 @@ func runGroupRank(rank, nranks int, rootHost string, duration int) int {
 	// races that lag from a standing start: startGroup creates the headless
 	// Service and the root pod in the same reconcile, so the root can reach this
 	// line before the EndpointSlice controller has observed its own IP.
-	rootIP, err := resolveHostWithin(rootHost, resolveBudget)
-	if err != nil {
-		// AND IT IS NOT FATAL FOR RANK 0, which does not use this as an address.
-		// Its only consumers are a log line and ncclEnv's RDMA pin, whose own
-		// failure path is already advisory ("leaving NCCL to choose its own
-		// transport"). Erroring the root here would lose an entire Group run —
-		// the workers are never created — over a name that was published a moment
-		// later, on hardware nothing had touched.
-		if rank == groupRootRankIndex {
-			logf("could not resolve BURNIN_ROOT_HOST=%q within %s (%v); continuing, because rank 0 "+
-				"serves the bootstrap handle rather than fetching it and uses this only to pin an "+
-				"RDMA device", rootHost, resolveBudget, err)
-		} else {
-			return fin(exitError, "could not resolve BURNIN_ROOT_HOST=%q within %s: %v — the "+
-				"rendezvous Service or its per-pod DNS is missing, so rank %d cannot find rank %d",
-				rootHost, resolveBudget, err, rank, groupRootRankIndex)
+	var rootIP net.IP
+	if rootHost == "" {
+		// Only rank 0 can reach this with an empty rootHost — groupRendezvous
+		// already refuses it for every other rank (#517). There is nothing to
+		// resolve, so this skips resolveHostWithin entirely rather than
+		// spending the full resolveBudget retrying a lookup that was never
+		// going to succeed: that retry loop cannot tell "empty, permanently"
+		// from "a real name, not published yet" and burns its whole budget on
+		// either, which left rank 0 with too little of its own deadline
+		// remaining to run the collective at all.
+		logf("BURNIN_ROOT_HOST is empty; continuing, because rank 0 serves the bootstrap handle " +
+			"rather than fetching it and uses this only to pin an RDMA device")
+	} else {
+		var err error
+		rootIP, err = resolveHostWithin(rootHost, resolveBudget)
+		if err != nil {
+			// AND IT IS NOT FATAL FOR RANK 0, which does not use this as an address.
+			// Its only consumers are a log line and ncclEnv's RDMA pin, whose own
+			// failure path is already advisory ("leaving NCCL to choose its own
+			// transport"). Erroring the root here would lose an entire Group run —
+			// the workers are never created — over a name that was published a moment
+			// later, on hardware nothing had touched.
+			if rank == groupRootRankIndex {
+				logf("could not resolve BURNIN_ROOT_HOST=%q within %s (%v); continuing, because rank 0 "+
+					"serves the bootstrap handle rather than fetching it and uses this only to pin an "+
+					"RDMA device", rootHost, resolveBudget, err)
+			} else {
+				return fin(exitError, "could not resolve BURNIN_ROOT_HOST=%q within %s: %v — the "+
+					"rendezvous Service or its per-pod DNS is missing, so rank %d cannot find rank %d",
+					rootHost, resolveBudget, err, rank, groupRootRankIndex)
+			}
 		}
 	}
 	if rootIP != nil {
