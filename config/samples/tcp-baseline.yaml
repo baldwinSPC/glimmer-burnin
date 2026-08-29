@@ -11,6 +11,13 @@
 # multi-interface routing table correctly, not just a single-NIC laptop. Naming
 # the management interface explicitly was refused with exit 3, as documented
 # below. A healthy pair measured 43.7 Gbps, 0 retransmits, 146us RTT.
+#
+# #482: the server end used to need TCP_BASELINE_INTERFACE set by hand, because
+# it has no peer address to route towards until the client exists. It now
+# discovers its own interface the same way the client always has — by waiting
+# for the client's handshake and reading which interface that connection
+# actually landed on — so neither end needs the override any more; this sample
+# no longer sets it. See runners/tcp-baseline/README.md, "The server's half".
 apiVersion: burnin.glimmer.ai/v1alpha1
 kind: BurnInTest
 metadata:
@@ -25,20 +32,17 @@ spec:
   hostNetwork: true
   runner:
     # No image on purpose — since v0.1.0 this kind resolves a default.
-    env:
-      # REQUIRED on the server end, which has no peer address to route towards
-      # and therefore nothing for the management-path guard to compare. Set this
-      # to the FABRIC interface — naming the default-route interface is refused.
-      # Illustrative name; this fleet's actual fabric interface is
-      # enP2p1s0f0np0 (see the header).
-      - name: TCP_BASELINE_INTERFACE
-        value: enp1s0f0
+    #
     # Without a probe, "Ready" only means the container started, and a client
     # that connects before iperf3 has bound reports a connection error that
-    # reads as a fabric fault.
+    # reads as a fabric fault. This names the GUARD port (5202), not iperf3's
+    # own (5201): iperf3 does not open until the accept-then-classify
+    # handshake has a verdict, and that handshake needs the client pod to
+    # exist — which the operator will not create until this probe succeeds.
+    # Probing 5201 would deadlock the pair against itself.
     readinessProbe:
       tcpSocket:
-        port: 5201
+        port: 5202
       periodSeconds: 2
   thresholds:
     # Deliberately no throughput floor. This project pins thresholds from

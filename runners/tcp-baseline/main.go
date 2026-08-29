@@ -47,10 +47,16 @@ const (
 	roleServer = "server"
 	roleClient = "client"
 
-	// defaultPort is iperf3's own default. Declared here because the server's
-	// readinessProbe has to name the same number, and a probe pointing at a
-	// port nothing listens on turns "Ready" back into "the container started".
+	// defaultPort is iperf3's own default.
 	defaultPort = 5201
+
+	// defaultGuardPort is the accept-then-classify rendezvous — see #482. It is
+	// bound BEFORE anything else, unconditionally, which is what the server's
+	// readinessProbe now names: iperf3's own port does not open until the
+	// guard has a verdict, and the operator will not create the client pod
+	// until the server is Ready, so the probe cannot point at 5201 without
+	// deadlocking the pair against itself.
+	defaultGuardPort = 5202
 )
 
 // iperfVersion is stamped by the Dockerfile from IPERF_REF, so a result can be
@@ -109,26 +115,37 @@ func run() int {
 	}
 	logf("tcp-baseline: iperf3 %s", iperfVersion)
 
-	// ── The guard, before anything is started ────────────────────────────────
-	//
-	// On BOTH ends. The server is the one that will actually receive the load,
-	// so checking only the client would leave the interface that matters
-	// unchecked — and a server bound on the management path is exactly the
-	// shape this guard exists to refuse.
-	if code, ok := guardPath(peerHost, role); !ok {
-		return code
-	}
+	guardPort := envInt("TCP_BASELINE_GUARD_PORT", defaultGuardPort)
 
 	if role == roleServer {
-		return runServer(port, duration, peerNode)
+		// The server cannot classify its own path up front — see #482: at
+		// Pair scope it starts before the client exists, so peerHost is a DNS
+		// name that cannot resolve yet, and there is structurally nothing to
+		// compare against the management interface. runServer resolves this
+		// itself, from the client's own accept-then-classify handshake,
+		// before iperf3 ever binds.
+		return runServer(port, guardPort, duration, peerNode)
 	}
-	return runClient(peerHost, peerNode, port, duration)
+
+	// The client CAN classify its own path immediately — it has a resolvable
+	// peer from the moment it starts — so it still runs the ordinary
+	// route-lookup guard for ITS OWN interface, unchanged. That protects the
+	// client's management path; it says nothing about the server's, which is
+	// what the handshake inside runClient establishes next.
+	if code, ok := guardPath(peerHost); !ok {
+		return code
+	}
+	return runClient(peerHost, peerNode, port, guardPort, duration)
 }
 
-// guardPath runs the management-path guard and turns its decision into a
-// contract outcome. Returns ok=false with the exit code when the run must not
-// proceed.
-func guardPath(peerHost, role string) (int, bool) {
+// guardPath runs the management-path guard for THIS pod's own route to the
+// peer, and turns its decision into a contract outcome. Returns ok=false with
+// the exit code when the run must not proceed.
+//
+// Client-only since #482: a server has no resolvable peer at the point it
+// would need to run this, so its half of the guard is the accept-then-classify
+// handshake in runServer instead.
+func guardPath(peerHost string) (int, bool) {
 	route, err := os.ReadFile("/proc/net/route")
 	if err != nil {
 		return fin(exitError, "could not read /proc/net/route (%v), so the management-path guard cannot "+
@@ -141,25 +158,8 @@ func guardPath(peerHost, role string) (int, bool) {
 	// more harshly than one the routing table picked — see classifyRoute.
 	explicit := strings.TrimSpace(os.Getenv("TCP_BASELINE_INTERFACE"))
 	testIface := explicit
-	var whyUnresolved string
 	if testIface == "" && peerHost != "" {
-		testIface, whyUnresolved = ifaceForAddr(peerHost, hostIfaces())
-	}
-	if testIface == "" && role == roleServer && explicit == "" {
-		// A server has no peer address to route towards yet, structurally: at
-		// Pair scope the operator does not create the client pod — and so its
-		// DNS record does not exist — until the server is Ready, so peerHost
-		// above is a name that cannot resolve at the point this guard runs.
-		// See #482. It is told which interface to bind, or the guard cannot
-		// say anything about it.
-		detail := whyUnresolved
-		if detail == "" {
-			detail = "BURNIN_PEER_HOST was empty"
-		}
-		return fin(exitError, "the server end needs TCP_BASELINE_INTERFACE naming the fabric interface to "+
-			"bind: with no peer address to route towards (%s), there is nothing to compare against the "+
-			"management interface (%s), and the guard fails closed rather than binding everywhere",
-			detail, mgmt), false
+		testIface, _ = ifaceForAddr(peerHost, hostIfaces())
 	}
 
 	// Which network namespace this is, established positively where it can be.
@@ -192,17 +192,32 @@ func guardPath(peerHost, role string) (int, bool) {
 	return 0, true
 }
 
-// runServer starts iperf3 in server mode and waits.
+// runServer runs the accept-then-classify handshake on guardPort, then either
+// refuses (never starting iperf3 — no load crosses any interface) or starts
+// iperf3 in server mode and waits.
 //
-// The server never decides. It is torn down when the pair settles, which the
-// operator does on the CLIENT's terminating — so this deliberately runs until
-// killed rather than exiting on its own after one connection. An iperf3 server
-// that exits after the first test would leave a retrying client dialling a
-// socket nobody is listening on.
-func runServer(port, duration int, peerNode string) int {
+// The server never decides the PAIR's verdict. It is torn down when the pair
+// settles, which the operator does on the CLIENT's terminating — so once past
+// the guard this deliberately runs until killed rather than exiting on its own
+// after one connection. An iperf3 server that exits after the first test would
+// leave a retrying client dialling a socket nobody is listening on.
+func runServer(port, guardPort, duration int, peerNode string) int {
+	logf("tcp-baseline: server guard on :%d, peer node %s", guardPort, peerNode)
+
+	verdict, err := serveGuard(guardPort, time.Duration(connectWaitSeconds)*time.Second)
+	if err != nil {
+		return fin(exitError, "%v", err)
+	}
+	switch verdict.decision {
+	case routeIsManagement:
+		return fin(exitSkip, "%s", verdict.reason)
+	case routeUnknown:
+		return fin(exitError, "%s", verdict.reason)
+	}
+
 	logf("tcp-baseline: server on :%d, peer node %s", port, peerNode)
 
-	// --one-off is NOT used, for the reason above.
+	// --one-off is NOT used, for the reason in the doc comment above.
 	cmd := exec.Command("iperf3", "--server", "--port", strconv.Itoa(port))
 	cmd.Stdout = os.Stderr // iperf3's server chatter is not our metrics stream
 	cmd.Stderr = os.Stderr
@@ -218,7 +233,7 @@ func runServer(port, duration int, peerNode string) int {
 	})
 	defer timer.Stop()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 	// A killed server is the expected end of a healthy pair, not a failure.
 	if err != nil && !strings.Contains(err.Error(), "signal:") {
 		return fin(exitError, "the iperf3 server exited badly: %v", err)
@@ -232,8 +247,28 @@ func runServer(port, duration int, peerNode string) int {
 // listener.
 const serverGraceSeconds = 60
 
-func runClient(peerHost, peerNode string, port, duration int) int {
+func runClient(peerHost, peerNode string, port, guardPort, duration int) int {
 	logf("tcp-baseline: client → %s:%d (node %s) for %ds", peerHost, port, peerNode, duration)
+
+	// The handshake, before anything iperf3-shaped: the server cannot classify
+	// its own path until a real peer exists to classify it FROM (#482), and
+	// this is that peer's arrival. dialGuard retries across the same ordering
+	// gap waitForListener already tolerates below.
+	v, err := dialGuard(peerHost, guardPort, time.Duration(connectWaitSeconds)*time.Second)
+	if err != nil {
+		return fin(exitError, "could not complete the management-path handshake with %s:%d (node %s): %v",
+			peerHost, guardPort, peerNode, err)
+	}
+	if !v.ok {
+		// The SERVER's own path was the problem, established the only way it
+		// could be: from the connection this client just made. Relay its
+		// verdict rather than let this client discover a vanished listener a
+		// moment later and misreport a guard refusal as a fabric fault.
+		if v.skip {
+			return fin(exitSkip, "server (node %s) declared its path unsafe: %s", peerNode, v.reason)
+		}
+		return fin(exitError, "server (node %s) declared its path unsafe: %s", peerNode, v.reason)
+	}
 
 	// Wait for the server's listener before measuring anything.
 	//
