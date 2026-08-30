@@ -287,7 +287,25 @@ var defaults = map[contract.TestKind]image{
 	// ratedMemClock and memClock), so this SKU can never populate them, and
 	// the runner says so instead of guessing.
 	contract.KindClockProbe: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.1", Vendor: VendorNVIDIA},
-	contract.KindDCGMDiag:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.2", Vendor: VendorNVIDIA},
+	// dcgm-diag moves to v0.7.3 (#479, #370), closing its row. A patch: the
+	// only .go source change since v0.7.2 is a new pre-flight refusal in
+	// loadConfig — enabling a plugin past DCGM's default per-SKU allowlist
+	// without an explicit, sufficiently long BURNIN_DURATION_SECONDS now
+	// errors before any DCGM invocation, rather than silently truncating a
+	// run against a level-derived timeout known to be wrong (memory alone
+	// measured 282-301s on this fleet's GB10, a spread no level-derived
+	// budget can safely predict). It does not touch what a correctly
+	// configured run measures — only adds a guard against a specific
+	// misconfiguration — so nothing calibrated against v0.7.2 changes
+	// meaning here.
+	//
+	// Hardware-verified on spark-043a, against the actual publish-candidate
+	// image: a gated plugin with an insufficient duration refuses
+	// immediately with the new #370 message; the default (no gated plugin)
+	// path proceeds past this check exactly as before, unaffected — it
+	// fails later for the expected, unrelated reason (spark-043a carries no
+	// DCGM installation at all; DCGM on this fleet is 85a9-only).
+	contract.KindDCGMDiag: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.3", Vendor: VendorNVIDIA},
 	// host-health moves to v0.7.2 (#479), closing its row — and it is worth
 	// recording that this one is a NO-OP republish. hack/checkpins flags the
 	// runner's directory as changed, and it is: #488 widened a unit test's
