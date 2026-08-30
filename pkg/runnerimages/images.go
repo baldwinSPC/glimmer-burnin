@@ -286,10 +286,29 @@ var defaults = map[contract.TestKind]image{
 	// refuses NVML_CLOCK_MEM entirely (nvml_unsupported names both
 	// ratedMemClock and memClock), so this SKU can never populate them, and
 	// the runner says so instead of guessing.
-	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.1", Vendor: VendorNVIDIA},
-	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.2", Vendor: VendorNVIDIA},
-	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.1", Vendor: VendorNVIDIA},
-	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.7.1", Vendor: VendorNVIDIA},
+	contract.KindClockProbe: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.1", Vendor: VendorNVIDIA},
+	contract.KindDCGMDiag:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.2", Vendor: VendorNVIDIA},
+	contract.KindHostHealth: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.1", Vendor: VendorNVIDIA},
+	// memory-bw moves to v0.8.0 (#479, #431), closing its row. A minor bump,
+	// not a patch: device_fold.h (553 new lines) adds real multi-device
+	// folding — a board with more than one GPU is now measured and gated on
+	// its WORST device rather than device 0 alone, which is a genuine
+	// measurement-semantics change wherever it applies, even though this
+	// fleet's single-GPU boards see identical numbers before and after.
+	//
+	// Hardware-verified on spark-043a, against the actual publish-candidate
+	// image (built fresh from this source, not inferred from #431's own
+	// investigation): a correct budget (BURNIN_RESOURCE_LIMITS naming the 1
+	// GPU actually visible) passes exactly as before —
+	// hostToDeviceBandwidthMaxGBs 58.72-58.73, deviceToHostBandwidthMaxGBs
+	// 59.08-59.34, deviceToDeviceBandwidthMaxGBs 121.49-121.76 across three
+	// runs. A WRONG budget (claiming 2 GPUs the runtime shows only 1 of)
+	// correctly refuses rather than folding a partial board:
+	// "this pod was allocated 2 device(s) but the runtime shows 1 [...] a
+	// fold over a partial board would certify devices nobody measured" —
+	// the new safety behavior #431 exists for, confirmed firing on the
+	// actual image being pinned.
+	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.8.0", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
 	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.1", Vendor: VendorNVIDIA},
