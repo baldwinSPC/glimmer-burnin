@@ -262,16 +262,31 @@ var defaults = map[contract.TestKind]image{
 	// rails"), and a confirming run of the shipped sample settling Passed at
 	// 22.83 GB/s against its real floor.
 	//
-	// THE OTHER EIGHT PINS IN THIS TABLE ARE STALE TOO — hack/checkpins fails on
-	// tcp-baseline, host-health, ib-write-bw, clockprobe, dcgm-diag, memory-bw,
-	// gpu-burn and thermal-soak, none of it comment drift (memory-bw is 600
-	// lines). They are NOT republished here, because publishing a runner image
-	// without verifying its kernel on real hardware is the one thing this file's
-	// own history says never to do, and eight verifications is not one session's
-	// work. Tracked in #509, which also covers why checkpins — which is correct
-	// and found all nine on its first run — is asked only weekly, and so is
-	// never asked at the moment a release pins these defaults.
-	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.0", Vendor: VendorNVIDIA},
+	// #509 found eight pins stale at once — tcp-baseline, host-health,
+	// ib-write-bw, clockprobe, dcgm-diag, memory-bw, gpu-burn and
+	// thermal-soak — none of it comment drift (memory-bw is 600 lines), and
+	// none republished in that PR: publishing a runner image without
+	// verifying its kernel on real hardware is the one thing this file's own
+	// history says never to do, and eight verifications is not one session's
+	// work. #479 tracks the six of those still open (clockprobe, dcgm-diag,
+	// host-health, memory-bw, thermal-soak, gpu-burn as re-found by a later
+	// checkpins run); tcp-baseline and ib-write-bw's #509 staleness closed
+	// separately. tcp-baseline has since gone stale again for an unrelated
+	// reason — #482's accept-then-classify redesign — landed and hardware
+	// verified 2026-08-29 but not yet republished.
+	//
+	// clockprobe moves to v0.7.1 (#479), closing its row. Purely additive:
+	// two new Evidence metrics, memClockPct and its ratedMemClockMHz
+	// denominator (#301) — the memory-domain analog of sustainedClockPct,
+	// landed thresholdless because nobody has yet watched a wedged part's
+	// memory clock move. No existing metric, verdict, or behavior changed,
+	// so this is a patch. Hardware-verified on spark-043a: CLOCKPROBE_PASS,
+	// every pre-existing metric unchanged from its v0.7.0 baseline, and the
+	// new pair correctly OMITTED rather than fabricated — GB10's NVML
+	// refuses NVML_CLOCK_MEM entirely (nvml_unsupported names both
+	// ratedMemClock and memClock), so this SKU can never populate them, and
+	// the runner says so instead of guessing.
+	contract.KindClockProbe:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindDCGMDiag:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.2", Vendor: VendorNVIDIA},
 	contract.KindHostHealth:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.7.1", Vendor: VendorNVIDIA},
