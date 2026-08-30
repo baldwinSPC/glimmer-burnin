@@ -362,7 +362,23 @@ var defaults = map[contract.TestKind]image{
 	// keep power-swing's bookkeeping out of both reports.
 	contract.KindThermalSoak: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.2", Vendor: VendorNVIDIA},
 	contract.KindGPUBurn:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.2", Vendor: VendorNVIDIA},
-	contract.KindIBWriteBW:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
+	// ib-write-bw moves to v0.6.5, a no-op republish surfaced by `checkpins`
+	// rather than by #479: fabric_contract_test.go — the drift guard for
+	// scaffolding shared across the fabric runners — picked up documentation
+	// and table entries from #499 (fabric-soak joining the shared-source
+	// guard) and #489/#501 (nccl's deliberate rail-selection fork), and both
+	// landed after v0.6.4 was built. `git diff` against the pinned commit
+	// shows exactly one file touched in this directory, and it is that test
+	// file — zero non-test .go changes, so the compiled binary is byte-for-
+	// byte what v0.6.4 already shipped.
+	//
+	// Republished anyway to close the stale-pin flag, and confirmed on
+	// spark-85a9 against the actual publish-candidate image: the server
+	// discovered all four RDMA ports (roceP2p1s0f0/f1, rocep1s0f0/f1) exactly
+	// as before, RLIMIT_MEMLOCK handling was unchanged, and the readinessProbe
+	// port (:18510) bound and waited for a peer — the same known-good v0.6.4
+	// behavior, on the actual bits being pinned.
+	contract.KindIBWriteBW: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.5", Vendor: VendorAny},
 	// nccl moves to v0.9.1 (#517, #518). A patch, not a minor bump: unlike
 	// v0.7.0 -> v0.9.0, this does not change what a healthy collective
 	// measures — every run tonight landed in the same ~19.5-19.7 GB/s band
