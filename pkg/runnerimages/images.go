@@ -386,14 +386,31 @@ var defaults = map[contract.TestKind]image{
 	contract.KindNCCL:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-nccl:v0.9.1", Vendor: VendorNVIDIA},
 	contract.KindGPUDirect: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpudirect-rdma:v0.6.4", Vendor: VendorNVIDIA},
 
-	// tcp-baseline joined the table at v0.1.0 (#237), verified through the
-	// operator on both Sparks: the client-side route lookup correctly picked
-	// the fabric interface with no override (enP2p1s0f0np0, not the wlP9s9
-	// management interface), the explicit-management-interface guard refused
-	// with exit 3 as documented, and a healthy run measured 43.7 Gbps / 0
-	// retransmits / 146us RTT. Needs no accelerator, so VendorAny like
-	// ib-write-bw.
-	contract.KindTCPBaseline: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-tcp-baseline:v0.1.1", Vendor: VendorAny},
+	// tcp-baseline moves to v0.1.2 (#482): the original design required the
+	// SERVER to set TCP_BASELINE_INTERFACE, which is structurally impossible
+	// to satisfy honestly — a Pair-scope server starts before the client pod
+	// or its DNS name exist, so there is nothing for the server to resolve
+	// its peer against. Worse, the old readinessProbe targeted iperf3's own
+	// port, which only opens after a handshake that itself depends on the
+	// client existing — and the operator refuses to create the client until
+	// the server probe succeeds, a structural deadlock rather than a bug in
+	// either side. The fix adds a dedicated guard port (5202) that listens
+	// immediately at startup and satisfies readinessProbe on its own; once
+	// the client actually connects, the server classifies its peer from the
+	// accepted socket's local/remote address (accept-then-classify) instead
+	// of pre-resolving it, and only then starts iperf3.
+	//
+	// Verified in two rounds. First, earlier tonight, a full two-Spark Pair
+	// test through the operator (not a standalone container): the guard port
+	// satisfied readinessProbe immediately with no deadlock, the client
+	// connected and the run measured 49.68 Gbps / 0 retransmits / 290us mean
+	// RTT, and tcpTestInterface=enP2p1s0f1np1 was discovered correctly with
+	// no TCP_BASELINE_INTERFACE override set anywhere. Second, a fresh
+	// confirming run directly against this exact publish-candidate image on
+	// spark-043a: the server bound its guard port and waited patiently for a
+	// peer rather than refusing or crashing. Needs no accelerator, so
+	// VendorAny like ib-write-bw.
+	contract.KindTCPBaseline: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-tcp-baseline:v0.1.2", Vendor: VendorAny},
 
 	// disk-io joined the table at v0.1.0 (#242), verified on a real Samsung
 	// MZALC4T0HBL1 NVMe over ext4. The check that matters — does O_DIRECT
