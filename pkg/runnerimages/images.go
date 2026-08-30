@@ -342,9 +342,27 @@ var defaults = map[contract.TestKind]image{
 	// actual image being pinned.
 	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.8.0", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
-	contract.KindThermalSoak:  {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.1", Vendor: VendorNVIDIA},
-	contract.KindGPUBurn:      {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.1", Vendor: VendorNVIDIA},
-	contract.KindIBWriteBW:    {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
+	// thermal-soak and gpu-burn move to v0.7.2 together (#479, #166), closing
+	// both rows — they share soak_core.cuh, so #166's power-swing addition
+	// (a new TestKind, DutyCycle bookkeeping and its swing_* evidence keys)
+	// landed in both at once. A patch for both: DutyCycle is an ADDITIVE
+	// trailing parameter defaulting to nullptr, and neither call site here
+	// ever passes one, so every touch point the diff adds — takeSample's
+	// duty fields, buildDeviceReport's swing_* keys, emitMeasurement's
+	// dutyCycleKnown guard — is provably inert for these two kinds by
+	// construction, not just by convention. power-swing itself is a
+	// separate, not-yet-published TestKind; it needs its own verification
+	// and pin when it ships.
+	//
+	// Hardware-verified on spark-043a, against the actual publish-candidate
+	// images: THERMAL_SOAK_PASS and GPU_BURN_PASS, sustained_clock_pct in
+	// the same healthy 79-81% band this fleet has shown all night, and —
+	// the direct test of the additive claim — zero swing_* keys anywhere in
+	// either runner's output, confirming DutyCycle's absence really does
+	// keep power-swing's bookkeeping out of both reports.
+	contract.KindThermalSoak: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.2", Vendor: VendorNVIDIA},
+	contract.KindGPUBurn:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.2", Vendor: VendorNVIDIA},
+	contract.KindIBWriteBW:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-ib-write-bw:v0.6.4", Vendor: VendorAny},
 	// nccl moves to v0.9.1 (#517, #518). A patch, not a minor bump: unlike
 	// v0.7.0 -> v0.9.0, this does not change what a healthy collective
 	// measures — every run tonight landed in the same ~19.5-19.7 GB/s band
