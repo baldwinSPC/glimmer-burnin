@@ -288,7 +288,21 @@ var defaults = map[contract.TestKind]image{
 	// the runner says so instead of guessing.
 	contract.KindClockProbe: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.1", Vendor: VendorNVIDIA},
 	contract.KindDCGMDiag:   {Ref: "ghcr.io/baldwinspc/glimmer-burnin-dcgm-diag:v0.7.2", Vendor: VendorNVIDIA},
-	contract.KindHostHealth: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.1", Vendor: VendorNVIDIA},
+	// host-health moves to v0.7.2 (#479), closing its row — and it is worth
+	// recording that this one is a NO-OP republish. hack/checkpins flags the
+	// runner's directory as changed, and it is: #488 widened a unit test's
+	// heap-retention tolerance from a fifth to a third (CI-runner GC noise
+	// was tripping it, not real retention), and #302 corrected README
+	// guidance about which kmsg-access recipe actually works. Neither
+	// touches a .go source file the binary is built from — only
+	// kernlog_test.go and README.md changed — so the compiled artifact is
+	// unchanged from v0.7.1. Republished anyway to close the stale-pin flag
+	// and keep this table's own claim ("every pin traceable to a verified
+	// build") true. Confirmed on spark-043a: HOST_HEALTH_OK, and the
+	// xid_source=none detail text matches #134/#302's documented recipe
+	// exactly for the (deliberately unprivileged) way this smoke test was
+	// invoked — not a regression, the same behavior v0.7.1 already had.
+	contract.KindHostHealth: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.2", Vendor: VendorNVIDIA},
 	// memory-bw moves to v0.8.0 (#479, #431), closing its row. A minor bump,
 	// not a patch: device_fold.h (553 new lines) adds real multi-device
 	// folding — a board with more than one GPU is now measured and gated on
