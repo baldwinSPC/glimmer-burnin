@@ -1,0 +1,12 @@
+crw-rw----+ 1 root render 237, 0 Sep 19 21:11 /dev/kfd
+total 0
+drwxr-xr-x   3 root root        100 Sep 19 21:11 .
+drwxr-xr-x  19 root root       4100 Sep 19 21:11 ..
+drwxr-xr-x   2 root root         80 Sep 19 21:11 by-path
+crw-rw----+  1 root video  226,   0 Sep 19 21:11 card0
+crw-rw----+  1 root render 226, 128 Sep 19 21:11 renderD128
+--- group ids ---
+render:x:992:lemonade
+video:x:44:
+--- what uid 65532 would see ---
+kfd mode: 660 root:render
