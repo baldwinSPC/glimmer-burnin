@@ -1,0 +1,287 @@
+# Acceptance for an AMD AI Halo node — Ryzen AI MAX+ 395 / Strix Halo, gfx1151.
+#
+# Everything here is derived from MEASUREMENT on a physical unit, not from
+# porting the NVIDIA profile across. The capture is committed at
+# runners/clockprobe-rocm/testdata/gfx1151-amd-halo/ and the reasoning is in
+# docs/vendors/amd-performance-testing.md.
+#
+# ────────────────────────────────────────────────────────────────────────────
+# THE RULE THAT MAKES THIS PROFILE DIFFERENT: DO NOT OVERLAP CPU AND GPU LOAD.
+#
+# An APU's GPU and its sixteen CPU cores share ONE socket power budget. Measured
+# on the real part: under a GPU-only FMA load the graphics clock holds 2900 MHz,
+# 100% of the ladder top. Add all-core CPU load and it collapses to 1177 MHz —
+# 41% — while the part stays 98% busy and gets *cooler*, because the GPU is
+# doing less work. Remove the CPU load and it returns to 2900 MHz immediately.
+#
+# That is correct, by-design arbitration on healthy silicon. It is also
+# indistinguishable from the amdgpu idle-clock lock (ROCm#5750) that
+# clockprobe-rocm exists to catch, which fires on exactly slow + cool + busy.
+# A profile that runs memory-stress alongside clockprobe FAILS ITS OWN HEALTHY
+# NODES, permanently, with the retry budget unspent — because a Fail is a
+# hardware verdict and is never retried.
+#
+# So `failFast: false` and a strictly SEQUENTIAL ordering below are not
+# stylistic. Tests run one at a time, and the CPU-side test is last.
+#
+# See #534. Until it is fixed, the clock gate here is advisory (`required:
+# false`) rather than acceptance — the measurement is worth having and the
+# verdict is not yet trustworthy on this package.
+# ────────────────────────────────────────────────────────────────────────────
+
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: amd-halo
+spec:
+  # Every result, even after a failure. A first-generation AMD profile is being
+  # used to LEARN the fleet's numbers; stopping at the first failure throws away
+  # the readings that would tell you whether the threshold was wrong.
+  failFast: false
+  tests:
+    # 1. What is this machine? Cheap, read-only, and the thing that explains a
+    #    slow node later. On this platform configuration is a real source of
+    #    bad measurements — GTT sizing, TTM page limit, kernel version and ROCm
+    #    version all change what the hardware can do — so capturing it before
+    #    anything is measured is what keeps a misconfigured node from being
+    #    condemned as a broken one. See the config-check gap in
+    #    docs/vendors/amd-performance-testing.md.
+    - testRef: fingerprint-probe
+      required: false
+
+    # 2. Host and accelerator fault counters over the window.
+    #    On this part there is NO ras/ directory — measured — so host-health
+    #    declares eccErrors unmeasurable via the n/a sentinel rather than
+    #    omitting it. That is the honest answer and it is why the gate below is
+    #    RequiredIfMeasurable: on hardware with no ECC block to read, an
+    #    `eccErrors Equal 0` gate must be reported not-evaluated, never passed
+    #    and never failed.
+    - testRef: amd-halo-host-health
+
+    # 3. The clock probe. Advisory until #534 — see the header.
+    - testRef: amd-halo-clockprobe
+      required: false
+
+    # 4. GPU-side compute. Runs alone.
+    - testRef: amd-halo-compute-smoke
+
+    # 5. Device bandwidth. On a unified-memory APU this measures the same
+    #    physical DRAM the CPU uses, so it belongs with the GPU-side tests and
+    #    away from the host memory stress below.
+    - testRef: amd-halo-memory-bw
+      required: false
+
+    # 6. HOST MEMORY STRESS — LAST, AND ALONE.
+    #    This is the CPU-side test, and the one that would collapse the GPU
+    #    clock if it overlapped anything above it. It is vendor-free and needs
+    #    no ROCm image.
+    - testRef: host-memory-stress
+  sinks: []
+
+---
+# host-health for a Halo.
+#
+# No thresholds on anything dimensional. Counters only — those are the gates
+# that are safe on day one, because a healthy part reports exactly zero
+# regardless of who made it.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: amd-halo-host-health
+spec:
+  kind: host-health
+  scope: Node
+  durationSeconds: 60
+  runner:
+    imagesByVendor:
+      - vendor: amd
+        arch: gfx1151
+        # MEASURED: /dev/kfd on this unit is root:render, mode 0660, gid 992,
+        # with `other::---`. The image's uid 65532 holds no such group and
+        # CANNOT open it. This is not a "may need" — a pod here needs the
+        # node's own render gid as a supplementalGroup, and that gid is
+        # host-specific, so it must be taken from the node rather than
+        # hardcoded. host-health reads sysfs only and does not need /dev/kfd;
+        # the runners that do are marked below.
+        image: ghcr.io/baldwinspc/glimmer-burnin-host-health-rocm:REPLACE-ME
+    hostPaths:
+      # Without /dev/kmsg host-health reports xid_source=none and OMITS the
+      # counter rather than printing a zero it never measured — so the gate
+      # below fails the node instead of certifying it. That is the honest
+      # degradation, and why the mount is declared rather than assumed.
+      - path: /dev/kmsg
+        mountPath: /dev/kmsg
+        readOnly: true
+        type: CharDevice
+  thresholds:
+    # RequiredIfMeasurable, not Required: this part has no ras/ directory, so
+    # the runner declares eccErrors unmeasurable and this gate is reported
+    # NOT EVALUATED. Under plain `Required` it would fail every healthy Halo in
+    # the fleet — which is precisely the GB10 mistake that motivated the
+    # sentinel in the first place.
+    - metric: eccErrors
+      comparison: Equal
+      value: "0"
+      applicability: RequiredIfMeasurable
+    # amdgpu fault patterns over the window are NOT yet gated here: the
+    # patterns in soak_core_rocm.h are built from the driver's published log
+    # vocabulary and have never been matched against a captured fault (#418).
+    # A pattern that silently under-matches reads as a healthy window, so it is
+    # evidence until a real capture confirms the shape.
+
+---
+# The sustained-clock probe. Advisory — see the profile header and #534.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: amd-halo-clockprobe
+spec:
+  kind: clockprobe
+  scope: Node
+  durationSeconds: 120
+  runner:
+    imagesByVendor:
+      - vendor: amd
+        arch: gfx1151
+        image: ghcr.io/baldwinspc/glimmer-burnin-clockprobe-rocm:REPLACE-ME
+    # MEASURED requirement, not a precaution — see the note on host-health.
+    #
+    # The RIGHT grant is a supplementalGroup for the node's render gid (992 on
+    # the unit measured). RunnerSpec cannot express one — it has runAsUser and
+    # capabilities and no supplementalGroups — so #535 tracks that gap, and
+    # until it lands root is the only expressible way in. That is a larger
+    # grant than the hardware needs, and saying so here is better than a sample
+    # that quietly runs everything as root without explaining why.
+    #
+    # `privileged: true` is NOT the alternative: measured elsewhere in this
+    # project, a privileged hostNetwork pod was missing the very device nodes
+    # it was meant to reach.
+    runAsUser: 0
+    hostPaths:
+      # The two device nodes a ROCm runner actually opens. Nothing else — a
+      # test that declares nothing gets a pod with no volumes at all, and that
+      # is the right default for an operator sent to MEASURE a fleet rather
+      # than mutate it.
+      - path: /dev/kfd
+        mountPath: /dev/kfd
+        readOnly: false
+        type: CharDevice
+      - path: /dev/dri
+        mountPath: /dev/dri
+        readOnly: false
+        type: Directory
+  resources:
+    limits:
+      amd.com/gpu: 1
+  thresholds:
+    # MEASURED: a healthy part sustains 100% of its 2900 MHz ladder top under a
+    # GPU-only load, held flat for 140 s. The shipped default floor is 60, which
+    # is not merely conservative — it is 2.5x below what the silicon does, and
+    # the whole gap is spent absorbing the CPU-contention artefact of #534
+    # rather than describing the part.
+    #
+    # Gated at 85 here, which is a real statement about gfx1151 under an
+    # uncontended socket. It is `required: false` at the profile level until
+    # #534 lands, because a contended socket reads 41% and this gate would then
+    # condemn a healthy node.
+    - metric: sustainedClockPct
+      comparison: GreaterThanOrEqual
+      value: "85"
+
+---
+# Compute smoke. gfx1151 is RDNA 3.5: WMMA wave32 builtins, not MFMA.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: amd-halo-compute-smoke
+spec:
+  kind: compute-smoke
+  scope: Node
+  # No durationSeconds: compute-smoke is a BURST-ONLY kind. Its GEMM finishes in
+  # milliseconds however long it is asked for, and api/v1alpha1/samples_test.go
+  # refuses a sample that sets a duration on one. A burst proves the
+  # arch-correct instruction path executed and got the right answer; a longer
+  # run does not strengthen that claim.
+  runner:
+    imagesByVendor:
+      # The arch rung earns its keep here. compute-smoke-rocm covers gfx11 only
+      # and reports a CDNA part as Error (#331), so the same profile applied to
+      # an Instinct node must not resolve to this image. Naming the arch is what
+      # makes that a configuration fact rather than a runtime surprise.
+      - vendor: amd
+        arch: gfx1151
+        image: ghcr.io/baldwinspc/glimmer-burnin-compute-smoke-rocm:REPLACE-ME
+    # See amd-halo-clockprobe for why this is root and not a supplementalGroup
+    # (#535).
+    runAsUser: 0
+    hostPaths:
+      # The two device nodes a ROCm runner actually opens. Nothing else — a
+      # test that declares nothing gets a pod with no volumes at all, and that
+      # is the right default for an operator sent to MEASURE a fleet rather
+      # than mutate it.
+      - path: /dev/kfd
+        mountPath: /dev/kfd
+        readOnly: false
+        type: CharDevice
+      - path: /dev/dri
+        mountPath: /dev/dri
+        readOnly: false
+        type: Directory
+  resources:
+    limits:
+      amd.com/gpu: 1
+  thresholds:
+    # deviceCount is the one acceptance gate that is safe before any baseline
+    # exists: a Halo has exactly one integrated device, so a pod handed none —
+    # or handed a board it cannot see — FAILS instead of certifying whatever it
+    # found. It is a count, and counts do not need a fleet baseline.
+    - metric: deviceCount
+      comparison: Equal
+      value: "1"
+    # No TFLOPS floor. This project pins rate thresholds from measured fleet
+    # baselines, and one unit is not a baseline — a floor invented from a single
+    # sample condemns the second node that is 3% slower. Run thresholdless,
+    # gather the fleet, then gate.
+
+---
+# Device bandwidth on unified memory.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: amd-halo-memory-bw
+spec:
+  kind: memory-bw
+  scope: Node
+  durationSeconds: 60
+  runner:
+    imagesByVendor:
+      - vendor: amd
+        arch: gfx1151
+        image: ghcr.io/baldwinspc/glimmer-burnin-memory-bw-rocm:REPLACE-ME
+    # See amd-halo-clockprobe for why this is root and not a supplementalGroup
+    # (#535).
+    runAsUser: 0
+    hostPaths:
+      # The two device nodes a ROCm runner actually opens. Nothing else — a
+      # test that declares nothing gets a pod with no volumes at all, and that
+      # is the right default for an operator sent to MEASURE a fleet rather
+      # than mutate it.
+      - path: /dev/kfd
+        mountPath: /dev/kfd
+        readOnly: false
+        type: CharDevice
+      - path: /dev/dri
+        mountPath: /dev/dri
+        readOnly: false
+        type: Directory
+  resources:
+    limits:
+      amd.com/gpu: 1
+  thresholds:
+    # Deliberately none, and this is the case where porting a number would be
+    # most tempting and most wrong. On an APU "device bandwidth" is bandwidth to
+    # the SAME physical DRAM the CPU is using, over a GTT mapping — it is not
+    # the dedicated-HBM measurand the NVIDIA floors describe, and a number
+    # carried across from either an NVIDIA part or an Instinct would be
+    # measuring a different thing under the same metric name.
+    []
