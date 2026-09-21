@@ -278,3 +278,105 @@ func TestSamplesAgreeWithTheRunnerImageTable(t *testing.T) {
 		t.Errorf("no sample carries the %q marker, so nothing keeps the samples' image claims honest", marker)
 	}
 }
+
+// TestResolveForDevice covers the arch rung: the one below vendor, added so a
+// Strix Halo APU and an Instinct MI300X — both `amd`, sharing almost nothing —
+// can be served by one profile.
+func TestResolveForDevice(t *testing.T) {
+	const (
+		halo    = "ghcr.io/x/clockprobe-rocm-gfx1151:v1"
+		cdna    = "ghcr.io/x/clockprobe-rocm-cdna:v1"
+		anyAMD  = "ghcr.io/x/clockprobe-rocm:v1"
+		nvidia  = "ghcr.io/x/clockprobe:v1"
+		theKind = contract.KindClockProbe
+	)
+
+	byArch := &api.RunnerSpec{ImagesByVendor: []api.VendorImage{
+		{Vendor: "amd", Arch: "gfx1151", Image: halo},
+		{Vendor: "amd", Arch: "gfx942", Image: cdna},
+		{Vendor: "amd", Image: anyAMD},
+		{Vendor: "nvidia", Image: nvidia},
+	}}
+
+	for _, tc := range []struct {
+		name         string
+		vendor, arch string
+		want         string
+	}{
+		{"exact arch wins", "amd", "gfx1151", halo},
+		{"the other arch", "amd", "gfx942", cdna},
+		{"an arch nobody listed falls to the vendor entry", "amd", "gfx1100", anyAMD},
+		{"no arch at all falls to the vendor entry", "amd", "", anyAMD},
+		{"a vendor with no arch entries is unaffected", "nvidia", "sm_121", nvidia},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveForDevice(theKind, byArch, tc.vendor, tc.arch)
+			if err != nil {
+				t.Fatalf("ResolveForDevice(%q, %q): %v", tc.vendor, tc.arch, err)
+			}
+			if got != tc.want {
+				t.Errorf("ResolveForDevice(%q, %q) = %q, want %q", tc.vendor, tc.arch, got, tc.want)
+			}
+		})
+	}
+
+	// SPECIFICITY IS NOT POSITION. The unqualified entry is written FIRST here,
+	// where a single-pass "first vendor match wins" loop would return it and
+	// shadow the arch entry below it. Resolution must not depend on the order
+	// somebody happened to write the list in.
+	t.Run("an unqualified entry written first does not shadow an arch entry", func(t *testing.T) {
+		shadowed := &api.RunnerSpec{ImagesByVendor: []api.VendorImage{
+			{Vendor: "amd", Image: anyAMD},
+			{Vendor: "amd", Arch: "gfx1151", Image: halo},
+		}}
+		got, err := ResolveForDevice(theKind, shadowed, "amd", "gfx1151")
+		if err != nil {
+			t.Fatalf("ResolveForDevice: %v", err)
+		}
+		if got != halo {
+			t.Errorf("got %q, want the arch-specific %q — list order decided the answer", got, halo)
+		}
+	})
+
+	// An explicit spec.runner.image still means every node, arch included:
+	// naming an image IS the declaration.
+	t.Run("an explicit image still wins over everything", func(t *testing.T) {
+		pinned := &api.RunnerSpec{Image: "ghcr.io/x/pinned:v9", ImagesByVendor: byArch.ImagesByVendor}
+		got, err := ResolveForDevice(theKind, pinned, "amd", "gfx1151")
+		if err != nil || got != "ghcr.io/x/pinned:v9" {
+			t.Errorf("got %q, %v; want the explicit pin", got, err)
+		}
+	})
+
+	// Resolve is ResolveForDevice with no arch, and must stay that way — the
+	// two dispatchers share this ladder and a second implementation of it is
+	// the drift this package exists to prevent.
+	t.Run("Resolve is the no-arch case", func(t *testing.T) {
+		a, errA := Resolve(theKind, byArch, "amd")
+		b, errB := ResolveForDevice(theKind, byArch, "amd", "")
+		if a != b || (errA == nil) != (errB == nil) {
+			t.Errorf("Resolve=%q(%v) but ResolveForDevice with empty arch=%q(%v)", a, errA, b, errB)
+		}
+	})
+
+	// A VENDOR ENUMERATED ONLY BY ARCH DOES NOT FALL THROUGH. The author showed
+	// they thought about which silicon this image suits; a node of that vendor
+	// whose arch is missing from their list is a gap in the enumeration, not an
+	// invitation to substitute the built-in default. It is an Error — hardware
+	// unjudged, retryable — and never a silently wrong image.
+	t.Run("arch-only entries refuse rather than fall through to the default", func(t *testing.T) {
+		archOnly := &api.RunnerSpec{ImagesByVendor: []api.VendorImage{
+			{Vendor: "amd", Arch: "gfx1151", Image: halo},
+			{Vendor: "amd", Arch: "gfx942", Image: cdna},
+		}}
+		_, err := ResolveForDevice(theKind, archOnly, "amd", "gfx1200")
+		if err == nil {
+			t.Fatal("resolved an image for an architecture nobody listed")
+		}
+		for _, want := range []string{"gfx1200", "gfx1151", "gfx942"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error does not name %q, so the reader cannot see the gap: %v", want, err)
+			}
+		}
+	})
+}

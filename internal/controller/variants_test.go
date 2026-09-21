@@ -155,7 +155,7 @@ func TestAxesReachTheRunnerAndNothingInterpretsThem(t *testing.T) {
 	spec := variantSpec(burninv1alpha1.KindComputeSmoke)
 	pod, err := podForTest(newRun("r", "p", "spark-a"), 0, 1, "gemm-fp4", &spec,
 		map[string]string{"precision": "fp4", "layout": "nt"},
-		"spark-a", "",
+		"spark-a", device{},
 		burninv1alpha1.TargetSelector{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -370,7 +370,7 @@ func TestVariants_OverlayOnATestWithNoRunnerBlock(t *testing.T) {
 			tc.check(t, cells[0].Spec)
 			// And the image still resolves: an empty RunnerSpec must behave
 			// exactly as a nil one did, or this fix would break every default.
-			if _, err := runnerImage(&cells[0].Spec, ""); err != nil {
+			if _, err := runnerImage(&cells[0].Spec, device{}); err != nil {
 				t.Errorf("image no longer resolves after the overlay: %v", err)
 			}
 		})

@@ -535,16 +535,73 @@ func WithoutDefault() []contract.TestKind {
 // The order is: an explicit image, then the vendor's own entry, then the kind's
 // default — but only if the default can actually measure this node.
 func Resolve(kind contract.TestKind, runner *api.RunnerSpec, vendor string) (string, error) {
+	return ResolveForDevice(kind, runner, vendor, "")
+}
+
+// ResolveForDevice is Resolve with the node's accelerator ARCHITECTURE as well
+// as its vendor — "gfx1151", "gfx942", "sm_121" — as the fingerprint reported
+// it.
+//
+// Resolve is this with an empty arch, which is what every caller meant before
+// architectures were selectable and what a node nothing has fingerprinted still
+// means. The two are one function so the two dispatchers cannot drift, which is
+// the whole reason this package exists.
+//
+// WHY THE ARCH RUNG EXISTS. The vendor rung stops one level too high on a
+// heterogeneous fleet: a Strix Halo APU and an Instinct MI300X are both `amd`
+// and share almost nothing — WMMA against MFMA, GTT against HBM, no RAS block
+// against ECC with row remapping. compute-smoke-rocm already reports a CDNA
+// part as Error because its kernel covers gfx11 only. Without this rung the
+// only way to serve both is one profile per architecture, which is exactly the
+// drift imagesByVendor was added to end, one level down.
+//
+// EMPTY ARCH IS NOT A MISMATCH, for the same reason an empty vendor is not:
+// a node nothing fingerprinted declared nothing, and absence is not a
+// declaration. It falls to the vendor's unqualified entry, which is where every
+// pre-existing spec's entries live.
+func ResolveForDevice(kind contract.TestKind, runner *api.RunnerSpec, vendor, arch string) (string, error) {
 	if runner != nil && runner.Image != "" {
 		// Pinned by the author for every node. Their call, including on a mixed
 		// fleet, and no vendor check applies: naming an image IS the declaration.
 		return runner.Image, nil
 	}
 	if runner != nil {
+		// MOST SPECIFIC FIRST, and it has to be two passes rather than one.
+		//
+		// A single pass taking the first entry whose vendor matches would let
+		// an unqualified `{vendor: amd}` written above `{vendor: amd, arch:
+		// gfx942}` shadow it — making resolution depend on the order somebody
+		// happened to write the list in, which is exactly the kind of invisible
+		// authoring trap this project keeps out of the API. Specificity is a
+		// property of the entry, not of its position.
+		if arch != "" {
+			for _, vi := range runner.ImagesByVendor {
+				if vi.Vendor == vendor && vi.Arch == arch && vi.Image != "" {
+					return vi.Image, nil
+				}
+			}
+		}
 		for _, vi := range runner.ImagesByVendor {
-			if vi.Vendor == vendor && vi.Image != "" {
+			if vi.Vendor == vendor && vi.Arch == "" && vi.Image != "" {
 				return vi.Image, nil
 			}
+		}
+
+		// A vendor listed ONLY with architectures, none of which is this node's,
+		// is reported here rather than falling through to the built-in default.
+		//
+		// The fall-through would be wrong in the one way that matters: the
+		// author has demonstrably thought about which silicon this image suits
+		// — they enumerated it — so a node of that vendor whose arch is absent
+		// from the list is a gap in their enumeration, not an invitation to
+		// substitute a default they did not choose. Reported as an Error, which
+		// leaves the hardware unjudged and retryable.
+		if vendor != "" && archOnlyEntriesFor(runner.ImagesByVendor, vendor) {
+			return "", fmt.Errorf(
+				"no image for vendor %q arch %s on kind %q: spec.runner.imagesByVendor lists %s for that vendor "+
+					"and no unqualified entry. Add an entry for this architecture, or drop the arch from one entry "+
+					"so it serves every %s node",
+				vendor, archOrUnknown(arch), kind, listArchesFor(runner.ImagesByVendor, vendor), vendor)
 		}
 	}
 
@@ -626,4 +683,45 @@ func listVendors(list []api.VendorImage) string {
 	}
 	sort.Strings(names)
 	return strings.Join(names, ", ")
+}
+
+// archOnlyEntriesFor reports whether this vendor appears in the list ONLY with
+// architectures attached — the case where falling through to the built-in
+// default would substitute an image the author did not choose for a node they
+// did not enumerate.
+func archOnlyEntriesFor(list []api.VendorImage, vendor string) bool {
+	seen := false
+	for _, vi := range list {
+		if vi.Vendor != vendor {
+			continue
+		}
+		if vi.Arch == "" {
+			return false
+		}
+		seen = true
+	}
+	return seen
+}
+
+// listArchesFor renders the architectures declared for one vendor, for the
+// message that says what the author actually wrote.
+func listArchesFor(list []api.VendorImage, vendor string) string {
+	var out []string
+	for _, vi := range list {
+		if vi.Vendor == vendor && vi.Arch != "" {
+			out = append(out, vi.Arch)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
+}
+
+// archOrUnknown keeps an empty arch from rendering as `arch ""`, which sends
+// the reader looking for a typo when the real problem is that nothing
+// established what silicon this node has.
+func archOrUnknown(arch string) string {
+	if arch == "" {
+		return `"unknown" (nothing established an accelerator architecture for this node)`
+	}
+	return `"` + arch + `"`
 }

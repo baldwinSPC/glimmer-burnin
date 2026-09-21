@@ -940,7 +940,7 @@ func (r *BurnInRunReconciler) advance(
 		if !busy[node] && len(busy) >= capNodes {
 			return advancePending, none, nil
 		}
-		newPod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, node, r.vendorFor(ctx, node), run.Spec.Target, nil)
+		newPod, buildErr := podForTest(run, index, attempt, t.Name, &t.Spec, t.Axes, node, r.deviceFor(ctx, node), run.Spec.Target, nil)
 		if buildErr != nil {
 			// Unbuildable pod (no image for the kind): machinery error, and
 			// asking again cannot fix it.

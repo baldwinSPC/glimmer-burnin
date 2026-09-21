@@ -446,7 +446,7 @@ func prepareVolumesAndContainers(steps []burninv1alpha1.PrepareStep) ([]corev1.V
 //
 // vendor may be empty, which is the ordinary single-vendor case and every case
 // before this field existed: byVendor is simply skipped and the default answers.
-func runnerImage(spec *burninv1alpha1.BurnInTestSpec, vendor string) (string, error) {
+func runnerImage(spec *burninv1alpha1.BurnInTestSpec, dev device) (string, error) {
 	// THE LADDER LIVES IN pkg/runnerimages, not here, and that is the point.
 	//
 	// The bare-metal dispatcher runs the same runner images on hosts that are not
@@ -455,7 +455,7 @@ func runnerImage(spec *burninv1alpha1.BurnInTestSpec, vendor string) (string, er
 	// with the vendor's — the same TestKind resolving to a DIFFERENT image on the
 	// same hardware, which is precisely the drift pkg/runnerimages exists to
 	// prevent and which its own package comment already records once.
-	return runnerimages.Resolve(spec.Kind, spec.Runner, vendor)
+	return runnerimages.ResolveForDevice(spec.Kind, spec.Runner, dev.vendor, dev.arch)
 }
 
 // podForTest builds the pod that executes one attempt of one test on one node.
@@ -473,14 +473,15 @@ func podForTest(
 	// test's definition — they are which CELL of it this pod is.
 	axes map[string]string,
 	node string,
-	// vendor is the accelerator vendor of `node`, from its NodeFingerprint. It
-	// selects an image from spec.runner.imagesByVendor and is used for NOTHING
+	// dev is what `node` said about its accelerator — vendor and architecture,
+	// from its NodeFingerprint. It selects an image from
+	// spec.runner.imagesByVendor and is used for NOTHING
 	// else — no behaviour in this function branches on it.
-	vendor string,
+	dev device,
 	target burninv1alpha1.TargetSelector,
 	rv *rendezvous,
 ) (*corev1.Pod, error) {
-	image, err := runnerImage(spec, vendor)
+	image, err := runnerImage(spec, dev)
 	if err != nil {
 		return nil, err
 	}

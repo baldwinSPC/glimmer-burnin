@@ -523,6 +523,42 @@ type VendorImage struct {
 	// +kubebuilder:validation:Enum=nvidia;amd;intel;tenstorrent;habana
 	Vendor string `json:"vendor"`
 
+	// Arch narrows the entry to ONE accelerator architecture within that
+	// vendor, matching NodeFingerprint's `status.gpus[].arch` exactly
+	// ("gfx1151", "gfx942", "sm_121", "sm_100"). Empty means the entry serves
+	// every architecture of the vendor — which is what every entry written
+	// before this field existed means, so nothing changes for them.
+	//
+	// # Why the vendor alone is not enough
+	//
+	// A Strix Halo APU and an Instinct MI300X are both `amd`, and almost
+	// nothing about them is shared: WMMA versus MFMA (compute-smoke-rocm
+	// reports a CDNA part as Error today, because its kernel covers gfx11
+	// only), unified GTT memory versus HBM3, no RAS block versus ECC with row
+	// remapping, a ~120 W package shared with sixteen CPU cores versus a
+	// 750 W GPU-only board. One image reference cannot serve both. The same
+	// shape exists on the other side of the fleet — a GB10 and a B200 are both
+	// `nvidia` and need different cubins — so this is fleet heterogeneity
+	// below the vendor line, not an AMD special case.
+	//
+	// # It stays a LOOKUP KEY
+	//
+	// The controller compares this string and does nothing else with it. It
+	// never learns what "gfx1151" means, exactly as it never learned what
+	// "amd" means, which is what keeps accelerator knowledge in runner images
+	// where this project requires it. An architecture nothing recognises is
+	// simply an entry that does not match.
+	//
+	// Deliberately NOT enumerated, unlike Vendor. The vendor vocabulary is
+	// closed and this project owns it; architecture names are minted by
+	// vendors on their own schedule, and an enum would reject a part newer
+	// than the operator. The cost is that a typo resolves to no entry rather
+	// than being caught at apply time — which is why resolution reports the
+	// arch it was looking for, and the entries it had, when it fails.
+	//
+	// +optional
+	Arch string `json:"arch,omitempty"`
+
 	// Image is the runner image for that vendor.
 	//
 	// +kubebuilder:validation:MinLength=1

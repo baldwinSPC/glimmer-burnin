@@ -28,7 +28,7 @@ func TestOneProfileServesAMixedFleet(t *testing.T) {
 		"nvidia": "ghcr.io/x/memory-bw:v1",
 		"amd":    "ghcr.io/x/memory-bw-rocm:v1",
 	} {
-		got, err := runnerImage(&spec, vendor)
+		got, err := runnerImage(&spec, device{vendor: vendor})
 		if err != nil {
 			t.Fatalf("%s: %v", vendor, err)
 		}
@@ -49,7 +49,7 @@ func TestResolutionOrderIsExplicitThenVendorThenDefault(t *testing.T) {
 	// An explicit pin means EVERY node, including one whose vendor is listed.
 	// Anything else would make `image` mean something different depending on
 	// which node read it.
-	got, err := runnerImage(&explicit, "amd")
+	got, err := runnerImage(&explicit, device{vendor: "amd"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,14 +62,14 @@ func TestResolutionOrderIsExplicitThenVendorThenDefault(t *testing.T) {
 		Kind:   burninv1alpha1.KindMemoryBW,
 		Runner: &burninv1alpha1.RunnerSpec{ImagesByVendor: []burninv1alpha1.VendorImage{{Vendor: "amd", Image: "ghcr.io/x/rocm:v1"}}},
 	}
-	if got, err = runnerImage(&byVendor, "amd"); err != nil || got != "ghcr.io/x/rocm:v1" {
+	if got, err = runnerImage(&byVendor, device{vendor: "amd"}); err != nil || got != "ghcr.io/x/rocm:v1" {
 		t.Errorf("byVendor = %q (%v), want the rocm image", got, err)
 	}
 
 	// A vendor the list does not name falls through to the default, because the
 	// kind HAS one and it is the honest answer for a fleet that is mostly one
 	// vendor with a few of another.
-	if got, err = runnerImage(&byVendor, "nvidia"); err != nil {
+	if got, err = runnerImage(&byVendor, device{vendor: "nvidia"}); err != nil {
 		t.Errorf("a vendor absent from the map should fall through to the kind default: %v", err)
 	} else if got == "ghcr.io/x/rocm:v1" {
 		t.Error("an nvidia node got the rocm image")
@@ -84,7 +84,7 @@ func TestAVendorWithNoImageAndNoDefaultFailsAtPlanTimeNamingBoth(t *testing.T) {
 		Runner: &burninv1alpha1.RunnerSpec{ImagesByVendor: []burninv1alpha1.VendorImage{{Vendor: "nvidia", Image: "ghcr.io/x/fingerprint:v1"}}},
 	}
 
-	_, err := runnerImage(&spec, "amd")
+	_, err := runnerImage(&spec, device{vendor: "amd"})
 	if err == nil {
 		t.Fatal("an unresolvable vendor was accepted")
 	}
@@ -102,7 +102,7 @@ func TestAnUnknownVendorSaysSoRatherThanPrintingAnEmptyString(t *testing.T) {
 		Kind:   burninv1alpha1.KindFingerprintProbe,
 		Runner: &burninv1alpha1.RunnerSpec{ImagesByVendor: []burninv1alpha1.VendorImage{{Vendor: "nvidia", Image: "ghcr.io/x/fingerprint:v1"}}},
 	}
-	_, err := runnerImage(&spec, "")
+	_, err := runnerImage(&spec, device{})
 	if err == nil {
 		t.Fatal("accepted")
 	}
@@ -115,11 +115,11 @@ func TestASingleVendorFleetIsUnaffected(t *testing.T) {
 	// Every profile written before this field existed must resolve exactly as
 	// it did, including on a node with no fingerprint at all.
 	spec := burninv1alpha1.BurnInTestSpec{Kind: burninv1alpha1.KindMemoryBW}
-	withVendor, err := runnerImage(&spec, "nvidia")
+	withVendor, err := runnerImage(&spec, device{vendor: "nvidia"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutVendor, err := runnerImage(&spec, "")
+	withoutVendor, err := runnerImage(&spec, device{})
 	if err != nil {
 		t.Fatal(err)
 	}
