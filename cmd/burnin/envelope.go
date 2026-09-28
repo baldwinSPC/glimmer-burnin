@@ -97,6 +97,7 @@ func (i *RunIdentity) Checkpoint(c localrun.Checkpoint, kind string, scope api.T
 		Reason:             contract.ReasonCheckpoint,
 		SentAt:             time.Now().UTC(),
 		Run:                i.run,
+		Producer:           cliProducer(),
 		Phase:              string(api.RunRunning),
 		CheckpointSequence: c.Sequence,
 		Fingerprint:        i.fingerprint,
@@ -125,6 +126,7 @@ func (i *RunIdentity) Final(rep localrun.Report) (contract.Envelope, error) {
 		Reason:     contract.ReasonPhaseChanged,
 		SentAt:     time.Now().UTC(),
 		Run:        i.run,
+		Producer:   cliProducer(),
 		Phase:      string(rep.Phase),
 		Summary: contract.Summary{
 			Passed:  rep.Summary.Passed,

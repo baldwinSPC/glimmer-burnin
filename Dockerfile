@@ -26,8 +26,16 @@ COPY internal/ internal/
 # looks to the module resolver like an unresolvable remote one.
 COPY pkg/ pkg/
 
+# Stamped into every envelope's producer block (#537). .git is not in the build
+# context, so the commit has to be passed in; unset, the envelope says "(devel)"
+# and carries no commit rather than claiming one.
+ARG VERSION=(devel)
+ARG COMMIT=
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o manager ./cmd
+    go build -trimpath -ldflags="-s -w \
+      -X github.com/baldwinSPC/glimmer-burnin/internal/sink.version=${VERSION} \
+      -X github.com/baldwinSPC/glimmer-burnin/internal/sink.commit=${COMMIT}" \
+    -o manager ./cmd
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /

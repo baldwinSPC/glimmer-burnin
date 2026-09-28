@@ -219,6 +219,10 @@ jobs:
           push: true
           provenance: true
           sbom: true
+          # Stamped into every envelope's producer block (#537).
+          build-args: |
+            VERSION=${{ inputs.version }}
+            COMMIT=${{ github.sha }}
           tags: ${{ steps.ref.outputs.ref }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

@@ -328,6 +328,8 @@ type Envelope struct {
 	SentAt     time.Time `json:"sentAt"`
 
 	Run RunRef `json:"run"`
+	// Producer is the build that produced this envelope. See Producer.
+	Producer *Producer `json:"producer,omitempty"`
 	// Cluster identifies where this delivery came from. Optional; see ClusterRef.
 	Cluster *ClusterRef `json:"cluster,omitempty"`
 	Phase   string      `json:"phase"`
