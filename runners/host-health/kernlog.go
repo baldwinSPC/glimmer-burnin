@@ -62,7 +62,10 @@ var hwErrorPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\[hardware error\]`),      // mce/EDAC printk prefix
 	regexp.MustCompile(`(?i)uncorrectable error`),     // EDAC, NVMe, PCIe
 	regexp.MustCompile(`(?i)amdgpu.*(gpu reset|ras)`), // AMD accelerator fault
-	regexp.MustCompile(`(?i)pcieport.*aer`),           // AER reported through pcieport
+	// An AER ERROR report, not the subsystem prefix: every root port prints
+	// "pcieport ...: AER: enabled with IRQ N" at boot, which read as eight
+	// hardware errors on every healthy DGX Spark (#551).
+	regexp.MustCompile(`(?i)pcieport.*\bAER:.*\berror\b`),
 }
 
 // fatalErrorPatterns are kernel lines that report an UNCORRECTED or fatal
