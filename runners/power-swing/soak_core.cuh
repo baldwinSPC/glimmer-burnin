@@ -117,6 +117,7 @@
 #include <vector>
 
 #include "device_fold.h"
+#include "soak_series.h"
 #include "kmsg/kmsg_watch.h"
 #include "nvml_dynamic.h"
 
@@ -492,6 +493,16 @@ struct Samples {
   unsigned int lastSm = 0;
   double lastPowerW = 0.0;
   unsigned long long lastReasonMask = 0;
+  // Whether each optional read succeeded ON THE LATEST sample, so the series
+  // below records a field only when this sample actually read it (#546).
+  bool lastTempOk = false;
+  double lastTempC = 0.0;
+  bool lastPowerOk = false;
+  bool lastMaskOk = false;
+
+  // The bounded per-sample record, emitted as telemetry.jsonl (#546) and the
+  // input to the steady-state drift (#547). See soak_series.h.
+  soakseries::Series series;
 
   double mean(double sum, long count) const { return count > 0 ? sum / count : 0.0; }
 };
@@ -513,6 +524,7 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
   if (nvml.deviceGetClockInfo(dev, nvmlrt::kClockSM, &sm) != nvmlrt::kSuccess) return;
 
   s->n++;
+  s->lastTempOk = s->lastPowerOk = s->lastMaskOk = false;
   s->smSum += sm;
   s->smMax = std::max(s->smMax, sm);
   s->smMin = std::min(s->smMin, sm);
@@ -524,6 +536,8 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
       s->tempN++;
       s->tempSum += t;
       s->tempMax = std::max(s->tempMax, static_cast<double>(t));
+      s->lastTempOk = true;
+      s->lastTempC = t;
     } else {
       ok->temp = false;
       noteUnsupported("temperature");
@@ -549,6 +563,7 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
       s->powerSum += w;
       s->powerMax = std::max(s->powerMax, w);
       s->lastPowerW = w;
+      s->lastPowerOk = true;
     } else {
       ok->power = false;
       noteUnsupported("powerDraw");
@@ -573,6 +588,7 @@ inline void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples 
       s->reasonsN++;
       s->reasonMask |= mask;
       s->lastReasonMask = mask;
+      s->lastMaskOk = true;
       for (int i = 0; i < kNumReasonBits; ++i) {
         if ((mask & kReasonBits[i].bit) != 0) s->reasonCount[i]++;
       }
@@ -1470,6 +1486,19 @@ inline void runActiveDevices(std::vector<DeviceCtx *> &active, std::vector<Devic
         takeSample(nvml, d->nvdev, &d->s, &d->samplerOk);
         d->lastSampleAt = now;
         const bool sampleLanded = d->s.n > nBefore;
+        if (sampleLanded) {
+          soakseries::Point p;
+          p.t = static_cast<float>(now - d->started);
+          p.warmup = now < d->warmupUntil;
+          p.smMHz = d->s.lastSm;
+          p.haveTemp = d->s.lastTempOk;
+          p.tempC = static_cast<float>(d->s.lastTempC);
+          p.havePower = d->s.lastPowerOk;
+          p.powerW = static_cast<float>(d->s.lastPowerW);
+          p.haveMask = d->s.lastMaskOk;
+          p.throttleMask = d->s.lastReasonMask;
+          d->s.series.add(p);
+        }
 
         // While genuinely idle (OFF phase), keep the "steady" throttle-reason
         // baseline current with the latest reading — not just the one frozen
@@ -1764,6 +1793,13 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
   if (!ctxs.empty()) {
     const DeviceCtx &d0 = ctxs.front();
     std::printf("samples_taken=%ld\n", d0.s.n);
+    // #547: did the clock settle? Signed split-half drift over the
+    // post-warm-up samples; negative is a clock still sliding when the test
+    // ended. Evidence only: it qualifies a verdict, it never makes one.
+    double drift = 0.0;
+    if (soakseries::smClockDriftPct(d0.s.series, &drift)) {
+      std::printf("sm_clock_steady_state_delta_pct=%.2f\n", drift);
+    }
     std::printf("gemm_active_s=%.2f\n", d0.totalGemmSeconds);
     if (d0.s.n > 0) {
       if (d0.ratedKnown) {
@@ -1811,6 +1847,19 @@ inline int run(const Keys &k, const std::vector<devices::FoldRule> &foldRules, M
     }
     if (d0.hostCounters[kCounterFirstBadIndex] != ~0ULL) {
       std::printf("first_miscompare_index=%llu\n", d0.hostCounters[kCounterFirstBadIndex]);
+    }
+  }
+
+  // #546: the per-sample series, every device, once, after the final report.
+  // 200 KiB leaves headroom under pkg/runner's 256 KiB artifact cap; a series
+  // that would not fit is thinned evenly rather than refused whole.
+  {
+    std::vector<soakseries::DeviceSeries> series;
+    for (const auto &d : ctxs) {
+      if (!d.s.series.points().empty()) series.push_back({d.index, &d.s.series});
+    }
+    if (!series.empty()) {
+      std::fputs(soakseries::renderArtifact(series, 200 * 1024, sampleIntervalMs / 1000.0).c_str(), stdout);
     }
   }
 

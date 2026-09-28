@@ -1576,6 +1576,16 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	// #547. Evidence, not a gate: a soak whose clock is still moving at the end
+	// has a sustained figure that describes a transient, and a reader should
+	// know that before trusting it — but a threshold on the drift would turn a
+	// scheduling choice (how long the soak ran) into a hardware verdict.
+	"smClockSteadyStateDeltaPct": {
+		Name: "smClockSteadyStateDeltaPct", Unit: UnitPercent,
+		Description:  "signed split-half drift of the SM clock over the post-warm-up samples: 100·(second-half mean − first-half mean)/max. Negative is a clock still sliding when the soak ended; near zero is steady state. Evidence, not a gate",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
 		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",

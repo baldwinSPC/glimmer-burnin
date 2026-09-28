@@ -1,0 +1,584 @@
+# spread sustainedClockSpreadPct not reported: one device; nothing to spread across
+clock_floor_pct=60.00
+temp_ceiling_c=0.00
+duration_requested_s=90
+sample_interval_ms=250
+progress_interval_s=15
+device_window_s=90
+warmup_s=9
+faults_injected=0
+driver_version=580.82.09
+gpu_name=NVIDIA GB10
+compute_cap=12.1
+pci_bus_id=000F:01:00.0
+ratedBoostClockMHz=3003
+ecc_mode=unsupported
+matrix_n=8192
+snapshot_seq=1
+soak_seconds=15.00
+iterations_completed=101
+miscompares=0
+sdc_detections=0
+nonfinite_count=0
+sustained_throughput_tflops=7.617
+sustained_clock_pct=79.35
+peak_temp_c=70.0
+mean_temp_c=65.3
+peak_power_w=88.39
+throttle_count=0
+power_cap_events=0
+ecc_errors=n/a
+xid_source=none
+xid_windows_watched=0
+xid_source_detail=/dev/kmsg: not present in this container (mount it with spec.runner.hostPaths)
+device_count=1
+devices_visible=1
+device_window_s=90
+device_concurrency=all
+worst_device_index=0
+worst_device_pci_bus_id=000F:01:00.0
+device_homogeneous=true
+sustainedClockSpreadPct=n/a
+snapshot_seq=2
+soak_seconds=30.00
+iterations_completed=202
+miscompares=0
+sdc_detections=0
+nonfinite_count=0
+sustained_throughput_tflops=7.599
+sustained_clock_pct=79.05
+peak_temp_c=74.0
+mean_temp_c=68.8
+peak_power_w=88.39
+throttle_count=0
+power_cap_events=0
+ecc_errors=n/a
+xid_source=none
+xid_windows_watched=0
+xid_source_detail=/dev/kmsg: not present in this container (mount it with spec.runner.hostPaths)
+device_count=1
+devices_visible=1
+device_window_s=90
+device_concurrency=all
+worst_device_index=0
+worst_device_pci_bus_id=000F:01:00.0
+device_homogeneous=true
+sustainedClockSpreadPct=n/a
+# spread sustainedClockSpreadPct not reported: one device; nothing to spread across
+snapshot_seq=3
+soak_seconds=45.00
+iterations_completed=303
+miscompares=0
+sdc_detections=0
+nonfinite_count=0
+sustained_throughput_tflops=7.594
+sustained_clock_pct=78.70
+peak_temp_c=78.0
+mean_temp_c=71.1
+peak_power_w=88.39
+throttle_count=0
+power_cap_events=0
+ecc_errors=n/a
+xid_source=none
+xid_windows_watched=0
+xid_source_detail=/dev/kmsg: not present in this container (mount it with spec.runner.hostPaths)
+device_count=1
+devices_visible=1
+device_window_s=90
+device_concurrency=all
+worst_device_index=0
+worst_device_pci_bus_id=000F:01:00.0
+device_homogeneous=true
+sustainedClockSpreadPct=n/a
+# spread sustainedClockSpreadPct not reported: one device; nothing to spread across
+# spread sustainedClockSpreadPct not reported: one device; nothing to spread across
+snapshot_seq=4
+soak_seconds=60.00
+iterations_completed=404
+miscompares=0
+sdc_detections=0
+nonfinite_count=0
+sustained_throughput_tflops=7.574
+sustained_clock_pct=78.14
+peak_temp_c=79.0
+mean_temp_c=72.7
+peak_power_w=88.39
+throttle_count=0
+power_cap_events=0
+ecc_errors=n/a
+xid_source=none
+xid_windows_watched=0
+xid_source_detail=/dev/kmsg: not present in this container (mount it with spec.runner.hostPaths)
+device_count=1
+devices_visible=1
+device_window_s=90
+device_concurrency=all
+worst_device_index=0
+worst_device_pci_bus_id=000F:01:00.0
+device_homogeneous=true
+sustainedClockSpreadPct=n/a
+snapshot_seq=5
+soak_seconds=75.00
+iterations_completed=505
+miscompares=0
+sdc_detections=0
+nonfinite_count=0
+sustained_throughput_tflops=7.570
+sustained_clock_pct=77.77
+peak_temp_c=80.0
+mean_temp_c=74.1
+peak_power_w=88.39
+throttle_count=0
+power_cap_events=0
+ecc_errors=n/a
+xid_source=none
+xid_windows_watched=0
+xid_source_detail=/dev/kmsg: not present in this container (mount it with spec.runner.hostPaths)
+device_count=1
+devices_visible=1
+device_window_s=90
+device_concurrency=all
+worst_device_index=0
+worst_device_pci_bus_id=000F:01:00.0
+device_homogeneous=true
+sustainedClockSpreadPct=n/a
+# spread sustainedClockSpreadPct not reported: one device; nothing to spread across
+snapshot_seq=6
+soak_seconds=90.01
+iterations_completed=604
+miscompares=0
+sdc_detections=0
+nonfinite_count=0
+sustained_throughput_tflops=7.550
+sustained_clock_pct=76.87
+peak_temp_c=81.0
+mean_temp_c=75.0
+peak_power_w=88.39
+throttle_count=0
+power_cap_events=0
+ecc_errors=n/a
+xid_source=none
+xid_windows_watched=0
+xid_source_detail=/dev/kmsg: not present in this container (mount it with spec.runner.hostPaths)
+device_count=1
+devices_visible=1
+device_window_s=90
+device_concurrency=all
+worst_device_index=0
+worst_device_pci_bus_id=000F:01:00.0
+device_homogeneous=true
+sustainedClockSpreadPct=n/a
+# spread sustainedClockSpreadPct not reported: one device; nothing to spread across
+# spread sustainedClockSpreadPct not reported: one device; nothing to spread across
+snapshot_seq=7
+soak_seconds=90.07
+iterations_completed=605
+miscompares=0
+sdc_detections=0
+nonfinite_count=0
+sustained_throughput_tflops=7.549
+sustained_clock_pct=76.87
+peak_temp_c=81.0
+mean_temp_c=75.0
+peak_power_w=88.39
+throttle_count=0
+power_cap_events=0
+ecc_errors=n/a
+xid_source=none
+xid_windows_watched=0
+xid_source_detail=/dev/kmsg: not present in this container (mount it with spec.runner.hostPaths)
+device_count=1
+devices_visible=1
+device_window_s=90
+device_concurrency=all
+worst_device_index=0
+worst_device_pci_bus_id=000F:01:00.0
+device_homogeneous=true
+sustainedClockSpreadPct=n/a
+samples_taken=359
+sm_clock_steady_state_delta_pct=-4.43
+gemm_active_s=79.23
+smClockMHz=2309
+min_sm_clock_pct=6.93
+max_sm_clock_pct=83.32
+mean_power_w=77.97
+gpu_utilization_pct=95.19
+mem_utilization_pct=0.00
+throttled_samples=0
+throttle_reasons_mask=0
+gpu_idle_samples=0
+applications_clocks_setting_samples=0
+sw_power_cap_samples=0
+hw_slowdown_samples=0
+sync_boost_samples=0
+sw_thermal_slowdown_samples=0
+hw_thermal_slowdown_samples=0
+hw_power_brake_samples=0
+display_clock_setting_samples=0
+throttle_reasons=none
+thermal_throttle_latched=false
+-----BEGIN BURNIN ARTIFACT telemetry.jsonl application/x-ndjson-----
+{"sampleIntervalS": 0.250, "devices": 1, "linesPerDeviceMax": 1599}
+{"device": 0, "t": 0.00, "warmup": true, "smMHz": 208, "tempC": 49.0, "powerW": 4.68, "throttleMask": 0}
+{"device": 0, "t": 0.25, "warmup": true, "smMHz": 2502, "tempC": 61.0, "powerW": 19.94, "throttleMask": 0}
+{"device": 0, "t": 0.50, "warmup": true, "smMHz": 2502, "tempC": 61.0, "powerW": 19.94, "throttleMask": 0}
+{"device": 0, "t": 0.75, "warmup": true, "smMHz": 2470, "tempC": 61.0, "powerW": 37.84, "throttleMask": 0}
+{"device": 0, "t": 1.00, "warmup": true, "smMHz": 2470, "tempC": 61.0, "powerW": 37.84, "throttleMask": 0}
+{"device": 0, "t": 1.25, "warmup": true, "smMHz": 2457, "tempC": 62.0, "powerW": 88.39, "throttleMask": 0}
+{"device": 0, "t": 1.51, "warmup": true, "smMHz": 2457, "tempC": 62.0, "powerW": 88.39, "throttleMask": 0}
+{"device": 0, "t": 1.76, "warmup": true, "smMHz": 2444, "tempC": 62.0, "powerW": 86.42, "throttleMask": 0}
+{"device": 0, "t": 2.01, "warmup": true, "smMHz": 2444, "tempC": 62.0, "powerW": 86.42, "throttleMask": 0}
+{"device": 0, "t": 2.26, "warmup": true, "smMHz": 2392, "tempC": 62.0, "powerW": 85.07, "throttleMask": 0}
+{"device": 0, "t": 2.51, "warmup": true, "smMHz": 2392, "tempC": 62.0, "powerW": 85.07, "throttleMask": 0}
+{"device": 0, "t": 2.76, "warmup": true, "smMHz": 2444, "tempC": 63.0, "powerW": 83.78, "throttleMask": 0}
+{"device": 0, "t": 3.01, "warmup": true, "smMHz": 2444, "tempC": 63.0, "powerW": 83.78, "throttleMask": 0}
+{"device": 0, "t": 3.26, "warmup": true, "smMHz": 2431, "tempC": 63.0, "powerW": 85.64, "throttleMask": 0}
+{"device": 0, "t": 3.52, "warmup": true, "smMHz": 2431, "tempC": 63.0, "powerW": 85.64, "throttleMask": 0}
+{"device": 0, "t": 3.77, "warmup": true, "smMHz": 2411, "tempC": 62.0, "powerW": 85.40, "throttleMask": 0}
+{"device": 0, "t": 4.02, "warmup": true, "smMHz": 2411, "tempC": 62.0, "powerW": 85.40, "throttleMask": 0}
+{"device": 0, "t": 4.27, "warmup": true, "smMHz": 2418, "tempC": 64.0, "powerW": 84.48, "throttleMask": 0}
+{"device": 0, "t": 4.52, "warmup": true, "smMHz": 2418, "tempC": 64.0, "powerW": 84.48, "throttleMask": 0}
+{"device": 0, "t": 4.77, "warmup": true, "smMHz": 2411, "tempC": 64.0, "powerW": 84.81, "throttleMask": 0}
+{"device": 0, "t": 5.02, "warmup": true, "smMHz": 2411, "tempC": 64.0, "powerW": 84.81, "throttleMask": 0}
+{"device": 0, "t": 5.28, "warmup": true, "smMHz": 2418, "tempC": 65.0, "powerW": 83.71, "throttleMask": 0}
+{"device": 0, "t": 5.53, "warmup": true, "smMHz": 2418, "tempC": 65.0, "powerW": 83.71, "throttleMask": 0}
+{"device": 0, "t": 5.78, "warmup": true, "smMHz": 2431, "tempC": 65.0, "powerW": 84.62, "throttleMask": 0}
+{"device": 0, "t": 6.03, "warmup": true, "smMHz": 2431, "tempC": 65.0, "powerW": 84.62, "throttleMask": 0}
+{"device": 0, "t": 6.28, "warmup": true, "smMHz": 2411, "tempC": 64.0, "powerW": 85.74, "throttleMask": 0}
+{"device": 0, "t": 6.53, "warmup": true, "smMHz": 2411, "tempC": 64.0, "powerW": 85.74, "throttleMask": 0}
+{"device": 0, "t": 6.78, "warmup": true, "smMHz": 2398, "tempC": 66.0, "powerW": 84.64, "throttleMask": 0}
+{"device": 0, "t": 7.03, "warmup": true, "smMHz": 2398, "tempC": 66.0, "powerW": 84.64, "throttleMask": 0}
+{"device": 0, "t": 7.28, "warmup": true, "smMHz": 2405, "tempC": 66.0, "powerW": 84.20, "throttleMask": 0}
+{"device": 0, "t": 7.53, "warmup": true, "smMHz": 2405, "tempC": 66.0, "powerW": 84.20, "throttleMask": 0}
+{"device": 0, "t": 7.78, "warmup": true, "smMHz": 2405, "tempC": 66.0, "powerW": 83.84, "throttleMask": 0}
+{"device": 0, "t": 8.04, "warmup": true, "smMHz": 2405, "tempC": 66.0, "powerW": 83.84, "throttleMask": 0}
+{"device": 0, "t": 8.29, "warmup": true, "smMHz": 2392, "tempC": 66.0, "powerW": 83.16, "throttleMask": 0}
+{"device": 0, "t": 8.54, "warmup": true, "smMHz": 2392, "tempC": 66.0, "powerW": 83.16, "throttleMask": 0}
+{"device": 0, "t": 8.79, "warmup": true, "smMHz": 2398, "tempC": 67.0, "powerW": 83.46, "throttleMask": 0}
+{"device": 0, "t": 9.04, "warmup": false, "smMHz": 2398, "tempC": 67.0, "powerW": 83.46, "throttleMask": 0}
+{"device": 0, "t": 9.29, "warmup": false, "smMHz": 2405, "tempC": 67.0, "powerW": 83.99, "throttleMask": 0}
+{"device": 0, "t": 9.54, "warmup": false, "smMHz": 2405, "tempC": 67.0, "powerW": 83.99, "throttleMask": 0}
+{"device": 0, "t": 9.79, "warmup": false, "smMHz": 2398, "tempC": 67.0, "powerW": 83.48, "throttleMask": 0}
+{"device": 0, "t": 10.04, "warmup": false, "smMHz": 2398, "tempC": 67.0, "powerW": 83.48, "throttleMask": 0}
+{"device": 0, "t": 10.29, "warmup": false, "smMHz": 2372, "tempC": 67.0, "powerW": 81.19, "throttleMask": 0}
+{"device": 0, "t": 10.55, "warmup": false, "smMHz": 2372, "tempC": 67.0, "powerW": 81.19, "throttleMask": 0}
+{"device": 0, "t": 10.80, "warmup": false, "smMHz": 2424, "tempC": 68.0, "powerW": 82.43, "throttleMask": 0}
+{"device": 0, "t": 11.05, "warmup": false, "smMHz": 2424, "tempC": 68.0, "powerW": 82.43, "throttleMask": 0}
+{"device": 0, "t": 11.30, "warmup": false, "smMHz": 2424, "tempC": 68.0, "powerW": 86.23, "throttleMask": 0}
+{"device": 0, "t": 11.55, "warmup": false, "smMHz": 2424, "tempC": 68.0, "powerW": 86.23, "throttleMask": 0}
+{"device": 0, "t": 11.80, "warmup": false, "smMHz": 2437, "tempC": 69.0, "powerW": 86.67, "throttleMask": 0}
+{"device": 0, "t": 12.05, "warmup": false, "smMHz": 2437, "tempC": 69.0, "powerW": 86.67, "throttleMask": 0}
+{"device": 0, "t": 12.30, "warmup": false, "smMHz": 2431, "tempC": 69.0, "powerW": 87.60, "throttleMask": 0}
+{"device": 0, "t": 12.55, "warmup": false, "smMHz": 2431, "tempC": 69.0, "powerW": 87.60, "throttleMask": 0}
+{"device": 0, "t": 12.81, "warmup": false, "smMHz": 2405, "tempC": 68.0, "powerW": 86.72, "throttleMask": 0}
+{"device": 0, "t": 13.06, "warmup": false, "smMHz": 2405, "tempC": 68.0, "powerW": 86.72, "throttleMask": 0}
+{"device": 0, "t": 13.31, "warmup": false, "smMHz": 2424, "tempC": 69.0, "powerW": 85.85, "throttleMask": 0}
+{"device": 0, "t": 13.56, "warmup": false, "smMHz": 2424, "tempC": 69.0, "powerW": 85.85, "throttleMask": 0}
+{"device": 0, "t": 13.81, "warmup": false, "smMHz": 2411, "tempC": 69.0, "powerW": 86.96, "throttleMask": 0}
+{"device": 0, "t": 14.06, "warmup": false, "smMHz": 2411, "tempC": 69.0, "powerW": 86.96, "throttleMask": 0}
+{"device": 0, "t": 14.31, "warmup": false, "smMHz": 2411, "tempC": 69.0, "powerW": 86.04, "throttleMask": 0}
+{"device": 0, "t": 14.56, "warmup": false, "smMHz": 2411, "tempC": 69.0, "powerW": 86.04, "throttleMask": 0}
+{"device": 0, "t": 14.82, "warmup": false, "smMHz": 2398, "tempC": 70.0, "powerW": 84.12, "throttleMask": 0}
+{"device": 0, "t": 15.07, "warmup": false, "smMHz": 2398, "tempC": 70.0, "powerW": 84.12, "throttleMask": 0}
+{"device": 0, "t": 15.32, "warmup": false, "smMHz": 2359, "tempC": 69.0, "powerW": 81.80, "throttleMask": 0}
+{"device": 0, "t": 15.57, "warmup": false, "smMHz": 2359, "tempC": 69.0, "powerW": 81.80, "throttleMask": 0}
+{"device": 0, "t": 15.82, "warmup": false, "smMHz": 2392, "tempC": 70.0, "powerW": 80.82, "throttleMask": 0}
+{"device": 0, "t": 16.07, "warmup": false, "smMHz": 2392, "tempC": 70.0, "powerW": 80.82, "throttleMask": 0}
+{"device": 0, "t": 16.32, "warmup": false, "smMHz": 2405, "tempC": 70.0, "powerW": 81.99, "throttleMask": 0}
+{"device": 0, "t": 16.57, "warmup": false, "smMHz": 2405, "tempC": 70.0, "powerW": 81.99, "throttleMask": 0}
+{"device": 0, "t": 16.82, "warmup": false, "smMHz": 2398, "tempC": 70.0, "powerW": 83.96, "throttleMask": 0}
+{"device": 0, "t": 17.07, "warmup": false, "smMHz": 2398, "tempC": 70.0, "powerW": 83.96, "throttleMask": 0}
+{"device": 0, "t": 17.32, "warmup": false, "smMHz": 2405, "tempC": 71.0, "powerW": 84.86, "throttleMask": 0}
+{"device": 0, "t": 17.58, "warmup": false, "smMHz": 2405, "tempC": 71.0, "powerW": 84.86, "throttleMask": 0}
+{"device": 0, "t": 17.83, "warmup": false, "smMHz": 2405, "tempC": 71.0, "powerW": 85.98, "throttleMask": 0}
+{"device": 0, "t": 18.08, "warmup": false, "smMHz": 2405, "tempC": 71.0, "powerW": 85.98, "throttleMask": 0}
+{"device": 0, "t": 18.33, "warmup": false, "smMHz": 2398, "tempC": 72.0, "powerW": 85.44, "throttleMask": 0}
+{"device": 0, "t": 18.58, "warmup": false, "smMHz": 2398, "tempC": 72.0, "powerW": 85.44, "throttleMask": 0}
+{"device": 0, "t": 18.83, "warmup": false, "smMHz": 2385, "tempC": 71.0, "powerW": 85.00, "throttleMask": 0}
+{"device": 0, "t": 19.08, "warmup": false, "smMHz": 2385, "tempC": 71.0, "powerW": 85.00, "throttleMask": 0}
+{"device": 0, "t": 19.34, "warmup": false, "smMHz": 2366, "tempC": 71.0, "powerW": 84.53, "throttleMask": 0}
+{"device": 0, "t": 19.59, "warmup": false, "smMHz": 2366, "tempC": 71.0, "powerW": 84.53, "throttleMask": 0}
+{"device": 0, "t": 19.84, "warmup": false, "smMHz": 2385, "tempC": 72.0, "powerW": 84.12, "throttleMask": 0}
+{"device": 0, "t": 20.09, "warmup": false, "smMHz": 2385, "tempC": 72.0, "powerW": 84.12, "throttleMask": 0}
+{"device": 0, "t": 20.34, "warmup": false, "smMHz": 2359, "tempC": 72.0, "powerW": 84.15, "throttleMask": 0}
+{"device": 0, "t": 20.59, "warmup": false, "smMHz": 2359, "tempC": 72.0, "powerW": 84.15, "throttleMask": 0}
+{"device": 0, "t": 20.84, "warmup": false, "smMHz": 2346, "tempC": 72.0, "powerW": 82.72, "throttleMask": 0}
+{"device": 0, "t": 21.09, "warmup": false, "smMHz": 2346, "tempC": 72.0, "powerW": 82.72, "throttleMask": 0}
+{"device": 0, "t": 21.34, "warmup": false, "smMHz": 2398, "tempC": 73.0, "powerW": 84.08, "throttleMask": 0}
+{"device": 0, "t": 21.59, "warmup": false, "smMHz": 2398, "tempC": 73.0, "powerW": 84.08, "throttleMask": 0}
+{"device": 0, "t": 21.84, "warmup": false, "smMHz": 2385, "tempC": 73.0, "powerW": 86.25, "throttleMask": 0}
+{"device": 0, "t": 22.09, "warmup": false, "smMHz": 2385, "tempC": 73.0, "powerW": 86.25, "throttleMask": 0}
+{"device": 0, "t": 22.35, "warmup": false, "smMHz": 2392, "tempC": 73.0, "powerW": 86.69, "throttleMask": 0}
+{"device": 0, "t": 22.60, "warmup": false, "smMHz": 2392, "tempC": 73.0, "powerW": 86.69, "throttleMask": 0}
+{"device": 0, "t": 22.85, "warmup": false, "smMHz": 2372, "tempC": 73.0, "powerW": 85.11, "throttleMask": 0}
+{"device": 0, "t": 23.10, "warmup": false, "smMHz": 2372, "tempC": 73.0, "powerW": 83.95, "throttleMask": 0}
+{"device": 0, "t": 23.35, "warmup": false, "smMHz": 2372, "tempC": 73.0, "powerW": 83.95, "throttleMask": 0}
+{"device": 0, "t": 23.60, "warmup": false, "smMHz": 2398, "tempC": 73.0, "powerW": 85.00, "throttleMask": 0}
+{"device": 0, "t": 23.85, "warmup": false, "smMHz": 2398, "tempC": 73.0, "powerW": 85.00, "throttleMask": 0}
+{"device": 0, "t": 24.10, "warmup": false, "smMHz": 2379, "tempC": 73.0, "powerW": 85.87, "throttleMask": 0}
+{"device": 0, "t": 24.36, "warmup": false, "smMHz": 2379, "tempC": 73.0, "powerW": 85.87, "throttleMask": 0}
+{"device": 0, "t": 24.61, "warmup": false, "smMHz": 2385, "tempC": 73.0, "powerW": 85.27, "throttleMask": 0}
+{"device": 0, "t": 24.86, "warmup": false, "smMHz": 2385, "tempC": 73.0, "powerW": 85.27, "throttleMask": 0}
+{"device": 0, "t": 25.11, "warmup": false, "smMHz": 2340, "tempC": 73.0, "powerW": 83.09, "throttleMask": 0}
+{"device": 0, "t": 25.36, "warmup": false, "smMHz": 2340, "tempC": 73.0, "powerW": 83.09, "throttleMask": 0}
+{"device": 0, "t": 25.61, "warmup": false, "smMHz": 2398, "tempC": 74.0, "powerW": 83.71, "throttleMask": 0}
+{"device": 0, "t": 25.86, "warmup": false, "smMHz": 2398, "tempC": 74.0, "powerW": 83.71, "throttleMask": 0}
+{"device": 0, "t": 26.11, "warmup": false, "smMHz": 2307, "tempC": 73.0, "powerW": 82.29, "throttleMask": 0}
+{"device": 0, "t": 26.36, "warmup": false, "smMHz": 2307, "tempC": 73.0, "powerW": 82.29, "throttleMask": 0}
+{"device": 0, "t": 26.62, "warmup": false, "smMHz": 2307, "tempC": 73.0, "powerW": 77.96, "throttleMask": 0}
+{"device": 0, "t": 26.87, "warmup": false, "smMHz": 2307, "tempC": 73.0, "powerW": 77.96, "throttleMask": 0}
+{"device": 0, "t": 27.12, "warmup": false, "smMHz": 2372, "tempC": 74.0, "powerW": 79.44, "throttleMask": 0}
+{"device": 0, "t": 27.37, "warmup": false, "smMHz": 2372, "tempC": 74.0, "powerW": 79.44, "throttleMask": 0}
+{"device": 0, "t": 27.62, "warmup": false, "smMHz": 2288, "tempC": 73.0, "powerW": 78.82, "throttleMask": 0}
+{"device": 0, "t": 27.87, "warmup": false, "smMHz": 2288, "tempC": 73.0, "powerW": 78.82, "throttleMask": 0}
+{"device": 0, "t": 28.12, "warmup": false, "smMHz": 2294, "tempC": 73.0, "powerW": 75.24, "throttleMask": 0}
+{"device": 0, "t": 28.37, "warmup": false, "smMHz": 2294, "tempC": 73.0, "powerW": 75.24, "throttleMask": 0}
+{"device": 0, "t": 28.62, "warmup": false, "smMHz": 2340, "tempC": 74.0, "powerW": 76.75, "throttleMask": 0}
+{"device": 0, "t": 28.88, "warmup": false, "smMHz": 2340, "tempC": 74.0, "powerW": 76.75, "throttleMask": 0}
+{"device": 0, "t": 29.13, "warmup": false, "smMHz": 2281, "tempC": 73.0, "powerW": 76.64, "throttleMask": 0}
+{"device": 0, "t": 29.38, "warmup": false, "smMHz": 2281, "tempC": 73.0, "powerW": 76.64, "throttleMask": 0}
+{"device": 0, "t": 29.63, "warmup": false, "smMHz": 2320, "tempC": 74.0, "powerW": 75.84, "throttleMask": 0}
+{"device": 0, "t": 29.88, "warmup": false, "smMHz": 2320, "tempC": 74.0, "powerW": 75.84, "throttleMask": 0}
+{"device": 0, "t": 30.13, "warmup": false, "smMHz": 2346, "tempC": 74.0, "powerW": 79.22, "throttleMask": 0}
+{"device": 0, "t": 30.38, "warmup": false, "smMHz": 2346, "tempC": 74.0, "powerW": 79.22, "throttleMask": 0}
+{"device": 0, "t": 30.63, "warmup": false, "smMHz": 2346, "tempC": 74.0, "powerW": 81.11, "throttleMask": 0}
+{"device": 0, "t": 30.88, "warmup": false, "smMHz": 2346, "tempC": 74.0, "powerW": 81.11, "throttleMask": 0}
+{"device": 0, "t": 31.13, "warmup": false, "smMHz": 2327, "tempC": 74.0, "powerW": 78.86, "throttleMask": 0}
+{"device": 0, "t": 31.38, "warmup": false, "smMHz": 2327, "tempC": 74.0, "powerW": 78.86, "throttleMask": 0}
+{"device": 0, "t": 31.64, "warmup": false, "smMHz": 2314, "tempC": 74.0, "powerW": 78.06, "throttleMask": 0}
+{"device": 0, "t": 31.89, "warmup": false, "smMHz": 2314, "tempC": 74.0, "powerW": 78.06, "throttleMask": 0}
+{"device": 0, "t": 32.14, "warmup": false, "smMHz": 2327, "tempC": 75.0, "powerW": 79.03, "throttleMask": 0}
+{"device": 0, "t": 32.39, "warmup": false, "smMHz": 2327, "tempC": 75.0, "powerW": 79.03, "throttleMask": 0}
+{"device": 0, "t": 32.64, "warmup": false, "smMHz": 2320, "tempC": 74.0, "powerW": 77.12, "throttleMask": 0}
+{"device": 0, "t": 32.89, "warmup": false, "smMHz": 2320, "tempC": 74.0, "powerW": 77.12, "throttleMask": 0}
+{"device": 0, "t": 33.14, "warmup": false, "smMHz": 2307, "tempC": 74.0, "powerW": 76.61, "throttleMask": 0}
+{"device": 0, "t": 33.39, "warmup": false, "smMHz": 2307, "tempC": 74.0, "powerW": 76.61, "throttleMask": 0}
+{"device": 0, "t": 33.64, "warmup": false, "smMHz": 2307, "tempC": 74.0, "powerW": 78.12, "throttleMask": 0}
+{"device": 0, "t": 33.90, "warmup": false, "smMHz": 2307, "tempC": 74.0, "powerW": 78.12, "throttleMask": 0}
+{"device": 0, "t": 34.15, "warmup": false, "smMHz": 2346, "tempC": 75.0, "powerW": 77.59, "throttleMask": 0}
+{"device": 0, "t": 34.40, "warmup": false, "smMHz": 2346, "tempC": 75.0, "powerW": 77.59, "throttleMask": 0}
+{"device": 0, "t": 34.65, "warmup": false, "smMHz": 2340, "tempC": 75.0, "powerW": 77.82, "throttleMask": 0}
+{"device": 0, "t": 34.90, "warmup": false, "smMHz": 2340, "tempC": 75.0, "powerW": 77.82, "throttleMask": 0}
+{"device": 0, "t": 35.15, "warmup": false, "smMHz": 2372, "tempC": 76.0, "powerW": 80.32, "throttleMask": 0}
+{"device": 0, "t": 35.40, "warmup": false, "smMHz": 2372, "tempC": 76.0, "powerW": 80.32, "throttleMask": 0}
+{"device": 0, "t": 35.65, "warmup": false, "smMHz": 2372, "tempC": 75.0, "powerW": 83.39, "throttleMask": 0}
+{"device": 0, "t": 35.90, "warmup": false, "smMHz": 2372, "tempC": 75.0, "powerW": 83.39, "throttleMask": 0}
+{"device": 0, "t": 36.15, "warmup": false, "smMHz": 2346, "tempC": 75.0, "powerW": 83.24, "throttleMask": 0}
+{"device": 0, "t": 36.41, "warmup": false, "smMHz": 2346, "tempC": 75.0, "powerW": 83.24, "throttleMask": 0}
+{"device": 0, "t": 36.66, "warmup": false, "smMHz": 2359, "tempC": 76.0, "powerW": 82.46, "throttleMask": 0}
+{"device": 0, "t": 36.91, "warmup": false, "smMHz": 2359, "tempC": 76.0, "powerW": 82.46, "throttleMask": 0}
+{"device": 0, "t": 37.16, "warmup": false, "smMHz": 2320, "tempC": 75.0, "powerW": 81.24, "throttleMask": 0}
+{"device": 0, "t": 37.41, "warmup": false, "smMHz": 2320, "tempC": 75.0, "powerW": 81.24, "throttleMask": 0}
+{"device": 0, "t": 37.66, "warmup": false, "smMHz": 2320, "tempC": 76.0, "powerW": 79.46, "throttleMask": 0}
+{"device": 0, "t": 37.91, "warmup": false, "smMHz": 2320, "tempC": 76.0, "powerW": 79.46, "throttleMask": 0}
+{"device": 0, "t": 38.16, "warmup": false, "smMHz": 2346, "tempC": 76.0, "powerW": 79.85, "throttleMask": 0}
+{"device": 0, "t": 38.41, "warmup": false, "smMHz": 2346, "tempC": 76.0, "powerW": 79.85, "throttleMask": 0}
+{"device": 0, "t": 38.66, "warmup": false, "smMHz": 2372, "tempC": 77.0, "powerW": 82.61, "throttleMask": 0}
+{"device": 0, "t": 38.91, "warmup": false, "smMHz": 2372, "tempC": 77.0, "powerW": 82.61, "throttleMask": 0}
+{"device": 0, "t": 39.16, "warmup": false, "smMHz": 2340, "tempC": 76.0, "powerW": 83.54, "throttleMask": 0}
+{"device": 0, "t": 39.41, "warmup": false, "smMHz": 2340, "tempC": 76.0, "powerW": 83.54, "throttleMask": 0}
+{"device": 0, "t": 39.67, "warmup": false, "smMHz": 2359, "tempC": 76.0, "powerW": 82.28, "throttleMask": 0}
+{"device": 0, "t": 39.92, "warmup": false, "smMHz": 2359, "tempC": 76.0, "powerW": 82.28, "throttleMask": 0}
+{"device": 0, "t": 40.17, "warmup": false, "smMHz": 2346, "tempC": 76.0, "powerW": 82.60, "throttleMask": 0}
+{"device": 0, "t": 40.42, "warmup": false, "smMHz": 2346, "tempC": 76.0, "powerW": 82.60, "throttleMask": 0}
+{"device": 0, "t": 40.67, "warmup": false, "smMHz": 2307, "tempC": 76.0, "powerW": 81.24, "throttleMask": 0}
+{"device": 0, "t": 40.92, "warmup": false, "smMHz": 2307, "tempC": 76.0, "powerW": 81.24, "throttleMask": 0}
+{"device": 0, "t": 41.17, "warmup": false, "smMHz": 2366, "tempC": 77.0, "powerW": 81.25, "throttleMask": 0}
+{"device": 0, "t": 41.42, "warmup": false, "smMHz": 2366, "tempC": 77.0, "powerW": 81.25, "throttleMask": 0}
+{"device": 0, "t": 41.67, "warmup": false, "smMHz": 2385, "tempC": 77.0, "powerW": 83.69, "throttleMask": 0}
+{"device": 0, "t": 41.92, "warmup": false, "smMHz": 2385, "tempC": 77.0, "powerW": 83.69, "throttleMask": 0}
+{"device": 0, "t": 42.18, "warmup": false, "smMHz": 2346, "tempC": 76.0, "powerW": 84.21, "throttleMask": 0}
+{"device": 0, "t": 42.43, "warmup": false, "smMHz": 2346, "tempC": 76.0, "powerW": 84.21, "throttleMask": 0}
+{"device": 0, "t": 42.68, "warmup": false, "smMHz": 2320, "tempC": 76.0, "powerW": 81.44, "throttleMask": 0}
+{"device": 0, "t": 42.93, "warmup": false, "smMHz": 2320, "tempC": 76.0, "powerW": 81.44, "throttleMask": 0}
+{"device": 0, "t": 43.18, "warmup": false, "smMHz": 2333, "tempC": 77.0, "powerW": 80.61, "throttleMask": 0}
+{"device": 0, "t": 43.43, "warmup": false, "smMHz": 2333, "tempC": 77.0, "powerW": 80.61, "throttleMask": 0}
+{"device": 0, "t": 43.68, "warmup": false, "smMHz": 2372, "tempC": 78.0, "powerW": 83.31, "throttleMask": 0}
+{"device": 0, "t": 43.93, "warmup": false, "smMHz": 2372, "tempC": 78.0, "powerW": 83.31, "throttleMask": 0}
+{"device": 0, "t": 44.18, "warmup": false, "smMHz": 2372, "tempC": 77.0, "powerW": 84.78, "throttleMask": 0}
+{"device": 0, "t": 44.44, "warmup": false, "smMHz": 2372, "tempC": 77.0, "powerW": 84.78, "throttleMask": 0}
+{"device": 0, "t": 44.69, "warmup": false, "smMHz": 2353, "tempC": 78.0, "powerW": 85.30, "throttleMask": 0}
+{"device": 0, "t": 44.94, "warmup": false, "smMHz": 2353, "tempC": 78.0, "powerW": 85.30, "throttleMask": 0}
+{"device": 0, "t": 45.19, "warmup": false, "smMHz": 2281, "tempC": 77.0, "powerW": 81.16, "throttleMask": 0}
+{"device": 0, "t": 45.44, "warmup": false, "smMHz": 2281, "tempC": 77.0, "powerW": 81.16, "throttleMask": 0}
+{"device": 0, "t": 45.69, "warmup": false, "smMHz": 2314, "tempC": 77.0, "powerW": 78.20, "throttleMask": 0}
+{"device": 0, "t": 45.94, "warmup": false, "smMHz": 2314, "tempC": 77.0, "powerW": 78.20, "throttleMask": 0}
+{"device": 0, "t": 46.19, "warmup": false, "smMHz": 2268, "tempC": 77.0, "powerW": 77.75, "throttleMask": 0}
+{"device": 0, "t": 46.45, "warmup": false, "smMHz": 2268, "tempC": 77.0, "powerW": 77.75, "throttleMask": 0}
+{"device": 0, "t": 46.70, "warmup": false, "smMHz": 2307, "tempC": 77.0, "powerW": 77.34, "throttleMask": 0}
+{"device": 0, "t": 46.95, "warmup": false, "smMHz": 2307, "tempC": 77.0, "powerW": 77.34, "throttleMask": 0}
+{"device": 0, "t": 47.20, "warmup": false, "smMHz": 2255, "tempC": 77.0, "powerW": 77.02, "throttleMask": 0}
+{"device": 0, "t": 47.45, "warmup": false, "smMHz": 2255, "tempC": 77.0, "powerW": 77.02, "throttleMask": 0}
+{"device": 0, "t": 47.70, "warmup": false, "smMHz": 2210, "tempC": 76.0, "powerW": 74.24, "throttleMask": 0}
+{"device": 0, "t": 47.95, "warmup": false, "smMHz": 2210, "tempC": 76.0, "powerW": 74.24, "throttleMask": 0}
+{"device": 0, "t": 48.20, "warmup": false, "smMHz": 2294, "tempC": 77.0, "powerW": 74.41, "throttleMask": 0}
+{"device": 0, "t": 48.46, "warmup": false, "smMHz": 2294, "tempC": 77.0, "powerW": 74.41, "throttleMask": 0}
+{"device": 0, "t": 48.71, "warmup": false, "smMHz": 2268, "tempC": 77.0, "powerW": 76.15, "throttleMask": 0}
+{"device": 0, "t": 48.96, "warmup": false, "smMHz": 2268, "tempC": 77.0, "powerW": 76.15, "throttleMask": 0}
+{"device": 0, "t": 49.21, "warmup": false, "smMHz": 2333, "tempC": 78.0, "powerW": 79.15, "throttleMask": 0}
+{"device": 0, "t": 49.46, "warmup": false, "smMHz": 2333, "tempC": 78.0, "powerW": 79.15, "throttleMask": 0}
+{"device": 0, "t": 49.71, "warmup": false, "smMHz": 2301, "tempC": 78.0, "powerW": 81.32, "throttleMask": 0}
+{"device": 0, "t": 49.96, "warmup": false, "smMHz": 2301, "tempC": 78.0, "powerW": 81.32, "throttleMask": 0}
+{"device": 0, "t": 50.22, "warmup": false, "smMHz": 2327, "tempC": 78.0, "powerW": 80.74, "throttleMask": 0}
+{"device": 0, "t": 50.47, "warmup": false, "smMHz": 2327, "tempC": 78.0, "powerW": 80.74, "throttleMask": 0}
+{"device": 0, "t": 50.72, "warmup": false, "smMHz": 2340, "tempC": 78.0, "powerW": 80.83, "throttleMask": 0}
+{"device": 0, "t": 50.97, "warmup": false, "smMHz": 2340, "tempC": 78.0, "powerW": 80.83, "throttleMask": 0}
+{"device": 0, "t": 51.22, "warmup": false, "smMHz": 2333, "tempC": 77.0, "powerW": 81.06, "throttleMask": 0}
+{"device": 0, "t": 51.47, "warmup": false, "smMHz": 2333, "tempC": 77.0, "powerW": 81.06, "throttleMask": 0}
+{"device": 0, "t": 51.72, "warmup": false, "smMHz": 2262, "tempC": 77.0, "powerW": 77.79, "throttleMask": 0}
+{"device": 0, "t": 51.97, "warmup": false, "smMHz": 2262, "tempC": 77.0, "powerW": 77.79, "throttleMask": 0}
+{"device": 0, "t": 52.22, "warmup": false, "smMHz": 2281, "tempC": 77.0, "powerW": 76.05, "throttleMask": 0}
+{"device": 0, "t": 52.47, "warmup": false, "smMHz": 2281, "tempC": 77.0, "powerW": 76.05, "throttleMask": 0}
+{"device": 0, "t": 52.72, "warmup": false, "smMHz": 2177, "tempC": 76.0, "powerW": 72.98, "throttleMask": 0}
+{"device": 0, "t": 52.98, "warmup": false, "smMHz": 2177, "tempC": 76.0, "powerW": 72.98, "throttleMask": 0}
+{"device": 0, "t": 53.23, "warmup": false, "smMHz": 2262, "tempC": 78.0, "powerW": 70.53, "throttleMask": 0}
+{"device": 0, "t": 53.48, "warmup": false, "smMHz": 2262, "tempC": 78.0, "powerW": 70.53, "throttleMask": 0}
+{"device": 0, "t": 53.73, "warmup": false, "smMHz": 2281, "tempC": 78.0, "powerW": 74.97, "throttleMask": 0}
+{"device": 0, "t": 53.98, "warmup": false, "smMHz": 2281, "tempC": 78.0, "powerW": 74.97, "throttleMask": 0}
+{"device": 0, "t": 54.23, "warmup": false, "smMHz": 2333, "tempC": 78.0, "powerW": 77.89, "throttleMask": 0}
+{"device": 0, "t": 54.48, "warmup": false, "smMHz": 2333, "tempC": 78.0, "powerW": 77.89, "throttleMask": 0}
+{"device": 0, "t": 54.73, "warmup": false, "smMHz": 2314, "tempC": 78.0, "powerW": 79.09, "throttleMask": 0}
+{"device": 0, "t": 54.99, "warmup": false, "smMHz": 2314, "tempC": 78.0, "powerW": 79.09, "throttleMask": 0}
+{"device": 0, "t": 55.24, "warmup": false, "smMHz": 2314, "tempC": 77.0, "powerW": 78.62, "throttleMask": 0}
+{"device": 0, "t": 55.49, "warmup": false, "smMHz": 2314, "tempC": 77.0, "powerW": 78.62, "throttleMask": 0}
+{"device": 0, "t": 55.74, "warmup": false, "smMHz": 2327, "tempC": 79.0, "powerW": 78.69, "throttleMask": 0}
+{"device": 0, "t": 55.99, "warmup": false, "smMHz": 2327, "tempC": 79.0, "powerW": 78.69, "throttleMask": 0}
+{"device": 0, "t": 56.24, "warmup": false, "smMHz": 2340, "tempC": 79.0, "powerW": 81.18, "throttleMask": 0}
+{"device": 0, "t": 56.49, "warmup": false, "smMHz": 2340, "tempC": 79.0, "powerW": 81.18, "throttleMask": 0}
+{"device": 0, "t": 56.74, "warmup": false, "smMHz": 2346, "tempC": 79.0, "powerW": 82.26, "throttleMask": 0}
+{"device": 0, "t": 56.99, "warmup": false, "smMHz": 2346, "tempC": 79.0, "powerW": 82.26, "throttleMask": 0}
+{"device": 0, "t": 57.25, "warmup": false, "smMHz": 2333, "tempC": 79.0, "powerW": 81.17, "throttleMask": 0}
+{"device": 0, "t": 57.50, "warmup": false, "smMHz": 2333, "tempC": 79.0, "powerW": 81.17, "throttleMask": 0}
+{"device": 0, "t": 57.75, "warmup": false, "smMHz": 2262, "tempC": 78.0, "powerW": 76.98, "throttleMask": 0}
+{"device": 0, "t": 58.00, "warmup": false, "smMHz": 2262, "tempC": 78.0, "powerW": 76.98, "throttleMask": 0}
+{"device": 0, "t": 58.25, "warmup": false, "smMHz": 2268, "tempC": 78.0, "powerW": 74.46, "throttleMask": 0}
+{"device": 0, "t": 58.50, "warmup": false, "smMHz": 2268, "tempC": 78.0, "powerW": 74.46, "throttleMask": 0}
+{"device": 0, "t": 58.75, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 76.82, "throttleMask": 0}
+{"device": 0, "t": 59.00, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 76.82, "throttleMask": 0}
+{"device": 0, "t": 59.25, "warmup": false, "smMHz": 2301, "tempC": 79.0, "powerW": 77.54, "throttleMask": 0}
+{"device": 0, "t": 59.50, "warmup": false, "smMHz": 2301, "tempC": 79.0, "powerW": 77.54, "throttleMask": 0}
+{"device": 0, "t": 59.75, "warmup": false, "smMHz": 2301, "tempC": 79.0, "powerW": 77.28, "throttleMask": 0}
+{"device": 0, "t": 60.01, "warmup": false, "smMHz": 2301, "tempC": 79.0, "powerW": 77.28, "throttleMask": 0}
+{"device": 0, "t": 60.26, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 77.95, "throttleMask": 0}
+{"device": 0, "t": 60.51, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 77.95, "throttleMask": 0}
+{"device": 0, "t": 60.76, "warmup": false, "smMHz": 2268, "tempC": 79.0, "powerW": 77.27, "throttleMask": 0}
+{"device": 0, "t": 61.01, "warmup": false, "smMHz": 2268, "tempC": 79.0, "powerW": 77.27, "throttleMask": 0}
+{"device": 0, "t": 61.26, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 76.99, "throttleMask": 0}
+{"device": 0, "t": 61.52, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 76.99, "throttleMask": 0}
+{"device": 0, "t": 61.77, "warmup": false, "smMHz": 2301, "tempC": 79.0, "powerW": 77.84, "throttleMask": 0}
+{"device": 0, "t": 62.02, "warmup": false, "smMHz": 2301, "tempC": 79.0, "powerW": 77.84, "throttleMask": 0}
+{"device": 0, "t": 62.27, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 77.93, "throttleMask": 0}
+{"device": 0, "t": 62.52, "warmup": false, "smMHz": 2307, "tempC": 79.0, "powerW": 77.93, "throttleMask": 0}
+{"device": 0, "t": 62.77, "warmup": false, "smMHz": 2255, "tempC": 79.0, "powerW": 75.57, "throttleMask": 0}
+{"device": 0, "t": 63.02, "warmup": false, "smMHz": 2255, "tempC": 79.0, "powerW": 75.57, "throttleMask": 0}
+{"device": 0, "t": 63.27, "warmup": false, "smMHz": 2255, "tempC": 79.0, "powerW": 73.88, "throttleMask": 0}
+{"device": 0, "t": 63.52, "warmup": false, "smMHz": 2255, "tempC": 79.0, "powerW": 73.88, "throttleMask": 0}
+{"device": 0, "t": 63.78, "warmup": false, "smMHz": 2320, "tempC": 79.0, "powerW": 75.79, "throttleMask": 0}
+{"device": 0, "t": 64.03, "warmup": false, "smMHz": 2320, "tempC": 79.0, "powerW": 75.79, "throttleMask": 0}
+{"device": 0, "t": 64.28, "warmup": false, "smMHz": 2327, "tempC": 80.0, "powerW": 78.32, "throttleMask": 0}
+{"device": 0, "t": 64.53, "warmup": false, "smMHz": 2327, "tempC": 80.0, "powerW": 78.32, "throttleMask": 0}
+{"device": 0, "t": 64.78, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 79.96, "throttleMask": 0}
+{"device": 0, "t": 65.03, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 79.96, "throttleMask": 0}
+{"device": 0, "t": 65.28, "warmup": false, "smMHz": 2294, "tempC": 79.0, "powerW": 78.67, "throttleMask": 0}
+{"device": 0, "t": 65.53, "warmup": false, "smMHz": 2294, "tempC": 79.0, "powerW": 78.67, "throttleMask": 0}
+{"device": 0, "t": 65.78, "warmup": false, "smMHz": 2275, "tempC": 79.0, "powerW": 77.14, "throttleMask": 0}
+{"device": 0, "t": 66.03, "warmup": false, "smMHz": 2275, "tempC": 79.0, "powerW": 77.14, "throttleMask": 0}
+{"device": 0, "t": 66.29, "warmup": false, "smMHz": 2262, "tempC": 79.0, "powerW": 76.06, "throttleMask": 0}
+{"device": 0, "t": 66.54, "warmup": false, "smMHz": 2262, "tempC": 79.0, "powerW": 76.06, "throttleMask": 0}
+{"device": 0, "t": 66.79, "warmup": false, "smMHz": 2320, "tempC": 80.0, "powerW": 76.95, "throttleMask": 0}
+{"device": 0, "t": 67.04, "warmup": false, "smMHz": 2320, "tempC": 80.0, "powerW": 76.95, "throttleMask": 0}
+{"device": 0, "t": 67.29, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 78.75, "throttleMask": 0}
+{"device": 0, "t": 67.54, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 78.75, "throttleMask": 0}
+{"device": 0, "t": 67.80, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 80.20, "throttleMask": 0}
+{"device": 0, "t": 68.05, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 80.20, "throttleMask": 0}
+{"device": 0, "t": 68.30, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 82.02, "throttleMask": 0}
+{"device": 0, "t": 68.55, "warmup": false, "smMHz": 2340, "tempC": 80.0, "powerW": 82.02, "throttleMask": 0}
+{"device": 0, "t": 68.80, "warmup": false, "smMHz": 2314, "tempC": 80.0, "powerW": 81.55, "throttleMask": 0}
+{"device": 0, "t": 69.05, "warmup": false, "smMHz": 2314, "tempC": 80.0, "powerW": 81.55, "throttleMask": 0}
+{"device": 0, "t": 69.30, "warmup": false, "smMHz": 2294, "tempC": 79.0, "powerW": 79.53, "throttleMask": 0}
+{"device": 0, "t": 69.56, "warmup": false, "smMHz": 2294, "tempC": 79.0, "powerW": 79.53, "throttleMask": 0}
+{"device": 0, "t": 69.81, "warmup": false, "smMHz": 2255, "tempC": 79.0, "powerW": 77.21, "throttleMask": 0}
+{"device": 0, "t": 70.06, "warmup": false, "smMHz": 2255, "tempC": 79.0, "powerW": 77.21, "throttleMask": 0}
+{"device": 0, "t": 70.31, "warmup": false, "smMHz": 2242, "tempC": 80.0, "powerW": 75.21, "throttleMask": 0}
+{"device": 0, "t": 70.56, "warmup": false, "smMHz": 2242, "tempC": 80.0, "powerW": 75.21, "throttleMask": 0}
+{"device": 0, "t": 70.81, "warmup": false, "smMHz": 2288, "tempC": 80.0, "powerW": 75.28, "throttleMask": 0}
+{"device": 0, "t": 71.06, "warmup": false, "smMHz": 2288, "tempC": 80.0, "powerW": 75.28, "throttleMask": 0}
+{"device": 0, "t": 71.32, "warmup": false, "smMHz": 2268, "tempC": 80.0, "powerW": 75.96, "throttleMask": 0}
+{"device": 0, "t": 71.57, "warmup": false, "smMHz": 2268, "tempC": 80.0, "powerW": 75.96, "throttleMask": 0}
+{"device": 0, "t": 71.82, "warmup": false, "smMHz": 2268, "tempC": 80.0, "powerW": 75.55, "throttleMask": 0}
+{"device": 0, "t": 72.07, "warmup": false, "smMHz": 2268, "tempC": 80.0, "powerW": 75.55, "throttleMask": 0}
+{"device": 0, "t": 72.32, "warmup": false, "smMHz": 2268, "tempC": 80.0, "powerW": 75.45, "throttleMask": 0}
+{"device": 0, "t": 72.57, "warmup": false, "smMHz": 2268, "tempC": 80.0, "powerW": 75.45, "throttleMask": 0}
+{"device": 0, "t": 72.82, "warmup": false, "smMHz": 2281, "tempC": 80.0, "powerW": 74.80, "throttleMask": 0}
+{"device": 0, "t": 73.07, "warmup": false, "smMHz": 2281, "tempC": 80.0, "powerW": 74.80, "throttleMask": 0}
+{"device": 0, "t": 73.33, "warmup": false, "smMHz": 2314, "tempC": 80.0, "powerW": 76.48, "throttleMask": 0}
+{"device": 0, "t": 73.58, "warmup": false, "smMHz": 2314, "tempC": 80.0, "powerW": 76.48, "throttleMask": 0}
+{"device": 0, "t": 73.83, "warmup": false, "smMHz": 2281, "tempC": 80.0, "powerW": 78.05, "throttleMask": 0}
+{"device": 0, "t": 74.08, "warmup": false, "smMHz": 2281, "tempC": 80.0, "powerW": 78.05, "throttleMask": 0}
+{"device": 0, "t": 74.33, "warmup": false, "smMHz": 2223, "tempC": 80.0, "powerW": 74.45, "throttleMask": 0}
+{"device": 0, "t": 74.58, "warmup": false, "smMHz": 2223, "tempC": 80.0, "powerW": 74.45, "throttleMask": 0}
+{"device": 0, "t": 74.83, "warmup": false, "smMHz": 2249, "tempC": 80.0, "powerW": 72.77, "throttleMask": 0}
+{"device": 0, "t": 75.08, "warmup": false, "smMHz": 2249, "tempC": 80.0, "powerW": 72.77, "throttleMask": 0}
+{"device": 0, "t": 75.34, "warmup": false, "smMHz": 2242, "tempC": 80.0, "powerW": 73.54, "throttleMask": 0}
+{"device": 0, "t": 75.59, "warmup": false, "smMHz": 2242, "tempC": 80.0, "powerW": 73.54, "throttleMask": 0}
+{"device": 0, "t": 75.84, "warmup": false, "smMHz": 2262, "tempC": 80.0, "powerW": 74.14, "throttleMask": 0}
+{"device": 0, "t": 76.09, "warmup": false, "smMHz": 2262, "tempC": 80.0, "powerW": 74.14, "throttleMask": 0}
+{"device": 0, "t": 76.34, "warmup": false, "smMHz": 2340, "tempC": 81.0, "powerW": 78.48, "throttleMask": 0}
+{"device": 0, "t": 76.59, "warmup": false, "smMHz": 2340, "tempC": 81.0, "powerW": 78.48, "throttleMask": 0}
+{"device": 0, "t": 76.84, "warmup": false, "smMHz": 2262, "tempC": 80.0, "powerW": 79.01, "throttleMask": 0}
+{"device": 0, "t": 77.09, "warmup": false, "smMHz": 2262, "tempC": 80.0, "powerW": 79.01, "throttleMask": 0}
+{"device": 0, "t": 77.34, "warmup": false, "smMHz": 2229, "tempC": 80.0, "powerW": 74.43, "throttleMask": 0}
+{"device": 0, "t": 77.59, "warmup": false, "smMHz": 2229, "tempC": 80.0, "powerW": 74.43, "throttleMask": 0}
+{"device": 0, "t": 77.85, "warmup": false, "smMHz": 2275, "tempC": 81.0, "powerW": 75.46, "throttleMask": 0}
+{"device": 0, "t": 78.10, "warmup": false, "smMHz": 2275, "tempC": 81.0, "powerW": 75.46, "throttleMask": 0}
+{"device": 0, "t": 78.35, "warmup": false, "smMHz": 2320, "tempC": 81.0, "powerW": 79.51, "throttleMask": 0}
+{"device": 0, "t": 78.60, "warmup": false, "smMHz": 2320, "tempC": 81.0, "powerW": 79.51, "throttleMask": 0}
+{"device": 0, "t": 78.85, "warmup": false, "smMHz": 2294, "tempC": 81.0, "powerW": 79.93, "throttleMask": 0}
+{"device": 0, "t": 79.10, "warmup": false, "smMHz": 2294, "tempC": 81.0, "powerW": 79.93, "throttleMask": 0}
+{"device": 0, "t": 79.35, "warmup": false, "smMHz": 2281, "tempC": 81.0, "powerW": 78.02, "throttleMask": 0}
+{"device": 0, "t": 79.60, "warmup": false, "smMHz": 2281, "tempC": 81.0, "powerW": 78.02, "throttleMask": 0}
+{"device": 0, "t": 79.85, "warmup": false, "smMHz": 2190, "tempC": 80.0, "powerW": 74.81, "throttleMask": 0}
+{"device": 0, "t": 80.11, "warmup": false, "smMHz": 2249, "tempC": 81.0, "powerW": 72.69, "throttleMask": 0}
+{"device": 0, "t": 80.36, "warmup": false, "smMHz": 2249, "tempC": 81.0, "powerW": 72.69, "throttleMask": 0}
+{"device": 0, "t": 80.61, "warmup": false, "smMHz": 2294, "tempC": 81.0, "powerW": 75.22, "throttleMask": 0}
+{"device": 0, "t": 80.86, "warmup": false, "smMHz": 2294, "tempC": 81.0, "powerW": 75.22, "throttleMask": 0}
+{"device": 0, "t": 81.11, "warmup": false, "smMHz": 2249, "tempC": 81.0, "powerW": 75.79, "throttleMask": 0}
+{"device": 0, "t": 81.36, "warmup": false, "smMHz": 2249, "tempC": 81.0, "powerW": 75.79, "throttleMask": 0}
+{"device": 0, "t": 81.61, "warmup": false, "smMHz": 2262, "tempC": 81.0, "powerW": 75.56, "throttleMask": 0}
+{"device": 0, "t": 81.86, "warmup": false, "smMHz": 2262, "tempC": 81.0, "powerW": 75.56, "throttleMask": 0}
+{"device": 0, "t": 82.11, "warmup": false, "smMHz": 2262, "tempC": 80.0, "powerW": 76.15, "throttleMask": 0}
+{"device": 0, "t": 82.37, "warmup": false, "smMHz": 2262, "tempC": 80.0, "powerW": 76.15, "throttleMask": 0}
+{"device": 0, "t": 82.62, "warmup": false, "smMHz": 2067, "tempC": 79.0, "powerW": 68.57, "throttleMask": 0}
+{"device": 0, "t": 82.87, "warmup": false, "smMHz": 2067, "tempC": 79.0, "powerW": 68.57, "throttleMask": 0}
+{"device": 0, "t": 83.12, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.58, "throttleMask": 0}
+{"device": 0, "t": 83.37, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.58, "throttleMask": 0}
+{"device": 0, "t": 83.62, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.80, "throttleMask": 0}
+{"device": 0, "t": 83.87, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.80, "throttleMask": 0}
+{"device": 0, "t": 84.12, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.78, "throttleMask": 0}
+{"device": 0, "t": 84.37, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.78, "throttleMask": 0}
+{"device": 0, "t": 84.63, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.93, "throttleMask": 0}
+{"device": 0, "t": 84.88, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 61.93, "throttleMask": 0}
+{"device": 0, "t": 85.13, "warmup": false, "smMHz": 2086, "tempC": 79.0, "powerW": 61.99, "throttleMask": 0}
+{"device": 0, "t": 85.38, "warmup": false, "smMHz": 2086, "tempC": 79.0, "powerW": 61.99, "throttleMask": 0}
+{"device": 0, "t": 85.63, "warmup": false, "smMHz": 2086, "tempC": 79.0, "powerW": 62.04, "throttleMask": 0}
+{"device": 0, "t": 85.88, "warmup": false, "smMHz": 2086, "tempC": 79.0, "powerW": 62.04, "throttleMask": 0}
+{"device": 0, "t": 86.14, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.38, "throttleMask": 0}
+{"device": 0, "t": 86.39, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.38, "throttleMask": 0}
+{"device": 0, "t": 86.64, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.57, "throttleMask": 0}
+{"device": 0, "t": 86.89, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.57, "throttleMask": 0}
+{"device": 0, "t": 87.14, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.42, "throttleMask": 0}
+{"device": 0, "t": 87.39, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.42, "throttleMask": 0}
+{"device": 0, "t": 87.64, "warmup": false, "smMHz": 2086, "tempC": 79.0, "powerW": 62.40, "throttleMask": 0}
+{"device": 0, "t": 87.90, "warmup": false, "smMHz": 2086, "tempC": 79.0, "powerW": 62.40, "throttleMask": 0}
+{"device": 0, "t": 88.15, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.35, "throttleMask": 0}
+{"device": 0, "t": 88.40, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.35, "throttleMask": 0}
+{"device": 0, "t": 88.65, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.47, "throttleMask": 0}
+{"device": 0, "t": 88.90, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.47, "throttleMask": 0}
+{"device": 0, "t": 89.15, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.65, "throttleMask": 0}
+{"device": 0, "t": 89.40, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.65, "throttleMask": 0}
+{"device": 0, "t": 89.66, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.59, "throttleMask": 0}
+{"device": 0, "t": 89.91, "warmup": false, "smMHz": 2080, "tempC": 79.0, "powerW": 62.59, "throttleMask": 0}
+-----END BURNIN ARTIFACT-----
+nvml_unsupported=memClock
+unsupported_reads=1
+THERMAL_SOAK_PASS

@@ -97,6 +97,7 @@ COPY gpu_burn.cu /src/gpu_burn.cu
 COPY soak_core.cuh /src/soak_core.cuh
 COPY nvml_dynamic.h /src/nvml_dynamic.h
 COPY device_fold.h /src/device_fold.h
+COPY soak_series.h /src/soak_series.h
 COPY kmsg/kmsg_watch.h /src/kmsg/kmsg_watch.h
 
 # -cudart static is nvcc's default on Linux but stated explicitly so the intent
