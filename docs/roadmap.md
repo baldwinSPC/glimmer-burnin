@@ -248,6 +248,27 @@ vulnerability in software that runs on production hardware.
   decision — now urgent, because an external consumer already imports these
   packages and Go module paths do not follow redirects
 
+### R8 — Measurement discipline
+
+A verdict against a floor is only as good as the floor, and every floor in this
+project is one sample on one day. This milestone is the tooling that turns
+repeated runs into a distribution, says when a later run left it, and makes the
+evidence portable. Ordered as it will land.
+
+- [#538] host-health counts corrected GHES records as hardware faults
+- [#544] Measurement runners record no clock, power or throttle state
+- [#543] `memory-bw` never measures managed (unified) memory
+- [#541] `fingerprint-probe` does not report CPU, memory or NVMe identity
+- [#546] The soak family throws its telemetry series away
+- [#537] A bare-metal results directory proves nothing about itself
+- [#548] Nothing produces a result that can leave the site
+- [#536] Baseline runs are gathered and nothing turns them into a distribution
+- [#540] Nothing compares the nodes of one run against each other
+- [#547] Windowed runners report no steady-state signal
+- [#542] The suite has no CPU measurement
+- [#545] `disk-io` reports no random-read IOPS or tail latency
+- [#539] NVMe health is unread (blocked on [#302])
+
 ### R-loop — Test factory
 
 Adding a TestKind is currently a research project, because the rules that govern
@@ -358,4 +379,18 @@ version, never a re-push.
 [#265]: https://github.com/baldwinSPC/glimmer-burnin/issues/265
 [#350]: https://github.com/baldwinSPC/glimmer-burnin/issues/350
 [#354]: https://github.com/baldwinSPC/glimmer-burnin/issues/354
+[#536]: https://github.com/baldwinSPC/glimmer-burnin/issues/536
+[#537]: https://github.com/baldwinSPC/glimmer-burnin/issues/537
+[#538]: https://github.com/baldwinSPC/glimmer-burnin/issues/538
+[#539]: https://github.com/baldwinSPC/glimmer-burnin/issues/539
+[#540]: https://github.com/baldwinSPC/glimmer-burnin/issues/540
+[#541]: https://github.com/baldwinSPC/glimmer-burnin/issues/541
+[#542]: https://github.com/baldwinSPC/glimmer-burnin/issues/542
+[#543]: https://github.com/baldwinSPC/glimmer-burnin/issues/543
+[#544]: https://github.com/baldwinSPC/glimmer-burnin/issues/544
+[#545]: https://github.com/baldwinSPC/glimmer-burnin/issues/545
+[#546]: https://github.com/baldwinSPC/glimmer-burnin/issues/546
+[#547]: https://github.com/baldwinSPC/glimmer-burnin/issues/547
+[#548]: https://github.com/baldwinSPC/glimmer-burnin/issues/548
+[#302]: https://github.com/baldwinSPC/glimmer-burnin/issues/302
 [docs/dev/new-testkind-playbook.md]: dev/new-testkind-playbook.md
