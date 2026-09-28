@@ -425,7 +425,7 @@ disagree about the same hardware. One brain, two dispatchers.
   be this operator deciding what somebody else's measurement means, silently.
 - **Metric names are a contract.** `pkg/contract/metrics.go` holds the registry
   and the grammar: lowerCamelCase, a dimensional metric ends in a registered
-  unit suffix (`Gbps`, `GBs`, `MBs`, `Us`, `Ms`, `S`, `C`, `W`, `Pct`,
+  unit suffix (`Gbps`, `GBs`, `MBs`, `GB`, `Us`, `Ms`, `S`, `C`, `W`, `Pct`,
   `Tflops`, `MHz`), a dimensionless counter does not. A runner's own key is
   mapped to the canonical name by the alias table in `pkg/runner/parse.go`;
   parsing is last-occurrence-wins, so two keys must never alias to the same name.

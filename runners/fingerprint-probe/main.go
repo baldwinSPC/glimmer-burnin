@@ -83,6 +83,7 @@ func run() int {
 
 	res := scan(sysfs)
 	report(res)
+	reportHost(scanHost(sysfs))
 
 	if len(res.Ambiguous) > 0 {
 		logf("fingerprint-probe: %d accelerator(s) under %s, and %d display-class device(s) "+

@@ -311,6 +311,13 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"xidPreexisting":               {UnitNone, ThresholdUseAcceptance},
 		"kernelFatalErrors":            {UnitNone, ThresholdUseAcceptance},
 		"kernelFatalErrorsPreexisting": {UnitNone, ThresholdUseAcceptance},
+		"cpuCount":                     {UnitNone, ThresholdUseAcceptance},
+		"performanceCoreCount":         {UnitNone, ThresholdUseAcceptance},
+		"memoryTotalGB":                {UnitGigabytes, ThresholdUseAcceptance},
+		"nvmeCount":                    {UnitNone, ThresholdUseAcceptance},
+		"nvmeTotalCapacityGB":          {UnitGigabytes, ThresholdUseAcceptance},
+		"nvmeModels":                   {UnitNone, ThresholdUseEvidence},
+		"nvmePciAddresses":             {UnitNone, ThresholdUseEvidence},
 		// gemm-sweep. The two labels are Evidence because their values are
 		// words and a shape — a threshold is compared as a float64, so a gate on
 		// either fails closed on every node forever while reading as a hardware

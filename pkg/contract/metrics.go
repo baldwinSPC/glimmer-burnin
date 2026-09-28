@@ -87,6 +87,11 @@ const (
 	// constant it may not have. sustainedClockPct carries the portable ratio;
 	// this unit carries the measurement it was computed from.
 	UnitMegahertz Unit = "MHz"
+	// UnitGigabytes is a CAPACITY in decimal gigabytes (1e9 bytes), as drive and
+	// memory vendors quote it. Deliberately not GiB: a "4 TB" drive should read
+	// as roughly 4000 here, not 3726. It cannot be confused with GBs under the
+	// suffix rule below, because GBs is checked first.
+	UnitGigabytes Unit = "GB"
 
 	// UnitNone marks a dimensionless counter. It has no suffix by rule 2.
 	UnitNone Unit = ""
@@ -100,6 +105,7 @@ var UnitSuffixes = []Unit{
 	UnitGigabitsPerSecond,
 	UnitGigabytesPerSecond,
 	UnitMegabytesPerSecond,
+	UnitGigabytes,
 	UnitTeraflops,
 	UnitMegahertz,
 	UnitMicroseconds,
@@ -1524,6 +1530,51 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
+	},
+	// Host identity from fingerprint-probe (#541). The counts and capacities are
+	// Acceptance — a node that should have 20 CPUs and reports 10 has lost a
+	// cluster — and the strings are Evidence, like the PCI identity strings.
+	"cpuCount": {
+		Name: "cpuCount", Unit: UnitNone,
+		Description:  "number of CPUs the host's sysfs lists as present",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"performanceCoreCount": {
+		Name: "performanceCoreCount", Unit: UnitNone,
+		Description:  "number of CPUs in the highest cpu_capacity class (within 90% of the maximum). n/a on a part whose kernel publishes no capacity classes, which means every core is the same",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"memoryTotalGB": {
+		Name: "memoryTotalGB", Unit: UnitGigabytes,
+		Description:  "total system memory the kernel manages, summed over NUMA nodes, in decimal gigabytes. Below the marketed size by the firmware and kernel reservations, so gate it with a floor measured on a healthy node",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"nvmeCount": {
+		Name: "nvmeCount", Unit: UnitNone,
+		Description:  "number of NVMe controllers in the host's sysfs",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"nvmeTotalCapacityGB": {
+		Name: "nvmeTotalCapacityGB", Unit: UnitGigabytes,
+		Description:  "total capacity of every NVMe namespace, in decimal gigabytes",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"nvmeModels": {
+		Name: "nvmeModels", Unit: UnitNone,
+		Description:  "comma-separated NVMe model strings in controller order. A label; gate on nvmeCount or nvmeTotalCapacityGB instead",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"nvmePciAddresses": {
+		Name: "nvmePciAddresses", Unit: UnitNone,
+		Description:  "comma-separated PCI slot addresses of the NVMe controllers, e.g. 0004:01:00.0. A drive in the wrong slot is an assembly fault; compare the string in a report rather than gating on it",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
 	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
