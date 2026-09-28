@@ -1603,6 +1603,27 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	// disk-io's random-read pass (#545): 4 KiB direct reads, randReadQueueDepth
+	// in flight, over the file the run wrote. IOPS is a rate with no unit
+	// suffix in the grammar, so it reads as dimensionless; it is a floor.
+	"randReadIops": {
+		Name: "randReadIops", Unit: UnitNone,
+		Description:  "4 KiB random reads per second at randReadQueueDepth in flight, direct I/O, counted after a short ramp",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"randReadP99LatencyUs": {
+		Name: "randReadP99LatencyUs", Unit: UnitMicroseconds,
+		Description:  "99th-percentile latency of the 4 KiB random reads, at 1 µs resolution; absent when the tail lies beyond 20 ms rather than clamped",
+		Aggregation:  AggMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"randReadQueueDepth": {
+		Name: "randReadQueueDepth", Unit: UnitNone,
+		Description:  "how many random reads were kept in flight; a configuration, recorded so an IOPS figure says what it was measured at",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
 		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",
