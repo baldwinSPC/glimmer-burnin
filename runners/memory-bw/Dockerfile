@@ -156,15 +156,29 @@ RUN set -eu; \
 
 RUN mkdir -p /out && install -m 0755 /nvbandwidth/build/nvbandwidth /out/nvbandwidth
 
-COPY memory_bw.cc device_fold.h /src/
+COPY memory_bw.cc device_fold.h managed_triad.cu /src/
+
+# managed_triad (#543): a triad over cudaMallocManaged memory, which nvbandwidth
+# has no case for. -cudart static for the same licence reason as nvbandwidth's
+# CMAKE_CUDA_RUNTIME_LIBRARY=Static, and the C++ runtime linked statically
+# because the distroless base has none; the assertion below checks both.
+# Arch: an explicit CUDA_ARCH is used as given, otherwise all-major, the same
+# policy the nvbandwidth build above follows. The triad needs no arch-specific
+# instruction, so nothing is lost by the portable default.
+RUN set -eu; \
+    arch="all-major"; \
+    if [ -n "${CUDA_ARCH:-}" ]; then arch="${CUDA_ARCH}"; fi; \
+    nvcc -O3 -std=c++17 -cudart static -arch="${arch}" \
+        -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc \
+        -o /out/managed_triad /src/managed_triad.cu
 
 # The wrapper's two build-time constants are generated into a header rather than
 # passed as quoted -D arguments: the value has to survive the Dockerfile parser
 # and the shell intact, and a mangled quote here would silently ship an image
 # that reports the wrong nvbandwidth version. memory_bw.cc guards both with
 # #ifndef, so it still compiles standalone.
-RUN printf '#define NVBANDWIDTH_REF "%s"\n#define NVBANDWIDTH_BIN "%s"\n' \
-        "${NVBANDWIDTH_REF}" "${NVBANDWIDTH_PATH}" > /src/nvbandwidth_build.h \
+RUN printf '#define NVBANDWIDTH_REF "%s"\n#define NVBANDWIDTH_BIN "%s"\n#define MANAGED_TRIAD_BIN "%s"\n' \
+        "${NVBANDWIDTH_REF}" "${NVBANDWIDTH_PATH}" /usr/local/bin/managed_triad > /src/nvbandwidth_build.h \
     && cat /src/nvbandwidth_build.h \
     && g++ -std=c++17 -O2 -Wall -Wextra \
         -static-libstdc++ -static-libgcc \
@@ -185,7 +199,7 @@ RUN printf '#define NVBANDWIDTH_REF "%s"\n#define NVBANDWIDTH_BIN "%s"\n' \
 # would be a redistributable, and fails the build.
 RUN set -eu; \
     : > /out/needed.txt; \
-    for bin in /out/nvbandwidth /out/memory_bw; do \
+    for bin in /out/nvbandwidth /out/memory_bw /out/managed_triad; do \
         echo "== $bin"; \
         objdump -p "$bin" | awk '/NEEDED/ {print $2}' | tee -a /out/needed.txt; \
     done; \
@@ -217,5 +231,6 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 
 COPY --from=build /out/nvbandwidth ${NVBANDWIDTH_PATH}
 COPY --from=build /out/memory_bw /usr/local/bin/memory_bw
+COPY --from=build /out/managed_triad /usr/local/bin/managed_triad
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/memory_bw"]

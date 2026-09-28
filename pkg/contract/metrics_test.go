@@ -309,6 +309,8 @@ func TestRegistryContainsTheNamesConsumersDependOn(t *testing.T) {
 		"xidLogDropped":                {UnitNone, ThresholdUseEvidence},
 		"xidWindowsWatched":            {UnitNone, ThresholdUseAcceptance},
 		"xidPreexisting":               {UnitNone, ThresholdUseAcceptance},
+		"managedMemoryBandwidthGBs":    {UnitGigabytesPerSecond, ThresholdUseAcceptance},
+		"managedTriadStatus":           {UnitNone, ThresholdUseEvidence},
 		"smClockSteadyStateDeltaPct":   {UnitPercent, ThresholdUseEvidence},
 		"kernelFatalErrors":            {UnitNone, ThresholdUseAcceptance},
 		"kernelFatalErrorsPreexisting": {UnitNone, ThresholdUseAcceptance},

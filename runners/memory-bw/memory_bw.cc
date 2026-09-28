@@ -36,6 +36,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -55,6 +56,9 @@
 // it shipped. The defaults exist only so this file compiles on its own.
 #ifndef NVBANDWIDTH_BIN
 #define NVBANDWIDTH_BIN "/usr/local/bin/nvbandwidth"
+#endif
+#ifndef MANAGED_TRIAD_BIN
+#define MANAGED_TRIAD_BIN "/usr/local/bin/managed_triad"
 #endif
 #ifndef NVBANDWIDTH_REF
 #define NVBANDWIDTH_REF "unknown"
@@ -634,6 +638,42 @@ int main() {
         errorReason = std::string("no bandwidth figure could be read from nvbandwidth's ") +
                       c.testcase + " output";
       continue;
+    }
+  }
+
+  // ── managed (unified) memory, #543 ─────────────────────────────────────────
+  // nvbandwidth has no managed-memory case, so a small triad over
+  // cudaMallocManaged runs as its own child. Its outcomes map onto this
+  // runner's contract, with one deliberate asymmetry: a MACHINERY failure of
+  // this newer measurement records its status and omits the metric instead of
+  // turning the whole test into an Error, so adding it changed no verdict a
+  // fleet already relies on. A gate on managedMemoryBandwidthGBs still fails
+  // closed on the omission. Wrong data is different: that is a fact about the
+  // part and fails the test like nvbandwidth's own verification does.
+  if (!(hasDeadline && Clock::now() >= deadline)) {
+    const Child managed = runNvbandwidth({MANAGED_TRIAD_BIN, "0.1", "20"}, hasDeadline, deadline);
+    echoChild("managed_triad", managed.output);
+    double gbs = 0;
+    bool parsed = false;
+    for (const std::string &line : splitLines(managed.output)) {
+      if (line.rfind("managed_triad_gbs=", 0) == 0) {
+        char *end = nullptr;
+        gbs = std::strtod(line.c_str() + 18, &end);
+        parsed = end != line.c_str() + 18 && std::isfinite(gbs) && gbs > 0;
+      }
+    }
+    if (managed.exitCode == 0 && parsed) {
+      std::printf("managed_memory_bandwidth_gbs=%.2f\n", gbs);
+    } else if (managed.exitCode == 2 && managed.output.find("managed_triad_unsupported=") != std::string::npos) {
+      // The device positively reported no managed-memory support.
+      std::printf("managed_memory_bandwidth_gbs=n/a\n");
+    } else if (managed.exitCode == 1 && managed.output.find("managed_triad_miscompare=") != std::string::npos) {
+      if (failReason.empty()) failReason = "the managed-memory triad produced wrong data";
+    } else {
+      std::printf("managed_triad_status=error\n");
+      std::fprintf(stderr, "memory-bw: managed-memory triad did not measure (exit %d%s); "
+                           "managedMemoryBandwidthGBs is omitted, the verdict is unchanged\n",
+                   managed.exitCode, managed.timedOut ? ", timed out" : "");
     }
   }
 

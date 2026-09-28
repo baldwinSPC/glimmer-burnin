@@ -350,3 +350,22 @@ for `memory-bw` is added to `defaultRunnerImages` in
    matters most and is the one a single healthy Spark cannot exercise.
 3. ~~**`scan_test.cc` is still not run by CI**~~ — closed:
    `runners/cxxtests_test.go` compiles and runs it under `make test`.
+
+## Managed (unified) memory (#543)
+
+nvbandwidth has no managed-memory case, so the image also carries
+`managed_triad`, a STREAM triad (`y = a·x + z`, float) over three
+`cudaMallocManaged` arrays holding a tenth of free device memory, first touched
+on the device, 20 timed iterations, median, worst device. It reports
+`managedMemoryBandwidthGBs`, or `n/a` where a device positively reports no
+managed-memory support.
+
+On a DGX Spark (GB10), where CPU and GPU share one LPDDR5X pool, it measured
+**165.34 GB/s**, against 116.31 GB/s device-to-device from nvbandwidth on the
+same run. That agrees with an independent measurement of 163 to 165 GB/s on the
+same part.
+
+If the triad cannot measure (a machinery failure), the runner records
+`managedTriadStatus=error` and omits the metric rather than turning the whole
+test into an Error, so adding it changed no existing verdict. Wrong data from
+the triad fails the test, like nvbandwidth's own verification.

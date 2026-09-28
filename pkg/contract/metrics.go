@@ -1586,6 +1586,23 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	// #543. The triad over cudaMallocManaged memory, worst device. On a part with
+	// one physical pool (GB10) it is what unified-memory workloads get, and it is
+	// expected to read below device-local bandwidth. n/a only where the device
+	// positively reports no managed-memory support.
+	"managedMemoryBandwidthGBs": {
+		Name: "managedMemoryBandwidthGBs", Unit: UnitGigabytesPerSecond,
+		Description:       "STREAM triad bandwidth over cudaMallocManaged memory, median of 20 iterations, worst device. Unmeasurable (n/a) where the device reports no managed-memory support",
+		Aggregation:       AggMin,
+		ThresholdUse:      ThresholdUseAcceptance,
+		MayBeUnmeasurable: true,
+	},
+	"managedTriadStatus": {
+		Name: "managedTriadStatus", Unit: UnitNone,
+		Description:  "\"error\" when the managed-memory triad could not measure; managedMemoryBandwidthGBs is then absent and the test's verdict is unchanged. A label; gate on managedMemoryBandwidthGBs instead",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
 		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",

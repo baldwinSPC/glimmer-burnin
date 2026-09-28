@@ -35,13 +35,16 @@ func TestPeerMatrixKeysReachTheCanonicalNames(t *testing.T) {
 		"d2d_bandwidth_gbs=1400.00",
 		"peer_read_bandwidth_gbs=210.40",
 		"peer_write_bandwidth_gbs=208.90",
+		"managed_memory_bandwidth_gbs=163.40",
+		"managed_triad_status=error",
 	}, "\n")
 
 	res := runner.Parse("memory-bw", out, 0)
 
 	for raw, want := range map[string]string{
-		"peer_read_bandwidth_gbs":  "peerReadBandwidthGBs",
-		"peer_write_bandwidth_gbs": "peerWriteBandwidthGBs",
+		"peer_read_bandwidth_gbs":      "peerReadBandwidthGBs",
+		"peer_write_bandwidth_gbs":     "peerWriteBandwidthGBs",
+		"managed_memory_bandwidth_gbs": "managedMemoryBandwidthGBs",
 	} {
 		if _, leaked := res.Metrics[raw]; leaked {
 			t.Errorf("%q reached the result un-aliased", raw)
