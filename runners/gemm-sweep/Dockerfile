@@ -120,6 +120,7 @@ COPY precision.h /src/precision.h
 # duplicated because each runner is its own Docker build context and COPY
 # cannot leave one. runners/devicefold_test.go refuses drift between copies.
 COPY device_fold.h /src/device_fold.h
+COPY load_envelope.h nvml_dynamic.h /src/
 
 # -cudart static is nvcc's default on Linux but stated explicitly so the intent
 # survives a toolchain change.  -static-libstdc++/-static-libgcc are host-compiler

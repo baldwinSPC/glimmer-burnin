@@ -72,9 +72,10 @@ var divergent = map[string]string{
 	// _v2-then-plain symbol resolution — lands in one copy and not the other,
 	// and a subset diverging that way looks exactly like a subset that is
 	// meant to. Unifying them would cost clockprobe two unused symbols.
-	"nvml_dynamic.h": "clockprobe carries a SUBSET: no ECC symbols, because it does not " +
-		"read ECC. gpu-burn and thermal-soak load the full set and are identical to " +
-		"each other.",
+	"nvml_dynamic.h": "clockprobe and gemm-sweep carry a SUBSET: no ECC symbols, because " +
+		"neither reads ECC (gemm-sweep's copy is clockprobe's, byte for byte, for its " +
+		"load envelope, #544). gpu-burn and thermal-soak load the full set and are " +
+		"identical to each other.",
 }
 
 func TestSharedRunnerSourcesDoNotDrift(t *testing.T) {
