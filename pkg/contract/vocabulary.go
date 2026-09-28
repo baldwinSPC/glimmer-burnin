@@ -278,7 +278,19 @@ const (
 	// gate on. See runners/power-swing/power_swing.cu's header comment.
 	KindPowerSwing TestKind = "power-swing"
 
-	KindCustom TestKind = "custom" // any image; no built-in parsing
+	// KindCPUBench is a Node-scope measurement of the HOST CPU (#542): double
+	// FMA throughput on the highest-capacity core alone and on every allowed
+	// core (fmaSingleCoreGflops, fmaAllCoreGflops), and STREAM
+	// copy/scale/add/triad bandwidth over arrays four times the largest single
+	// L3 (hostStream*GBs).
+	//
+	// On an APU or a Grace part the CPU shares one memory system with the
+	// accelerator, so host compute and host memory bandwidth are part of
+	// accepting the node, and a lost performance cluster or an untrained memory
+	// channel passes every accelerator test. Vendor-free: no accelerator is
+	// touched. It must never overlap a GPU test on an APU (#534).
+	KindCPUBench TestKind = "cpu-bench"
+	KindCustom   TestKind = "custom" // any image; no built-in parsing
 )
 
 // BuiltInKinds are the kinds whose runner image, result parser and metric names
@@ -318,6 +330,7 @@ var BuiltInKinds = []TestKind{
 	KindClockProbe,
 	KindMemoryStress,
 	KindMemoryRetention,
+	KindCPUBench,
 }
 
 var builtInKinds = func() map[TestKind]bool {
@@ -405,6 +418,11 @@ var sustainedLoadKinds = map[TestKind]bool{
 	// accelerator — which matters here rather than exempting it, because the
 	// watchdog reading this declaration judges the host CPU package too.
 	KindMemoryStress: true,
+
+	// Every allowed core under FMA and then STREAM load for most of its window:
+	// the CPU package gets hot, which is what a node-local watchdog must read as
+	// this test working (#542).
+	KindCPUBench: true,
 
 	// Levels 3 and 4 run DCGM's targeted_stress and sm_stress plugins for
 	// ~15 minutes, and the level is a runner env var. Whether THIS execution

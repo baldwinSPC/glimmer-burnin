@@ -1,0 +1,11 @@
+cpuBenchThreads=20
+cpuBenchPerfCore=19
+durationRequestedS=60
+fmaSingleCoreGflops=15.60
+fmaAllCoreGflops=93.45
+streamArrayBytes=67108864
+hostStreamCopyGBs=144.79
+hostStreamScaleGBs=137.50
+hostStreamAddGBs=132.01
+hostStreamTriadGBs=130.77
+CPU_BENCH_PASS: measured

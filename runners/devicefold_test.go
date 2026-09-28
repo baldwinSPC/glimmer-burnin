@@ -82,6 +82,7 @@ func TestEveryAcceleratorRunnerIteratesDevicesOrSaysWhyNot(t *testing.T) {
 		"memory-stress":     "no accelerator; host RAM",
 		"memory-retention":  "no accelerator; host RAM held untouched, not iterated",
 		"disk-io":           "no accelerator; storage",
+		"cpu-bench":         "no accelerator; host CPU and host memory",
 		"tcp-baseline":      "no accelerator; the kernel TCP stack",
 	}
 

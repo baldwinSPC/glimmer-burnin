@@ -513,6 +513,9 @@ func WithoutDefault() []contract.TestKind {
 		contract.KindCustom, contract.KindFingerprintProbe,
 		contract.KindFabricSoak, contract.KindPowerSwing, contract.KindMemoryRetention,
 		contract.KindXPUDiag,
+		// #542: source and a hardware-verified build (spark-043a), no published
+		// tag yet. It joins defaults the moment one is published.
+		contract.KindCPUBench,
 	}
 }
 

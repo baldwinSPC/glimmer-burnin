@@ -252,6 +252,7 @@ The registered suffixes, from `pkg/contract/metrics.go`:
 | `W` | watts |
 | `Pct` | percent |
 | `Tflops` | teraflops |
+| `Gflops` | gigaflops, a CPU's scale |
 | `MHz` | megahertz |
 | `GB` | a capacity in decimal gigabytes (1e9 bytes), as drive and memory vendors quote it |
 

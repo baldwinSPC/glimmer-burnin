@@ -119,6 +119,7 @@ scarce resource, which is time on silicon.
 | `tcp-baseline` | Plain TCP throughput and retransmits | Pair | shipped | shipped | shipped | shipped (vendor-free) · #237 partial (see issue) |
 | `disk-io` | Storage throughput and latency (direct I/O) | Node | shipped | shipped | shipped | shipped (vendor-free) · #242 partial (see issue) |
 | `fingerprint-probe` | What the hardware says about itself | Node | in tree | in tree | in tree | in tree (vendor-free) · verify [#354] |
+| `cpu-bench` | Host CPU FMA and STREAM memory bandwidth | Node | in tree | in tree | in tree | in tree (vendor-free), verified arm64 on GB10 · [#542] |
 
 Beyond the kinds themselves, the matrix has axes: **variants** ([#155]) express
 one test across precisions, message sizes or duration classes; **baseline mode**

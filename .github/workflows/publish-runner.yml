@@ -24,6 +24,7 @@ on:
           - memory-bw
           - memory-stress
           - memory-retention
+          - cpu-bench
           - thermal-soak
           - gpu-burn
           - power-swing

@@ -143,7 +143,7 @@ does not decide how long the test runs.
 lowerCamelCase. A **dimensional** metric ends in a registered unit suffix; a
 **dimensionless counter** does not.
 
-`Gbps` `GBs` `MBs` `Us` `Ms` `S` `C` `W` `Pct` `Tflops` `MHz`
+`Gbps` `GBs` `MBs` `GB` `Us` `Ms` `S` `C` `W` `Pct` `Tflops` `Gflops` `MHz`
 
 The casing is a trap and it is the quiet one. `gbs` folds to `Gbs`, which is not
 the registered `GBs` — so `h2d_bandwidth_gbs` normalises to a name `UnitOf()`

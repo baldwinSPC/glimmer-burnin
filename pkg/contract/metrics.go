@@ -80,6 +80,7 @@ const (
 	UnitWatts              Unit = "W"
 	UnitPercent            Unit = "Pct"
 	UnitTeraflops          Unit = "Tflops"
+	UnitGigaflops          Unit = "Gflops" // a CPU's scale; Tflops would read 0.0156 for one core
 	// UnitMegahertz is how every driver and every clock probe quotes a core or
 	// memory clock, so it is the unit the measurement arrives in. The alternative
 	// — normalising clocks to a percentage of the rated boost clock — throws away
@@ -107,6 +108,7 @@ var UnitSuffixes = []Unit{
 	UnitMegabytesPerSecond,
 	UnitGigabytes,
 	UnitTeraflops,
+	UnitGigaflops,
 	UnitMegahertz,
 	UnitMicroseconds,
 	UnitMilliseconds,
@@ -1583,6 +1585,75 @@ var registry = map[string]Metric{
 	"smClockSteadyStateDeltaPct": {
 		Name: "smClockSteadyStateDeltaPct", Unit: UnitPercent,
 		Description:  "signed split-half drift of the SM clock over the post-warm-up samples: 100·(second-half mean − first-half mean)/max. Negative is a clock still sliding when the soak ended; near zero is steady state. Evidence, not a gate",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	// cpu-bench (#542). The two FMA figures and the four STREAM figures are
+	// floors (Min): the worst window describes the part. On GB10 one
+	// Cortex-X925 core reads 15.6 GFLOP/s and STREAM about 130-145 GB/s.
+	"fmaSingleCoreGflops": {
+		Name: "fmaSingleCoreGflops", Unit: UnitGigaflops,
+		Description:  "double-precision FMA throughput of ONE core, the highest cpu_capacity core the pod may use: 8 independent chains, median of samples",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"fmaAllCoreGflops": {
+		Name: "fmaAllCoreGflops", Unit: UnitGigaflops,
+		Description:  "the same FMA kernel on every allowed core at once, one pinned thread each, median of samples. Noisier than the single-core figure on a part with heterogeneous clusters",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"hostStreamCopyGBs": {
+		Name: "hostStreamCopyGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "STREAM copy (c = a) over host memory, one pinned thread per allowed core, arrays 4x the largest single L3, median",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"hostStreamScaleGBs": {
+		Name: "hostStreamScaleGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "STREAM scale (b = s·c) over host memory, as hostStreamCopyGBs",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"hostStreamAddGBs": {
+		Name: "hostStreamAddGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "STREAM add (c = a + b) over host memory, as hostStreamCopyGBs",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"hostStreamTriadGBs": {
+		Name: "hostStreamTriadGBs", Unit: UnitGigabytesPerSecond,
+		Description:  "STREAM triad (a = b + s·c) over host memory, as hostStreamCopyGBs; the figure usually quoted",
+		Aggregation:  AggMin,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"cpuBenchThreads": {
+		Name: "cpuBenchThreads", Unit: UnitNone,
+		Description:  "how many CPUs the pod's affinity mask allowed, and so how many threads the all-core phases ran",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"cpuBenchPerfCore": {
+		Name: "cpuBenchPerfCore", Unit: UnitNone,
+		Description:  "the CPU id the single-core FMA ran on: the highest cpu_capacity allowed core, ties to the lowest id. An identity, not a quantity",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"streamArrayBytes": {
+		Name: "streamArrayBytes", Unit: UnitNone,
+		Description:  "bytes per STREAM array: 4x the largest single L3 instance, or 256 MiB where no L3 is published (then streamArrayBasis=fallback)",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"streamArrayBasis": {
+		Name: "streamArrayBasis", Unit: UnitNone,
+		Description:  "\"fallback\" when no L3 size was published and STREAM used a fixed 256 MiB array. A label",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
+	"streamStatus": {
+		Name: "streamStatus", Unit: UnitNone,
+		Description:  "\"insufficient_memory\" when the RAM headroom guard refused STREAM (three arrays may use at most three quarters of available memory); the hostStream metrics are then absent. A label",
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},

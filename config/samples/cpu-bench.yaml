@@ -1,0 +1,24 @@
+# Host CPU acceptance (#542): FMA throughput on the best core and on every core,
+# and STREAM host memory bandwidth.
+#
+# Thresholdless by design until a fleet baseline exists (#353): promote five
+# runs with `burnin baseline promote` and pin floors from what they measured.
+# For scale, on a DGX Spark (GB10) a Cortex-X925 core reads about 15.6 GFLOP/s
+# and STREAM triad about 130 GB/s; the all-core FMA figure is noisy on its
+# 10+10 heterogeneous clusters.
+#
+# On an APU or a Grace part, never run this at the same time as a GPU test:
+# CPU load moves the GPU's clock (#534). A profile runs tests one at a time on a
+# node, which is enough.
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: host-cpu
+spec:
+  kind: cpu-bench
+  scope: Node
+  durationSeconds: 60
+  runner:
+    # No image is published yet; build runners/cpu-bench and name it here.
+    image: ghcr.io/baldwinspc/glimmer-burnin-cpu-bench:REPLACE-ME
+  thresholds: []
