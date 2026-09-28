@@ -47,6 +47,8 @@ COMMANDS
   run        execute a profile on this machine
   merge      fold every rank's record into one collective verdict
   report     render a run's results as a document
+  baseline   promote replicate runs into a baseline
+  compare    compare a run against a baseline, or two nodes
   verify     check that a sealed results directory is unchanged
   sanitize   write a copy of a result that can leave the site
   version    print the version
@@ -72,6 +74,10 @@ func main() {
 		err = runMerge(os.Args[2:])
 	case "report":
 		err = runReport(os.Args[2:])
+	case "baseline":
+		err = runBaseline(os.Args[2:])
+	case "compare":
+		err = runCompare(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
 	case "sanitize":
