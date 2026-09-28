@@ -158,7 +158,7 @@ func run() int {
 		return fin(exitFail, "write failed after %s: %v", humanBytes(write.bytes), werr)
 	}
 
-	read, rerr := readPass(target, block, deadline)
+	read, rerr := readPass(target, block, splitReadWindow(time.Now(), deadline))
 	if rerr != nil {
 		report(write, read)
 		// The same asymmetry the write path above already observes, and for the
@@ -175,6 +175,22 @@ func run() int {
 	}
 
 	report(write, read)
+
+	// The random-read pass (#545) gets whatever the sequential read left. It
+	// runs only over what this run itself wrote, so rule 4 holds: no site data
+	// is ever read.
+	depth := envInt("DISK_IO_RANDREAD_DEPTH", defaultRandDepth)
+	if write.bytes > 0 && read.bytes > 0 {
+		rnd, rndErr := randReadPass(target, write.bytes, depth, deadline)
+		reportRandom(rnd, depth)
+		if rndErr != nil {
+			if !rnd.reached {
+				return fin(exitError, "the random-read pass never reached the device (%v), so it says "+
+					"nothing about it", rndErr)
+			}
+			return fin(exitFail, "random read failed after %d reads: %v", rnd.ops, rndErr)
+		}
+	}
 
 	// NEITHER DIRECTION MOVING DATA IS AN ERROR, NOT A FAIL, and the two are
 	// reported apart because "the run completed without moving data (wrote
@@ -227,6 +243,21 @@ func report(write, read result) {
 	// exactly what a gate of `ioErrors Equal 0` needs to see to pass a healthy
 	// node.
 	metric("ioErrors", strconv.Itoa(write.errors+read.errors))
+}
+
+// reportRandom emits the random-read metrics. Like the sequential ones, a pass
+// that counted nothing emits nothing for itself rather than a zero nobody
+// measured, and a tail beyond the histogram's range is left unreported rather
+// than clamped.
+func reportRandom(r randResult, depth int) {
+	metric("randReadQueueDepth", strconv.Itoa(depth))
+	if r.ops == 0 || r.elapsed <= 0 {
+		return
+	}
+	metric("randReadIops", strconv.FormatFloat(r.iops(), 'f', 0, 64))
+	if p99, ok := r.p99Us(); ok {
+		metric("randReadP99LatencyUs", trim(p99))
+	}
 }
 
 // isExistErr reports whether an open failed because the file was already there.

@@ -35,6 +35,9 @@ func TestEmittedMetricNamesObeyTheContract(t *testing.T) {
 		"p99LatencyUs=9100.000",
 		"ioErrors=0",
 		"diskIoPath=/mnt/scratch",
+		"randReadQueueDepth=32",
+		"randReadIops=512345",
+		"randReadP99LatencyUs=84.000",
 	}
 
 	res := runner.Parse("disk-io", strings.Join(emitted, "\n"), 0)

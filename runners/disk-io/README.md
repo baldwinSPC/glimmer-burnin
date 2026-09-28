@@ -133,3 +133,20 @@ Not yet verified on real hardware: the free-space refusal against an
 actually-near-full volume, cleanup after a SIGKILL mid-write, a non-4KiB-
 multiple block size being refused, and a Skip on a filesystem that refuses
 O_DIRECT outright (tmpfs/overlay) — this fleet's disks all take it. See #242.
+
+## Random reads (#545)
+
+After the sequential passes, the runner issues 4 KiB direct reads at uniformly
+random aligned offsets in the file it wrote, `DISK_IO_RANDREAD_DEPTH` (default
+32) in flight, for whatever time the sequential read left. It reports
+`randReadIops`, `randReadP99LatencyUs` (1 µs resolution, from a histogram;
+absent rather than clamped when the tail passes 20 ms) and
+`randReadQueueDepth`. A short ramp is issued but not counted.
+
+**These numbers are this runner's, not fio's.** Goroutines each issuing a
+blocking `pread` stand in for fio's libaio queue, because fio is GPL and cannot
+ship here, and they cost more per read. On a DGX Spark's Samsung
+MZALC4T0HBL1, this runner measured 177,860 IOPS with a p99 of 392 µs, where fio
+on the same drive model is reported at 505k to 530k IOPS with a p99 of 82 to
+87 µs. Pin a floor from this runner's own baseline (`burnin baseline promote`),
+never from a fio figure.
