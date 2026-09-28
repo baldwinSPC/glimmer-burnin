@@ -8,6 +8,19 @@ import (
 	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
+// version and commit are stamped into the operator binary at build time:
+//
+//	-ldflags "-X github.com/baldwinSPC/glimmer-burnin/internal/sink.version=v0.9.1
+//	          -X github.com/baldwinSPC/glimmer-burnin/internal/sink.commit=<sha>"
+//
+// They are build constants, not configuration, which is why they live here
+// rather than being threaded through every EnvelopeFor call: the operator's
+// identity is the same for every envelope it will ever assemble.
+var (
+	version = "(devel)"
+	commit  = ""
+)
+
 // EnvelopeFor builds the delivery document for a run.
 //
 // reason and eventKey together identify the delivery, and the eventKey must be
@@ -36,6 +49,7 @@ func EnvelopeFor(
 			UID:       string(run.UID),
 			Profile:   profile,
 		},
+		Producer:    contract.ProducerFromBuild("glimmer-burnin-operator", version, commit),
 		Phase:       string(run.Status.Phase),
 		Fingerprint: run.Status.Fingerprint,
 		Cluster:     cluster,

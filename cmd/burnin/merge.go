@@ -161,6 +161,10 @@ func runMerge(args []string) error {
 	}
 	if err := writeJSON(filepath.Join(out, "envelopes", "001-RunPhaseChanged.json"), env); err != nil {
 		warn("the merged envelope was not written: %v", err)
+	} else if err := sealDir(out); err != nil {
+		// Merge adds a file to a directory the run already sealed, so it must
+		// re-seal or `burnin verify` would report its own envelope as foreign.
+		warn("the merged envelope was written but the directory was not sealed: %v", err)
 	}
 
 	sender, err := f.sink.deliverer()

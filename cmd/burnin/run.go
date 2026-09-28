@@ -50,7 +50,8 @@ FLAGS
                     documents, exactly as a cluster would take them
   --profile         which profile, when the suite declares more than one
   --node            this machine's name in the results (default: hostname)
-  --results-dir     where to write envelopes and raw runner output
+  --results-dir     where to write envelopes and raw runner output; sealed
+                    with SHA256SUMS last (check with "burnin verify")
   --runtime         auto|docker|podman|nerdctl (default auto)
   --retry-on-error  how many times an Error may be retried, per test (default 0)
   --dry-run         resolve and print what would run, then stop
@@ -287,6 +288,10 @@ func runRun(args []string) error {
 			// The run happened and its verdict stands; failing to file it is
 			// worth saying loudly and is not a reason to discard the verdict.
 			warn("results were not written: %v", err)
+		} else if err := sealDir(f.resultsDir); err != nil {
+			// Unsealed is visible: `burnin verify` says so. Nothing is lost
+			// but the proof, so this is a warning and not a changed verdict.
+			warn("results were written but not sealed: %v", err)
 		}
 	}
 

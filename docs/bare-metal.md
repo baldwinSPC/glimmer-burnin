@@ -18,6 +18,16 @@ so one file can serve both paths. That is deliberate: a slimmer CLI-native
 schema would be a third contract that can drift, which is the disease this whole
 design exists to cure.
 
+
+**The results directory is sealed.** The last thing `burnin run` (and
+`burnin merge`) does is write `SHA256SUMS` over every file it wrote, and
+`burnin verify DIR` checks it later: every file re-hashed, nothing reached
+through a symlink, nothing present that the run did not write. A run
+interrupted before it finished filing has no `SHA256SUMS`, and `verify` says
+the directory is unsealed rather than trusting it. This proves the evidence is
+intact, not who produced it; anyone able to edit a file can rewrite the sums
+too, which is what signing (#175) is for.
+
 ---
 
 ## One brain, two dispatchers

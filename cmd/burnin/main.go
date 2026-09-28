@@ -20,11 +20,22 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=v0.6.0".
 // Unset, it says so rather than claiming a version it does not have.
 var version = "(devel)"
+
+// commit may be stamped alongside version with -X main.commit=<sha>. Unset, the
+// Go toolchain's own VCS stamping is used, which `go build` inside a git
+// checkout provides.
+var commit = ""
+
+func cliProducer() *contract.Producer {
+	return contract.ProducerFromBuild("burnin", version, commit)
+}
 
 const usage = `burnin — burn-in results
 
@@ -36,6 +47,7 @@ COMMANDS
   run        execute a profile on this machine
   merge      fold every rank's record into one collective verdict
   report     render a run's results as a document
+  verify     check that a sealed results directory is unchanged
   version    print the version
 
 Run "burnin <command> -h" for a command's flags.
@@ -59,6 +71,8 @@ func main() {
 		err = runMerge(os.Args[2:])
 	case "report":
 		err = runReport(os.Args[2:])
+	case "verify":
+		err = runVerify(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("burnin", version)
 	case "help", "--help", "-h":

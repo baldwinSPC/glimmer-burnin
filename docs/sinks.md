@@ -51,6 +51,11 @@ the block.
     "uid": "6f0e6c62-0e6e-4d9a-9a5b-2c1f9a6d1a77",
     "profile": "node-acceptance"
   },
+  "producer": {
+    "name": "glimmer-burnin-operator",
+    "version": "v0.9.1",
+    "commit": "1e44a67c2f0d4b8e9a3f5c6d7e8f9a0b1c2d3e4f"
+  },
   "cluster": {
     "name": "spark-lab-1",
     "uid": "1b7cf0a2-32b4-4a51-8d3c-0f9e4a71c505"
@@ -176,6 +181,7 @@ What is worth reading closely:
 | `cancelReason` | Present only when `phase` is `Cancelled`. Distinguishes an operator-requested stop from a deadline expiry — opposite meanings about the hardware. |
 | `checkpointSequence` | Present only when `reason` is `Checkpoint`. The ordering key for a run's progress record; checkpoints can arrive out of order and this is what puts them back. |
 | `run` | Which run this describes. See below. |
+| `producer` | The build that produced this envelope: `name` (`glimmer-burnin-operator` or `burnin`), `version` (the stamped release, or `(devel)` for an unstamped build — never guessed) and `commit`. When a runner or verdict defect is found later, this is how a consumer finds which of its stored results came from the affected build. |
 | `cluster` | Which cluster it came from. Optional; see below. |
 | `fingerprint` | Node name → a summary of what hardware the verdict applies to, captured **once, at run start**. A verdict without it is not portable evidence. |
 | `results` | Every execution recorded so far, cumulative. Present on checkpoints too, mid-flight results included. |
