@@ -64,6 +64,10 @@ var kubernetesFree = []string{
 	// started depending on something only the operator has, and the two
 	// dispatchers are about to disagree about a collective's verdict.
 	"pkg/group",
+	// Kubernetes-free because a sanitised result is shared with people who do
+	// not run this operator — an RMA desk, another site — and the tool that
+	// makes it runs on a bare host.
+	"pkg/sanitize",
 }
 
 // kubernetesCoupled are the packages that DO cost a consumer Kubernetes, each

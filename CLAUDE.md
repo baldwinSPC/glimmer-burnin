@@ -250,6 +250,9 @@ pkg/group/           folds N ranks' reports into the ONE result a collective is
                      judged on: the verdict precedence and the per-metric
                      Combination election
                      NO Kubernetes dependency. Measured: 0 k8s modules.
+pkg/sanitize/        a shareable copy of a result: pseudonymised identity,
+                     measurements untouched, fail-closed residual scan
+                     NO Kubernetes dependency (hack/invariants asserts it).
 ```
 
 Shared by both dispatchers, but Kubernetes-coupled (see the ledger below):

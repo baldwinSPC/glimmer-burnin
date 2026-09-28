@@ -28,6 +28,17 @@ the directory is unsealed rather than trusting it. This proves the evidence is
 intact, not who produced it; anyone able to edit a file can rewrite the sums
 too, which is what signing (#175) is for.
 
+**A sealed result can be sanitised for sharing.** `burnin sanitize
+--results-dir IN --out OUT` writes a copy for an RMA desk, a vendor or another
+site. Node names, UUIDs, MACs, RDMA GUIDs, serials and hostnames become
+pseudonyms, IP addresses move into the documentation ranges, and secrets and
+environment dumps are masked. Every measurement is kept exactly as written.
+Pseudonyms are stable within one copy and unlinkable across copies, because
+the salt is drawn fresh each time and never written down. It fails closed:
+every output file is re-scanned, and on any finding nothing is written. The
+copy is sealed and marked `SANITIZED.json`, and it is terminal: its identity is
+a pseudonym, so nothing may compare it against another result.
+
 ---
 
 ## One brain, two dispatchers
