@@ -39,6 +39,24 @@ every output file is re-scanned, and on any finding nothing is written. The
 copy is sealed and marked `SANITIZED.json`, and it is terminal: its identity is
 a pseudonym, so nothing may compare it against another result.
 
+**Replicate runs become a baseline, and later runs are compared against it.**
+`burnin baseline promote --results-dir r1 ... --results-dir r5 --as NAME --out
+NAME.json` records each numeric metric's replicate distribution for one node:
+the values, the mean, and the sample SD and CV. A metric is enforceable only
+from at least five clean runs, and runs whose fingerprints differ are refused.
+`burnin compare --baseline NAME.json --results-dir DIR` then judges one run.
+A change inside `--tolerance` (default 5 %) is a MATCH. Beyond it, the
+change is a REGRESSION or IMPROVEMENT only if the value also falls outside
+the baseline's prediction interval. `burnin compare --results-dir A...
+--peer-results-dir B...` compares two nodes' runs of one profile, with a
+bootstrap of the difference once each side has two runs. A differing kernel,
+OS or accelerator between the sides is reported as NOT_COMPARABLE with the
+fields named, which doubles as a version-symmetry check.
+
+A comparison is not a verdict. REGRESSION says a number moved; thresholds
+still decide Pass and Fail, because a baseline can itself be wrong. Only
+`--enforce` turns an enforceable regression into exit 1.
+
 ---
 
 ## One brain, two dispatchers

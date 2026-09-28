@@ -253,6 +253,12 @@ pkg/group/           folds N ranks' reports into the ONE result a collective is
 pkg/sanitize/        a shareable copy of a result: pseudonymised identity,
                      measurements untouched, fail-closed residual scan
                      NO Kubernetes dependency (hack/invariants asserts it).
+pkg/stats/           mean/SD/CV, type-7 quantile, bootstrap, prediction
+                     interval, split-half steady-state test
+pkg/compare/         baselines from replicate runs; run-vs-baseline and
+                     node-vs-node comparison. A comparison is NOT a verdict:
+                     REGRESSION means "moved", thresholds still decide Fail.
+                     Both NO Kubernetes dependency (hack/invariants).
 ```
 
 Shared by both dispatchers, but Kubernetes-coupled (see the ledger below):

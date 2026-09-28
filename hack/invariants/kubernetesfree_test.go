@@ -68,6 +68,10 @@ var kubernetesFree = []string{
 	// not run this operator — an RMA desk, another site — and the tool that
 	// makes it runs on a bare host.
 	"pkg/sanitize",
+	// Kubernetes-free so a consumer can judge stored envelopes against a
+	// baseline without linking the operator (#536).
+	"pkg/stats",
+	"pkg/compare",
 }
 
 // kubernetesCoupled are the packages that DO cost a consumer Kubernetes, each
