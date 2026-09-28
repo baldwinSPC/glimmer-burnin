@@ -48,6 +48,7 @@ COMMANDS
   merge      fold every rank's record into one collective verdict
   report     render a run's results as a document
   verify     check that a sealed results directory is unchanged
+  sanitize   write a copy of a result that can leave the site
   version    print the version
 
 Run "burnin <command> -h" for a command's flags.
@@ -73,6 +74,8 @@ func main() {
 		err = runReport(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
+	case "sanitize":
+		err = runSanitize(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("burnin", version)
 	case "help", "--help", "-h":
