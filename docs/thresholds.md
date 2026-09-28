@@ -83,7 +83,7 @@ errors is a tolerance for ECC errors.**
 `sustainedClockPct Equal 83.22` asks a sampled average to reproduce one decimal
 string exactly. It will not, so the gate fails on every healthy node forever, and
 each failure is reported in the same shape as a hardware verdict. A metric whose
-name ends in a registered unit suffix (`Gbps`, `GBs`, `MBs`, `Us`, `Ms`, `S`,
+name ends in a registered unit suffix (`Gbps`, `GBs`, `MBs`, `GB`, `Us`, `Ms`, `S`,
 `C`, `W`, `Pct`, `Tflops`, `MHz`) is continuous by construction — gate it with
 `GreaterThanOrEqual` and/or `LessThanOrEqual`. The linter says so at authoring
 time; see below.

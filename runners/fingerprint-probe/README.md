@@ -50,6 +50,19 @@ profile when you want both.
 | `pciVendorIds`, `pciDeviceIds` | as the devices report them |
 | `acceleratorVendors` | distinct vendors, resolved where a name is known |
 | `acceleratorDrivers` | bound kernel modules — **omitted when nothing is bound** |
+| `cpuCount` | CPUs the host lists as present |
+| `performanceCoreCount` | CPUs in the highest `cpu_capacity` class; `n/a` on a part with no capacity classes |
+| `memoryTotalGB` | memory the kernel manages, summed over NUMA nodes, decimal GB |
+| `nvmeCount`, `nvmeTotalCapacityGB` | NVMe controllers and the total size of their namespaces |
+| `nvmeModels`, `nvmePciAddresses` | model strings and slot addresses, in controller order |
+
+The host fields (#541) come from the same read-only sysfs mount and answer "is
+this the machine we bought". On a DGX Spark they read `cpuCount=20`,
+`performanceCoreCount=10` (the Cortex-X925 cluster; **cpu0 is an efficiency
+core**), `memoryTotalGB=128.5`, and one drive at `0004:01:00.0`. A lost
+performance cluster, a memory channel that did not train, or a drive in the
+wrong slot passes every load test and shows up here. Anything the runner could
+not read is omitted, never reported as zero.
 
 Two deliberate asymmetries:
 

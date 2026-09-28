@@ -253,6 +253,7 @@ The registered suffixes, from `pkg/contract/metrics.go`:
 | `Pct` | percent |
 | `Tflops` | teraflops |
 | `MHz` | megahertz |
+| `GB` | a capacity in decimal gigabytes (1e9 bytes), as drive and memory vendors quote it |
 
 Longer suffixes are checked first, so `busBandwidthGBs` is not read as a name
 ending in `S`.
