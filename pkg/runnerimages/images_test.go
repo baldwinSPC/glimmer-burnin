@@ -109,6 +109,8 @@ func TestEveryDefaultDeclaresItsVendor(t *testing.T) {
 	}
 	for _, want := range []contract.TestKind{
 		contract.KindIBWriteBW, contract.KindMemoryStress, contract.KindTCPBaseline, contract.KindDiskIO,
+		// Host CPU and host memory only (#542); exempt in pins_test.go too.
+		contract.KindCPUBench,
 	} {
 		if !neutral[want] {
 			t.Errorf("%q touches no accelerator and must be %s", want, VendorAny)

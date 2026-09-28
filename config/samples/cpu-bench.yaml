@@ -18,7 +18,4 @@ spec:
   kind: cpu-bench
   scope: Node
   durationSeconds: 60
-  runner:
-    # No image is published yet; build runners/cpu-bench and name it here.
-    image: ghcr.io/baldwinspc/glimmer-burnin-cpu-bench:REPLACE-ME
   thresholds: []
