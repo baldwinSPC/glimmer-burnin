@@ -117,6 +117,15 @@ type stats struct {
 	// reached. On a long soak it is a better floor than the single minimum,
 	// which one scheduling hiccup can drag down.
 	p1 float64
+	// driftPct is the signed split-half drift of the completed windows in
+	// time order: 100·(mean of the second half − mean of the first)/max, the
+	// middle window of an odd count in neither (#547). Negative is a link
+	// that got slower as it warmed — the optic or transceiver this soak exists
+	// to find — which a minimum and a spread cannot tell apart from a link
+	// that was slow in one window at random. driftOK is false below four
+	// windows.
+	driftPct float64
+	driftOK  bool
 }
 
 func (s *soak) stats() (stats, bool) {
@@ -152,6 +161,22 @@ func (s *soak) stats() (stats, bool) {
 		rank = 1
 	}
 	out.p1 = sorted[rank-1]
+
+	if k := len(v); k >= 4 {
+		h := k / 2
+		var a, b float64
+		for _, x := range v[:h] {
+			a += x
+		}
+		for _, x := range v[k-h:] {
+			b += x
+		}
+		a /= float64(h)
+		b /= float64(h)
+		den := math.Max(math.Max(math.Abs(a), math.Abs(b)), 1e-9)
+		out.driftPct = 100 * (b - a) / den
+		out.driftOK = true
+	}
 
 	return out, true
 }

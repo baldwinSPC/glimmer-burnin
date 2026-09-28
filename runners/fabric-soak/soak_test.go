@@ -193,3 +193,33 @@ func TestAnUnreadableCounterIsOmittedNotZero(t *testing.T) {
 		t.Errorf("symbol delta = %d, want 2", d["symbol_error_counter"])
 	}
 }
+
+// TestALinkThatSlowsAsItWarmsReadsAsNegativeDrift is #547. A minimum and a
+// spread cannot tell "slowed as it warmed" from "one bad window at random";
+// the split-half drift can.
+func TestALinkThatSlowsAsItWarmsReadsAsNegativeDrift(t *testing.T) {
+	var warming soak
+	for _, g := range []float64{97.5, 97.5, 97.4, 95.0, 92.0, 90.0} {
+		warming.record(g, true)
+	}
+	st, ok := warming.stats()
+	if !ok || !st.driftOK || st.driftPct > -5 {
+		t.Errorf("a warming link drifted %.2f%% (ok %v), want clearly negative", st.driftPct, st.driftOK)
+	}
+
+	var blip soak
+	for _, g := range []float64{97.5, 60.0, 97.5, 97.5, 60.0, 97.5} {
+		blip.record(g, true)
+	}
+	if st, _ := blip.stats(); st.driftPct != 0 {
+		t.Errorf("symmetric one-off dips drifted %.2f%%, want 0", st.driftPct)
+	}
+
+	var few soak
+	for _, g := range []float64{97.5, 97.4, 97.3} {
+		few.record(g, true)
+	}
+	if st, _ := few.stats(); st.driftOK {
+		t.Error("three windows were judged")
+	}
+}

@@ -463,6 +463,9 @@ func emit(s *soak, c *counterReport, partial bool) {
 		metric("peakBandwidthGbps", trim(st.max))
 		metric("bandwidthStdDevGbps", trim(st.stddev))
 		metric("p1BandwidthGbps", trim(st.p1))
+		if st.driftOK {
+			metric("bandwidthSteadyStateDeltaPct", trim(st.driftPct))
+		}
 	}
 
 	if c == nil {
