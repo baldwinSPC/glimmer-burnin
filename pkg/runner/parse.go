@@ -273,6 +273,8 @@ var aliases = map[string]map[string]string{
 		"peer_read_bandwidth_gbs":  "peerReadBandwidthGBs",
 		"peer_write_bandwidth_gbs": "peerWriteBandwidthGBs",
 		"memory_bandwidth_gbs":     "memoryBandwidthGBs",
+		// #543: the triad over cudaMallocManaged memory, same unit spelling.
+		"managed_memory_bandwidth_gbs": "managedMemoryBandwidthGBs",
 	},
 
 	"host-health": {
