@@ -106,7 +106,11 @@ const (
 // saw zeroes, and the gaps are the honest reading. It is also what makes this
 // metric worth registering at all — hostHealthVersion is how a stored result
 // says which behaviour produced it, and it can only do that if it moves.
-const emissionVersion = "2"
+// "3" stops counting the boot-time "pcieport ...: AER: enabled with IRQ N"
+// lines as hardware errors (#551). kernelHwErrors and its preexisting twin
+// read LOWER from this version on, on every node, with no change in the
+// hardware: a consumer charting them sees a step down at the boundary.
+const emissionVersion = "3"
 
 // Defaults. The window is the interval over which event counters are differenced.
 const (

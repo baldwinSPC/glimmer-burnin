@@ -717,3 +717,29 @@ func TestFatalCounterIgnoresCorrectedGHESRecords(t *testing.T) {
 		}
 	}
 }
+
+// TestAERDriverEnablementIsNotAHardwareError is #551: every root port prints
+// its AER enablement at boot, and the old prefix pattern counted eight on
+// every healthy DGX Spark.
+func TestAERDriverEnablementIsNotAHardwareError(t *testing.T) {
+	var c messageCounter
+	for _, m := range []string{
+		"pcieport 0000:00:00.0: AER: enabled with IRQ 334",
+		"pcieport 000f:00:00.0: AER: enabled with IRQ 355",
+	} {
+		c.visit(m)
+	}
+	if c.hw != 0 {
+		t.Errorf("boot-time AER enablement counted %d hardware errors, want 0", c.hw)
+	}
+	for _, m := range []string{
+		"pcieport 0000:00:01.0: AER: Corrected error received: 0000:01:00.0",
+		"pcieport 0000:00:01.0: AER: Multiple Uncorrected (Non-Fatal) error received: 0000:01:00.0",
+	} {
+		var e messageCounter
+		e.visit(m)
+		if e.hw != 1 {
+			t.Errorf("%q: hw=%d, want 1", m, e.hw)
+		}
+	}
+}
