@@ -456,3 +456,9 @@ fires if ANY device returned a wrong answer, not just device 0.
   `/dev/kmsg` mounted plus `privileged: true` and `runAsUser: 0`. Declining
   the grant costs only that evidence: `xid_source=none`, `xid_count` omitted,
   every other measurement unchanged
+
+## Telemetry series and clock drift
+
+This runner shares `soak_core.cuh` and `soak_series.h` with thermal-soak, so it
+emits the same `telemetry.jsonl` artifact (#546) and `smClockSteadyStateDeltaPct`
+(#547). See `runners/thermal-soak/README.md`.

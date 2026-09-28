@@ -297,3 +297,9 @@ declared (this Dockerfile sets `NVIDIA_VISIBLE_DEVICES=all` and
 window-scoped watch — `/dev/kmsg` reachable via `spec.runner.hostPaths`, which
 degrades honestly (`xid_source=none`, `xidEvents` omitted) rather than
 fabricating a zero when it is not mounted.
+
+## Telemetry series and clock drift
+
+This runner shares `soak_core.cuh` and `soak_series.h` with thermal-soak, so it
+emits the same `telemetry.jsonl` artifact (#546) and `smClockSteadyStateDeltaPct`
+(#547). See `runners/thermal-soak/README.md`.

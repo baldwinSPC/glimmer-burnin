@@ -46,7 +46,7 @@ const (
 // rather than a shared path because the publish-runner workflow builds each
 // runner with its OWN directory as the Docker build context, and COPY cannot
 // reach outside a build context.
-var sharedSources = []string{"soak_core.cuh", "nvml_dynamic.h", "kmsg/kmsg_watch.h"}
+var sharedSources = []string{"soak_core.cuh", "nvml_dynamic.h", "kmsg/kmsg_watch.h", "soak_series.h"}
 
 // otherSoakDirs are every OTHER directory that carries a byte-identical copy
 // of sharedSources, checked against thermal-soak as the canonical copy.

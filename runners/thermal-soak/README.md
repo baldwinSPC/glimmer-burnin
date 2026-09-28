@@ -666,3 +666,22 @@ windows, since `worstDeviceIndex` names only the last window's worst device.
   watch](#the-xid-watch-and-what-the-pod-needs-for-it)). Declining the grant
   costs only that evidence: `xid_source=none`, `xid_count` omitted, every other
   measurement unchanged
+
+## The series, and whether the clock settled
+
+The soak samples clocks, temperature, power and throttle reasons every
+`BURNIN_SOAK_SAMPLE_INTERVAL_MS` (250 ms by default). The whole series now
+leaves the runner as a fenced `telemetry.jsonl` artifact (#546): one line per
+sample per device, a field omitted on any sample where the driver did not
+return it, bounded to 200 KiB and thinned evenly with a header saying so. It is
+evidence about the verdict and never part of it.
+
+`smClockSteadyStateDeltaPct` (#547) is the signed split-half drift of the SM
+clock over the post-warm-up samples. Negative means the clock was still sliding
+when the soak ended, so the sustained figure describes a transient. On a GB10
+at 90 s it read −4.43 % while the soak passed, with `sustained_clock_pct`
+falling from 79.35 to 76.87 over the run. It is evidence and cannot be gated:
+how long a soak runs is a scheduling choice, not a property of the part.
+
+Shared byte-for-byte with gpu-burn and power-swing through `soak_series.h`,
+whose unit test lives in `runners/gpu-burn/soak_series_test.cc`.
