@@ -678,3 +678,42 @@ func TestKernelLogProbeSaysWhyItFoundNoSource(t *testing.T) {
 		}
 	})
 }
+
+// TestFatalCounterIgnoresCorrectedGHESRecords is #538. The GHES driver prints
+// "[Hardware Error]:" on every line of every firmware-first record, corrected
+// ones included, so the prefix heuristic counts a handled event as a fault.
+// kernelFatalErrors keys on the severity field instead.
+func TestFatalCounterIgnoresCorrectedGHESRecords(t *testing.T) {
+	corrected := []string{
+		"{1}[Hardware Error]: Hardware error from APEI Generic Hardware Error Source: 0",
+		"{1}[Hardware Error]: event severity: corrected",
+		"{1}[Hardware Error]:  Error 0, type: corrected",
+		"{1}[Hardware Error]:   section_type: PCIe error",
+		"pcieport 0000:00:01.0: AER: Corrected error message received from 0000:01:00.0",
+	}
+	var c messageCounter
+	for _, m := range corrected {
+		c.visit(m)
+	}
+	if c.fatal != 0 {
+		t.Errorf("a corrected GHES record counted %d fatal errors, want 0", c.fatal)
+	}
+	if c.hw == 0 {
+		t.Errorf("the prefix heuristic stopped matching; kernelHwErrors is evidence and must keep counting")
+	}
+
+	for _, m := range []string{
+		"{2}[Hardware Error]: event severity: fatal",
+		"{3}[Hardware Error]: event severity: recoverable",
+		"EDAC MC0: 1 Uncorrected error on DIMM A1",
+		"mce: [Hardware Error]: MCE: CPU 3: Machine Check: 0 Bank 5: Hardware event",
+		"NVRM: Xid (PCI:0000:01:00): 79, pid=1234, GPU has fallen off the bus, critical",
+		"Kernel panic - not syncing: Fatal hardware error!",
+	} {
+		var f messageCounter
+		f.visit(m)
+		if f.fatal != 1 {
+			t.Errorf("%q: fatal=%d, want exactly 1 (a line counts once however many patterns match)", m, f.fatal)
+		}
+	}
+}

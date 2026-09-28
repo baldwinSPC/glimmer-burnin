@@ -51,12 +51,43 @@ var xidPattern = regexp.MustCompile(`(?i)NVRM:\s*Xid`)
 // It is heuristic, so it is EVIDENCE ONLY and never gated: a false positive
 // here must not condemn a node. A non-zero kernelHwErrors is a "go read the
 // kernel log" signal for a human.
+//
+// It is also noisier than it looks, and that is measured rather than assumed:
+// on a DGX Spark the GHES firmware-first driver prints the "[Hardware Error]:"
+// prefix on EVERY line of EVERY record it reports, CORRECTED ones included,
+// so one corrected event the platform handled can add several to this count.
+// The count that can be gated is kernelFatalErrors, below (#538).
 var hwErrorPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)machine check`),           // x86 MCE
 	regexp.MustCompile(`(?i)\[hardware error\]`),      // mce/EDAC printk prefix
 	regexp.MustCompile(`(?i)uncorrectable error`),     // EDAC, NVMe, PCIe
 	regexp.MustCompile(`(?i)amdgpu.*(gpu reset|ras)`), // AMD accelerator fault
 	regexp.MustCompile(`(?i)pcieport.*aer`),           // AER reported through pcieport
+}
+
+// fatalErrorPatterns are kernel lines that report an UNCORRECTED or fatal
+// hardware event, matched one line at a time. Unlike hwErrorPatterns they key
+// on the field that states severity rather than on a prefix, which is what
+// makes the count safe to gate: kernelFatalErrors Equal 0.
+//
+//   - "event severity: fatal|recoverable" is the GHES record's own severity
+//     field (none / corrected / recoverable / fatal). "recoverable" is counted
+//     because it means uncorrected-but-handled: the data was lost, the kernel
+//     survived. A "corrected" record never matches.
+//   - "Uncorrected error", "MCE: ... Hardware event" and "Kernel panic" are
+//     the kernel's own wording for the same class on other paths.
+//   - "Xid ... critical" is NVIDIA's own escalation of an Xid, narrower than
+//     xidEvents, which counts every Xid.
+//
+// Patterns and severity split are ported from an independent GB10 acceptance
+// toolkit, whose authors confirmed the GHES behaviour against a real DGX Spark
+// boot log. A line is counted once however many patterns it matches.
+var fatalErrorPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)event severity:\s*(fatal|recoverable)`),
+	regexp.MustCompile(`(?i)\buncorrected error\b`),
+	regexp.MustCompile(`(?i)\bMCE:.*hardware event\b`),
+	regexp.MustCompile(`(?i)\bXid\b.*\bcritical\b`),
+	regexp.MustCompile(`(?i)\bkernel panic\b`),
 }
 
 // kernelLog is a differenceable source of kernel messages.
@@ -82,8 +113,7 @@ type kernelLogProbe struct {
 	src    kernelLog
 	source string // kmsg | kernlog | none
 
-	xidPre, hwPre int64
-	xidNew, hwNew int64
+	pre, win messageCounter
 	// baselineOK and windowOK say whether each SAMPLE was actually taken. They
 	// are not the same statement as `dropped`, and conflating them is what
 	// produced both halves of issue #112's second round: a scan that returned an
@@ -210,7 +240,7 @@ func (k *kernelLogProbe) baseline() {
 	if !k.available {
 		return
 	}
-	k.xidPre, k.hwPre, k.baselineOK = k.count()
+	k.pre, k.baselineOK = k.count()
 }
 
 // collect closes the window and releases the source.
@@ -218,7 +248,7 @@ func (k *kernelLogProbe) collect() {
 	if !k.available {
 		return
 	}
-	k.xidNew, k.hwNew, k.windowOK = k.count()
+	k.win, k.windowOK = k.count()
 	k.src.close()
 }
 
@@ -229,16 +259,16 @@ func (k *kernelLogProbe) collect() {
 // a clean scan of a quiet log yields, so a caller that reads only the counts
 // cannot tell "nothing happened" from "we could not look" — and this runner's
 // first rule is that those are different claims.
-func (k *kernelLogProbe) count() (xid, hw int64, ok bool) {
+func (k *kernelLogProbe) count() (messageCounter, bool) {
 	var c messageCounter
 	if err := k.src.scan(c.visit); err != nil {
 		k.dropped = true
 		// The partial tally is discarded rather than returned. It is a floor on
 		// an interval whose start we do not know, which is not a measurement of
 		// anything a threshold could be written against.
-		return 0, 0, false
+		return messageCounter{}, false
 	}
-	return c.xid, c.hw, true
+	return c, true
 }
 
 // emit publishes only the counters that were actually measured.
@@ -266,12 +296,14 @@ func (k *kernelLogProbe) emit(out *emitter) {
 		return
 	}
 	if k.baselineOK && k.windowOK {
-		out.setInt(keyXidCount, k.xidNew)
-		out.setInt("kernel_hw_errors", k.hwNew)
+		out.setInt(keyXidCount, k.win.xid)
+		out.setInt("kernel_hw_errors", k.win.hw)
+		out.setInt("kernel_fatal_errors", k.win.fatal)
 	}
 	if k.baselineOK {
-		out.setInt("xid_preexisting", k.xidPre)
-		out.setInt("kernel_hw_errors_preexisting", k.hwPre)
+		out.setInt("xid_preexisting", k.pre.xid)
+		out.setInt("kernel_hw_errors_preexisting", k.pre.hw)
+		out.setInt("kernel_fatal_errors_preexisting", k.pre.fatal)
 	}
 	if k.dropped {
 		// The ring buffer wrapped, the reader fell behind, or a scan failed
@@ -282,21 +314,33 @@ func (k *kernelLogProbe) emit(out *emitter) {
 	}
 }
 
-// messageCounter is the entire reason the scan ever produced messages: two
+// messageCounter is the entire reason the scan ever produced messages: three
 // tallies. It is a struct with a visit method rather than a closure so the same
 // counting rule is reachable from a test without re-stating it.
-type messageCounter struct{ xid, hw int64 }
+//
+// The tallies are independent, not a partition: a fatal GHES line also carries
+// the "[Hardware Error]" prefix and is counted by both hw and fatal.
+type messageCounter struct{ xid, hw, fatal int64 }
 
 func (c *messageCounter) visit(m string) {
 	if xidPattern.MatchString(m) {
 		c.xid++
 	}
-	for _, p := range hwErrorPatterns {
+	if matchesAny(fatalErrorPatterns, m) {
+		c.fatal++
+	}
+	if matchesAny(hwErrorPatterns, m) {
+		c.hw++
+	}
+}
+
+func matchesAny(ps []*regexp.Regexp, m string) bool {
+	for _, p := range ps {
 		if p.MatchString(m) {
-			c.hw++
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

@@ -1504,6 +1504,27 @@ var registry = map[string]Metric{
 		Combination:  CombineMax,
 		ThresholdUse: ThresholdUseAcceptance,
 	},
+	// kernelFatalErrors is the GATEABLE kernel-log count, and it exists because
+	// host-health's kernelHwErrors cannot be one: that heuristic keys on the
+	// "[Hardware Error]" prefix, which the GHES firmware-first driver prints on
+	// every line of CORRECTED records too (measured on a DGX Spark boot log,
+	// #538). This one keys on the record's own severity field and on the
+	// kernel's uncorrected/fatal wording, so a corrected event never counts.
+	// Windowed like xidEvents, hence Sum.
+	"kernelFatalErrors": {
+		Name: "kernelFatalErrors", Unit: UnitNone,
+		Description:  "count of kernel log lines reporting an uncorrected or fatal hardware event during the test window: a GHES record with severity fatal or recoverable, an uncorrected error, an MCE hardware event, a critical Xid, or a kernel panic. Corrected events are never counted",
+		Aggregation:  AggSum,
+		Combination:  CombineSum,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
+	"kernelFatalErrorsPreexisting": {
+		Name: "kernelFatalErrorsPreexisting", Unit: UnitNone,
+		Description:  "count of kernel log lines reporting an uncorrected or fatal hardware event that were already in the log when the scan's window opened — the node's earlier history this boot. The windowed count is kernelFatalErrors",
+		Aggregation:  AggLast,
+		Combination:  CombineMax,
+		ThresholdUse: ThresholdUseAcceptance,
+	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
 		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",

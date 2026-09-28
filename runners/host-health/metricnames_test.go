@@ -172,6 +172,8 @@ func TestEvidenceMetricNamesAreWellFormed(t *testing.T) {
 		"nicLinkDownTotal",
 		"ibLinkDownTotal",
 		"kernelHwErrors",
+		"kernelFatalErrors",
+		"kernelFatalErrorsPreexisting",
 		"observationWindowS",
 		"elapsedS",
 	} {
