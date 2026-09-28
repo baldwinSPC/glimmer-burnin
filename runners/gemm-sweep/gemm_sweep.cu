@@ -106,6 +106,10 @@
 // a plain C++ test can drive it exhaustively without a GPU.
 #include "precision.h"
 #include "device_fold.h"
+#include "load_envelope.h"
+#include "nvml_dynamic.h"
+
+#include <atomic>
 
 #include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"
@@ -177,6 +181,62 @@ struct DeviceResult {
                                          // total_kernel_ms, gemm_iterations, achieved_tflops
   bool ranGemm = false;                 // false for a device that never reached measureWindow
   double maxAbsRef = 0.0;
+  // Throttle reasons seen while the timed loop ran (#544). Not in `values`:
+  // a bit mask does not fold by Min/Max/Sum, it unions.
+  bool haveReasons = false;
+  unsigned long long reasonMask = 0;
+};
+
+// NVML, opened once in main() before any device runs and read-only after, so
+// every device's sampler thread may use it. gNvmlOk false means no envelope is
+// reported: the fields are omitted, never zeroed (#544).
+nvmlrt::Library gNvml;
+bool gNvmlOk = false;
+
+// LoadSampler reads NVML for ONE device every 250 ms while the timed loop runs.
+// It is RAII on purpose: measureWindow returns early on any error, and a
+// std::thread destroyed while still joinable terminates the whole process.
+class LoadSampler {
+ public:
+  explicit LoadSampler(const DeviceResult *d) {
+    if (!gNvmlOk || !d->identityRead || gNvml.deviceGetHandleByPciBusId == nullptr) return;
+    if (gNvml.deviceGetHandleByPciBusId(d->busId.c_str(), &dev_) != nvmlrt::kSuccess) return;
+    thread_ = std::thread([this] {
+      while (!stop_.load()) {
+        sample();
+        for (int i = 0; i < 10 && !stop_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+    });
+  }
+  ~LoadSampler() { finish(); }
+  // finish stops the thread; after it, env() is stable.
+  void finish() {
+    stop_.store(true);
+    if (thread_.joinable()) thread_.join();
+  }
+  const loadenv::Envelope &env() const { return env_; }
+
+ private:
+  void sample() {
+    unsigned int v = 0;
+    if (gNvml.deviceGetClockInfo != nullptr && gNvml.deviceGetClockInfo(dev_, nvmlrt::kClockSM, &v) == nvmlrt::kSuccess)
+      env_.addClock(v);
+    if (gNvml.deviceGetTemperature != nullptr &&
+        gNvml.deviceGetTemperature(dev_, nvmlrt::kTemperatureGpu, &v) == nvmlrt::kSuccess)
+      env_.addTemp(v);
+    if (gNvml.deviceGetPowerUsage != nullptr && gNvml.deviceGetPowerUsage(dev_, &v) == nvmlrt::kSuccess)
+      env_.addPower(v / 1000.0);
+    if (gNvml.deviceGetEnforcedPowerLimit != nullptr && gNvml.deviceGetEnforcedPowerLimit(dev_, &v) == nvmlrt::kSuccess)
+      env_.addLimit(v / 1000.0);
+    unsigned long long m = 0;
+    if (gNvml.deviceGetCurrentClocksThrottleReasons != nullptr &&
+        gNvml.deviceGetCurrentClocksThrottleReasons(dev_, &m) == nvmlrt::kSuccess)
+      env_.addMask(m);
+  }
+  nvmlrt::Device dev_ = nullptr;
+  std::thread thread_;
+  std::atomic<bool> stop_{false};
+  loadenv::Envelope env_;
 };
 
 // gCurrent is thread-local: under `all` concurrency, each worker thread runs
@@ -301,6 +361,7 @@ void measureWindow(long windowSeconds, double flopsPerIteration, double toleranc
   if (cudaError_t e = cudaEventCreate(&end); e != cudaSuccess) { cudaErrored("cudaEventCreate", e); return; }
 
   WindowStats s;
+  LoadSampler sampler(out);  // watches the timed loop only, not setup
   const auto wallStart = std::chrono::steady_clock::now();
   for (;;) {
     cudaEventRecord(beg);
@@ -320,6 +381,11 @@ void measureWindow(long windowSeconds, double flopsPerIteration, double toleranc
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
     if (windowSeconds <= 0 || elapsed >= static_cast<double>(windowSeconds)) break;
   }
+
+  sampler.finish();
+  sampler.env().store(&out->values);
+  out->haveReasons = sampler.env().haveMask;
+  out->reasonMask = sampler.env().mask;
 
   const double maxRelError = maxAbsRef > 0.0 ? s.maxAbsErr / maxAbsRef : INFINITY;
   out->ranGemm = true;
@@ -1019,6 +1085,14 @@ int main() {
   std::printf("device_window_s=%ld\n", windowS);
   std::printf("device_concurrency=%s\n", devices::concurrencyName(conc.mode));
 
+  // NVML for the load envelope (#544). Its absence costs the envelope and
+  // nothing else: the GEMM verdict never depends on it.
+  {
+    std::string nvmlErr;
+    gNvmlOk = gNvml.open(&nvmlErr) && gNvml.init != nullptr && gNvml.init() == nvmlrt::kSuccess;
+    if (!gNvmlOk) std::fprintf(stderr, "gemm-sweep: no NVML (%s); clock/temp/power envelope omitted\n", nvmlErr.c_str());
+  }
+
   // ── run every device ─────────────────────────────────────────────────────
   std::vector<DeviceResult> results(planCount);
   if (conc.mode == devices::Concurrency::All) {
@@ -1061,6 +1135,11 @@ int main() {
       {"achieved_tflops", devices::Fold::Min},
       {"total_kernel_ms", devices::Fold::Sum},
       {"gemm_iterations", devices::Fold::Sum},
+      // #544: the state the part was in while the GEMM ran, worst device.
+      {"sm_clock_mhz", devices::Fold::Min},
+      {"gpu_temp_c", devices::Fold::Max},
+      {"power_draw_w", devices::Fold::Max},
+      {"enforced_power_limit_w", devices::Fold::Min},
   };
   // primaryKey is max_relative_error, not achieved_tflops: max_relative_error
   // is ALWAYS reported (achieved_tflops is omitted whenever total_kernel_ms is
@@ -1070,9 +1149,25 @@ int main() {
   const devices::Folded folded = devices::fold(reports, kDeviceFold, "max_relative_error");
 
   for (const char *key : {"nonfinite_count", "max_abs_error", "max_relative_error",
-                          "achieved_tflops", "total_kernel_ms", "gemm_iterations"}) {
+                          "achieved_tflops", "total_kernel_ms", "gemm_iterations",
+                          "sm_clock_mhz", "gpu_temp_c", "power_draw_w", "enforced_power_limit_w"}) {
     if (auto it = folded.values.find(key); it != folded.values.end()) {
       std::printf("%s=%.6g\n", key, it->second);
+    }
+  }
+  // Throttle reasons latched on ANY device while the GEMM ran: a union, so a
+  // reason on one card of eight is not hidden by the seven that were clean.
+  {
+    bool any = false;
+    unsigned long long mask = 0;
+    for (auto &r : results) {
+      if (!r.ranGemm || !r.haveReasons) continue;
+      any = true;
+      mask |= r.reasonMask;
+    }
+    if (any) {
+      std::printf("throttle_reasons_mask=%llu\n", mask);
+      std::printf("throttle_reasons=%s\n", loadenv::reasonLabels(mask).c_str());
     }
   }
   // Evidence: device 0's, exactly as the single-device engine always reported.

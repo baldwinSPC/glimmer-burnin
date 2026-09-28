@@ -214,6 +214,8 @@ var aliases = map[string]map[string]string{
 		// second name for one quantity is a quantity that eventually disagrees
 		// with itself.
 		"gemm_iterations": "iterationsCompleted",
+		// #544. "mhz" folds to "Mhz", not the registered "MHz" suffix.
+		"sm_clock_mhz": "smClockMHz",
 	},
 
 	"gpu-burn": {
