@@ -1695,6 +1695,14 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	// #547, fabric-soak's form: the soak family's clock drift, applied to the
+	// windows of an RDMA link. Evidence for the same reason as the clock's.
+	"bandwidthSteadyStateDeltaPct": {
+		Name: "bandwidthSteadyStateDeltaPct", Unit: UnitPercent,
+		Description:  "signed split-half drift of the completed windows' bandwidth in time order. Negative is a link that slowed as it warmed; near zero is a steady link. Evidence, not a gate",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
 		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",

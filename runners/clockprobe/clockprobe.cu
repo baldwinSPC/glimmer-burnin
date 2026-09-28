@@ -131,6 +131,7 @@
 
 #include "device_fold.h"
 #include "nvml_dynamic.h"
+#include "soak_series.h"
 
 namespace {
 
@@ -326,6 +327,12 @@ struct Samples {
   long throttleEvents = 0; // transitions into a capped state, not sample counts
   bool prevThrottled = false;
 
+  // The per-sample record (#546/#547), shared with the soak family through
+  // soak_series.h. Every sample here is post-warm-up: the warm-up phase runs
+  // with no Samples at all.
+  soakseries::Series series;
+  double firstSampleAt = -1.0;
+
   double mean(double sum, long count) const { return count > 0 ? sum / count : 0.0; }
 };
 
@@ -351,6 +358,11 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, Sam
   s->n++;
   s->smSum += sm;
   s->smMax = std::max(s->smMax, sm);
+  const double at = nowSeconds();
+  if (s->firstSampleAt < 0) s->firstSampleAt = at;
+  soakseries::Point pt;
+  pt.t = static_cast<float>(at - s->firstSampleAt);
+  pt.smMHz = sm;
 
   double temp = 0.0;
   bool tempKnown = false;
@@ -362,6 +374,8 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, Sam
       s->tempN++;
       s->tempSum += temp;
       s->tempMax = std::max(s->tempMax, temp);
+      pt.haveTemp = true;
+      pt.tempC = static_cast<float>(temp);
     } else {
       ok->temp = false;
       note("temperature");
@@ -395,6 +409,8 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, Sam
       s->powerN++;
       s->powerSum += w;
       s->powerMax = std::max(s->powerMax, w);
+      pt.havePower = true;
+      pt.powerW = static_cast<float>(w);
     } else {
       ok->power = false;
       note("powerDraw");
@@ -425,11 +441,14 @@ void takeSample(const nvmlrt::Library &nvml, nvmlrt::Device dev, Samples *s, Sam
       if (capped) s->throttledSamples++;
       if (capped && !s->prevThrottled) s->throttleEvents++;
       s->prevThrottled = capped;
+      pt.haveMask = true;
+      pt.throttleMask = mask;
     } else {
       ok->reasons = false;
       note("throttleReasons");
     }
   }
+  s->series.add(pt);
 }
 
 // ── terminal output ─────────────────────────────────────────────────────────
@@ -469,6 +488,7 @@ void emitCommon() {
 // ── per-device state and pipeline ───────────────────────────────────────────
 
 struct DeviceResult {
+  soakseries::Series series;  // this device's post-warm-up samples (#546/#547)
   int index = 0;
   int exitCode = kExitPass; // 0 pass, 1 fail, 2 skip, 3 error — THIS device's own outcome
   std::string reason;       // why, for the terminal marker if this device decides it
@@ -777,6 +797,7 @@ void runOneDevice(int index, long windowSecondsTotal, double clockFloorPct,
     return;
   }
 
+  out->series = s.series;
   const double meanSm = s.smSum / s.n;
   const double sustainedClockPct = 100.0 * meanSm / ratedBoostMHz;
   out->smClockMHz = meanSm;
@@ -1065,6 +1086,12 @@ int main() {
     const DeviceResult &d0 = results.front();
     std::printf("elapsed_s=%.2f\n", d0.elapsedS);
     std::printf("samples_taken=%ld\n", d0.samplesTaken);
+    // #547: signed split-half drift of the clock over the sampled window.
+    // Negative is a clock still falling when the probe ended. Evidence only.
+    double drift = 0.0;
+    if (soakseries::smClockDriftPct(d0.series, &drift)) {
+      std::printf("sm_clock_steady_state_delta_pct=%.2f\n", drift);
+    }
     std::printf("load_launches=%ld\n", d0.loadLaunches);
     std::printf("load_threads=%.0f\n", d0.loadThreads);
     std::printf("load_iters_per_launch=%d\n", d0.loadItersPerLaunch);
@@ -1125,6 +1152,15 @@ int main() {
   devices::printFold(stdout, reports, visible, windowS, conc.mode, folded, spreads, /*underMig=*/false);
   if (reports.size() > 1) {
     std::fputs(devices::renderPerDeviceArtifact(reports).c_str(), stdout);
+  }
+  {
+    std::vector<soakseries::DeviceSeries> series;
+    for (const auto &r : results) {
+      if (!r.series.points().empty()) series.push_back({r.index, &r.series});
+    }
+    if (!series.empty()) {
+      std::fputs(soakseries::renderArtifact(series, 200 * 1024, sampleIntervalMs / 1000.0).c_str(), stdout);
+    }
   }
 
   emitCommon();
