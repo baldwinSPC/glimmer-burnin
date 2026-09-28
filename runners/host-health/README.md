@@ -65,6 +65,19 @@ These are exactly the five counters the `host-health` kind is defined by, each
 gated at `Equal 0`, so the runner's exit code agrees with the profile it is
 written for.
 
+### Gateable, not gated by the runner
+
+`kernelFatalErrors` and `kernelFatalErrorsPreexisting` count kernel log lines
+that report an **uncorrected or fatal** hardware event: a GHES record whose
+`event severity` is `fatal` or `recoverable`, `Uncorrected error`, an MCE
+`Hardware event`, a critical Xid, or `Kernel panic`. A corrected event is never
+counted. They are safe to gate (`kernelFatalErrors Equal 0`), but the runner's
+own exit code does not read them, so adding them changed no existing verdict.
+
+They exist because `kernelHwErrors` cannot be gated. It keys on the
+`[Hardware Error]` prefix, and on a DGX Spark the GHES driver prints that
+prefix on every line of every record, corrected ones included (#538).
+
 ### Evidence — reported, not gated
 
 `xidPreexisting`, `kernelHwErrors`, `kernelHwErrorsPreexisting`, `xidLogDropped`,
