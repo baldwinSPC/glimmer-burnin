@@ -48,6 +48,7 @@ const (
 	KindFingerprintProbe = contract.KindFingerprintProbe
 	KindTCPBaseline      = contract.KindTCPBaseline
 	KindDiskIO           = contract.KindDiskIO
+	KindCPUBench         = contract.KindCPUBench
 	KindFabricSoak       = contract.KindFabricSoak
 	KindGemmSweep        = contract.KindGemmSweep
 )

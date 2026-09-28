@@ -43,6 +43,7 @@ cover.out
 /memory-bw
 /memory-bw-rocm
 /memory-retention
+/cpu-bench
 /memory-stress
 /nccl
 /nccl-rocm

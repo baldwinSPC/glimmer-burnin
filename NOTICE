@@ -130,6 +130,11 @@ runner's Dockerfile and README for the per-image assertion that enforces this.
     - no third-party component: a CGO-free Apache-2.0 Go binary over the Go
       standard library (BSD-3-Clause).
 
+  runners/cpu-bench
+    - no third-party component: this project's own Apache-2.0 C++17 over plain
+      threads, linked statically against libstdc++/libgcc (GCC Runtime Library
+      Exception) and run on distroless. No OpenMP, so no libgomp.
+
   runners/memory-retention
     - no third-party component and no external tool of any kind: a CGO-free
       Apache-2.0 Go binary over the Go standard library (BSD-3-Clause). Unlike

@@ -29,6 +29,7 @@ func TestDrivesSustainedLoad(t *testing.T) {
 		{contract.KindClockProbe, true, "holds a known, steady, clock-bound load — that is how it judges sustained clocks at all"},
 		{contract.KindFabricSoak, true, "the ib-write-bw measurement iterated over hours, to find what fails once warm"},
 		{contract.KindMemoryStress, true, "stressapptest for the whole window; host RAM, which the watchdog also judges"},
+		{contract.KindCPUBench, true, "every allowed core under FMA then STREAM load for most of its window"},
 		{contract.KindDCGMDiag, true, "levels 3 and 4 run targeted_stress and sm_stress for ~15 min, and the level is a runner env var this operator must not read"},
 
 		{contract.KindComputeSmoke, false, "one GEMM in milliseconds; burst-only"},
@@ -68,6 +69,7 @@ func TestEveryKindDeclaresWhetherItHoldsLoad(t *testing.T) {
 		contract.KindGPUDirect: true, contract.KindTCPBaseline: true,
 		contract.KindMemoryRetention: true,
 		contract.KindXPUDiag:         true,
+		contract.KindCPUBench:        true,
 	}
 	for _, k := range contract.BuiltInKinds {
 		if !classified[k] {

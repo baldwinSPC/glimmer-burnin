@@ -920,6 +920,7 @@ func TestDriverInjectionIsDeclaredWhereItIsNeeded(t *testing.T) {
 		"memory-retention":  "holds a pattern in HOST memory untouched; no accelerator involved at all, unlike any other runner in this repository",
 		"fingerprint-probe": "READS ABOUT accelerators over a read-only sysfs mount and never opens one; it must work on a node whose device plugin never came up",
 		"disk-io":           "measures storage through direct I/O against a declared path; no accelerator is involved",
+		"cpu-bench":         "measures the HOST CPU and host memory with plain threads; never opens an accelerator",
 		"tcp-baseline":      "measures the kernel TCP stack through iperf3; it is the accelerator-free half of the fabric story and runs on nodes with no GPU at all",
 	}
 
