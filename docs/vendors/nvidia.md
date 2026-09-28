@@ -127,6 +127,82 @@ exists this is the honest answer. Tracked in [#422] so nobody re-derives it.
 
 [#422]: https://github.com/baldwinSPC/glimmer-burnin/issues/422
 
+## GB10 (DGX Spark): platform facts
+
+These were measured on two DGX Spark units by an independent GB10 acceptance
+effort, and are recorded here because each one is a trap for a runner or a
+threshold. Where this project's own fleet has confirmed one, it says so. The
+others are not yet re-measured here, and a number below is a **seed for
+[#353], not a pin**: working-set sizes and methods differ from this project's
+runners.
+
+**What the part does not expose**
+
+- `nvidia-smi --query-gpu` never populates `clocks.mem`,
+  `ecc.errors.corrected.volatile.total` or
+  `ecc.errors.uncorrected.volatile.total`; they are null on every sample.
+  Consistent with this project's own finding that GB10 exposes no ECC to NVML,
+  which is why `host-health` declares `eccErrors=n/a`.
+- There is no `nvpmodel`-style discrete power mode to look up. The power and
+  clock state a number was measured under can only be READ, at the time, which
+  is what [#544] is for.
+- Per-rail power, energy counters and the PL1/PL2 caps are visible only through
+  a third-party hwmon driver. `nvidia-smi` power is GPU-only. The widely quoted
+  240 W is the external supply's rating against a SoC TDP of roughly 140 W.
+
+**Telemetry that lies**
+
+- GPU temperature reads misleadingly **low** at low power states, and a
+  firmware/EC-dependent bug pins the driver's own `T.Limit Temp` near a bogus
+  50 °C on some units. Never derive a thermal band from driver-reported
+  thresholds, and treat an implausibly low reading as a fault mode rather than
+  a healthy idle. Idle is about 41 °C.
+- nvme-cli `smart-log -o json` reports `temperature` in **Kelvin** (314 for a
+  drive at about 41 °C).
+- The GHES firmware-first driver prints `[Hardware Error]:` on every line of
+  every record, **corrected ones included**. The authoritative field is
+  `event severity: fatal|recoverable|corrected`. A scan keyed on the prefix
+  counts handled events as faults ([#538]).
+- `timedatectl` has no real `SystemClockSynchronized` property; it returns
+  empty on healthy nodes. `NTPSynchronized` is the signal.
+- The kernel prints an Xid's device as `PCI:0000:01:00`, while `nvidia-smi`
+  reports `00000000:01:00.0`. Attributing Xids per device needs both forms.
+
+**CPU and memory topology**
+
+- 10× Cortex-X925 (performance) plus 10× Cortex-A725 (efficiency).
+  `cpu_capacity` separates them cleanly: A725 reads 718–731, X925 997–1024,
+  with the maximum on cpu19. **cpu0 is not a performance core**, and the two
+  clusters are separate cpufreq policies that can carry different governors.
+- L3 is two asymmetric instances: 8 MiB for cpus 0–9, 16 MiB for cpus 10–19.
+  A STREAM array must exceed the larger one.
+- CPU and GPU share one 128 GB LPDDR5X pool. Host and device load on the same
+  part interact, the same class of effect [#534] measured on an AMD APU; never
+  overlap a CPU measurement with a GPU one.
+
+**Reference numbers (seeds, not pins)**
+
+| Quantity | Reported value | Conditions |
+|---|---|---|
+| bf16 GEMM | 60–65 TFLOP/s | square 8192, TF32 and reduced-precision paths off |
+| device-memory triad | 228–231 GB/s | working set 0.1 of free memory |
+| managed-memory triad | 163–165 GB/s | same; `cudaMallocManaged` ([#543]) |
+| host STREAM triad | 100–109 GB/s | 64 MiB arrays, all cores |
+| CPU FMA roofline | 15.6 GFLOP/s one X925 core; about 103 all 20 | double, 8 chains ([#542]) |
+| NVMe (Samsung MZALC4T0HBL1) | seq write 12.1 GB/s, seq read 14.9–15.0, 4 KiB randread 505k–530k IOPS, p99 82–87 µs | direct I/O, 32 in flight ([#545]) |
+| load ramp | utilization 0→96 %, power 4.3→80.1 W, SM clock 208→2450 MHz | first to mid-run sample of a training load |
+
+This project's own measured fabric and collective numbers live under
+[Thresholds](#thresholds) and in [#353].
+
+[#353]: https://github.com/baldwinSPC/glimmer-burnin/issues/353
+[#534]: https://github.com/baldwinSPC/glimmer-burnin/issues/534
+[#538]: https://github.com/baldwinSPC/glimmer-burnin/issues/538
+[#542]: https://github.com/baldwinSPC/glimmer-burnin/issues/542
+[#543]: https://github.com/baldwinSPC/glimmer-burnin/issues/543
+[#544]: https://github.com/baldwinSPC/glimmer-burnin/issues/544
+[#545]: https://github.com/baldwinSPC/glimmer-burnin/issues/545
+
 ## Thresholds
 
 Measured, never from a datasheet. The fleet this project was built against
