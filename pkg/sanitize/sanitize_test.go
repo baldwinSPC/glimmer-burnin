@@ -206,3 +206,19 @@ func TestKeysThatCollideAfterSanitisingAreRefused(t *testing.T) {
 		t.Error("two keys that sanitise to one were merged silently")
 	}
 }
+
+// #540: a serial-derived identity metric is pseudonymised; no content rule
+// would recognise a 16-hex digest, and left alone it links every shared result.
+func TestASerialDigestMetricIsPseudonymised(t *testing.T) {
+	s := mustNew(t, Options{})
+	out, err := s.JSON([]byte(`{"results":[{"metrics":{"nvmeSerialDigests":"aaaa1111bbbb2222","nvmeCount":"1"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "aaaa1111bbbb2222") || !strings.Contains(string(out), `"nvmeSerialDigests": "serial-`) {
+		t.Errorf("digest not pseudonymised:\n%s", out)
+	}
+	if !strings.Contains(string(out), `"nvmeCount": "1"`) {
+		t.Errorf("a number was touched:\n%s", out)
+	}
+}

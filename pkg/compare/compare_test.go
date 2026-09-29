@@ -2,6 +2,7 @@ package compare
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,5 +158,29 @@ func TestFingerprintFieldsKeepSpacesInValues(t *testing.T) {
 	op := FingerprintFields("kernel=6.11 nvidia.com/gpu.product=NVIDIA GB10")
 	if op["nvidia.com/gpu.product"] != "NVIDIA GB10" {
 		t.Errorf("operator-style key: %v", op)
+	}
+}
+
+func withIdentity(e *contract.Envelope, digests string) *contract.Envelope {
+	e.Results = append(e.Results, contract.TestResult{Name: "identity", Kind: "fingerprint-probe", Phase: "Passed",
+		Metrics: map[string]string{"nvmeSerialDigests": digests, "nvmeCount": "1"}})
+	return e
+}
+
+// #540: the same drive reported by two nodes is one machine seen twice, or a
+// cloned image, and is said before anything else.
+func TestTwoNodesSharingADriveAreFlagged(t *testing.T) {
+	a := side(t, withIdentity(run("spark-043a", gb10, "a", "Passed", map[string]float64{"bandwidthGbps": 97.5}), "aaaa1111bbbb2222"))
+	b := side(t, withIdentity(run("spark-85a9", gb10, "b", "Passed", map[string]float64{"bandwidthGbps": 97.5}), "cccc3333dddd4444,aaaa1111bbbb2222"))
+	r := outcomeOf(Symmetry(a, b, opts), "identity")
+	if r.Outcome != NotComparable || !strings.Contains(r.Cause, "aaaa1111bbbb2222") {
+		t.Errorf("shared drive: %+v", r)
+	}
+	c := side(t, withIdentity(run("spark-85a9", gb10, "c", "Passed", map[string]float64{"bandwidthGbps": 97.5}), "cccc3333dddd4444"))
+	if r := outcomeOf(Symmetry(a, c, opts), "identity"); r.Outcome != "" {
+		t.Errorf("distinct drives flagged: %+v", r)
+	}
+	if _, ok := a.Metrics["identity/nvmeSerialDigests"]; ok {
+		t.Error("an identity label was collected as a quantity")
 	}
 }

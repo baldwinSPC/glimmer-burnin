@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -121,5 +122,26 @@ func TestParseCPUList(t *testing.T) {
 		if _, err := parseCPUList(bad); err == nil {
 			t.Errorf("parseCPUList(%q) accepted", bad)
 		}
+	}
+}
+
+// #540: each drive's serial becomes a digest that identifies it without naming
+// it, and a partial list is not emitted, because the drive it omits could be
+// the one two nodes share.
+func TestNVMeSerialsBecomeDigestsNeverSerials(t *testing.T) {
+	root := gb10Sysfs(t)
+	writeFile(t, filepath.Join(root, "class", "nvme", "nvme0", "serial"), "S7FJNX0Y123456      \n")
+	h := scanHost(root)
+	if len(h.nvme) != 1 || len(h.nvme[0].serialDigest) != 16 {
+		t.Fatalf("digest = %q", h.nvme[0].serialDigest)
+	}
+	// Trailing padding is part of how sysfs presents the serial, not the serial.
+	other := gb10Sysfs(t)
+	writeFile(t, filepath.Join(other, "class", "nvme", "nvme0", "serial"), "S7FJNX0Y123456\n")
+	if scanHost(other).nvme[0].serialDigest != h.nvme[0].serialDigest {
+		t.Error("the same serial with different padding produced two digests")
+	}
+	if strings.Contains(h.nvme[0].serialDigest, "S7FJ") {
+		t.Error("the digest contains the serial")
 	}
 }
