@@ -1703,6 +1703,15 @@ var registry = map[string]Metric{
 		Aggregation:  AggLast,
 		ThresholdUse: ThresholdUseEvidence,
 	},
+	// #540. Identity, not a quantity: compare's node-vs-node check reads it to
+	// catch one drive reported by two nodes. burnin sanitize pseudonymises it,
+	// because a stable unsalted digest would link every shared result.
+	"nvmeSerialDigests": {
+		Name: "nvmeSerialDigests", Unit: UnitNone,
+		Description:  "comma-separated first 16 hex of SHA-256 over each NVMe serial, controller order; the serial itself is never emitted. Two nodes sharing a digest are one drive seen twice. A label",
+		Aggregation:  AggLast,
+		ThresholdUse: ThresholdUseEvidence,
+	},
 	"nodeReady": {
 		Name: "nodeReady", Unit: UnitNone,
 		Description:  "the runner's own verdict echoed as true|false, so a stored result carries it next to the evidence. It is a restatement of the exit code, not an independent measurement, and gating on it would ask a threshold to re-derive a decision the operator already has — as a word, which compares as a float64 and fails closed on both of its values",

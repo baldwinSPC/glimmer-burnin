@@ -99,13 +99,16 @@ type Side struct {
 	// must agree for the runs to be replicates of one configuration.
 	RunFingerprints []string
 	Metrics         map[string]*Observation
+	// Identity holds label-valued identity evidence the latest run reported,
+	// such as nvmeSerialDigests (#540). Never compared as a quantity.
+	Identity map[string]string
 }
 
 // Collect reads the terminal verdict envelopes of runs on ONE node. Metric
 // values that are not finite numbers are skipped: labels and identity strings
 // are evidence, not quantities.
 func Collect(envs []*contract.Envelope) (*Side, error) {
-	s := &Side{Metrics: map[string]*Observation{}}
+	s := &Side{Metrics: map[string]*Observation{}, Identity: map[string]string{}}
 	for _, e := range envs {
 		if e.Reason != contract.ReasonPhaseChanged || !terminal(e.Phase) {
 			continue
@@ -121,6 +124,12 @@ func Collect(envs []*contract.Envelope) (*Side, error) {
 		s.Runs = append(s.Runs, e.Run.UID)
 		for _, r := range e.Results {
 			for metric, raw := range r.Metrics {
+				if identityMetrics[metric] {
+					if v := strings.TrimSpace(raw); v != "" {
+						s.Identity[metric] = v
+					}
+					continue
+				}
 				v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 				if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 					continue
@@ -146,6 +155,32 @@ func Collect(envs []*contract.Envelope) (*Side, error) {
 		return nil, fmt.Errorf("no finished runs: a comparison needs a terminal RunPhaseChanged envelope")
 	}
 	return s, nil
+}
+
+// identityMetrics are the label metrics that say WHICH hardware a result came
+// from. Two nodes sharing a value are one piece of hardware seen twice.
+var identityMetrics = map[string]bool{"nvmeSerialDigests": true}
+
+// sharedIdentity names the identity values two sides have in common.
+func sharedIdentity(a, b *Side) []string {
+	var out []string
+	for metric := range identityMetrics {
+		av, bv := a.Identity[metric], b.Identity[metric]
+		if av == "" || bv == "" {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, x := range strings.Split(av, ",") {
+			seen[strings.TrimSpace(x)] = true
+		}
+		for _, y := range strings.Split(bv, ",") {
+			if y = strings.TrimSpace(y); y != "" && seen[y] {
+				out = append(out, metric+" "+y)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func terminal(phase string) bool {
@@ -348,6 +383,13 @@ func Symmetry(left, right *Side, o Options) []Result {
 			decide(&res, x, ref, o.tolFor(key), DirectionOf(metricOf(key)), conclusive)
 		}
 		out = append(out, res)
+	}
+	// #540: the same drive on two nodes is a cloned image or one machine
+	// reached under two names, which makes every other row meaningless.
+	if shared := sharedIdentity(left, right); len(shared) > 0 && left.Node != right.Node {
+		out = append(out, Result{Key: "identity", Outcome: NotComparable,
+			Cause: "the same hardware appears on both nodes (" + strings.Join(shared, "; ") +
+				"): a cloned image, or one machine reached under two names"})
 	}
 	return sortResults(out)
 }

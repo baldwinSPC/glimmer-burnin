@@ -534,6 +534,11 @@ func (s *Sanitizer) walkMember(k string, val any, isMetric bool) (any, error) {
 		switch {
 		case isMetric && isFiniteNumber(str):
 			return str, nil
+		case isMetric && keySerial.MatchString(k) && str != "":
+			// An identity metric derived from serials (nvmeSerialDigests,
+			// #540): a stable digest no content rule recognises, so without
+			// this it would link every shared result to the drive.
+			return s.replace(CatSerial, str)
 		case !isMetric && exemptLeafKeys[k]:
 			return str, nil
 		}

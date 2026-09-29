@@ -4,6 +4,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,6 +46,11 @@ type nvmeController struct {
 	model      string
 	pciAddress string // the slot, e.g. 0004:01:00.0
 	bytes      int64  // sum over the controller's namespaces
+	// serialDigest identifies the drive without naming it (#540): the first
+	// 16 hex of SHA-256 over the serial. Two nodes reporting the same digest
+	// are one drive seen twice — a cloned image or the same machine reached
+	// under two names. The serial itself is never emitted.
+	serialDigest string
 }
 
 // capacityClassFraction is how close to the maximum cpu_capacity a core must be
@@ -176,6 +183,12 @@ func scanNVMe(sysfs string) []nvmeController {
 		if b, err := os.ReadFile(filepath.Join(c, "model")); err == nil {
 			n.model = strings.Join(strings.Fields(string(b)), " ")
 		}
+		if b, err := os.ReadFile(filepath.Join(c, "serial")); err == nil {
+			if serial := strings.TrimSpace(string(b)); serial != "" {
+				sum := sha256.Sum256([]byte(serial))
+				n.serialDigest = hex.EncodeToString(sum[:])[:16]
+			}
+		}
 		if dev, err := filepath.EvalSymlinks(filepath.Join(c, "device")); err == nil {
 			n.pciAddress = filepath.Base(dev)
 		}
@@ -218,12 +231,20 @@ func reportHost(h hostIdentity) {
 	if len(h.nvme) == 0 {
 		return
 	}
-	var models, slots []string
+	var models, slots, digests []string
 	var total int64
 	for _, n := range h.nvme {
 		models = append(models, n.model)
 		slots = append(slots, n.pciAddress)
 		total += n.bytes
+		if n.serialDigest != "" {
+			digests = append(digests, n.serialDigest)
+		}
+	}
+	// Emitted only when EVERY drive's serial was read: a partial list could
+	// hide the one drive two nodes share.
+	if len(digests) == len(h.nvme) {
+		metric("nvmeSerialDigests", strings.Join(digests, ","))
 	}
 	metric("nvmeModels", strings.Join(models, ","))
 	metric("nvmePciAddresses", strings.Join(slots, ","))
