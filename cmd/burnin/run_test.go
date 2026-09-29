@@ -604,3 +604,34 @@ spec:
 		t.Errorf("NODE = %q, want spark-a", spec.Env["NODE"])
 	}
 }
+
+// #567: capabilities without runAsUser: 0 are refused here exactly as the
+// operator refuses them. Now that --cap-add reaches the runtime, the
+// combination means as little on bare metal as in a pod, and a profile the
+// operator refuses must not quietly run here as a probe that reads nothing.
+func TestCapabilitiesWithoutRootAreRefusedAsTheOperatorDoes(t *testing.T) {
+	body := `
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInProfile
+metadata:
+  name: p
+spec:
+  tests:
+    - testRef: hh
+---
+apiVersion: burnin.glimmer.ai/v1alpha1
+kind: BurnInTest
+metadata:
+  name: hh
+spec:
+  kind: host-health
+  runner:
+    image: example.invalid/hh:test
+    capabilities: [SYSLOG]
+`
+	s, _ := loadSuite([]string{writeSuite(t, body)})
+	_, _, err := s.buildPlan("", "n1", 0, nil)
+	if err == nil || !strings.Contains(err.Error(), `test "hh"`) {
+		t.Fatalf("buildPlan accepted capabilities without runAsUser: 0: %v", err)
+	}
+}

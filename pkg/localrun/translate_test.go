@@ -284,6 +284,33 @@ func TestSupplementalGroupsBecomeGroupAdd(t *testing.T) {
 	}
 }
 
+// #567: the uid and the capabilities reach the container runtime, so the kmsg
+// recipe (privileged + runAsUser: 0 + a CharDevice mount) means the same thing
+// on bare metal as in-cluster. Unset stays unset: no --user, no --cap-add.
+func TestRunAsUserAndCapabilitiesReachTheRuntime(t *testing.T) {
+	uid := int64(0)
+	spec := api.BurnInTestSpec{
+		Kind: api.KindHostHealth,
+		Runner: &api.RunnerSpec{Image: "x:1", RunAsUser: &uid,
+			Capabilities: []api.Capability{api.CapabilitySYSLOG}},
+	}
+	got, err := Translate(Plan{Node: "n1"}, PlannedTest{Name: "t", Spec: spec})
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	args := strings.Join((&CLIRuntime{Binary: "podman"}).args(got), " ")
+	if !strings.Contains(args, "--user 0") || !strings.Contains(args, "--cap-add SYSLOG") {
+		t.Errorf("runAsUser/capabilities did not reach the runtime: %s", args)
+	}
+
+	spec.Runner.RunAsUser, spec.Runner.Capabilities = nil, nil
+	got, _ = Translate(Plan{Node: "n1"}, PlannedTest{Name: "t", Spec: spec})
+	args = strings.Join((&CLIRuntime{Binary: "podman"}).args(got), " ")
+	if strings.Contains(args, "--user") || strings.Contains(args, "--cap-add") {
+		t.Errorf("a test asking for no privilege got some: %s", args)
+	}
+}
+
 // Every character device inside a mounted DIRECTORY is granted, not just a
 // hostPath declared CharDevice — issue #289.
 //

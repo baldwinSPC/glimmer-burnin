@@ -263,6 +263,12 @@ func (r *CLIRuntime) args(spec RunSpec) []string {
 	if spec.Privileged {
 		args = append(args, "--privileged")
 	}
+	if spec.User != nil {
+		args = append(args, "--user", strconv.FormatInt(*spec.User, 10))
+	}
+	for _, c := range spec.CapAdd {
+		args = append(args, "--cap-add", c)
+	}
 	if spec.UnlimitedMemlock {
 		// There is no PodSpec field for this at all, which is why the fabric
 		// runners document a node-level containerd change in-cluster. Here it

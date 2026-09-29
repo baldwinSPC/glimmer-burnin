@@ -40,6 +40,13 @@ type RunSpec struct {
 	// (#535). Without it a group-only device such as /dev/kfd is visible and
 	// unopenable, and an AMD runner reports that no accelerator is present.
 	GroupAdd []int64
+	// User is the uid to run as, the `--user` form of the container's
+	// securityContext.runAsUser; nil keeps the image's own USER. CapAdd are
+	// capabilities added with `--cap-add`. Both are read from the same
+	// RunnerSpec fields the operator reads (#567): dropping them made the
+	// kmsg recipe run as root in-cluster and as 65532 here, with no warning.
+	User   *int64
+	CapAdd []string
 	// GPUAccess says which accelerator the container needs, if any.
 	GPUAccess GPUAccess
 	// UnlimitedMemlock raises RLIMIT_MEMLOCK. RDMA registration needs it, and
@@ -161,6 +168,13 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 		spec.Args = t.Spec.Runner.Args
 		spec.Privileged = t.Spec.Runner.Privileged
 		spec.GroupAdd = append([]int64(nil), t.Spec.Runner.SupplementalGroups...)
+		if u := t.Spec.Runner.RunAsUser; u != nil {
+			uid := *u
+			spec.User = &uid
+		}
+		for _, c := range t.Spec.Runner.Capabilities {
+			spec.CapAdd = append(spec.CapAdd, string(c))
+		}
 
 		for _, m := range t.Spec.Runner.HostPaths {
 			mount := Mount{
