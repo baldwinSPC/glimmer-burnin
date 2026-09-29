@@ -195,6 +195,11 @@ func (s *suite) buildPlan(profileName, node string, retries int32, rz *localrun.
 	if err := plan.RefuseUnreachableAxes(p.Tests); err != nil {
 		return localrun.Plan{}, nil, err
 	}
+	// And the operator's refusal of capabilities without uid 0 (#567), which
+	// means as little under --cap-add as under a pod's securityContext.
+	if err := plan.RefuseCapabilitiesWithoutRunAsUserZero(p.Tests); err != nil {
+		return localrun.Plan{}, nil, err
+	}
 	return p, warnings, nil
 }
 

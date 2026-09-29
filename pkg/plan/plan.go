@@ -302,3 +302,39 @@ func SortedAxisKeys(axes map[string]string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// RefuseCapabilitiesWithoutRunAsUserZero rejects a profile that sets
+// spec.runner.capabilities without spec.runner.runAsUser: 0 (#302).
+//
+// A capability added to the bounding set does nothing for a non-root uid
+// without ambient capabilities — measured on real hardware while root-causing
+// #134, the same finding that showed `privileged: true` alone fails for a
+// container that stayed at its image's default uid. Left unrefused, that
+// combination produces a probe that silently reads nothing, which is
+// indistinguishable from hardware nobody granted the reading to see — refused
+// here, before a node is cordoned, at the same severity as an unsatisfiable
+// threshold.
+//
+// Shared by both dispatchers (#567): `burnin run` passes the same fields as
+// --user and --cap-add, so the combination is exactly as meaningless there,
+// and a profile the operator refuses must not quietly run on bare metal.
+func RefuseCapabilitiesWithoutRunAsUserZero(tests []Test) error {
+	var bad []string
+	for _, t := range tests {
+		if t.Spec.Runner == nil || len(t.Spec.Runner.Capabilities) == 0 {
+			continue
+		}
+		if t.Spec.Runner.RunAsUser == nil || *t.Spec.Runner.RunAsUser != 0 {
+			bad = append(bad, fmt.Sprintf("test %q", t.Name))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%d test(s) set spec.runner.capabilities without spec.runner.runAsUser: 0, so the run is refused "+
+			"before any node is touched — a capability added to the bounding set does nothing for a "+
+			"non-root uid without ambient capabilities, and this would produce a probe that silently "+
+			"reads nothing rather than an error naming why: %s",
+		len(bad), strings.Join(bad, "; "))
+}
