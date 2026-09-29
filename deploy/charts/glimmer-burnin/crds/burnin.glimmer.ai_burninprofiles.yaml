@@ -907,6 +907,41 @@ spec:
                                 it could not read is reported as unread, never as clean.
                               format: int64
                               type: integer
+                            supplementalGroups:
+                              description: |-
+                                SupplementalGroups are extra gids the runner pod's processes belong to,
+                                for a host device whose DAC grants a GROUP and nobody else.
+
+                                The case it exists for is AMD's /dev/kfd: mode 0660, owned by the
+                                node's `render` group, `other::---`. Every runner image here runs as the
+                                non-root 65532, which holds no supplemental groups and so cannot open it,
+                                and before this field the only grant that worked was RunAsUser: 0 —
+                                root, a far larger grant than one device needs (#535). Membership of the
+                                device's own group is the least-privilege form, and it is what this is.
+
+                                A LITERAL LIST, not a group name resolved per node. The gid is
+                                host-specific (992 on one Strix Halo unit, commonly 44 or 110
+                                elsewhere), and resolving `render` would mean reading the node's
+                                /etc/group through a privileged helper — trading away exactly the
+                                privilege this field exists to avoid. Read it off the target with
+                                `stat -c %g /dev/kfd` and write the number; a profile is per SKU and a
+                                fleet's image is uniform, so one number is normally right for a fleet.
+
+                                gid 0 is refused: the root group is a grant over every root-group-owned
+                                file the pod can reach, not over one device, and a test that genuinely
+                                needs it should say RunAsUser: 0 and be read as the root grant it is.
+
+                                Pod-level, so it applies to every container including Prepare's
+                                initContainers; it rides in the pinned plan with the rest of the runner
+                                spec, and `burnin run` passes the same list as `--group-add`, so both
+                                dispatchers agree about whether a device is openable.
+                              items:
+                                format: int64
+                                minimum: 1
+                                type: integer
+                              maxItems: 8
+                              type: array
+                              x-kubernetes-list-type: set
                           type: object
                         scope:
                           default: Node

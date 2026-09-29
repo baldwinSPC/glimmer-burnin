@@ -267,6 +267,23 @@ func TestAnAMDTestGetsBothDeviceNodes(t *testing.T) {
 	}
 }
 
+// #535: the group list both dispatchers read becomes --group-add, one flag per
+// gid, so a profile that opens /dev/kfd in-cluster opens it here too.
+func TestSupplementalGroupsBecomeGroupAdd(t *testing.T) {
+	spec := api.BurnInTestSpec{
+		Kind:   api.KindClockProbe,
+		Runner: &api.RunnerSpec{Image: "x:1", SupplementalGroups: []int64{992, 44}},
+	}
+	got, err := Translate(Plan{Node: "n1"}, PlannedTest{Name: "t", Spec: spec})
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	args := strings.Join((&CLIRuntime{Binary: "podman"}).args(got), " ")
+	if !strings.Contains(args, "--group-add 992 --group-add 44") {
+		t.Errorf("supplementalGroups did not become --group-add: %s", args)
+	}
+}
+
 // Every character device inside a mounted DIRECTORY is granted, not just a
 // hostPath declared CharDevice — issue #289.
 //

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -290,6 +291,9 @@ func (r *CLIRuntime) args(spec RunSpec) []string {
 	}
 	for _, d := range spec.Devices {
 		args = append(args, "--device", d)
+	}
+	for _, g := range spec.GroupAdd {
+		args = append(args, "--group-add", strconv.FormatInt(g, 10))
 	}
 
 	for _, k := range sortedKeys(spec.Env) {
