@@ -35,6 +35,11 @@ type RunSpec struct {
 	// picture for a fabric test.
 	HostNetwork bool
 	Privileged  bool
+	// GroupAdd are supplemental gids for the container's process, the
+	// `--group-add` form of the pod's securityContext.supplementalGroups
+	// (#535). Without it a group-only device such as /dev/kfd is visible and
+	// unopenable, and an AMD runner reports that no accelerator is present.
+	GroupAdd []int64
 	// GPUAccess says which accelerator the container needs, if any.
 	GPUAccess GPUAccess
 	// UnlimitedMemlock raises RLIMIT_MEMLOCK. RDMA registration needs it, and
@@ -155,6 +160,7 @@ func Translate(p Plan, t PlannedTest) (RunSpec, error) {
 		spec.Command = t.Spec.Runner.Command
 		spec.Args = t.Spec.Runner.Args
 		spec.Privileged = t.Spec.Runner.Privileged
+		spec.GroupAdd = append([]int64(nil), t.Spec.Runner.SupplementalGroups...)
 
 		for _, m := range t.Spec.Runner.HostPaths {
 			mount := Mount{

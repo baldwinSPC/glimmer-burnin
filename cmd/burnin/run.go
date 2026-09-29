@@ -242,6 +242,16 @@ func runRun(args []string) error {
 	for _, w := range warnings {
 		warn("%s", w)
 	}
+	// #535: a group-only device the container is not in is visible and
+	// unopenable, and an AMD runner then skips as if no accelerator existed.
+	// Named here, against this host's own device modes, before anything runs.
+	for _, t := range resolved.Tests {
+		if spec, err := localrun.Translate(resolved, t); err == nil {
+			for _, gap := range localrun.DeviceGroupGaps(spec) {
+				warn("%s: %s", t.Name, gap)
+			}
+		}
+	}
 
 	// Threshold linting before anything runs, so an unsatisfiable gate is
 	// reported while its author is still here rather than as a verdict on

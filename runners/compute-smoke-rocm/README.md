@@ -178,5 +178,5 @@ the multi-device engine was written.
   by unit tests over `scopeOf`. Add them if the on-hardware pass finds the
   integration path still unexercised.
 - **Runtime prerequisites**: `/dev/kfd` and `/dev/dri` from the device plugin
-  (`amd.com/gpu: 1`). Runs as uid 65532; see clockprobe-rocm's README for the
-  same open question about group-restricted `/dev/kfd`.
+  (`amd.com/gpu: 1`). Runs as uid 65532, so a group-restricted `/dev/kfd`
+  needs `spec.runner.supplementalGroups` — see clockprobe-rocm's README.

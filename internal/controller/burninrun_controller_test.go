@@ -5448,3 +5448,34 @@ func TestBaselineRunWithoutThresholdsMeasuresAndSaysSo(t *testing.T) {
 		t.Errorf("a baseline must still record its measurements: %v", got.Status.Results[0].Metrics)
 	}
 }
+
+// #535: a group-only device (AMD's /dev/kfd, 0660 root:render) is opened by
+// joining its group, not by becoming root. The gids reach the POD's security
+// context, change nothing about the uid, and a test that asks for none gets no
+// PodSecurityContext at all.
+func TestSupplementalGroupsReachThePodAndGrantNothingElse(t *testing.T) {
+	podFor := func(groups []int64) *corev1.Pod {
+		spec := burninv1alpha1.BurnInTestSpec{
+			Kind:   burninv1alpha1.KindClockProbe,
+			Runner: &burninv1alpha1.RunnerSpec{Image: "example.invalid/cp:v1", SupplementalGroups: groups},
+		}
+		pod, err := podForTest(newRun("r", "p", "halo"), 0, 1, "t", &spec, nil, "halo", "",
+			burninv1alpha1.TargetSelector{}, nil)
+		if err != nil {
+			t.Fatalf("podForTest: %v", err)
+		}
+		return pod
+	}
+
+	if pod := podFor(nil); pod.Spec.SecurityContext != nil {
+		t.Errorf("a test asking for no group got a PodSecurityContext: %+v", pod.Spec.SecurityContext)
+	}
+	pod := podFor([]int64{992})
+	psc := pod.Spec.SecurityContext
+	if psc == nil || len(psc.SupplementalGroups) != 1 || psc.SupplementalGroups[0] != 992 {
+		t.Fatalf("supplementalGroups did not reach the pod: %+v", psc)
+	}
+	if psc.RunAsUser != nil || pod.Spec.Containers[0].SecurityContext != nil {
+		t.Error("a group grant silently changed the uid or the container's security context")
+	}
+}

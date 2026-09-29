@@ -679,6 +679,17 @@ func podForTest(
 		},
 	}
 
+	// #535: membership of a host device's own group, the least-privilege way
+	// to open a group-only device node such as AMD's /dev/kfd. Pod-level
+	// because that is where Kubernetes puts it, which also covers Prepare's
+	// initContainers. Nil unless the test asked, so a test that declared none
+	// gets no PodSecurityContext at all.
+	if spec.Runner != nil && len(spec.Runner.SupplementalGroups) > 0 {
+		pod.Spec.SecurityContext = &corev1.PodSecurityContext{
+			SupplementalGroups: append([]int64(nil), spec.Runner.SupplementalGroups...),
+		}
+	}
+
 	if rv != nil {
 		// hostname + subdomain are what give this pod its own A record under
 		// the headless Service, which is how the other members address it.

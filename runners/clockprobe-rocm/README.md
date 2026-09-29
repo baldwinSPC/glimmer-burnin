@@ -112,10 +112,14 @@ correlation against.
   `publish-runner.yml` still asserts two platforms and must learn this
   exception before a publish is attempted.
 - **Runtime prerequisites**: `/dev/kfd` and `/dev/dri` from the device plugin
-  (`amd.com/gpu: 1`). The image runs as uid 65532; hosts whose `/dev/kfd` is
-  group-restricted may need `runAsUser: 0` or a supplemental group until the
-  hardware pass settles the least privilege that works — record what is
-  measured, then narrow.
+  (`amd.com/gpu: 1`). The image runs as uid 65532, which cannot open a
+  group-restricted `/dev/kfd` — measured on a Strix Halo as `0660 root:render`,
+  `other::---` — and then reports `no accelerator visible` and skips. The
+  least-privilege grant is the device's own group, not root: read it off the
+  target (`stat -c %g /dev/kfd`; 992 on that unit) and set
+  `spec.runner.supplementalGroups: [<gid>]` (#535). `burnin run` passes the same
+  list as `--group-add`, and warns before running when a device it is about to
+  hand the container is group-only and the group is missing.
 
 ## Build notes
 
