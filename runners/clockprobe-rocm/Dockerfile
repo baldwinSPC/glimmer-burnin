@@ -31,10 +31,14 @@
 # this project already trusts, and it is one pinned artifact instead of a
 # resolution that can drift under us.
 #
-# 6.4.4 is the first release train listing gfx1151 (Strix Halo) as supported.
-# Community reports of ROCm 7.x regressions on gfx1151 are why this stays on
-# 6.4.x until the hardware pass can measure both.
-ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:6.4.4-complete
+# 7.2.3, not 6.4.4 (#531). This pinned 6.4.4 "until the hardware pass can
+# measure both", and the pass settled it: on a Strix Halo running kernel
+# 6.18.44 with host ROCm 7.14, every image built on 6.4.4 found the device and
+# selected its gfx1151 code object, then failed to finalise it
+# (HSA_STATUS_ERROR_OUT_OF_RESOURCES). 7.2.x is the userland other workloads
+# already run on that host. The five apt-installed -rocm runners share this
+# pin; nccl-rocm needs 7.12+ for RCCL and copies its runtime instead.
+ARG ROCM_IMAGE=docker.io/rocm/dev-ubuntu-24.04:7.2.3-complete
 FROM ${ROCM_IMAGE} AS build
 
 # The offload targets this image carries device code for.  HIP has no PTX-style
@@ -66,10 +70,11 @@ RUN set -eu; \
       exit 1; \
     }
 
-COPY clockprobe_rocm.cc sysfs_clocks.h device_fold.h /src/
+COPY clockprobe_rocm.cc sysfs_clocks.h device_fold.h gfx_offload.h /src/
 RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \
       -std=c++17 -O3 \
       $(for t in ${GPU_TARGETS}; do printf -- '--offload-arch=%s ' "$t"; done) \
+      -DBURNIN_BUILT_TARGETS="\"${GPU_TARGETS}\"" \
       -o /out/clockprobe-rocm clockprobe_rocm.cc
 
 # Record what the shipped binary actually links, and assert the one dependency
@@ -84,9 +89,9 @@ RUN ldd /out/clockprobe-rocm | tee /out/ldd.txt \
 # ── final: the binary plus the MIT HIP runtime, nothing else ─────────────────
 # NOT the devel image: it carries the whole toolchain and the math libraries,
 # none of which a probe needs on a node.
-FROM ubuntu:24.04
+FROM docker.io/library/ubuntu:24.04
 
-ARG ROCM_VERSION=6.4.4
+ARG ROCM_VERSION=7.2.3
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg \
   && wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \
@@ -96,10 +101,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   # AMD's own documented origin pin, and it is load-bearing rather than
   # defensive.  Ubuntu noble/universe ships its own builds of ROCm package
   # names — its hipcc (5.7.1-3) is what broke this image's first CI build by
-  # shadowing AMD's — and the runtime the binary loads must be the 6.4.4 one
+  # shadowing AMD's — and the runtime the binary loads must be the ROCM_VERSION one
   # it was compiled against.  Pinning the ORIGIN closes the whole class: a
   # distro-shadowed hsa-rocr or comgr would install quietly and then misbehave
-  # against a 6.4.4-compiled binary, which is far subtler than a missing path.
+  # against a binary compiled for another ROCm, which is far subtler than a missing path.
   && printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 1000\n' \
       > /etc/apt/preferences.d/rocm \
   && apt-get update && apt-get install -y --no-install-recommends \

@@ -26,7 +26,7 @@
 # and clockprobe-rocm's first two CI builds are the record of what the other
 # way costs: Ubuntu's universe hipcc shadowed AMD's, and the hand-picked
 # package set could not link device code.  See that runner's README.
-ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:6.4.4-complete
+ARG ROCM_IMAGE=docker.io/rocm/dev-ubuntu-24.04:7.2.3-complete
 FROM ${ROCM_IMAGE} AS build
 
 # The offload targets this image carries device code for.
@@ -63,9 +63,9 @@ RUN ldd /out/compute-smoke-rocm | tee /out/ldd.txt \
     && ! grep -q 'not found' /out/ldd.txt
 
 # ── final: the binary plus the MIT HIP runtime, nothing else ─────────────────
-FROM ubuntu:24.04
+FROM docker.io/library/ubuntu:24.04
 
-ARG ROCM_VERSION=6.4.4
+ARG ROCM_VERSION=7.2.3
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg \
   && wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \

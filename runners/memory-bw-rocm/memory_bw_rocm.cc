@@ -90,6 +90,7 @@
 
 #include "bw_stats.h"
 #include "device_fold.h"
+#include "gfx_offload.h"
 
 namespace {
 
@@ -220,6 +221,13 @@ void processDevice(int index, long windowSecondsTotal, long bufferMiB, long copy
 	}
 	out->name = props.name;
 	out->gfxTarget = props.gcnArchName;
+	// #564: refused BEFORE any launch — see gfx_offload.h for why after is too late.
+	if (const std::string why = gfxoffload::refusal(gfxoffload::kBuiltTargets, props.gcnArchName);
+	    !why.empty()) {
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) + ": " + why + "; hardware unjudged";
+		return;
+	}
 	// A PCI address string built directly from HIP's own report of where this
 	// ordinal lives — unlike clockprobe_rocm.cc, this runner reads no sysfs
 	// telemetry, so there is no separate sysfs card to correlate against.
@@ -353,6 +361,8 @@ void processDevice(int index, long windowSecondsTotal, long bufferMiB, long copy
 	// Warm up so the measured window excludes first-launch and page-in costs,
 	// which on a GTT-backed pool are real and would understate a healthy part.
 	hipLaunchKernelGGL(triad, dim3(blocks), dim3(threads), 0, nullptr, dA, dB, dC, scalar, elems);
+	// #564: the synchronize does not report a launch that never started.
+	if ((e = hipGetLastError()) != hipSuccess) { setError("triad warmup launch", e); return; }
 	if ((e = hipDeviceSynchronize()) != hipSuccess) { setError("triad warmup", e); return; }
 
 	long iterations = 0;
@@ -433,7 +443,7 @@ devices::DeviceReport toDeviceReport(const DeviceResult &r) {
 
 }  // namespace
 
-int main() {
+static int runMain() {
 	std::string cfgErr;
 	long durationSeconds, bufferMiB, copyPasses;
 	if (!envLong("BURNIN_DURATION_SECONDS", 60, &durationSeconds, &cfgErr) ||
@@ -624,4 +634,18 @@ int main() {
 	if (combined == kExitFail) return fail(reasons);
 	if (combined == kExitSkip) return skip(reasons);
 	return errored(reasons);
+}
+
+// #564: line-buffer stdout so every line already printed survives a crash —
+// a container log is a pipe, fully buffered by default, and a SIGSEGV used to
+// take the runner's own diagnosis with it — and leave through std::_Exit, so
+// the HIP runtime's teardown cannot replace the exit code this runner decided
+// with a SIGSEGV of its own. Measured on gfx1151: after a failed code-object
+// load every -rocm runner exited 139 with empty stdout.
+int main() {
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	const int rc = runMain();
+	std::fflush(stdout);
+	std::fflush(stderr);
+	std::_Exit(rc);
 }

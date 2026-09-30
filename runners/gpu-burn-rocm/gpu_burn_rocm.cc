@@ -26,6 +26,7 @@
 // whole suite that would notice. A soak that finds a miscompare on a Halo has
 // found something nothing else can see.
 
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 
@@ -64,7 +65,7 @@ const soak::Keys kKeys = {
 
 }  // namespace
 
-int main() {
+static int runMain() {
 	std::string cfgErr;
 	long durationSeconds = 0, matrixN = 0;
 	if (!soak::envLong("BURNIN_DURATION_SECONDS", soak::kDefaultDurationSeconds, &durationSeconds,
@@ -113,4 +114,18 @@ int main() {
 		                             " non-finite value(s) appeared in the result under load");
 	}
 	return soak::pass(kKeys);
+}
+
+// #564: line-buffer stdout so every line already printed survives a crash —
+// a container log is a pipe, fully buffered by default, and a SIGSEGV used to
+// take the runner's own diagnosis with it — and leave through std::_Exit, so
+// the HIP runtime's teardown cannot replace the exit code this runner decided
+// with a SIGSEGV of its own. Measured on gfx1151: after a failed code-object
+// load every -rocm runner exited 139 with empty stdout.
+int main() {
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	const int rc = runMain();
+	std::fflush(stdout);
+	std::fflush(stderr);
+	std::_Exit(rc);
 }

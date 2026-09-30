@@ -23,7 +23,7 @@ still, but it is a breaking contract change across every existing profile.)
 
 ## It needs ROCm 7.12+, and 7.2.x will not do
 
-The other `-rocm` runners pin 6.4.4. This one cannot.
+The other `-rocm` runners pin 7.2.3, a maintenance train. This one cannot.
 
 RCCL did not support gfx1151 until [rocm-systems PR #3415](https://github.com/ROCm/rocm-systems/pull/3415)
 (merged 2026-02-26), first shipped in **ROCm 7.12**. The `rocm-7.2.x` line is a

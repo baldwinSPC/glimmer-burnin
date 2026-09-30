@@ -21,7 +21,7 @@
 # Build from AMD's devel image rather than assembling ROCm from apt — the
 # convention every NVIDIA runner here follows with nvcr.io/nvidia/cuda:*-devel,
 # and the thing clockprobe-rocm's first two CI builds paid to learn.
-ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:6.4.4-complete
+ARG ROCM_IMAGE=docker.io/rocm/dev-ubuntu-24.04:7.2.3-complete
 FROM ${ROCM_IMAGE} AS build
 
 # The offload targets this image carries device code for.  HIP has no JIT
@@ -47,10 +47,11 @@ RUN set -eu; \
       exit 1; \
     }
 
-COPY memory_bw_rocm.cc bw_stats.h device_fold.h /src/
+COPY memory_bw_rocm.cc bw_stats.h device_fold.h gfx_offload.h /src/
 RUN mkdir -p /out && cd /src && /opt/rocm/bin/hipcc \
       -std=c++17 -O3 \
       $(for t in ${GPU_TARGETS}; do printf -- '--offload-arch=%s ' "$t"; done) \
+      -DBURNIN_BUILT_TARGETS="\"${GPU_TARGETS}\"" \
       -o /out/memory-bw-rocm memory_bw_rocm.cc
 
 RUN ldd /out/memory-bw-rocm | tee /out/ldd.txt \
@@ -58,9 +59,9 @@ RUN ldd /out/memory-bw-rocm | tee /out/ldd.txt \
     && ! grep -q 'not found' /out/ldd.txt
 
 # ── final: the binary plus the MIT HIP runtime, nothing else ─────────────────
-FROM ubuntu:24.04
+FROM docker.io/library/ubuntu:24.04
 
-ARG ROCM_VERSION=6.4.4
+ARG ROCM_VERSION=7.2.3
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg \
   && wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \

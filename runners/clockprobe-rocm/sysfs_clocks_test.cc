@@ -165,6 +165,21 @@ void testJudge() {
 	j = Judge(15.0, true, 55.0, true, 40.0, floor, thermalFloor, thermalTemp);
 	check(std::strcmp(j.idleClockLock, "unknown") == 0,
 	      "cool+slow but not busy stays unknown");
+	check(!j.loadNotApplied, "40% busy is a loaded part, still judged");
+
+	// Slow, cool and essentially IDLE: the load never reached the part, so the
+	// clock read is an idle clock. Not a verdict on the part — the runner
+	// reports it as an error. Measured: 22% of ladder top at 0.99% busy.
+	j = Judge(22.0, true, 32.0, true, 0.99, floor, thermalFloor, thermalTemp);
+	check(!j.pass, "an idle clock is not a pass");
+	check(j.loadNotApplied, "slow at ~1% busy means the load was not applied");
+	check(std::strcmp(j.idleClockLock, "unknown") == 0, "an unloaded part cannot show the lock");
+
+	// Neither a fast part nor an unreadable utilization is ever called unloaded.
+	check(!Judge(95.0, true, 70.0, true, 1.0, floor, thermalFloor, thermalTemp).loadNotApplied,
+	      "a pass is never reinterpreted as unloaded");
+	check(!Judge(15.0, true, 55.0, false, 0.0, floor, thermalFloor, thermalTemp).loadNotApplied,
+	      "an unknown utilization never declares the load absent");
 }
 
 } // namespace
