@@ -81,6 +81,7 @@
 //     WMMA_GEMM_SKIP:  <why>       exit 2   this hardware is out of scope
 //     WMMA_GEMM_ERROR: <why>       exit 3   we could not measure; UNJUDGED
 
+#include <cstdlib>
 #include <hip/hip_runtime.h>
 
 #include <chrono>
@@ -471,7 +472,7 @@ int wholeRunSkip(const std::string &why) {
 
 }  // namespace
 
-int main() {
+static int runMain() {
 	std::printf("built_gfx_targets=%s\n", kBuiltTargets);
 	std::printf("m=%d\nn=%d\nk=%d\n", kM, kN, kK);
 
@@ -573,4 +574,18 @@ int main() {
 	                                            : "WMMA_GEMM_ERROR";
 	std::printf("%s: %s\n", marker, reasons.c_str());
 	return combined;
+}
+
+// #564: line-buffer stdout so every line already printed survives a crash —
+// a container log is a pipe, fully buffered by default, and a SIGSEGV used to
+// take the runner's own diagnosis with it — and leave through std::_Exit, so
+// the HIP runtime's teardown cannot replace the exit code this runner decided
+// with a SIGSEGV of its own. Measured on gfx1151: after a failed code-object
+// load every -rocm runner exited 139 with empty stdout.
+int main() {
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	const int rc = runMain();
+	std::fflush(stdout);
+	std::fflush(stderr);
+	std::_Exit(rc);
 }

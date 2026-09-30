@@ -273,7 +273,20 @@ struct Judgement {
 	// reading "busy while slow" cannot be established. An unknown must never
 	// collapse into an all-clear.
 	const char *idleClockLock = "false";
+	// loadNotApplied: the part was slow AND the driver says it was mostly
+	// idle, so the clock that was read is an idle clock and says nothing about
+	// the part under load. That is not a measurement, so the runner reports
+	// it as an ERROR (unjudged, retried), never a Fail. Measured on a Strix
+	// Halo: a load loop feeding the GPU ~1% of the time read 22% of the
+	// ladder top, which the general floor would otherwise have condemned.
+	bool loadNotApplied = false;
 };
+
+// kLoadAppliedBusyPct is the utilization below which a slow part is judged
+// unloaded rather than slow. A saturating load reads 90%+; an idle part reads
+// ~0-1%. The bar is low on purpose: between it and the lock signature's 80%
+// the slow part is still judged, just without a lock verdict.
+constexpr double kLoadAppliedBusyPct = 25.0;
 
 // Judge applies the same fail-closed rules clockprobe applies, with the amdgpu
 // idle-clock lock (ROCm issue #5750) in the role the PD wedge plays on GB10:
@@ -311,6 +324,9 @@ inline Judgement Judge(double sustainedPct,
 		j.idleClockLock = thermal ? "false" : "unknown";
 	} else if (!busyKnown) {
 		j.idleClockLock = "unknown";
+	} else if (meanBusyPct < kLoadAppliedBusyPct) {
+		j.idleClockLock = "unknown";
+		j.loadNotApplied = true;
 	} else {
 		// Slow, cool, and the driver says the part is working: the #5750
 		// signature. 80% is a deliberately high bar — the load this runner

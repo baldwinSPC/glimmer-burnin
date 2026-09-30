@@ -60,8 +60,17 @@ driver's own declared ceiling for the part as configured, which keeps the
 denominator honest when a BIOS or power-mode change lowers the ladder.
 
 The load is a register-resident FP32 FMA chain — clock-bound, no memory
-traffic, exact FLOP count — launched continuously while the sampler reads
-sysfs between launches.
+traffic, exact FLOP count — kept queued for the whole window while the sampler
+reads sysfs. "Queued" is the part that matters, and the first version got it
+wrong: it timed a COLD first launch for calibration (module load counted as
+kernel time, so every launch was sized at about a millisecond) and then issued
+one launch per 200 ms poll, only when the stream was empty. The part sat idle
+~99% of the window — measured on gfx1151: 0.99% busy, 10 W, 22% of the ladder
+top — and the runner condemned the idle clock. It now calibrates after an
+untimed warm-up launch, with events, to ~100 ms per launch, and keeps two
+batches in flight, each at least twice the sample interval long, so the queue
+never drains between polls. `gpu_utilization_pct`, `mean_power_w` and
+`sustained_fma_throughput_tflops` are the evidence that the load was applied.
 
 ## Judgement
 
@@ -79,6 +88,10 @@ Same rules as clockprobe, with the vocabulary sysfs supports:
   only for slow + cool + busy (≥80% mean utilization); `unknown` whenever the
   temperature or utilization needed to establish the signature could not be
   read. Unknown never reads as all-clear.
+- **Slow and mostly idle → error** (exit 3), not fail: when the part was slow
+  AND `gpu_busy_percent` averaged under 25%, the load never reached it, and
+  the clock that was read is an idle clock that says nothing about the part
+  under load. Only a slow part the driver reports as working is judged.
 - No readable `pp_dpm_sclk` ladder → **skip** (exit 2): a part with no rated
   clock is unjudged, not slow. An amdgpu device visible in sysfs that HIP
   cannot use → **error** (exit 3): hardware present, unjudged.
@@ -124,7 +137,7 @@ correlation against.
 ## Build notes
 
 **Build from AMD's devel image, not from apt.** The build stage is
-`rocm/dev-ubuntu-24.04:6.4.4-complete`, matching how every NVIDIA runner here
+`rocm/dev-ubuntu-24.04:7.2.3-complete`, matching how every NVIDIA runner here
 builds against `nvcr.io/nvidia/cuda:*-devel`. The first two CI builds of this
 image assembled the toolchain from apt instead, and both failed on package
 archaeology rather than on anything about this runner:
@@ -144,6 +157,11 @@ already tracks. If you re-pin `ROCM_VERSION`, keep the pin, and keep both
 `ldd` assertions: one proves the built binary links the HIP runtime, the other
 proves the runtime stage actually resolves it.
 
-**Why 6.4.x and not 7.x**: 6.4.4 is the first release train listing gfx1151 as
-supported, and the community has reported ROCm 7.x performance regressions on
-this part. Revisit when the hardware pass can measure both.
+**Why 7.2.3 and not 6.4.4** (#531): this runner pinned 6.4.4, the first release
+train listing gfx1151, until a hardware pass could measure both. It did. On a
+Strix Halo with kernel 6.18.44 and host ROCm 7.14, every image built on 6.4.4
+found the device and selected its gfx1151 code object, then could not finalise
+it (`HSA_STATUS_ERROR_OUT_OF_RESOURCES`, reported by HIP as
+`hipErrorNoBinaryForGpu`). 7.2.x is the userland other workloads already run on
+that host. The five apt-installed `-rocm` runners share this pin; `nccl-rocm`
+needs 7.12+ for RCCL.

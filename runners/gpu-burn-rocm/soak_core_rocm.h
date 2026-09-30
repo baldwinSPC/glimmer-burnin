@@ -109,6 +109,7 @@
 #include <vector>
 
 #include "device_fold.h"
+#include "gfx_offload.h"
 #include "kmsg/kmsg_watch.h"
 
 namespace soak {
@@ -614,6 +615,14 @@ inline void setupDevice(DeviceCtx *d, int matrixN) {
 	}
 	d->gcnArchName = d->props.gcnArchName;
 	d->identityRead = true;
+	// #564: refused BEFORE the reference GEMM's launch — see gfx_offload.h for
+	// why after is too late.
+	if (const std::string why = gfxoffload::refusal(gfxoffload::kBuiltTargets, d->props.gcnArchName);
+	    !why.empty()) {
+		d->exitCode = kExitError;
+		d->detail = why;
+		return;
+	}
 	// Identity keys keep TODAY's meaning — the FIRST device's — exactly as the
 	// NVIDIA engine's setupDevice does, and for the same reason: a bracket-
 	// indexed pseudo-key would not match the registered metric-name grammar,
@@ -656,13 +665,19 @@ inline void setupDevice(DeviceCtx *d, int matrixN) {
 	if ((e = hipEventCreate(&d->evStart)) != hipSuccess) return fail("hipEventCreate start", e);
 	if ((e = hipEventCreate(&d->evStop)) != hipSuccess) return fail("hipEventCreate stop", e);
 
+	// #564: every launch is checked where it is made. A synchronize does not
+	// report a launch that never started: on gfx1151 hipStreamSynchronize
+	// returned success after hipErrorNoBinaryForGpu.
 	hipLaunchKernelGGL(fillKernel, dim3(256), dim3(256), 0, d->stream, d->dA, d->elems, 0x9E3779B9u);
+	if ((e = hipGetLastError()) != hipSuccess) return fail("fill launch", e);
 	hipLaunchKernelGGL(fillKernel, dim3(256), dim3(256), 0, d->stream, d->dB, d->elems, 0x85EBCA6Bu);
+	if ((e = hipGetLastError()) != hipSuccess) return fail("fill launch", e);
 	if ((e = hipStreamSynchronize(d->stream)) != hipSuccess) return fail("fill", e);
 
 	const dim3 block(kBlockDim, kBlockDim);
 	const dim3 grid((d->n + kTileN - 1) / kTileN, (d->n + kTileM - 1) / kTileM);
 	hipLaunchKernelGGL(sgemmKernel, grid, block, 0, d->stream, d->dA, d->dB, d->dRef, d->n);
+	if ((e = hipGetLastError()) != hipSuccess) return fail("reference gemm launch", e);
 	if ((e = hipStreamSynchronize(d->stream)) != hipSuccess) return fail("reference gemm", e);
 
 	d->active = true;
@@ -799,9 +814,14 @@ inline void report(const Keys &k, const std::vector<DeviceCtx *> &reportable,
 	}
 
 	std::printf("%s%.2f\n", k.elapsed, m.elapsedSeconds);
-	std::printf("%s%lld\n", k.iterations, m.iterations);
-	std::printf("%s%llu\n", k.miscompares, m.miscompares);
-	std::printf("nonfinite_count=%llu\n", m.nonfinite);
+	// Counters only when some device actually ran: a device refused before its
+	// first launch (#564) measured nothing, and `errors=0` from it would read
+	// as a clean correctness check nobody performed.
+	if (!reports.empty()) {
+		std::printf("%s%lld\n", k.iterations, m.iterations);
+		std::printf("%s%llu\n", k.miscompares, m.miscompares);
+		std::printf("nonfinite_count=%llu\n", m.nonfinite);
+	}
 	if (m.tflopsKnown) std::printf("%s%.3f\n", k.tflops, m.tflops);
 
 	if (m.tempKnown) {

@@ -5,7 +5,7 @@
 #
 # ── THIS RUNNER NEEDS A NEWER ROCm THAN THE OTHER -rocm IMAGES ───────────────
 #
-# The others pin 6.4.4.  RCCL did not support gfx1151 until rocm-systems PR
+# The others pin 7.2.3.  RCCL did not support gfx1151 until rocm-systems PR
 # #3415 (merged 2026-02-26), which first shipped in ROCm 7.12.  Critically the
 # rocm-7.2.x line is a MAINTENANCE BRANCH that never received the fix, so
 # "ROCm 7.x" is not a sufficient floor and 7.2.4 would build an image whose

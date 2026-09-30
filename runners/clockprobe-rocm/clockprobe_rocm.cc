@@ -86,6 +86,7 @@
 #include <vector>
 
 #include "device_fold.h"
+#include "gfx_offload.h"
 #include "sysfs_clocks.h"
 
 namespace {
@@ -243,6 +244,13 @@ void runOneDevice(int index, long windowSecondsTotal, long sampleIntervalMs, dou
 	}
 	out->name = props.name;
 	out->gfxTarget = props.gcnArchName;
+	// #564: refused BEFORE any launch — see gfx_offload.h for why after is too late.
+	if (const std::string why = gfxoffload::refusal(gfxoffload::kBuiltTargets, props.gcnArchName);
+	    !why.empty()) {
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) + ": " + why + "; hardware unjudged";
+		return;
+	}
 
 	// PCI-address correlation, not sysfs enumeration order — see the file
 	// header. props.pciDomainID/pciBusID/pciDeviceID are HIP's own report of
@@ -285,29 +293,57 @@ void runOneDevice(int index, long windowSecondsTotal, long sampleIntervalMs, dou
 		out->reason = "device " + std::to_string(index) + ": hipMalloc: " + hipGetErrorString(hs);
 		return;
 	}
-	auto cleanup = [&]() { (void)hipFree(sink); };
 
 	const int threads = 256;
 	const int blocks = (props.multiProcessorCount > 0 ? props.multiProcessorCount : 40) * 8;
 
-	int iters = 20000;
-	{
-		const auto t0 = std::chrono::steady_clock::now();
+	// Calibration, the CUDA runner's shape: one small UNTIMED launch first —
+	// it pays module load and first-launch overhead, which once made the timed
+	// launch look ~100x slower than the kernel and sized every later launch at
+	// about a millisecond — then two event-timed rounds converging on
+	// kLaunchMs per launch.
+	constexpr double kLaunchMs = 100.0;
+	int iters = 1024;
+	hipEvent_t evStart = nullptr, evStop = nullptr, batchDone[2] = {nullptr, nullptr};
+	auto cleanup = [&]() {
+		for (hipEvent_t e : {evStart, evStop, batchDone[0], batchDone[1]})
+			if (e) (void)hipEventDestroy(e);
+		(void)hipFree(sink);
+	};
+	for (hipEvent_t *e : {&evStart, &evStop, &batchDone[0], &batchDone[1]}) {
+		if ((hs = hipEventCreate(e)) != hipSuccess) {
+			out->exitCode = kExitError;
+			out->reason = "device " + std::to_string(index) + ": hipEventCreate: " + hipGetErrorString(hs);
+			cleanup();
+			return;
+		}
+	}
+	hipLaunchKernelGGL(fmaLoad, dim3(blocks), dim3(threads), 0, nullptr, sink, iters);
+	// #564: a launch that never started is NOT reported by the synchronize
+	// below — measured on gfx1151, hipDeviceSynchronize returned success
+	// after hipErrorNoBinaryForGpu — so the launch itself must be checked.
+	if ((hs = hipGetLastError()) != hipSuccess || (hs = hipDeviceSynchronize()) != hipSuccess) {
+		out->exitCode = kExitError;
+		out->reason =
+		    "device " + std::to_string(index) + ": initial launch failed: " + hipGetErrorString(hs);
+		cleanup();
+		return;
+	}
+	iters = 20000;
+	for (int round = 0; round < 2; ++round) {
+		(void)hipEventRecord(evStart, nullptr);
 		hipLaunchKernelGGL(fmaLoad, dim3(blocks), dim3(threads), 0, nullptr, sink, iters);
-		if ((hs = hipDeviceSynchronize()) != hipSuccess) {
+		(void)hipEventRecord(evStop, nullptr);
+		if ((hs = hipGetLastError()) != hipSuccess || (hs = hipEventSynchronize(evStop)) != hipSuccess) {
 			out->exitCode = kExitError;
 			out->reason =
 			    "device " + std::to_string(index) + ": calibration launch failed: " + hipGetErrorString(hs);
 			cleanup();
 			return;
 		}
-		const double ms = std::chrono::duration<double, std::milli>(
-		                      std::chrono::steady_clock::now() - t0)
-		                      .count();
-		if (ms > 0.05) {
-			const double scale = 100.0 / ms;
-			iters = static_cast<int>(std::fmin(std::fmax(iters * scale, 1000.0), 2e7));
-		}
+		float ms = 0.0f;
+		if (hipEventElapsedTime(&ms, evStart, evStop) != hipSuccess || ms <= 0.0f) break;
+		iters = static_cast<int>(std::fmin(std::fmax(iters * (kLaunchMs / ms), 1024.0), 2e7));
 	}
 
 	const long warmupSeconds = std::max(3L, std::min(10L, windowSecondsTotal / 6));
@@ -322,21 +358,46 @@ void runOneDevice(int index, long windowSecondsTotal, long sampleIntervalMs, dou
 		return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 	};
 
-	hipLaunchKernelGGL(fmaLoad, dim3(blocks), dim3(threads), 0, nullptr, sink, iters);
-	launches++;
-	while (secondsSince() < static_cast<double>(windowSecondsTotal)) {
-		if (hipStreamQuery(nullptr) == hipSuccess) {
+	// Two batches in flight, each at least twice the sample interval long, so
+	// the queue is never empty between polls: when the older batch completes
+	// the newer one is still running, and its replacement goes in behind it.
+	// The previous loop launched ONE ~1 ms kernel per 200 ms poll and only
+	// when the stream was idle — the part sat idle ~99% of the window and
+	// read an idle clock (0.99% busy, 10 W, 22% of ladder top on gfx1151).
+	const int perBatch =
+	    std::max(1, static_cast<int>(std::ceil(2.0 * sampleIntervalMs / kLaunchMs)));
+	auto submit = [&](int slot) -> bool {
+		for (int i = 0; i < perBatch; ++i)
 			hipLaunchKernelGGL(fmaLoad, dim3(blocks), dim3(threads), 0, nullptr, sink, iters);
-			launches++;
-		} else {
-			hipError_t qs = hipGetLastError();
-			if (qs != hipSuccess && qs != hipErrorNotReady) {
+		if ((hs = hipGetLastError()) != hipSuccess) return false;
+		(void)hipEventRecord(batchDone[slot], nullptr);
+		launches += perBatch;
+		return true;
+	};
+	if (!submit(0) || !submit(1)) {
+		out->exitCode = kExitError;
+		out->reason = "device " + std::to_string(index) + ": load launch failed: " + hipGetErrorString(hs);
+		cleanup();
+		return;
+	}
+	int oldest = 0;
+	while (secondsSince() < static_cast<double>(windowSecondsTotal)) {
+		const hipError_t q = hipEventQuery(batchDone[oldest]);
+		if (q == hipSuccess) {
+			if (!submit(oldest)) {
 				out->exitCode = kExitError;
-				out->reason = "device " + std::to_string(index) +
-				             ": load launch failed mid-run: " + hipGetErrorString(qs);
+				out->reason = "device " + std::to_string(index) + ": load launch failed mid-run: " +
+				              hipGetErrorString(hs);
 				cleanup();
 				return;
 			}
+			oldest ^= 1;
+		} else if (q != hipErrorNotReady) {
+			out->exitCode = kExitError;
+			out->reason = "device " + std::to_string(index) + ": load kernel failed mid-run: " +
+			              hipGetErrorString(q);
+			cleanup();
+			return;
 		}
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(sampleIntervalMs));
@@ -422,6 +483,16 @@ void runOneDevice(int index, long windowSecondsTotal, long sampleIntervalMs, dou
 		out->exitCode = kExitPass;
 		return;
 	}
+	if (j.loadNotApplied) {
+		char why[300];
+		std::snprintf(why, sizeof(why),
+		              "device %d: the part was %.1f%% busy over the window, so the %.1f%% clock read is "
+		              "an idle clock, not a clock under load; hardware unjudged",
+		              index, out->meanBusy, sustainedPct);
+		out->exitCode = kExitError;
+		out->reason = why;
+		return;
+	}
 	char reason[300];
 	std::snprintf(reason, sizeof(reason),
 	              "device %d: sustained clock %.1f%% of the DPM ladder top (%.0f MHz) is under the "
@@ -444,7 +515,7 @@ devices::DeviceReport toDeviceReport(const DeviceResult &r) {
 
 } // namespace
 
-int main() {
+static int runMain() {
 	std::string cfgErr;
 	long durationSeconds, sampleIntervalMs;
 	double clockFloorPct, thermalClockFloorPct, thermalTempC;
@@ -602,4 +673,18 @@ int main() {
 	if (combined == kExitFail) return fail(reasons);
 	if (combined == kExitSkip) return skip(reasons);
 	return errored(reasons);
+}
+
+// #564: line-buffer stdout so every line already printed survives a crash —
+// a container log is a pipe, fully buffered by default, and a SIGSEGV used to
+// take the runner's own diagnosis with it — and leave through std::_Exit, so
+// the HIP runtime's teardown cannot replace the exit code this runner decided
+// with a SIGSEGV of its own. Measured on gfx1151: after a failed code-object
+// load every -rocm runner exited 139 with empty stdout.
+int main() {
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	const int rc = runMain();
+	std::fflush(stdout);
+	std::fflush(stderr);
+	std::_Exit(rc);
 }

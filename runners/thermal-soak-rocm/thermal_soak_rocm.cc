@@ -14,6 +14,7 @@
 //
 // gpu-burn-rocm asks whether the answers stayed RIGHT while it was that hot.
 
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 
@@ -77,7 +78,7 @@ constexpr double kDefaultMinClockPct = 40.0;
 
 }  // namespace
 
-int main() {
+static int runMain() {
 	std::string cfgErr;
 	long durationSeconds = 0, matrixN = 0;
 	double minClockPct = 0, maxTempC = 0;
@@ -144,4 +145,18 @@ int main() {
 		return soak::fail(kKeys, reason);
 	}
 	return soak::pass(kKeys);
+}
+
+// #564: line-buffer stdout so every line already printed survives a crash —
+// a container log is a pipe, fully buffered by default, and a SIGSEGV used to
+// take the runner's own diagnosis with it — and leave through std::_Exit, so
+// the HIP runtime's teardown cannot replace the exit code this runner decided
+// with a SIGSEGV of its own. Measured on gfx1151: after a failed code-object
+// load every -rocm runner exited 139 with empty stdout.
+int main() {
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	const int rc = runMain();
+	std::fflush(stdout);
+	std::fflush(stderr);
+	std::_Exit(rc);
 }
