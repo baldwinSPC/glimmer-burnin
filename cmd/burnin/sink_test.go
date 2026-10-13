@@ -41,7 +41,7 @@ func TestBothDispatchersDeriveTheSameDeliveryID(t *testing.T) {
 		Status: api.BurnInRunStatus{Phase: rep.Phase},
 	}
 	fromOperator := sink.EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged,
-		sink.PhaseKey(rep.Phase), time.Now(), nil, false)
+		sink.PhaseKey(rep.Phase), time.Now(), nil, false, nil)
 
 	if fromCLI.DeliveryID != fromOperator.DeliveryID {
 		t.Errorf("delivery IDs diverged:\n  cli:      %s\n  operator: %s",

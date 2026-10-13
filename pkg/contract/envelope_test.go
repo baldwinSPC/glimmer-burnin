@@ -68,6 +68,9 @@ func TestValidateRejects(t *testing.T) {
 		"missing reason":     func(e *Envelope) { e.Reason = "" },
 		"missing run UID":    func(e *Envelope) { e.Run.UID = "" },
 		"zero sentAt":        func(e *Envelope) { e.SentAt = time.Time{} },
+		"progress planning nothing": func(e *Envelope) {
+			e.Progress = &Progress{PlannedExecutions: 0}
+		},
 	}
 	for what, mutate := range cases {
 		e := validEnvelope()
@@ -222,5 +225,41 @@ func TestSummaryAccountsForEveryExecution(t *testing.T) {
 	if int(total) != len(env.Results) {
 		t.Errorf("summary totals %d across %d results — a consumer asking 'how many did not "+
 			"pass' cannot answer it from the summary", total, len(env.Results))
+	}
+}
+
+// Progress is additive: an envelope without it decodes and validates, one with
+// it round-trips, and an absent progress is not written as a zero.
+func TestProgressIsOptionalAndRoundTrips(t *testing.T) {
+	bare := validEnvelope()
+	raw, err := json.Marshal(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "progress") {
+		t.Errorf("an envelope with no progress wrote it anyway: %s", raw)
+	}
+	var back Envelope
+	if err := json.Unmarshal(raw, &back); err != nil || back.Progress != nil {
+		t.Fatalf("decoding an envelope without progress: %v, progress %+v", err, back.Progress)
+	}
+
+	with := validEnvelope()
+	with.Progress = &Progress{PlannedExecutions: 6, Nodes: []string{"spark-a", "spark-b"}, CurrentNodes: []string{"spark-b"}}
+	if err := with.Validate(); err != nil {
+		t.Fatalf("a well-formed progress fails validation: %v", err)
+	}
+	raw, err = json.Marshal(with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"plannedExecutions":6`, `"nodes":["spark-a","spark-b"]`, `"currentNodes":["spark-b"]`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("envelope %s lacks %s", raw, want)
+		}
+	}
+	back = Envelope{}
+	if err := json.Unmarshal(raw, &back); err != nil || back.Progress == nil || back.Progress.PlannedExecutions != 6 {
+		t.Fatalf("round trip: %v, progress %+v", err, back.Progress)
 	}
 }

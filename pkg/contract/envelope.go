@@ -307,6 +307,28 @@ type ClusterRef struct {
 	UID string `json:"uid,omitempty"`
 }
 
+// Progress says how far a run is through the executions it planned.
+//
+// Without it a consumer can count the results it has seen but not the results
+// still owed, so "3 of ?" is the most a progress display can say. The operator
+// pins the execution plan when the run starts, so the denominator does not move
+// while the run is in flight.
+//
+// Present on deliveries from an operator that sends it; absent on older ones,
+// which a consumer must read as not observed and never as zero.
+type Progress struct {
+	// PlannedExecutions is how many executions the pinned plan holds, counted as
+	// results are: one per target node for each Node-scope test, and one for each
+	// Pair or Group-scope test. A test's repeats are one execution, as they are
+	// one result.
+	PlannedExecutions int32 `json:"plannedExecutions"`
+	// Nodes are the plan's target nodes, in the order the plan lists them.
+	Nodes []string `json:"nodes,omitempty"`
+	// CurrentNodes are the nodes with an execution in flight at this delivery, in
+	// the order of Nodes. Empty when none is, as on a terminal delivery.
+	CurrentNodes []string `json:"currentNodes,omitempty"`
+}
+
 // Envelope is the delivered document.
 type Envelope struct {
 	Version string `json:"version"`
@@ -355,6 +377,9 @@ type Envelope struct {
 	Fingerprint map[string]string `json:"fingerprint,omitempty"`
 	Results     []TestResult      `json:"results,omitempty"`
 	Summary     Summary           `json:"summary"`
+	// Progress is the run's planned executions and the nodes under test. Optional;
+	// see Progress.
+	Progress *Progress `json:"progress,omitempty"`
 }
 
 // NewDeliveryID derives the idempotency key for a delivery.
@@ -388,6 +413,9 @@ func (e *Envelope) Validate() error {
 		return &ValidationError{Field: "run.uid", Reason: "must be set; name alone is not stable identity"}
 	case e.SentAt.IsZero():
 		return &ValidationError{Field: "sentAt", Reason: "must be set"}
+	}
+	if e.Progress != nil && e.Progress.PlannedExecutions < 1 {
+		return &ValidationError{Field: "progress.plannedExecutions", Reason: "must be at least 1 when progress is present; an absent progress is how an envelope says it was not observed"}
 	}
 	for i, r := range e.Results {
 		for name := range r.Metrics {

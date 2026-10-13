@@ -84,7 +84,7 @@ func (r *BurnInRunReconciler) deliver(
 	}
 	logger := log.FromContext(ctx)
 	env := sink.EnvelopeFor(run, run.Spec.ProfileRef, reason, eventKey, r.now(), r.Cluster,
-		pinnedBaseline(run))
+		pinnedBaseline(run), pinnedProgress(run))
 
 	ctx, cancel := context.WithTimeout(ctx, deliveryTimeout)
 	defer cancel()
@@ -145,4 +145,42 @@ func pinnedBaseline(run *burninv1alpha1.BurnInRun) bool {
 		return p.Baseline
 	}
 	return run.Spec.Baseline != nil && *run.Spec.Baseline
+}
+
+// pinnedProgress is the run's planned executions and the nodes under test, read
+// from the pinned plan. A run with no readable plan has planned nothing yet, and
+// the envelope then carries no progress at all: an absent field is how a
+// consumer reads "not observed", where a zero would read as an empty plan.
+func pinnedProgress(run *burninv1alpha1.BurnInRun) *contract.Progress {
+	p, ok, err := loadPlan(run)
+	if err != nil || !ok || p == nil {
+		return nil
+	}
+	planned := 0
+	for _, t := range p.Tests {
+		planned += len(executionUnits(p, t))
+	}
+	if planned == 0 {
+		return nil
+	}
+	running := map[string]bool{}
+	for _, res := range run.Status.Results {
+		if res.Phase != burninv1alpha1.RunRunning {
+			continue
+		}
+		for _, n := range res.Nodes {
+			running[n] = true
+		}
+	}
+	var current []string
+	for _, n := range p.Targets {
+		if running[n] {
+			current = append(current, n)
+		}
+	}
+	return &contract.Progress{
+		PlannedExecutions: int32(planned),
+		Nodes:             append([]string(nil), p.Targets...),
+		CurrentNodes:      current,
+	}
 }

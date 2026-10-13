@@ -3,6 +3,7 @@ package sink
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func sampleRun() *burninv1alpha1.BurnInRun {
 func TestEnvelopeForProducesValidEnvelope(t *testing.T) {
 	run := sampleRun()
 	env := EnvelopeFor(run, run.Spec.ProfileRef, contract.ReasonPhaseChanged,
-		PhaseKey(run.Status.Phase), time.Unix(1750000100, 0), nil, false)
+		PhaseKey(run.Status.Phase), time.Unix(1750000100, 0), nil, false, nil)
 
 	if err := env.Validate(); err != nil {
 		t.Fatalf("built envelope fails validation: %v", err)
@@ -62,8 +63,8 @@ func TestEnvelopeForProducesValidEnvelope(t *testing.T) {
 // envelope — otherwise every retry mints a new key and dedupe is impossible.
 func TestEnvelopeDeliveryIDIsIndependentOfSendTime(t *testing.T) {
 	run := sampleRun()
-	a := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Unix(1750000100, 0), nil, false)
-	b := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Unix(1750009999, 0), nil, false)
+	a := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Unix(1750000100, 0), nil, false, nil)
+	b := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Unix(1750009999, 0), nil, false, nil)
 
 	if a.DeliveryID != b.DeliveryID {
 		t.Errorf("DeliveryID changed with the clock (%q vs %q); retries would never be recognised as duplicates",
@@ -76,10 +77,10 @@ func TestEnvelopeDeliveryIDIsIndependentOfSendTime(t *testing.T) {
 
 func TestDeliveryKeysDistinguishReasons(t *testing.T) {
 	run := sampleRun()
-	phase := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Now(), nil, false)
-	test := EnvelopeFor(run, "p", contract.ReasonTestCompleted, TestKey("fp4"), time.Now(), nil, false)
-	cp1 := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(1), time.Now(), nil, false)
-	cp2 := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(2), time.Now(), nil, false)
+	phase := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Now(), nil, false, nil)
+	test := EnvelopeFor(run, "p", contract.ReasonTestCompleted, TestKey("fp4"), time.Now(), nil, false, nil)
+	cp1 := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(1), time.Now(), nil, false, nil)
+	cp2 := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(2), time.Now(), nil, false, nil)
 
 	ids := map[string]string{
 		"phase": phase.DeliveryID, "test": test.DeliveryID,
@@ -190,7 +191,7 @@ func TestEnvelopeCarriesEveryViolation(t *testing.T) {
 			}},
 		},
 	}
-	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false)
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil)
 
 	got := env.Results[0].Violations
 	if len(got) != 3 {
@@ -225,7 +226,7 @@ func TestEnvelopeCarriesUnmeasurableAndNotEvaluated(t *testing.T) {
 			}},
 		},
 	}
-	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false)
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil)
 	r := env.Results[0]
 
 	if len(r.Unmeasurable) != 2 {
@@ -254,7 +255,7 @@ func TestCancelledEnvelopeCarriesTheReason(t *testing.T) {
 		Spec:       burninv1alpha1.BurnInRunSpec{CancelReason: "power event in row 4"},
 		Status:     burninv1alpha1.BurnInRunStatus{Phase: burninv1alpha1.RunCancelled},
 	}
-	env := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false)
+	env := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil)
 	if env.CancelReason != "power event in row 4" {
 		t.Errorf("cancelReason = %q, want the operator's own words", env.CancelReason)
 	}
@@ -262,7 +263,7 @@ func TestCancelledEnvelopeCarriesTheReason(t *testing.T) {
 	// A run that was NOT cancelled carries none, so a consumer can read its
 	// presence as a signal rather than checking a sentinel.
 	run.Status.Phase = burninv1alpha1.RunPassed
-	if got := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false); got.CancelReason != "" {
+	if got := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil); got.CancelReason != "" {
 		t.Errorf("a passed run carried cancelReason=%q", got.CancelReason)
 	}
 }
@@ -275,12 +276,12 @@ func TestCheckpointEnvelopeCarriesItsSequence(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "burnin", Name: "run1", UID: "uid-1"},
 		Status:     burninv1alpha1.BurnInRunStatus{Phase: burninv1alpha1.RunRunning},
 	}
-	cp := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(7), time.Unix(1750000000, 0), nil, false)
+	cp := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(7), time.Unix(1750000000, 0), nil, false, nil)
 	if cp.CheckpointSequence != 7 {
 		t.Errorf("checkpointSequence = %d, want 7", cp.CheckpointSequence)
 	}
 	// Only on checkpoints: a phase change has no sequence to carry.
-	phase := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Unix(1750000000, 0), nil, false)
+	phase := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, PhaseKey(run.Status.Phase), time.Unix(1750000000, 0), nil, false, nil)
 	if phase.CheckpointSequence != 0 {
 		t.Errorf("a phase-change envelope carried checkpointSequence=%d", phase.CheckpointSequence)
 	}
@@ -295,12 +296,12 @@ func TestClusterIsCarriedButNeverInvented(t *testing.T) {
 		Status:     burninv1alpha1.BurnInRunStatus{Phase: burninv1alpha1.RunPassed},
 	}
 	with := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0),
-		&contract.ClusterRef{Name: "spark-lab", UID: "ks-uid"}, false)
+		&contract.ClusterRef{Name: "spark-lab", UID: "ks-uid"}, false, nil)
 	if with.Cluster == nil || with.Cluster.Name != "spark-lab" || with.Cluster.UID != "ks-uid" {
 		t.Errorf("cluster = %+v, want both fields", with.Cluster)
 	}
 
-	without := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false)
+	without := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil)
 	if without.Cluster != nil {
 		t.Errorf("an operator with no cluster configured emitted %+v", without.Cluster)
 	}
@@ -323,7 +324,7 @@ func TestSummaryCountsErroredAndSkipped(t *testing.T) {
 			Results: make([]burninv1alpha1.TestResult, 10),
 		},
 	}
-	s := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false).Summary
+	s := EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil).Summary
 	if s.Errored != 3 || s.Skipped != 4 {
 		t.Errorf("summary = %+v, want errored=3 skipped=4", s)
 	}
@@ -358,7 +359,7 @@ func TestSummaryIsExhaustiveOnEveryReason(t *testing.T) {
 	}
 	for _, reason := range contract.Reasons {
 		t.Run(string(reason), func(t *testing.T) {
-			s := EnvelopeFor(run, "p", reason, "k", time.Unix(1750000000, 0), nil, false).Summary
+			s := EnvelopeFor(run, "p", reason, "k", time.Unix(1750000000, 0), nil, false, nil).Summary
 			total := s.Passed + s.Failed + s.Errored + s.Skipped
 			if total != int32(len(run.Status.Results)) {
 				t.Errorf("summary totals %d across %d results (%+v) — a consumer asking "+
@@ -389,7 +390,7 @@ func TestEnvelopeCarriesBaseline(t *testing.T) {
 		// The caller resolves baseline from the PINNED PLAN; this fixture stands
 		// in for a plan that agrees with the spec, which is the ordinary case.
 		return EnvelopeFor(run, "p", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil,
-			baseline != nil && *baseline)
+			baseline != nil && *baseline, nil)
 	}
 
 	sweep := mk(func() *bool { b := true; return &b }())
@@ -437,7 +438,7 @@ func TestEnvelopeDescribesASegmentedSoak(t *testing.T) {
 			}},
 		},
 	}
-	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false)
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil)
 	r := env.Results[0]
 
 	if r.Segments == nil {
@@ -467,7 +468,7 @@ func TestAnUnsegmentedResultCarriesNoSegmentBlock(t *testing.T) {
 			}},
 		},
 	}
-	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false)
+	env := EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, "", time.Unix(1750000000, 0), nil, false, nil)
 	if env.Results[0].Segments != nil {
 		t.Errorf("an unsegmented result grew a segment block: %+v", env.Results[0].Segments)
 	}
@@ -479,5 +480,17 @@ func TestAnUnsegmentedResultCarriesNoSegmentBlock(t *testing.T) {
 	}
 	if strings.Contains(string(blob), "segments") {
 		t.Errorf("an unsegmented result serialised a segments key: %s", blob)
+	}
+}
+
+func TestEnvelopeFor_CarriesTheProgressItIsGiven(t *testing.T) {
+	run := sampleRun()
+	prog := &contract.Progress{PlannedExecutions: 6, Nodes: []string{"a", "b"}, CurrentNodes: []string{"b"}}
+	env := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(1), time.Now(), nil, false, prog)
+	if !reflect.DeepEqual(env.Progress, prog) {
+		t.Errorf("Progress = %+v, want %+v", env.Progress, prog)
+	}
+	if bare := EnvelopeFor(run, "p", contract.ReasonCheckpoint, CheckpointKey(1), time.Now(), nil, false, nil); bare.Progress != nil {
+		t.Errorf("an operator with no plan delivered progress %+v", bare.Progress)
 	}
 }
