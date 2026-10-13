@@ -799,7 +799,7 @@ func TestSoak_ManySegmentsStayWritableAndStillRenderTheVerdict(t *testing.T) {
 
 	cm := &sink.ConfigMap{Client: h.c, Namespace: "burnin", Name: "burnin-results"}
 	env := sink.EnvelopeFor(run, "acceptance", contract.ReasonPhaseChanged, sink.PhaseKey(burninv1alpha1.RunPassed),
-		h.nowVal, nil, false)
+		h.nowVal, nil, false, nil)
 	if err := cm.Deliver(context.Background(), env); err != nil {
 		t.Fatalf("the ConfigMap sink refused a %d-segment soak's verdict: %v", segments, err)
 	}

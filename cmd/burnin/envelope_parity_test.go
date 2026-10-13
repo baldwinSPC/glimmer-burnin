@@ -55,6 +55,10 @@ var cliDoesNotDeliver = map[string][]string{
 		// cancelled by ^C.
 		"Baseline",
 		"CancelReason",
+		// Progress is the operator's pinned plan and the nodes it has in flight.
+		// A local run is one invocation on one host with no plan to pin, so there
+		// is no denominator to deliver; the console prints its own.
+		"Progress",
 	},
 	"TestResult": {
 		// Segmented soaks are pod-lifecycle machinery, and they stay here
@@ -86,9 +90,9 @@ func TestTheTwoAssemblersAgreeAboutEveryContractField(t *testing.T) {
 	cluster := &contract.ClusterRef{Name: "spark-fleet", UID: "cl-uid"}
 	opEnvs := []*contract.Envelope{
 		sink.EnvelopeFor(opRun, "acceptance", contract.ReasonPhaseChanged,
-			sink.PhaseKey(opRun.Status.Phase), time.Now(), cluster, true),
+			sink.PhaseKey(opRun.Status.Phase), time.Now(), cluster, true, &contract.Progress{PlannedExecutions: 2, Nodes: []string{"a", "b"}, CurrentNodes: []string{"a"}}),
 		sink.EnvelopeFor(opRun, "acceptance", contract.ReasonCheckpoint,
-			sink.CheckpointKey(3), time.Now(), cluster, false),
+			sink.CheckpointKey(3), time.Now(), cluster, false, nil),
 	}
 
 	opEnvelope := map[string]bool{}
@@ -276,9 +280,10 @@ func maximalCheckpoint() localrun.Checkpoint {
 func TestTheLedgerOnlyShrinks(t *testing.T) {
 	// 7 at the start; 6 once variant expansion moved to pkg/plan and both
 	// dispatchers began calling it; 5 once the CLI streamed its runners' stdout
-	// and could publish checkpoints. Lower this in the same commit as each
-	// entry that goes.
-	if n := len(cliDoesNotDeliver["Envelope"]) + len(cliDoesNotDeliver["TestResult"]); n > 5 {
+	// and could publish checkpoints; 6 again for Progress, the operator's pinned
+	// plan, which a local run has none of (#573). Lower this in the same commit
+	// as each entry that goes.
+	if n := len(cliDoesNotDeliver["Envelope"]) + len(cliDoesNotDeliver["TestResult"]); n > 6 {
 		t.Errorf("the cliDoesNotDeliver ledger grew to %d entries; it started at 7 and is meant to "+
 			"shrink as the CLI gains features. If a new contract field genuinely cannot be delivered "+
 			"locally, raise this bound in the same commit as the ledger entry and its reason", n)

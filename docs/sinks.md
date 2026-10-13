@@ -180,6 +180,7 @@ What is worth reading closely:
 | `baseline` | `true` means the run applied **no thresholds at all**. See [below](#baseline--a-passed-that-certifies-nothing). Omitted when false. |
 | `cancelReason` | Present only when `phase` is `Cancelled`. Distinguishes an operator-requested stop from a deadline expiry — opposite meanings about the hardware. |
 | `checkpointSequence` | Present only when `reason` is `Checkpoint`. The ordering key for a run's progress record; checkpoints can arrive out of order and this is what puts them back. |
+| `progress` | The operator's planned executions and the nodes under test: `plannedExecutions` (results the pinned plan owes: one per target node for a Node-scope test, one per Pair or Group test; repeats count once), `nodes` (the plan's targets, in plan order) and `currentNodes` (nodes with an execution in flight now, in `nodes` order; empty on a terminal delivery). Absent from an operator that does not send it, which a consumer reads as not observed, never as zero. Never sent by the `burnin` CLI. |
 | `run` | Which run this describes. See below. |
 | `producer` | The build that produced this envelope: `name` (`glimmer-burnin-operator` or `burnin`), `version` (the stamped release, or `(devel)` for an unstamped build — never guessed) and `commit`. When a runner or verdict defect is found later, this is how a consumer finds which of its stored results came from the affected build. |
 | `cluster` | Which cluster it came from. Optional; see below. |

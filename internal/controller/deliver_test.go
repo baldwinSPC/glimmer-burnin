@@ -2,7 +2,12 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"testing"
+
+	"github.com/baldwinSPC/glimmer-burnin/pkg/contract"
+
+	burninv1alpha1 "github.com/baldwinSPC/glimmer-burnin/api/v1alpha1"
 )
 
 // A MID-RUN EDIT TO spec.baseline MUST NOT CHANGE WHAT THE ENVELOPE REPORTS.
@@ -81,5 +86,116 @@ func TestPinnedBaseline_FallsBackToTheSpecBeforeThePlanExists(t *testing.T) {
 	run.Spec.Baseline = nil
 	if pinnedBaseline(run) {
 		t.Error("a run that never asked for baseline reports as one")
+	}
+}
+
+// The denominator is the pinned plan's executions, counted the way results are:
+// one per target node for a Node-scope test, one for a Pair or Group test.
+func TestPinnedProgress_CountsTheExecutionsThePlanOwes(t *testing.T) {
+	pair := smokeTest("link")
+	pair.Spec.Scope = burninv1alpha1.ScopePair
+	group := smokeTest("collective")
+	group.Spec.Scope = burninv1alpha1.ScopeGroup
+	run := newRun("run1", "acceptance", "spark-a", "spark-b")
+	p := &plan{
+		Version: 1,
+		Targets: []string{"spark-a", "spark-b"},
+		Tests: []plannedTest{
+			{Name: "smoke", Spec: smokeTest("smoke").Spec},
+			{Name: "thermal", Spec: smokeTest("thermal").Spec},
+			{Name: "link", Spec: pair.Spec},
+			{Name: "collective", Spec: group.Spec},
+		},
+	}
+	if err := pinPlan(run, p); err != nil {
+		t.Fatal(err)
+	}
+	run.Status.Results = []burninv1alpha1.TestResult{
+		{Name: "smoke", Phase: burninv1alpha1.RunPassed, Nodes: []string{"spark-a"}},
+		{Name: "smoke", Phase: burninv1alpha1.RunRunning, Nodes: []string{"spark-b"}},
+	}
+	got := pinnedProgress(run)
+	if got == nil {
+		t.Fatal("a run with a pinned plan delivered no progress")
+	}
+	// Two Node-scope tests on two nodes, plus one pair and one group.
+	if got.PlannedExecutions != 6 {
+		t.Errorf("PlannedExecutions = %d, want 6", got.PlannedExecutions)
+	}
+	if want := []string{"spark-a", "spark-b"}; !reflect.DeepEqual(got.Nodes, want) {
+		t.Errorf("Nodes = %v, want %v", got.Nodes, want)
+	}
+	if want := []string{"spark-b"}; !reflect.DeepEqual(got.CurrentNodes, want) {
+		t.Errorf("CurrentNodes = %v, want %v: only the node with an execution in flight", got.CurrentNodes, want)
+	}
+
+	// A settled run has no node under test.
+	run.Status.Results[1].Phase = burninv1alpha1.RunPassed
+	if got := pinnedProgress(run); got == nil || len(got.CurrentNodes) != 0 || got.PlannedExecutions != 6 {
+		t.Errorf("after the last execution settled, progress = %+v, want 6 planned and no current node", got)
+	}
+}
+
+// A pair or group execution holds every target, and so names every target.
+func TestPinnedProgress_APairInFlightNamesBothNodes(t *testing.T) {
+	pair := smokeTest("link")
+	pair.Spec.Scope = burninv1alpha1.ScopePair
+	run := newRun("run1", "acceptance", "spark-a", "spark-b")
+	if err := pinPlan(run, &plan{Version: 1, Targets: []string{"spark-a", "spark-b"},
+		Tests: []plannedTest{{Name: "link", Spec: pair.Spec}}}); err != nil {
+		t.Fatal(err)
+	}
+	run.Status.Results = []burninv1alpha1.TestResult{
+		{Name: "link", Phase: burninv1alpha1.RunRunning, Nodes: []string{"spark-a", "spark-b"}},
+	}
+	got := pinnedProgress(run)
+	if got == nil || got.PlannedExecutions != 1 || !reflect.DeepEqual(got.CurrentNodes, []string{"spark-a", "spark-b"}) {
+		t.Errorf("progress = %+v, want 1 planned and both nodes current", got)
+	}
+}
+
+// No pinned plan means nothing was planned, and the envelope says nothing: an
+// absent progress reads as not observed where a zero would read as an empty plan.
+func TestPinnedProgress_IsAbsentBeforeThePlanExists(t *testing.T) {
+	run := newRun("run1", "acceptance", "spark-a")
+	if got := pinnedProgress(run); got != nil {
+		t.Errorf("progress = %+v for a run with no plan, want none", got)
+	}
+}
+
+// The progress reaches the consumer: every delivery of a started run carries the
+// pinned denominator, and the terminal one has no node under test.
+func TestDeliver_EveryDeliveryOfAStartedRunCarriesTheDenominator(t *testing.T) {
+	h := newHarness(t,
+		gb10Node("spark-a"), gb10Node("spark-b"),
+		smokeTest("fp4"),
+		cmSink("results", "burnin-results"),
+		profile("acceptance", []string{"results"}, false, testRef("fp4")),
+		withNodeCap(newRun("run1", "acceptance", "spark-a", "spark-b"), 2),
+	)
+	h.reconcile("run1")
+	h.reconcile("run1")
+	pods := h.pods("run1")
+	h.finishPod(pods["spark-a"], 0, fp4Stdout, "Completed")
+	h.finishPod(pods["spark-b"], 0, fp4Stdout, "Completed")
+	h.reconcileUntilSettled("run1")
+
+	envs := h.envelopesWithReason("burnin-results", contract.ReasonPhaseChanged)
+	var terminal *contract.Envelope
+	for i := range envs {
+		if envs[i].Phase == string(burninv1alpha1.RunPassed) {
+			terminal = &envs[i]
+		}
+		if envs[i].Phase == string(burninv1alpha1.RunRunning) || envs[i].Phase == string(burninv1alpha1.RunPassed) {
+			if envs[i].Progress == nil || envs[i].Progress.PlannedExecutions != 2 {
+				t.Errorf("%s delivery progress = %+v, want 2 planned (one test on two nodes)", envs[i].Phase, envs[i].Progress)
+			}
+		}
+	}
+	if terminal == nil {
+		t.Fatalf("no terminal delivery among %d phase changes", len(envs))
+	}
+	if got := terminal.Progress; got == nil || len(got.CurrentNodes) != 0 || !reflect.DeepEqual(got.Nodes, []string{"spark-a", "spark-b"}) {
+		t.Errorf("terminal progress = %+v, want both nodes planned and none under test", got)
 	}
 }

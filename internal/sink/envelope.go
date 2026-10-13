@@ -36,6 +36,7 @@ func EnvelopeFor(
 	now time.Time,
 	cluster *contract.ClusterRef,
 	baseline bool,
+	progress *contract.Progress,
 ) *contract.Envelope {
 	env := &contract.Envelope{
 		Version:    contract.Version,
@@ -53,6 +54,7 @@ func EnvelopeFor(
 		Phase:       string(run.Status.Phase),
 		Fingerprint: run.Status.Fingerprint,
 		Cluster:     cluster,
+		Progress:    progress,
 		Summary: contract.Summary{
 			Passed:  run.Status.Passed,
 			Failed:  run.Status.Failed,
