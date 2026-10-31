@@ -337,8 +337,16 @@ jobs:
           # Loaded rather than pulled from inside the cluster: podForTest sets no
           # imagePullPolicy, so a tagged image defaults to IfNotPresent and the
           # runners never need registry access from a kind node.
+          #
+          # Saved for ONE platform, then loaded as an archive (#587). Docker's
+          # containerd image store saves a pulled image as its whole
+          # multi-platform index with only this host's layers, and `kind load
+          # docker-image` imports with --all-platforms, so the import asks for
+          # content the archive does not carry ("content digest … not found").
+          docker version --format 'docker client {{.Client.Version}}, server {{.Server.Version}}'
           docker pull "$E2E_RUNNER_IMAGE"
-          kind load docker-image "$E2E_RUNNER_IMAGE" --name "$KIND_CLUSTER"
+          docker save --platform "linux/$(go env GOARCH)" -o "$RUNNER_TEMP/e2e-runner.tar" "$E2E_RUNNER_IMAGE"
+          kind load image-archive "$RUNNER_TEMP/e2e-runner.tar" --name "$KIND_CLUSTER"
 
       - name: Run the operator
         run: |

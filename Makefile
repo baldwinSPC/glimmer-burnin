@@ -112,7 +112,9 @@ e2e: e2e-cluster e2e-deploy test-e2e ## Create a kind cluster, deploy the operat
 e2e-cluster: ## Create the e2e kind cluster (1 control-plane + 3 workers).
 	kind create cluster --name $(KIND_CLUSTER) --config test/e2e/kind.yaml
 	docker pull $(E2E_RUNNER_IMAGE)
-	kind load docker-image $(E2E_RUNNER_IMAGE) --name $(KIND_CLUSTER)
+	docker save --platform linux/$(shell go env GOARCH) -o $(KIND_CLUSTER)-runner.tar $(E2E_RUNNER_IMAGE)
+	kind load image-archive $(KIND_CLUSTER)-runner.tar --name $(KIND_CLUSTER)
+	rm -f $(KIND_CLUSTER)-runner.tar
 
 .PHONY: e2e-deploy
 e2e-deploy: ## Apply config/ and point the Deployment at a locally built image.
