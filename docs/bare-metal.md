@@ -39,6 +39,16 @@ every output file is re-scanned, and on any finding nothing is written. The
 copy is sealed and marked `SANITIZED.json`, and it is terminal: its identity is
 a pseudonym, so nothing may compare it against another result.
 
+**An interrupted run stops the containers it started.** Each container is named
+`burnin-<random>` and labelled `burnin.glimmer.ai/run=<run id>`, the key the
+operator puts on a run's pods. A signal sent to the CLI never reaches the load:
+the container belongs to the runtime's daemon, and a runner's PID 1 drops a
+SIGTERM from outside its namespace. So on SIGINT or SIGTERM, and when a test
+reaches its deadline, the CLI runs `<runtime> kill` and then
+`<runtime> rm --force` on that container by name, and on nothing else, and
+prints whether the stop was confirmed. A CLI that is SIGKILLed first cannot do
+this; `docker ps --filter label=burnin.glimmer.ai/run` finds what it left.
+
 **Replicate runs become a baseline, and later runs are compared against it.**
 `burnin baseline promote --results-dir r1 ... --results-dir r5 --as NAME --out
 NAME.json` records each numeric metric's replicate distribution for one node:
