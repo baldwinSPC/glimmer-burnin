@@ -11,8 +11,8 @@ type: application
 # "which chart" and "which operator" must not be two questions. appVersion is the
 # image tag the chart pulls by default, so it carries the "v" publish-operator.yml
 # publishes; version is SemVer and cannot.
-version: 0.10.1
-appVersion: "v0.10.1"
+version: 0.10.2
+appVersion: "v0.10.2"
 
 home: https://github.com/baldwinSPC/glimmer-burnin
 sources:
