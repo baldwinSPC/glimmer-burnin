@@ -102,7 +102,10 @@ func TestTheChartShipsEveryCRD(t *testing.T) {
 	}
 }
 
-// The chart pins the same image the shipped manifests do.
+// The chart pins the same image the shipped manifests do. The chart's default
+// image is the repository in values.yaml tagged with appVersion
+// (templates/_helpers.tpl), and publish-operator.yml pushes only the tag the
+// manifest names, so the two references must be the same string, "v" included.
 func TestTheChartAndTheManifestsAgreeOnTheImage(t *testing.T) {
 	manifest := read(t, "config/manager/manager.yaml")
 	const prefix = "image: ghcr.io/baldwinspc/glimmer-burnin:"
@@ -113,14 +116,28 @@ func TestTheChartAndTheManifestsAgreeOnTheImage(t *testing.T) {
 	}
 	tag := strings.TrimSpace(manifest[i+len(prefix) : i+len(prefix)+20])
 	tag = strings.SplitN(tag, "\n", 2)[0]
+	pinned := strings.TrimPrefix(prefix, "image: ") + tag
 
 	chart := read(t, "deploy/charts/glimmer-burnin/Chart.yaml")
-	want := "appVersion: \"" + strings.TrimPrefix(tag, "v") + "\""
-	if !strings.Contains(chart, want) {
-		t.Errorf("config/manager pins %s but Chart.yaml does not carry the matching "+
-			"appVersion (%s). \"Which chart\" and \"which operator\" must not be two "+
-			"questions.", tag, want)
+	values := read(t, "deploy/charts/glimmer-burnin/values.yaml")
+	rendered := field(t, values, "  repository:") + ":" + strings.Trim(field(t, chart, "appVersion:"), `"`)
+	if rendered != pinned {
+		t.Errorf("the chart's default image is %s but config/manager pins %s. The chart "+
+			"would pull a tag nothing publishes. \"Which chart\" and \"which operator\" "+
+			"must not be two questions.", rendered, pinned)
 	}
+}
+
+// field returns the value of the first line of doc starting with key.
+func field(t *testing.T, doc, key string) string {
+	t.Helper()
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.HasPrefix(line, key) {
+			return strings.TrimSpace(strings.TrimPrefix(line, key))
+		}
+	}
+	t.Fatalf("no line starts with %q; this guard is not reading what it thinks it is", key)
+	return ""
 }
 
 // The chart declares no cert-manager dependency, and must not acquire one.

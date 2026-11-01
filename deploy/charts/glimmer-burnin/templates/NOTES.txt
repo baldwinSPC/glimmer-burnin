@@ -6,7 +6,7 @@ Check the manager is up:
 
 Then define a test and a profile, and run one:
 
-  kubectl apply -f https://raw.githubusercontent.com/baldwinSPC/glimmer-burnin/v{{ .Chart.AppVersion }}/config/samples/node-acceptance.yaml
+  kubectl apply -f https://raw.githubusercontent.com/baldwinSPC/glimmer-burnin/{{ .Chart.AppVersion }}/config/samples/node-acceptance.yaml
 
 TWO THINGS TO KNOW BEFORE YOU POINT THIS AT HARDWARE
 
