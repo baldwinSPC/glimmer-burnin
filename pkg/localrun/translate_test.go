@@ -232,7 +232,7 @@ func TestTheCommandLineIsDeterministicAndCorrectPerRuntime(t *testing.T) {
 		GPUAccess:        GPUNvidia,
 	}
 
-	docker := (&CLIRuntime{Binary: "docker", GPUFlagStyle: GPUFlagDockerNative}).args(spec)
+	docker := (&CLIRuntime{Binary: "docker", GPUFlagStyle: GPUFlagDockerNative}).args(spec, "burnin-test")
 	joined := strings.Join(docker, " ")
 	for _, want := range []string{
 		"run --rm", "--network host", "--ulimit memlock=-1:-1",
@@ -245,7 +245,7 @@ func TestTheCommandLineIsDeterministicAndCorrectPerRuntime(t *testing.T) {
 	}
 
 	// podman and nerdctl want the CDI form for accelerators.
-	cdi := strings.Join((&CLIRuntime{Binary: "podman", GPUFlagStyle: GPUFlagCDI}).args(spec), " ")
+	cdi := strings.Join((&CLIRuntime{Binary: "podman", GPUFlagStyle: GPUFlagCDI}).args(spec, "burnin-test"), " ")
 	if !strings.Contains(cdi, "--device nvidia.com/gpu=all") {
 		t.Errorf("CDI runtime did not use the CDI device form: %s", cdi)
 	}
@@ -261,7 +261,7 @@ func TestTheCommandLineIsDeterministicAndCorrectPerRuntime(t *testing.T) {
 }
 
 func TestAnAMDTestGetsBothDeviceNodes(t *testing.T) {
-	args := strings.Join((&CLIRuntime{Binary: "docker"}).args(RunSpec{Image: "i:1", GPUAccess: GPUAMD}), " ")
+	args := strings.Join((&CLIRuntime{Binary: "docker"}).args(RunSpec{Image: "i:1", GPUAccess: GPUAMD}, "burnin-test"), " ")
 	if !strings.Contains(args, "--device /dev/kfd") || !strings.Contains(args, "--device /dev/dri") {
 		t.Errorf("AMD access needs both device nodes: %s", args)
 	}
@@ -278,7 +278,7 @@ func TestSupplementalGroupsBecomeGroupAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate: %v", err)
 	}
-	args := strings.Join((&CLIRuntime{Binary: "podman"}).args(got), " ")
+	args := strings.Join((&CLIRuntime{Binary: "podman"}).args(got, "burnin-test"), " ")
 	if !strings.Contains(args, "--group-add 992 --group-add 44") {
 		t.Errorf("supplementalGroups did not become --group-add: %s", args)
 	}
@@ -298,14 +298,14 @@ func TestRunAsUserAndCapabilitiesReachTheRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Translate: %v", err)
 	}
-	args := strings.Join((&CLIRuntime{Binary: "podman"}).args(got), " ")
+	args := strings.Join((&CLIRuntime{Binary: "podman"}).args(got, "burnin-test"), " ")
 	if !strings.Contains(args, "--user 0") || !strings.Contains(args, "--cap-add SYSLOG") {
 		t.Errorf("runAsUser/capabilities did not reach the runtime: %s", args)
 	}
 
 	spec.Runner.RunAsUser, spec.Runner.Capabilities = nil, nil
 	got, _ = Translate(Plan{Node: "n1"}, PlannedTest{Name: "t", Spec: spec})
-	args = strings.Join((&CLIRuntime{Binary: "podman"}).args(got), " ")
+	args = strings.Join((&CLIRuntime{Binary: "podman"}).args(got, "burnin-test"), " ")
 	if strings.Contains(args, "--user") || strings.Contains(args, "--cap-add") {
 		t.Errorf("a test asking for no privilege got some: %s", args)
 	}

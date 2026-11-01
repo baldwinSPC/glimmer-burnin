@@ -3,6 +3,7 @@ package localrun
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ContainerRuntime runs one container to completion.
@@ -72,7 +74,22 @@ type CLIRuntime struct {
 	// GPUFlagStyle selects how accelerator access is requested. Empty means
 	// autodetected at construction.
 	GPUFlagStyle GPUFlagStyle
+	// RunID labels every container this runtime starts with LabelRun=RunID,
+	// so another process can find a run's containers when this one was
+	// SIGKILLed before it could stop them. Empty starts them unlabelled; each
+	// is still named, and stopped by that name.
+	RunID string
+	// Logf receives one line for each container stopped because its run's
+	// context ended, saying whether the stop was confirmed. Nil discards them.
+	Logf func(format string, args ...any)
 }
+
+// LabelRun is the label naming the run a container belongs to: the key the
+// operator puts on a run's pods, so one query finds a run on either path.
+const LabelRun = "burnin.glimmer.ai/run"
+
+// stopTimeout bounds stopping one container after its run's context ended.
+const stopTimeout = 10 * time.Second
 
 // GPUFlagStyle is how a runtime is asked for accelerators.
 type GPUFlagStyle string
@@ -159,7 +176,8 @@ func (r *CLIRuntime) RunStreaming(ctx context.Context, spec RunSpec, onOutput fu
 		defer cancel()
 	}
 
-	args := r.args(spec)
+	name := containerName()
+	args := r.args(spec, name)
 	cmd := exec.CommandContext(ctx, r.Binary, args...)
 
 	stdout := &liveBuffer{notify: onOutput}
@@ -173,6 +191,20 @@ func (r *CLIRuntime) RunStreaming(ctx context.Context, spec RunSpec, onOutput fu
 	err := cmd.Run()
 	out := Execution{Stdout: stdout.String(), Stderr: stderr.String()}
 
+	// When the context ends, CommandContext SIGKILLs the runtime's CLIENT. The
+	// container belongs to the runtime's daemon, so it is still running, and
+	// nothing sent to this process reaches it: a runner's PID 1 with no SIGTERM
+	// handler drops a signal from outside its namespace. So the container is
+	// stopped here, by the name it was started under (#584). A process that
+	// never started has no container to stop.
+	stopped, stopConfirmed := "", true
+	if err != nil && ctx.Err() != nil && cmd.Process != nil {
+		stopped, stopConfirmed = r.stop(name)
+		if r.Logf != nil {
+			r.Logf("%s", stopped)
+		}
+	}
+
 	switch {
 	case err == nil:
 		out.ExitCode = 0
@@ -184,9 +216,12 @@ func (r *CLIRuntime) RunStreaming(ctx context.Context, spec RunSpec, onOutput fu
 		// recording a deadline kill as Error rather than reading the code.
 		out.TimedOut = true
 		out.ExitCode = -1
+		killed := "and was killed — no verdict was reported."
+		if !stopConfirmed {
+			killed = "— no verdict was reported, and " + stopped + "."
+		}
 		out.Stderr = strings.TrimSpace(fmt.Sprintf(
-			"container exceeded its %s deadline and was killed — no verdict was reported. %s",
-			spec.Timeout, out.Stderr))
+			"container exceeded its %s deadline %s %s", spec.Timeout, killed, out.Stderr))
 
 	case isExitError(err, &out):
 		// A non-zero exit is the runner's verdict, delivered.
@@ -240,6 +275,56 @@ func (b *liveBuffer) String() string {
 	return b.buf.String()
 }
 
+// containerName is a name for one container, unique to it, so a stop can name
+// exactly the container this runtime started and nothing else.
+func containerName() string {
+	return "burnin-" + strings.ToLower(rand.Text())
+}
+
+// stop ends a container started here whose run's context ended, and says what
+// that established. confirmed is false when neither call could establish that
+// the container is no longer running.
+//
+// kill ends the load, and --rm removes the container once it exits. rm --force
+// covers what --rm never removes: a container whose client died between create
+// and start. docker's rm --force exits 0 for a container that is already gone.
+func (r *CLIRuntime) stop(name string) (report string, confirmed bool) {
+	// A fresh context: the run's own is done, and a command that inherited it
+	// would never start.
+	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+	defer cancel()
+	killOut, killErr := exec.CommandContext(ctx, r.Binary, "kill", name).CombinedOutput()
+	rmOut, rmErr := exec.CommandContext(ctx, r.Binary, "rm", "--force", name).CombinedOutput()
+
+	switch {
+	case killErr == nil:
+		return fmt.Sprintf("killed container %s, which was still running when its run's context ended", name), true
+	case rmErr == nil || noSuchContainer(rmOut):
+		return fmt.Sprintf("container %s is no longer running (%s kill: %s)", name, r.Binary, failure(killOut, killErr)), true
+	}
+	report = fmt.Sprintf("container %s may still be running: %s kill: %s; %s rm --force: %s",
+		name, r.Binary, failure(killOut, killErr), r.Binary, failure(rmOut, rmErr))
+	if r.RunID != "" {
+		report += fmt.Sprintf("; this run's containers carry the label %s=%s", LabelRun, r.RunID)
+	}
+	return report, false
+}
+
+// noSuchContainer reports a runtime saying the named container does not exist,
+// in the phrase docker, podman and nerdctl all use.
+func noSuchContainer(out []byte) bool {
+	return strings.Contains(strings.ToLower(string(out)), "no such container")
+}
+
+// failure is a failed command's own first line, or its error when it said
+// nothing.
+func failure(out []byte, err error) string {
+	if line := firstLine(string(out)); line != "" {
+		return line
+	}
+	return err.Error()
+}
+
 // isExitError extracts an exit code from a command failure.
 func isExitError(err error, out *Execution) bool {
 	var ee *exec.ExitError
@@ -254,8 +339,11 @@ func isExitError(err error, out *Execution) bool {
 //
 // Ordering is deterministic so a test can assert on it and a user can read a
 // logged command without hunting.
-func (r *CLIRuntime) args(spec RunSpec) []string {
-	args := []string{"run", "--rm"}
+func (r *CLIRuntime) args(spec RunSpec, name string) []string {
+	args := []string{"run", "--rm", "--name", name}
+	if r.RunID != "" {
+		args = append(args, "--label", LabelRun+"="+r.RunID)
+	}
 
 	if spec.HostNetwork {
 		args = append(args, "--network", "host")

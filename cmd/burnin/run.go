@@ -284,6 +284,11 @@ func runRun(args []string) error {
 	if err != nil {
 		return exitWith(exitError, err)
 	}
+	// Every container carries the run's id, and one still running when the
+	// run is interrupted is stopped, with a line saying whether that was
+	// confirmed (#584).
+	rt.RunID = id.run.UID
+	rt.Logf = warn
 
 	hooks := Hooks(os.Stderr)
 	hooks.OnCheckpoint = checkpointHook(ctx, os.Stderr, id, resolved, sender, rz)
@@ -483,7 +488,7 @@ func firstLineOf(s string) string {
 }
 
 // resolveRuntime picks a container runtime.
-func resolveRuntime(name string) (localrun.ContainerRuntime, error) {
+func resolveRuntime(name string) (*localrun.CLIRuntime, error) {
 	if name == "" || name == "auto" {
 		rt, err := localrun.DetectRuntime()
 		if err != nil {
