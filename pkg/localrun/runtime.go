@@ -88,8 +88,10 @@ type CLIRuntime struct {
 // operator puts on a run's pods, so one query finds a run on either path.
 const LabelRun = "burnin.glimmer.ai/run"
 
-// stopTimeout bounds stopping one container after its run's context ended.
-const stopTimeout = 10 * time.Second
+// StopTimeout bounds stopping one container after its run's context ended. A
+// caller that signals the CLI to stop has to wait longer than this before it
+// kills the CLI, or the container can outlive the kill.
+const StopTimeout = 10 * time.Second
 
 // GPUFlagStyle is how a runtime is asked for accelerators.
 type GPUFlagStyle string
@@ -291,7 +293,7 @@ func containerName() string {
 func (r *CLIRuntime) stop(name string) (report string, confirmed bool) {
 	// A fresh context: the run's own is done, and a command that inherited it
 	// would never start.
-	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 	defer cancel()
 	killOut, killErr := exec.CommandContext(ctx, r.Binary, "kill", name).CombinedOutput()
 	rmOut, rmErr := exec.CommandContext(ctx, r.Binary, "rm", "--force", name).CombinedOutput()

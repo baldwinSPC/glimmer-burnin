@@ -145,7 +145,7 @@ func TestACancelledRunStopsTheContainerItStartedAndNothingElse(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(stopTimeout + 5*time.Second):
+	case <-time.After(StopTimeout + 5*time.Second):
 		t.Fatal("Run did not return after its context was cancelled")
 	}
 
