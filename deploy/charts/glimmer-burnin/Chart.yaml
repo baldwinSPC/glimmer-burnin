@@ -8,9 +8,11 @@ type: application
 
 # The chart version and the app version move together on purpose. A runner image
 # is executed by a node's readiness gate and published tags are immutable, so
-# "which chart" and "which operator" must not be two questions.
-version: 0.10.0
-appVersion: "0.10.0"
+# "which chart" and "which operator" must not be two questions. appVersion is the
+# image tag the chart pulls by default, so it carries the "v" publish-operator.yml
+# publishes; version is SemVer and cannot.
+version: 0.10.1
+appVersion: "v0.10.1"
 
 home: https://github.com/baldwinSPC/glimmer-burnin
 sources:
