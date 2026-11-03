@@ -5,6 +5,7 @@ package localrun
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,5 +148,38 @@ func TestAFailedStopThroughTheShimReportsTheRuntimesError(t *testing.T) {
 	out := shimBanner + "\nError: no container with name or ID \"burnin-x\" found: no such container\n"
 	if got, want := failure([]byte(out), errors.New("exit status 125")), `Error: no container with name or ID "burnin-x" found: no such container`; got != want {
 		t.Errorf("failure = %q, want %q", got, want)
+	}
+}
+
+// A deadline kill's message keeps the sentence saying the container was
+// killed, even when the runner's stderr mentions an error further down.
+func TestADeadlineKillKeepsTheDeadlineSentence(t *testing.T) {
+	got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+		&fakeRuntime{steps: []Execution{{
+			ExitCode: -1,
+			TimedOut: true,
+			Stderr: "container exceeded its 1s deadline and was killed — no verdict was reported. rank 0: starting soak\n" +
+				"rank 0: recv error on peer 1, retrying\n",
+		}}})
+	if got.Phase != api.RunError || !strings.Contains(got.Message, "exceeded its 1s deadline and was killed") {
+		t.Errorf("phase %s, message %q, want Error naming the deadline kill", got.Phase, got.Message)
+	}
+}
+
+// A runner's own Error keeps the first line of its stderr: the error-line rule
+// is for the runtime's own failures, and a runner's later line that merely
+// mentions an error is not its account of what happened.
+func TestARunnersOwnErrorKeepsItsFirstStderrLine(t *testing.T) {
+	for _, code := range []int{3, 137} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			got := runOne(t, onePlan(PlannedTest{Name: "t", Spec: testSpec(), Required: true}, 0),
+				&fakeRuntime{steps: []Execution{{
+					ExitCode: code,
+					Stderr:   "hipMalloc of 64 GiB failed: out of memory\necc errors: 0\n",
+				}}})
+			if got.Phase != api.RunError || !strings.Contains(got.Message, "hipMalloc of 64 GiB failed") {
+				t.Errorf("phase %s, message %q, want Error carrying the first stderr line", got.Phase, got.Message)
+			}
+		})
 	}
 }
