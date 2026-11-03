@@ -426,7 +426,7 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 			// Nothing on stdout explained an Error. The runtime's own words are
 			// the only account of what happened, and dropping them leaves a
 			// verdict nobody can act on.
-			message = strings.TrimSpace(message + " [" + firstLine(exec.Stderr) + "]")
+			message = strings.TrimSpace(message + " [" + errorLine(exec.Stderr) + "]")
 		}
 
 		res.Attempts = append(res.Attempts, Attempt{
@@ -715,7 +715,16 @@ func bracket(s string) string {
 	return " [runner said: " + strings.TrimSpace(s) + "]"
 }
 
-func firstLine(s string) string {
+// errorLine is the first line of s that mentions an error, or its first line
+// when none does. A runtime that fails to start a container writes progress
+// first ("Trying to pull …", "Unable to find image … locally") and the error
+// after it.
+func errorLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(strings.ToLower(line), "error") {
+			return strings.TrimSpace(line)
+		}
+	}
 	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
 	return strings.TrimSpace(line)
 }
