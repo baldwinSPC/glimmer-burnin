@@ -426,7 +426,7 @@ func runTest(ctx context.Context, p Plan, t PlannedTest, rt ContainerRuntime, h 
 			// Nothing on stdout explained an Error. The runtime's own words are
 			// the only account of what happened, and dropping them leaves a
 			// verdict nobody can act on.
-			message = strings.TrimSpace(message + " [" + firstLine(exec.Stderr) + "]")
+			message = strings.TrimSpace(message + " [" + stderrLine(exec) + "]")
 		}
 
 		res.Attempts = append(res.Attempts, Attempt{
@@ -713,6 +713,35 @@ func bracket(s string) string {
 		return ""
 	}
 	return " [runner said: " + strings.TrimSpace(s) + "]"
+}
+
+// stderrLine is the line of an Error's stderr that its message carries: the
+// first line, unless the container runtime itself failed (exit 125, 126 or
+// 127), whose progress lines ("Trying to pull …", "Unable to find image …
+// locally") come before its error. A deadline kill keeps its first line, which
+// is the sentence saying the container was killed.
+func stderrLine(e Execution) string {
+	if !e.TimedOut && isRuntimeFailure(e.ExitCode) {
+		return errorLine(e.Stderr)
+	}
+	return firstLine(e.Stderr)
+}
+
+// isRuntimeFailure reports whether code is one docker, podman and nerdctl exit
+// with when they could not run the container's command at all.
+func isRuntimeFailure(code int) bool {
+	return code == 125 || code == 126 || code == 127
+}
+
+// errorLine is the first line of s that mentions an error, or its first line
+// when none does.
+func errorLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(strings.ToLower(line), "error") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return firstLine(s)
 }
 
 func firstLine(s string) string {

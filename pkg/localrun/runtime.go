@@ -123,20 +123,63 @@ var ErrNoRuntime = errors.New("no container runtime found")
 
 // DetectRuntime finds a usable runtime.
 //
-// It checks the binary is on PATH and nothing more. Whether the daemon is
-// running is not probed here: the first Run will say so, with the runtime's own
-// error, which is more informative than anything this could synthesise.
+// It checks the binary is on PATH, and asks a docker it finds for its version,
+// which needs no daemon. Whether the daemon is running is not probed here: the
+// first Run will say so, with the runtime's own error, which is more
+// informative than anything this could synthesise.
+//
+// A docker that reports itself as podman is podman-docker's shim (#594), and
+// podman is run directly, with podman's device flags.
 func DetectRuntime() (*CLIRuntime, error) {
 	for _, c := range runtimeCandidates {
-		if path, err := exec.LookPath(c.binary); err == nil {
-			return &CLIRuntime{Binary: path, GPUFlagStyle: c.style}, nil
+		path, err := exec.LookPath(c.binary)
+		if err != nil {
+			continue
 		}
+		if c.binary == "docker" && isPodmanShim(path) {
+			if podman, err := exec.LookPath("podman"); err == nil {
+				path = podman
+			}
+			return &CLIRuntime{Binary: path, GPUFlagStyle: GPUFlagCDI}, nil
+		}
+		return &CLIRuntime{Binary: path, GPUFlagStyle: c.style}, nil
 	}
 	names := make([]string, 0, len(runtimeCandidates))
 	for _, c := range runtimeCandidates {
 		names = append(names, c.binary)
 	}
 	return nil, fmt.Errorf("%w: looked for %s on PATH", ErrNoRuntime, strings.Join(names, ", "))
+}
+
+// podmanDockerBanner begins the line podman-docker's docker shim writes to
+// stderr on every call, whatever the call does.
+const podmanDockerBanner = "Emulate Docker CLI using podman."
+
+// versionProbeTimeout bounds asking a docker binary for its version.
+const versionProbeTimeout = 5 * time.Second
+
+// isPodmanShim reports whether the docker binary at path is podman.
+func isPodmanShim(path string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.WaitDelay = time.Second
+	out, _ := cmd.CombinedOutput()
+	return strings.Contains(strings.ToLower(string(out)), "podman")
+}
+
+// withoutShimBanner removes podman-docker's banner lines from a command's output.
+func withoutShimBanner(s string) string {
+	if !strings.Contains(s, podmanDockerBanner) {
+		return s
+	}
+	var kept []string
+	for _, line := range strings.SplitAfter(s, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), podmanDockerBanner) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "")
 }
 
 // NewRuntime returns a runtime for a named binary.
@@ -191,7 +234,7 @@ func (r *CLIRuntime) RunStreaming(ctx context.Context, spec RunSpec, onOutput fu
 	cmd.Stdin = nil
 
 	err := cmd.Run()
-	out := Execution{Stdout: stdout.String(), Stderr: stderr.String()}
+	out := Execution{Stdout: stdout.String(), Stderr: withoutShimBanner(stderr.String())}
 
 	// When the context ends, CommandContext SIGKILLs the runtime's CLIENT. The
 	// container belongs to the runtime's daemon, so it is still running, and
@@ -318,10 +361,10 @@ func noSuchContainer(out []byte) bool {
 	return strings.Contains(strings.ToLower(string(out)), "no such container")
 }
 
-// failure is a failed command's own first line, or its error when it said
-// nothing.
+// failure is a failed command's own account of its failure, or its error when
+// it said nothing.
 func failure(out []byte, err error) string {
-	if line := firstLine(string(out)); line != "" {
+	if line := errorLine(withoutShimBanner(string(out))); line != "" {
 		return line
 	}
 	return err.Error()

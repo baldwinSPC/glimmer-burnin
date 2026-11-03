@@ -52,7 +52,8 @@ FLAGS
   --node            this machine's name in the results (default: hostname)
   --results-dir     where to write envelopes and raw runner output; sealed
                     with SHA256SUMS last (check with "burnin verify")
-  --runtime         auto|docker|podman|nerdctl (default auto)
+  --runtime         auto|docker|podman|nerdctl (default auto); auto runs podman
+                    when docker is podman-docker's shim
   --retry-on-error  how many times an Error may be retried, per test (default 0)
   --dry-run         resolve and print what would run, then stop
   --sink-url        POST the envelope to this URL when the run finishes
