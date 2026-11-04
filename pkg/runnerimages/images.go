@@ -286,7 +286,7 @@ var defaults = map[contract.TestKind]image{
 	// refuses NVML_CLOCK_MEM entirely (nvml_unsupported names both
 	// ratedMemClock and memClock), so this SKU can never populate them, and
 	// the runner says so instead of guessing.
-	contract.KindClockProbe: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.7.1", Vendor: VendorNVIDIA},
+	contract.KindClockProbe: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-clockprobe:v0.8.0", Vendor: VendorNVIDIA},
 	// dcgm-diag moves to v0.7.3 (#479, #370), closing its row. A patch: the
 	// only .go source change since v0.7.2 is a new pre-flight refusal in
 	// loadConfig — enabling a plugin past DCGM's default per-SKU allowlist
@@ -320,7 +320,7 @@ var defaults = map[contract.TestKind]image{
 	// xid_source=none detail text matches #134/#302's documented recipe
 	// exactly for the (deliberately unprivileged) way this smoke test was
 	// invoked — not a regression, the same behavior v0.7.1 already had.
-	contract.KindHostHealth: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.7.2", Vendor: VendorNVIDIA},
+	contract.KindHostHealth: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-host-health:v0.8.0", Vendor: VendorNVIDIA},
 	// memory-bw moves to v0.8.0 (#479, #431), closing its row. A minor bump,
 	// not a patch: device_fold.h (553 new lines) adds real multi-device
 	// folding — a board with more than one GPU is now measured and gated on
@@ -340,7 +340,7 @@ var defaults = map[contract.TestKind]image{
 	// fold over a partial board would certify devices nobody measured" —
 	// the new safety behavior #431 exists for, confirmed firing on the
 	// actual image being pinned.
-	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.8.0", Vendor: VendorNVIDIA},
+	contract.KindMemoryBW:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-bw:v0.9.0", Vendor: VendorNVIDIA},
 	contract.KindMemoryStress: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-memory-stress:v0.6.2", Vendor: VendorAny},
 	// thermal-soak and gpu-burn move to v0.7.2 together (#479, #166), closing
 	// both rows — they share soak_core.cuh, so #166's power-swing addition
@@ -360,8 +360,8 @@ var defaults = map[contract.TestKind]image{
 	// the direct test of the additive claim — zero swing_* keys anywhere in
 	// either runner's output, confirming DutyCycle's absence really does
 	// keep power-swing's bookkeeping out of both reports.
-	contract.KindThermalSoak: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.7.2", Vendor: VendorNVIDIA},
-	contract.KindGPUBurn:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.7.2", Vendor: VendorNVIDIA},
+	contract.KindThermalSoak: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-thermal-soak:v0.8.0", Vendor: VendorNVIDIA},
+	contract.KindGPUBurn:     {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gpu-burn:v0.8.0", Vendor: VendorNVIDIA},
 	// ib-write-bw moves to v0.6.5, a no-op republish surfaced by `checkpins`
 	// rather than by #479: fabric_contract_test.go — the drift guard for
 	// scaffolding shared across the fabric runners — picked up documentation
@@ -436,14 +436,14 @@ var defaults = map[contract.TestKind]image{
 	// O_DIRECT never touched it) measured only 1.1 GB/s before a second
 	// buffered read jumped to 7.1 GB/s once the cache warmed — the textbook
 	// cache-bypass signature. Needs no accelerator, so VendorAny.
-	contract.KindDiskIO: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-disk-io:v0.1.2", Vendor: VendorAny},
+	contract.KindDiskIO: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-disk-io:v0.2.0", Vendor: VendorAny},
 
 	// gemm-sweep joined the table at v0.6.4 because its gate was met twice over:
 	// the five captures #265 took, and a run through the OPERATOR on 2026-08-17
 	// where all five precisions passed on both nodes as variant cells. Moved to
 	// v0.7.0 with the rest of the multi-device batch — see the header comment
 	// above.
-	contract.KindGemmSweep: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gemm-sweep:v0.7.0", Vendor: VendorNVIDIA},
+	contract.KindGemmSweep: {Ref: "ghcr.io/baldwinspc/glimmer-burnin-gemm-sweep:v0.8.0", Vendor: VendorNVIDIA},
 
 	// KindCustom has no default by definition: it exists so a user can point
 	// any image at the contract, and inventing a default would defeat it.
