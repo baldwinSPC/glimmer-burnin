@@ -27,8 +27,9 @@ verdict should not have to pull in client-go to do it.
    `Passed`, `Failed`, `Error`, `Cancelled` (and `Skipped`, which a *result*
    takes and a run is not expected to). A `Checkpoint` is progress, not a
    verdict.
-5. **Check `baseline`.** A `true` there means the run gated nothing. See
-   [below](#baseline--a-passed-that-certifies-nothing).
+5. **Check `baseline`.** A `true` there means the run gated nothing, and `false`
+   that it applied its gates. An absent key is an operator before v0.10.4, which
+   left `false` out. See [below](#baseline--a-passed-that-certifies-nothing).
 
 ---
 
@@ -177,7 +178,7 @@ What is worth reading closely:
 | `reason` | Why this was sent: `RunPhaseChanged`, `TestCompleted` or `Checkpoint`. Lets you tell a progress update from a verdict without diffing state. |
 | `sentAt` | When *this attempt* was built, UTC. It moves on every retry; it is not the run's clock and must not be used to order anything. |
 | `phase` | The run's phase at send time: `Pending`, `Running`, `Passed`, `Failed`, `Error`, `Cancelled`. All but the first two are terminal, as is `Skipped` — which a *result* takes and a run is not expected to, though `pkg/report` and the exporter both treat it as a run phase so a consumer should too. |
-| `baseline` | `true` means the run applied **no thresholds at all**. See [below](#baseline--a-passed-that-certifies-nothing). Omitted when false. |
+| `baseline` | `true` means the run applied **no thresholds at all**. See [below](#baseline--a-passed-that-certifies-nothing). Sent when false from v0.10.4; operators before it left it out. |
 | `cancelReason` | Present only when `phase` is `Cancelled`. Distinguishes an operator-requested stop from a deadline expiry — opposite meanings about the hardware. |
 | `checkpointSequence` | Present only when `reason` is `Checkpoint`. The ordering key for a run's progress record; checkpoints can arrive out of order and this is what puts them back. |
 | `progress` | The operator's planned executions and the nodes under test: `plannedExecutions` (results the pinned plan owes: one per target node for a Node-scope test, one per Pair or Group test; repeats count once), `nodes` (the plan's targets, in plan order) and `currentNodes` (nodes with an execution in flight now, in `nodes` order; empty on a terminal delivery). Absent from an operator that does not send it, which a consumer reads as not observed, never as zero. Never sent by the `burnin` CLI. |

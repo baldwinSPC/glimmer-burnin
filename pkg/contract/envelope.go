@@ -341,7 +341,11 @@ type Envelope struct {
 	// to combine the flag with thresholds, so a true value here means the run
 	// carried no gates at all — it is a statement about what the verdict is
 	// WORTH, not a hint.
-	Baseline bool `json:"baseline,omitempty"`
+	//
+	// It is sent when false as well. Operators before v0.10.4 left a false value
+	// out, so a consumer cannot tell an absent key from an operator that predates
+	// the field, and reads it as unknown gating (glimmer#5206).
+	Baseline bool `json:"baseline"`
 	// DeliveryID is the idempotency key. It is DERIVED, not random: a retry of
 	// the same delivery carries the same ID, so a receiver that has already
 	// applied it can discard the duplicate. See NewDeliveryID.
