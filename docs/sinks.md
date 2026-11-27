@@ -27,9 +27,11 @@ verdict should not have to pull in client-go to do it.
    `Passed`, `Failed`, `Error`, `Cancelled` (and `Skipped`, which a *result*
    takes and a run is not expected to). A `Checkpoint` is progress, not a
    verdict.
-5. **Check `baseline`.** A `true` there means the run gated nothing, and `false`
-   that it applied its gates. An absent key is an operator before v0.10.4, which
-   left `false` out. See [below](#baseline--a-passed-that-certifies-nothing).
+5. **Check `baseline`.** A `true` there means the run gated nothing. `false`
+   means only that the run was not declared a baseline; which gates ran is in
+   each result's `applied` and `notEvaluated`. The `burnin` CLI has no baseline
+   mode and sends `false`. An absent key is an operator or CLI before v0.10.4,
+   which left `false` out. See [below](#baseline--a-passed-that-certifies-nothing).
 
 ---
 
@@ -46,6 +48,7 @@ the block.
   "reason": "RunPhaseChanged",
   "sentAt": "2026-08-08T04:11:52.318Z",
   "phase": "Failed",
+  "baseline": false,
   "run": {
     "namespace": "burnin",
     "name": "node-acceptance-h9x2",
@@ -54,7 +57,7 @@ the block.
   },
   "producer": {
     "name": "glimmer-burnin-operator",
-    "version": "v0.9.1",
+    "version": "v0.10.4",
     "commit": "1e44a67c2f0d4b8e9a3f5c6d7e8f9a0b1c2d3e4f"
   },
   "cluster": {
@@ -178,7 +181,7 @@ What is worth reading closely:
 | `reason` | Why this was sent: `RunPhaseChanged`, `TestCompleted` or `Checkpoint`. Lets you tell a progress update from a verdict without diffing state. |
 | `sentAt` | When *this attempt* was built, UTC. It moves on every retry; it is not the run's clock and must not be used to order anything. |
 | `phase` | The run's phase at send time: `Pending`, `Running`, `Passed`, `Failed`, `Error`, `Cancelled`. All but the first two are terminal, as is `Skipped` — which a *result* takes and a run is not expected to, though `pkg/report` and the exporter both treat it as a run phase so a consumer should too. |
-| `baseline` | `true` means the run applied **no thresholds at all**. See [below](#baseline--a-passed-that-certifies-nothing). Sent when false from v0.10.4; operators before it left it out. |
+| `baseline` | `true` means the run applied **no thresholds at all**. `false` means only that the run was not declared a baseline: read each result's `applied` and `notEvaluated` for which gates ran. Sent when false from v0.10.4, by the operator and the `burnin` CLI; earlier releases left it out. See [below](#baseline--a-passed-that-certifies-nothing). |
 | `cancelReason` | Present only when `phase` is `Cancelled`. Distinguishes an operator-requested stop from a deadline expiry — opposite meanings about the hardware. |
 | `checkpointSequence` | Present only when `reason` is `Checkpoint`. The ordering key for a run's progress record; checkpoints can arrive out of order and this is what puts them back. |
 | `progress` | The operator's planned executions and the nodes under test: `plannedExecutions` (results the pinned plan owes: one per target node for a Node-scope test, one per Pair or Group test; repeats count once), `nodes` (the plan's targets, in plan order) and `currentNodes` (nodes with an execution in flight now, in `nodes` order; empty on a terminal delivery). Absent from an operator that does not send it, which a consumer reads as not observed, never as zero. Never sent by the `burnin` CLI. |
@@ -705,6 +708,12 @@ It is a statement about what the verdict is *worth*, not a hint. The operator
 and not a suppression, because a flag that turned a failing acceptance run into
 a passing measurement run would be a threshold-laundering switch. So `true` here
 is a reliable claim that nothing was gated.
+
+`false` is not the reverse claim. A run whose profile carries no thresholds and
+is not declared a baseline also passes on exit 0 and sends `false`. Every
+`burnin` CLI run sends `false` too, gated or not. A consumer that certifies
+hardware on a pass must also find at least one gate in the results' `applied`
+sets.
 
 ---
 
