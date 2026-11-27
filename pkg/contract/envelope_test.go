@@ -2,6 +2,7 @@ package contract
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,33 @@ func TestJSONWireFormat(t *testing.T) {
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("wire format missing %s\ngot: %s", want, b)
+		}
+	}
+}
+
+// A certifying run must say baseline=false on the wire. A consumer cannot tell
+// an absent key from an operator that predates the field, so it reads absence as
+// unknown gating, and a run that applied every gate would never certify
+// (glimmer#5206).
+func TestBaselineIsAlwaysOnTheWire(t *testing.T) {
+	for _, baseline := range []bool{false, true} {
+		e := validEnvelope()
+		e.Baseline = baseline
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(b, &keys); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		got, ok := keys["baseline"]
+		if !ok {
+			t.Errorf("baseline=%v: the envelope carries no baseline key, so a consumer cannot tell this run from one an older operator sent\ngot: %s", baseline, b)
+			continue
+		}
+		if want := strconv.FormatBool(baseline); string(got) != want {
+			t.Errorf("baseline=%v: wire value %s, want %s", baseline, got, want)
 		}
 	}
 }
